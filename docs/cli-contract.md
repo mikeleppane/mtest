@@ -284,7 +284,9 @@ that is the runner's flag, not a forwarded user argument.
 
 Built binaries persist across invocations under `.mtest-cache/build-v1/` in the
 invocation root, so a rerun over an unchanged tree compiles nothing. The cache
-is **on by default**, is local to one checkout, and is never shared between
+is **on by default** and is local to one checkout. It is deliberately not
+persisted across CI runs: moving compiled artifacts into shared state could
+reuse a binary built for a different host CPU. It is never shared between
 machines.
 
 Each artifact is an immutable directory named `<mangled>_h<digest>`, holding the
@@ -295,17 +297,24 @@ interrupted publication leaves nothing a later run can adopt. Two runs that race
 for one key are not an error: the loser adopts the winner's artifact.
 
 The key is derived from the compile inputs, never from configuration text. It
-covers the resolved compiler and every file in the library directory beside it,
-five environment variables that move where the toolchain reads or writes
-something of its own (`MODULAR_HOME`, `MODULAR_CACHE_DIR`,
+covers the resolved compiler and every entry in `<resolved compiler
+dir>/../lib/mojo`, five environment variables that move where the toolchain
+reads or writes something of its own (`MODULAR_HOME`, `MODULAR_CACHE_DIR`,
 `MODULAR_DERIVED_PATH`, `MODULAR_NVPTX_COMPILER_PATH`, `XDG_CACHE_HOME`), the
 physical invocation root, the build arguments, every
 file named by a build argument, the walked contents of every `-I` root, the
 walked contents of the directory the test file sits in, and the test file itself
 — by CONTENT, so a modification time that moves without the bytes changing
-rebuilds nothing. That directory is in the key because the compiler resolves a
-bare `from helper import ...` against the source file's own directory, with no
-`-I` involved: a helper beside a test is a build input nothing else covers.
+rebuilds nothing. A branch switch and back hits only for files whose bytes are
+identical across branches; differing files replace their one live generation
+and recompile when switched back. That directory is in the key because the
+compiler resolves a bare `from helper import ...` against the source file's own
+directory, with no `-I` involved: a helper beside a test is a build input
+nothing else covers.
+The keyed `-I` spelling is exact — `-I lib` and `-I ./lib` differ — while the
+named directory's contents are walked and digested. Symlink resolution remains
+canonicalized. A wrapper script therefore relocates the keyed library directory
+beside the wrapper; the real compiler's libraries are not directly keyed.
 Settings that cannot change a compiled byte (timeouts, workers, retries,
 selection, reporters, and the rest of §25) are absent from it and never
 invalidate anything. There is no import-graph analysis: one change under an `-I`
@@ -332,6 +341,10 @@ unclassifiable `--build-arg`, an include tree that cannot be walked, a store
 that cannot be created — turns the cache off for the whole session with one
 warning and builds normally. No cache condition ever fails a run that would
 otherwise pass.
+
+`--compile-timeout` bounds only a compile that happens. A warm hit performs no
+compile and therefore cannot produce COMPILE-TIMEOUT; use `--no-cache` when the
+compile deadline itself must be exercised.
 
 Retries are outside the cache entirely: a crash-class retry builds to its
 invocation-private path under `build/bin/` and publishes nothing, and the file
@@ -397,14 +410,16 @@ this design cannot close without compiling from a snapshot, and it is listed
 first because a reader deciding whether to trust a warm run needs it before
 anything else here.
 
-- **An input edited and edited back while the compiler is running.** The key is
-  taken before the compile and re-checked after it, so an input that is
-  DIFFERENT at publication is caught: nothing is published, a `cache-publish`
-  warning is emitted, and the file is rebuilt next run. What two samples cannot
-  see is an input that changed and changed back while the compiler was reading
-  it. Both samples agree, the binary came from bytes neither of them saw, and no
-  warning is emitted because as far as the guard can tell nothing moved. A later
-  run over the restored tree hits that binary.
+- **An input edited and edited back while the compiler is running.** Build
+  inputs must remain stable while a compiler invocation runs; mutation during
+  compilation is unsupported. Test-file publication re-checks its inputs after
+  compilation, so an input that is DIFFERENT at publication is caught: nothing
+  is published, a `cache-publish` warning is emitted, and the file is rebuilt
+  next run. What those two samples cannot see is an input that changed and
+  changed back while the compiler was reading it. Both samples agree, the
+  binary came from bytes neither of them saw, and no warning is emitted because
+  as far as the guard can tell nothing moved. A later run over the restored tree
+  hits that binary.
 
   This is reachable by ordinary work — editing a helper during a slow compile
   and undoing it — and it is a real gap, not a theoretical one. Closing it takes
@@ -415,11 +430,12 @@ anything else here.
   If you suspect it, `--no-cache` compiles from what is on disk, and
   `--cache-clear` discards anything already stored.
 
-  The same two-sample limit applies more widely to the session-scoped inputs.
-  The `-I` root contents and the toolchain are sampled once for the whole
-  session rather than per build, so their window is the entire run. Re-walking
-  every include root at every publication would narrow that without closing it,
-  at a cost scaling with include-tree size times files compiled; the per-file
+  Configured precompile-step inputs are sampled once, so their unsupported
+  mutation window spans the whole step; they do not receive the test-file
+  publication re-check. The `-I` root contents and the toolchain are likewise
+  sampled once for the whole session rather than per build. Re-walking every
+  include root at every publication would narrow that without closing it, at a
+  cost scaling with include-tree size times files compiled; the per-file
   directory re-walk is bounded by one directory and paid only on a miss, which
   is why it is worth doing and the session-wide one is not.
 

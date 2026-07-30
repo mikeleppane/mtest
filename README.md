@@ -837,7 +837,9 @@ the command.
 mtest compiles every test file with `mojo build` before it runs it. The build
 cache keeps those binaries under `.mtest-cache/build-v1/` in the invocation
 root, so a file whose compile inputs have not changed is not compiled again. It
-is on by default and needs no configuration.
+is on by default and needs no configuration. The store is per-checkout and is
+deliberately not persisted across CI runs: moving compiled artifacts into shared
+state could reuse a binary built for a different host CPU.
 
 The summary band reports the split. A cold store builds everything:
 
@@ -884,15 +886,21 @@ Read the counters, not the clock. Both runs above finish in about a second
 because the files are tiny and `mojo` keeps a module cache of its own; the
 counters are what tell you whether a compile happened.
 
+`--compile-timeout` bounds only a compile that happens. A warm hit performs no
+compile and cannot produce COMPILE-TIMEOUT; use `--no-cache` when you need to
+exercise the deadline.
+
 ### What invalidates an entry
 
 Each cached binary is keyed by a digest over the compile inputs mtest names —
 everything an ordinary edit, upgrade, or move can reach:
 
 - the resolved `mojo` executable — its canonical path, its contents, and its
-  `--version` output — plus every entry of its library directory, by name and
-  type, and the contents of every regular file among them, so a toolchain
-  upgrade rebuilds everything;
+  `--version` output — plus every entry of `<resolved compiler
+  dir>/../lib/mojo`, by name and type, and the contents of every regular file
+  among them, so a toolchain upgrade rebuilds everything. A wrapper script
+  relocates that directory beside the wrapper, so the real compiler's libraries
+  are not directly keyed; symlink resolution remains canonicalized;
 - `MODULAR_HOME`, `MODULAR_CACHE_DIR`, `MODULAR_DERIVED_PATH`,
   `MODULAR_NVPTX_COMPILER_PATH`, and `XDG_CACHE_HOME` — the variables that move
   where the toolchain reads or writes something of its own, or which tool it
@@ -900,6 +908,8 @@ everything an ordinary edit, upgrade, or move can reach:
   in [the CLI contract](docs/cli-contract.md) for what that leaves uncovered;
 - the canonicalized invocation root;
 - the build arguments, with any file or `-I` directory they name resolved and
+  digested. The `-I` argument spelling is keyed exactly as written (`-I lib`
+  and `-I ./lib` differ), while the named directory contents are walked and
   digested;
 - the walked contents of every include root — every `*.mojo`, `*.🔥`,
   `*.mojopkg`, and `*.mojoc` an `-I` makes visible, recursing into
@@ -913,19 +923,23 @@ everything an ordinary edit, upgrade, or move can reach:
 
 Files enter the key by **content**, never by modification time, so a `touch`, a
 `git checkout` that rewrites a file with the same bytes, or a branch switch and
-back all still hit. Settings that cannot change a compiled byte — timeouts,
-workers, retries, selection, reporters — are not in the key and never
-invalidate anything. The invocation root is in the key, though, so moving or
-renaming the checkout invalidates everything in it.
+back still hit only when the files' bytes are identical across branches.
+Differing files replace their one live generation and recompile when switched
+back. Settings that cannot change a compiled byte — timeouts, workers, retries,
+selection, reporters — are not in the key and never invalidate anything. The
+invocation root is in the key, though, so moving or renaming the checkout
+invalidates everything in it.
 
-There is one gap worth knowing about before you trust a warm run. The key is
-taken before a build and re-checked after it, which catches an input you edited
-and left edited — that publishes nothing and rebuilds next run. It does not
-catch one you edited and undid *while the compiler was reading it*: both checks
-agree, and the stored binary came from bytes that are no longer anywhere. If you
-edited during a slow compile and changed your mind, `--no-cache` compiles from
-what is on disk and `--cache-clear` discards what was stored. The full statement
-is in [the CLI contract](docs/cli-contract.md) under the cache's non-goals.
+Build inputs must remain stable while a compiler invocation runs; mutation
+during compilation is unsupported. Test-file publication re-checks inputs after
+compilation, catching an input you edited and left edited: it publishes nothing
+and rebuilds next run. It cannot catch one you edited and undid *while the
+compiler was reading it*: both checks agree, and the stored binary came from
+bytes that are no longer anywhere. Configured precompile-step inputs are sampled
+once, so their unsupported mutation window spans the whole step. If you edited
+during a slow compile and changed your mind, `--no-cache` compiles from what is
+on disk and `--cache-clear` discards what was stored. The full statement is in
+[the CLI contract](docs/cli-contract.md) under the cache's non-goals.
 
 There is no import-graph analysis. One edit under an `-I` root invalidates every
 file keyed over that root, and one edit beside a test file invalidates every test
@@ -965,10 +979,11 @@ PASS           e2e/matrix/test_beta.mojo       0.02s
 
 The common causes are a build argument mtest's grammar does not recognize (as
 above — an unknown flag might change what gets built in a way the key cannot
-see), a `mojo` that will not resolve, and an include tree that cannot be walked:
-a file over the size cap, a directory that cannot be listed, or a package
-directory hiding behind a symlink. `collect` has no reporter to warn through and
-reports the same condition as a `collect: cache-off: ...` line on stderr.
+see), a `-Xlinker <flag>` the cache cannot characterize, a `mojo` that will not
+resolve, and an include tree that cannot be walked: a file over the size cap, a
+directory that cannot be listed, or a package directory hiding behind a symlink.
+`collect` has no reporter to warn through and reports the same condition as a
+`collect: cache-off: ...` line on stderr.
 
 No cache condition ever fails a run that would otherwise pass, and none of them
 changes a verdict.
@@ -1060,9 +1075,10 @@ to finish.
 
 `CACHEDIR.TAG` carries the standard cachedir signature, so backup and archiving
 tools that honor the convention skip the directory. The store is per-checkout,
-is never shared between machines, and belongs in `.gitignore` — the same
-`.mtest-cache/` line that covers the last-run state covers it. Deleting it by
-hand at any moment is safe; the next run is simply cold.
+is never shared between machines, is deliberately not persisted across CI runs,
+and belongs in `.gitignore` — the same `.mtest-cache/` line that covers the
+last-run state covers it. Deleting it by hand at any moment is safe; the next
+run is simply cold.
 
 A build compiles into a private staging directory beside its final home, and is
 published with a single `rename(2)` once its bytes are on disk, so an
