@@ -3,11 +3,19 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import platform
+import shutil
+import subprocess
+import tempfile
 import unittest
 from unittest import mock
 
+from scripts.build import native as native_build
+from scripts.build.profiles import host_profile, load_profiles
 from scripts.checks import native as native_check
+from scripts.checks import native_abi
 
 
 class NativeCheckCommandTests(unittest.TestCase):
@@ -16,6 +24,189 @@ class NativeCheckCommandTests(unittest.TestCase):
     def test_repository_root_is_exact(self) -> None:
         root = Path(__file__).resolve().parents[2]
         self.assertEqual(native_check.ROOT, root)
+        self.assertEqual(
+            native_abi.PRODUCTION_OBJECT,
+            root / "build/native/mtest_exec_native.o",
+        )
+
+    def test_strict_inventory_requires_strong_stack_protection(self) -> None:
+        self.assertIn("-fstack-protector-strong", native_abi.STRICT_FLAGS)
+        self.assertNotIn("-fstack-protector", native_abi.STRICT_FLAGS)
+        self.assertEqual(
+            native_abi.PROTECTED_FUNCTION,
+            "mtest_exec_process_open",
+        )
+
+    def test_linux_stack_check_must_be_inside_protected_function(self) -> None:
+        inside = """
+0000000000000010 <mtest_exec_process_open>:
+  10: e8 00 00 00 00 call 15 <mtest_exec_process_open+0x5>
+      11: R_X86_64_PLT32 __stack_chk_fail-0x4
+0000000000000020 <mtest_exec_process_close>:
+  20: c3 ret
+"""
+        elsewhere = """
+0000000000000010 <mtest_exec_process_open>:
+  10: c3 ret
+0000000000000020 <mtest_exec_process_close>:
+  20: e8 00 00 00 00 call 25 <mtest_exec_process_close+0x5>
+      21: R_X86_64_PLT32 __stack_chk_fail-0x4
+"""
+        self.assertTrue(
+            native_abi.function_references_symbol(
+                inside,
+                function="mtest_exec_process_open",
+                symbol="__stack_chk_fail",
+                platform="linux",
+            )
+        )
+        self.assertFalse(
+            native_abi.function_references_symbol(
+                elsewhere,
+                function="mtest_exec_process_open",
+                symbol="__stack_chk_fail",
+                platform="linux",
+            )
+        )
+
+    def test_darwin_stack_check_must_be_inside_protected_function(self) -> None:
+        inside = """
+_mtest_exec_process_open:
+0000000000000010 bl ___stack_chk_fail
+_mtest_exec_process_close:
+0000000000000020 ret
+"""
+        elsewhere = """
+_mtest_exec_process_open:
+0000000000000010 ret
+_mtest_exec_process_close:
+0000000000000020 bl ___stack_chk_fail
+"""
+        self.assertTrue(
+            native_abi.function_references_symbol(
+                inside,
+                function="mtest_exec_process_open",
+                symbol="___stack_chk_fail",
+                platform="darwin",
+            )
+        )
+        self.assertFalse(
+            native_abi.function_references_symbol(
+                elsewhere,
+                function="mtest_exec_process_open",
+                symbol="___stack_chk_fail",
+                platform="darwin",
+            )
+        )
+
+    def test_copied_inventory_without_strong_flag_is_rejected(self) -> None:
+        retained = [
+            flag
+            for flag in native_abi.STRICT_FLAGS_FILE.read_text(
+                encoding="utf-8"
+            ).splitlines()
+            if flag.strip() != "-fstack-protector-strong"
+        ]
+        with tempfile.TemporaryDirectory(prefix="mtest-native-flags-") as raw_tmp:
+            inventory = Path(raw_tmp) / "native_strict_flags.txt"
+            inventory.write_text("\n".join(retained) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(
+                SystemExit,
+                "missing required flag -fstack-protector-strong",
+            ):
+                native_abi.main(strict_flags_file=inventory)
+
+    def test_production_shell_ignores_ambient_compiler_flags(self) -> None:
+        profile = host_profile(
+            system=platform.system(),
+            machine=platform.machine(),
+            profiles=load_profiles(),
+        )
+        with tempfile.TemporaryDirectory(prefix="mtest-native-command-") as raw_tmp:
+            tmp = Path(raw_tmp)
+            build_scripts = tmp / "scripts" / "build"
+            build_scripts.mkdir(parents=True)
+            for source in (
+                native_build.ROOT / "scripts" / "build" / "production_build.sh",
+                native_abi.STRICT_FLAGS_FILE,
+                native_build.ROOT / "scripts" / "build" / "production_profiles.txt",
+            ):
+                shutil.copyfile(source, build_scripts / source.name)
+            (tmp / "native").mkdir()
+            (tmp / "native" / "mtest_exec_native.c").write_text(
+                "int command_capture_only;\n",
+                encoding="ascii",
+            )
+            fake_bin = tmp / "bin"
+            fake_bin.mkdir()
+            capture = tmp / "clang.args"
+            fake_clang = fake_bin / "clang"
+            fake_clang.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                'printf \'%s\\n\' "$@" >"$MTEST_COMMAND_CAPTURE"\n'
+                "output=''\n"
+                "while [[ $# -gt 0 ]]; do\n"
+                "  if [[ \"$1\" == '-o' ]]; then\n"
+                '    output="$2"\n'
+                "    shift 2\n"
+                "  else\n"
+                "    shift\n"
+                "  fi\n"
+                "done\n"
+                ': >"$output"\n',
+                encoding="ascii",
+            )
+            fake_clang.chmod(0o755)
+            environment = {
+                **os.environ,
+                "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+                "MTEST_COMMAND_CAPTURE": str(capture),
+                "CFLAGS": "-march=native -DPOISON_CFLAGS",
+                "CPPFLAGS": "-DPOISON_CPPFLAGS",
+            }
+            completed = subprocess.run(
+                ["bash", str(build_scripts / "production_build.sh"), "native"],
+                cwd=tmp,
+                check=False,
+                text=True,
+                capture_output=True,
+                env=environment,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            command = capture.read_text(encoding="utf-8").splitlines()
+        for flag in profile.c_flags:
+            self.assertIn(flag, command)
+        self.assertIn("-DMTEST_EXEC_TESTING=0", command)
+        self.assertNotIn("-march=native", command)
+        self.assertNotIn("-DPOISON_CFLAGS", command)
+        self.assertNotIn("-DPOISON_CPPFLAGS", command)
+
+    def test_testing_commands_ignore_ambient_compiler_flags(self) -> None:
+        profile = host_profile(
+            system=platform.system(),
+            machine=platform.machine(),
+            profiles=load_profiles(),
+        )
+        poison = {
+            "CFLAGS": "-march=native -DPOISON_CFLAGS",
+            "CPPFLAGS": "-DPOISON_CPPFLAGS",
+        }
+        with mock.patch.dict(os.environ, poison):
+            adapter_command = native_build.testing_compile_command("clang", profile)
+            lifecycle_command = native_check.test_compile_command(
+                "clang",
+                native_check.TEST_SOURCES[0],
+                Path("lifecycle.o"),
+                profile,
+            )
+        for command in (adapter_command, lifecycle_command):
+            for flag in profile.c_flags:
+                self.assertIn(flag, command)
+            self.assertIn("-DMTEST_EXEC_TESTING=1", command)
+            self.assertNotIn("-march=native", command)
+            self.assertNotIn("-DPOISON_CFLAGS", command)
+            self.assertNotIn("-DPOISON_CPPFLAGS", command)
 
     def test_source_inventory_is_nonempty_and_exact(self) -> None:
         root = Path(__file__).resolve().parents[2]

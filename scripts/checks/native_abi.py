@@ -1,13 +1,22 @@
 #!/usr/bin/env python3
-"""Compile and verify the exact native exec adapter ABI variants."""
+"""Verify authoritative native objects and compiler-hardening evidence."""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
+import platform
+import re
 import subprocess
 import sys
 import tempfile
+
+from scripts.build.profiles import (
+    ProductionProfile,
+    host_profile,
+    load_profiles,
+)
+from scripts.checks.native_sources import tracked_native_sources
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -15,7 +24,11 @@ NATIVE = ROOT / "native"
 SOURCE = NATIVE / "mtest_exec_native.c"
 HEADER = NATIVE / "mtest_exec_native.h"
 TEST_HEADER = NATIVE / "mtest_exec_native_test.h"
-SOURCE_FILES = (SOURCE, HEADER, TEST_HEADER)
+SOURCE_FILES = tracked_native_sources(ROOT)
+PRODUCTION_OBJECT = ROOT / "build" / "native" / "mtest_exec_native.o"
+TESTING_OBJECT = ROOT / "build" / "native" / "mtest_exec_native_test.o"
+CANARY_SOURCE = ROOT / "tests" / "native" / "stack_protector_canary.c"
+PROTECTED_FUNCTION = "mtest_exec_process_open"
 
 # The strict production C flags are single-sourced in this file so the Python
 # checks here and the bash production-build entrypoint
@@ -70,7 +83,7 @@ TEST_ONLY_SYMBOLS = {
 }
 
 
-def _load_strict_flags(path: Path) -> tuple[str, ...]:
+def load_strict_flags(path: Path = STRICT_FLAGS_FILE) -> tuple[str, ...]:
     """Return the shared strict production flag inventory read from `path`.
 
     The file lists one flag per line; blank lines and lines beginning with '#'
@@ -83,10 +96,18 @@ def _load_strict_flags(path: Path) -> tuple[str, ...]:
     )
     if not flags:
         raise SystemExit(f"native-abi-check: strict flag inventory is empty: {path}")
+    if flags.count("-fstack-protector-strong") != 1:
+        raise SystemExit(
+            f"native-abi-check: missing required flag -fstack-protector-strong: {path}"
+        )
+    if "-fstack-protector" in flags:
+        raise SystemExit(
+            f"native-abi-check: forbidden weak flag -fstack-protector: {path}"
+        )
     return flags
 
 
-STRICT_FLAGS = _load_strict_flags(STRICT_FLAGS_FILE)
+STRICT_FLAGS = load_strict_flags()
 
 
 def run(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -119,11 +140,27 @@ def compiler() -> str:
     return cc
 
 
-def compile_variant(cc: str, output: Path, *, testing: bool) -> None:
-    """Compile one strict production or test adapter object."""
-    command = [
+def current_profile() -> ProductionProfile:
+    """Return the strict profile selected for the current production host."""
+    return host_profile(
+        system=platform.system(),
+        machine=platform.machine(),
+        profiles=load_profiles(),
+    )
+
+
+def variant_compile_command(
+    cc: str,
+    output: Path,
+    *,
+    testing: bool,
+    profile: ProductionProfile,
+) -> list[str]:
+    """Return one exact adapter compile command."""
+    return [
         cc,
         *STRICT_FLAGS,
+        *profile.c_flags,
         f"-DMTEST_EXEC_TESTING={1 if testing else 0}",
         "-I",
         str(NATIVE),
@@ -132,6 +169,22 @@ def compile_variant(cc: str, output: Path, *, testing: bool) -> None:
         "-o",
         str(output),
     ]
+
+
+def compile_variant(
+    cc: str,
+    output: Path,
+    *,
+    testing: bool,
+    profile: ProductionProfile,
+) -> None:
+    """Compile one strict adapter object for build-time use."""
+    command = variant_compile_command(
+        cc,
+        output,
+        testing=testing,
+        profile=profile,
+    )
     proc = run(command)
     require(proc.returncode == 0, f"native compile failed:\n{proc.stdout}")
 
@@ -163,35 +216,203 @@ def defined_symbols(object_path: Path) -> set[str]:
     return symbols
 
 
-def main() -> int:
-    """Verify files, strict compilation, layouts, and symbol isolation."""
+def undefined_symbols(object_path: Path) -> set[str]:
+    """Return the undefined symbol spellings reported by the platform nm."""
+    nm = os.environ.get("NM", "nm")
+    proc = run([nm, "-u", str(object_path)])
+    require(proc.returncode == 0, f"nm -u failed for {object_path}:\n{proc.stdout}")
+    return {line.split()[-1] for line in proc.stdout.splitlines() if line.split()}
+
+
+def _function_region(
+    disassembly: str,
+    *,
+    function: str,
+    platform_name: str,
+) -> str | None:
+    if platform_name == "darwin":
+        label = f"_{function}:"
+        lines = disassembly.splitlines()
+        starts = [index for index, line in enumerate(lines) if line.strip() == label]
+        if len(starts) != 1:
+            return None
+        start = starts[0]
+        end = len(lines)
+        for index in range(start + 1, len(lines)):
+            if re.fullmatch(r"_[A-Za-z_$][A-Za-z0-9_.$]*:", lines[index].strip()):
+                end = index
+                break
+        return "\n".join(lines[start:end])
+    if platform_name == "linux":
+        linux_label = re.compile(rf"^[0-9A-Fa-f]+ <{re.escape(function)}>:$")
+        global_label = re.compile(r"^[0-9A-Fa-f]+ <[^>]+>:$")
+        lines = disassembly.splitlines()
+        starts = [
+            index
+            for index, line in enumerate(lines)
+            if linux_label.fullmatch(line.strip())
+        ]
+        if len(starts) != 1:
+            return None
+        start = starts[0]
+        end = len(lines)
+        for index in range(start + 1, len(lines)):
+            if global_label.fullmatch(lines[index].strip()):
+                end = index
+                break
+        return "\n".join(lines[start:end])
+    raise SystemExit(
+        f"native-abi-check: unsupported disassembly platform: {platform_name}"
+    )
+
+
+def function_references_symbol(
+    disassembly: str,
+    *,
+    function: str,
+    symbol: str,
+    platform: str,
+) -> bool:
+    """Return whether ``symbol`` occurs inside exactly ``function``."""
+    region = _function_region(
+        disassembly,
+        function=function,
+        platform_name=platform,
+    )
+    return region is not None and symbol in region
+
+
+def disassembly(object_path: Path) -> str:
+    """Return platform disassembly with relocation/symbol references."""
+    if sys.platform == "linux":
+        command = [os.environ.get("OBJDUMP", "objdump"), "-dr", str(object_path)]
+    elif sys.platform == "darwin":
+        command = [os.environ.get("OTOOL", "otool"), "-tvV", str(object_path)]
+    else:
+        raise SystemExit(
+            f"native-abi-check: unsupported production host platform {sys.platform}"
+        )
+    proc = run(command)
+    require(
+        proc.returncode == 0,
+        f"disassembly failed for {object_path}:\n{proc.stdout}",
+    )
+    return proc.stdout
+
+
+def stack_check_symbol(platform_name: str = sys.platform) -> str:
+    """Return the platform spelling of the stack-check failure symbol."""
+    if platform_name == "linux":
+        return "__stack_chk_fail"
+    if platform_name == "darwin":
+        return "___stack_chk_fail"
+    raise SystemExit(
+        f"native-abi-check: unsupported production host platform {platform_name}"
+    )
+
+
+def verify_stack_protector(
+    cc: str,
+    profile: ProductionProfile,
+    production: Path,
+) -> None:
+    """Prove stack protection in the artifact and against a compiler control."""
+    symbol = stack_check_symbol()
+    require(
+        symbol in undefined_symbols(production),
+        f"production object does not reference {symbol}",
+    )
+    # The compiler-inserted failure branch is artifact evidence, not an
+    # ordinary source-level post-fork call: it is reachable only after a stack
+    # overwrite, when normal child execution is already impossible. Keep the
+    # source call-graph allowlist unchanged.
+    require(
+        function_references_symbol(
+            disassembly(production),
+            function=PROTECTED_FUNCTION,
+            symbol=symbol,
+            platform=sys.platform,
+        ),
+        f"{PROTECTED_FUNCTION} does not reference {symbol}",
+    )
+    with tempfile.TemporaryDirectory(prefix="mtest-stack-canary-") as raw_tmp:
+        tmp = Path(raw_tmp)
+        positive = tmp / "positive.o"
+        negative = tmp / "negative.o"
+        positive_command = [
+            cc,
+            *STRICT_FLAGS,
+            *profile.c_flags,
+            "-c",
+            str(CANARY_SOURCE),
+            "-o",
+            str(positive),
+        ]
+        positive_compile = run(positive_command)
+        require(
+            positive_compile.returncode == 0,
+            f"stack canary compile failed:\n{positive_compile.stdout}",
+        )
+        negative_flags = tuple(
+            flag for flag in STRICT_FLAGS if flag != "-fstack-protector-strong"
+        )
+        negative_command = [
+            cc,
+            *negative_flags,
+            *profile.c_flags,
+            "-c",
+            str(CANARY_SOURCE),
+            "-o",
+            str(negative),
+        ]
+        negative_compile = run(negative_command)
+        require(
+            negative_compile.returncode == 0,
+            f"negative stack canary compile failed:\n{negative_compile.stdout}",
+        )
+        require(
+            symbol in undefined_symbols(positive),
+            f"positive stack canary does not reference {symbol}",
+        )
+        require(
+            symbol not in undefined_symbols(negative),
+            f"negative stack canary unexpectedly references {symbol}",
+        )
+
+
+def main(*, strict_flags_file: Path = STRICT_FLAGS_FILE) -> int:
+    """Verify authoritative objects, stack protection, and symbol isolation."""
+    require(
+        load_strict_flags(strict_flags_file) == STRICT_FLAGS,
+        "strict flag inventory changed after module load",
+    )
     require(bool(SOURCE_FILES), "source inventory is empty")
     for path in SOURCE_FILES:
         require(path.is_file(), f"missing required file: {path.relative_to(ROOT)}")
 
+    for object_path in (PRODUCTION_OBJECT, TESTING_OBJECT):
+        require(
+            object_path.is_file(),
+            f"missing authoritative object: {object_path.relative_to(ROOT)}",
+        )
     cc = compiler()
-    with tempfile.TemporaryDirectory(prefix="mtest-native-abi-") as raw_tmp:
-        tmp = Path(raw_tmp)
-        production = tmp / "mtest_exec_native.o"
-        testing = tmp / "mtest_exec_native_test.o"
-        compile_variant(cc, production, testing=False)
-        compile_variant(cc, testing, testing=True)
-
-        production_got = defined_symbols(production)
-        require(
-            production_got == PRODUCTION_SYMBOLS,
-            "production symbols differ:\n"
-            f"  missing={sorted(PRODUCTION_SYMBOLS - production_got)}\n"
-            f"  extra={sorted(production_got - PRODUCTION_SYMBOLS)}",
-        )
-        expected_testing = PRODUCTION_SYMBOLS | TEST_ONLY_SYMBOLS
-        testing_got = defined_symbols(testing)
-        require(
-            testing_got == expected_testing,
-            "test symbols differ:\n"
-            f"  missing={sorted(expected_testing - testing_got)}\n"
-            f"  extra={sorted(testing_got - expected_testing)}",
-        )
+    profile = current_profile()
+    production_got = defined_symbols(PRODUCTION_OBJECT)
+    require(
+        production_got == PRODUCTION_SYMBOLS,
+        "production symbols differ:\n"
+        f"  missing={sorted(PRODUCTION_SYMBOLS - production_got)}\n"
+        f"  extra={sorted(production_got - PRODUCTION_SYMBOLS)}",
+    )
+    expected_testing = PRODUCTION_SYMBOLS | TEST_ONLY_SYMBOLS
+    testing_got = defined_symbols(TESTING_OBJECT)
+    require(
+        testing_got == expected_testing,
+        "test symbols differ:\n"
+        f"  missing={sorted(expected_testing - testing_got)}\n"
+        f"  extra={sorted(testing_got - expected_testing)}",
+    )
+    verify_stack_protector(cc, profile, PRODUCTION_OBJECT)
 
     print(
         "native-abi-check: OK -- ABI v2 layouts and "

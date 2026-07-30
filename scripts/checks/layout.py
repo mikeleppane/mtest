@@ -30,6 +30,8 @@ BUILD_SOURCE_PATHS = (
     Path("scripts/build/native_strict_flags.txt"),
     Path("scripts/build/package_consumption.py"),
     Path("scripts/build/production_build.sh"),
+    Path("scripts/build/production_profiles.txt"),
+    Path("scripts/build/profiles.py"),
 )
 COMPANION_ROOT = Path("companions/assertions")
 COMPANION_SOURCE_ROOT = COMPANION_ROOT / "src"

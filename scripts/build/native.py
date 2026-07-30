@@ -1,25 +1,55 @@
 #!/usr/bin/env python3
-"""Build the production native exec adapter object with the pinned compiler."""
+"""Build authoritative production and testing native adapter objects."""
 
 from __future__ import annotations
 
 from pathlib import Path
+import platform
+import subprocess
 import sys
 
+from scripts.build.profiles import ProductionProfile, host_profile, load_profiles
 from scripts.checks import native_abi as native_abi_check
 
 
 ROOT = Path(__file__).resolve().parents[2]
-OUTPUT = ROOT / "build" / "native" / "mtest_exec_native.o"
-TEST_OUTPUT = ROOT / "build" / "native" / "mtest_exec_native_test.o"
+OUTPUT = native_abi_check.PRODUCTION_OBJECT
+TEST_OUTPUT = native_abi_check.TESTING_OBJECT
+
+
+def testing_compile_command(
+    cc: str,
+    profile: ProductionProfile,
+) -> list[str]:
+    """Return the testing-object command without ambient compiler flags."""
+    return native_abi_check.variant_compile_command(
+        cc,
+        TEST_OUTPUT,
+        testing=True,
+        profile=profile,
+    )
 
 
 def main() -> int:
-    """Compile the strict production-only object consumed by Mojo link steps."""
+    """Stage production through Bash and compile the testing-only variant."""
+    profile = host_profile(
+        system=platform.system(),
+        machine=platform.machine(),
+        profiles=load_profiles(),
+    )
+    subprocess.run(
+        ["bash", "scripts/build/production_build.sh", "native"],
+        cwd=ROOT,
+        check=True,
+    )
     cc = native_abi_check.compiler()
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    native_abi_check.compile_variant(cc, OUTPUT, testing=False)
-    native_abi_check.compile_variant(cc, TEST_OUTPUT, testing=True)
+    native_abi_check.compile_variant(
+        cc,
+        TEST_OUTPUT,
+        testing=True,
+        profile=profile,
+    )
     symbols = native_abi_check.defined_symbols(OUTPUT)
     native_abi_check.require(
         symbols == native_abi_check.PRODUCTION_SYMBOLS,

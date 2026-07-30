@@ -146,6 +146,7 @@ postfork-check = "python -m scripts.tests.test_postfork && python -m scripts.che
 # fault and sanitizer controls that production linkage proves absent.
 native-check = { cmd = "python -m scripts.tests.test_native && python -m scripts.checks.native", depends-on = [
     "postfork-check",
+    "build-native",
 ] }
 
 # Source-build the native adapter and a risk-weighted exec subset with matching
@@ -289,7 +290,7 @@ recipe-check = "python -m scripts.tests.test_community_recipe && python -m scrip
 # only check that the probe oracle duplicated into both lanes has not diverged.
 # Left solely in `valgrind-check` that check is unreachable on macOS and costs a
 # full instrumented lane on Linux to learn a docstring was reworded in one copy.
-harness-unit-check = "python -m scripts.tests.test_process_watchdog && python -m scripts.tests.test_dogfood && python -m scripts.tests.test_package_consumption && python -m scripts.tests.test_selfhost && python -m scripts.tests.test_e2e && python -m scripts.tests.test_e2e_json && python -m scripts.tests.test_contract && python -m scripts.tests.test_transcript_compare && python -m scripts.tests.test_readme_help && python -m scripts.tests.test_coverage_capability && python -m scripts.tests.test_abi_probe && python -m scripts.tests.test_asan && python -m scripts.tests.test_valgrind && python -m scripts.tests.test_native_format"
+harness-unit-check = "python -m scripts.tests.test_process_watchdog && python -m scripts.tests.test_dogfood && python -m scripts.tests.test_package_consumption && python -m scripts.tests.test_selfhost && python -m scripts.tests.test_e2e && python -m scripts.tests.test_e2e_json && python -m scripts.tests.test_contract && python -m scripts.tests.test_transcript_compare && python -m scripts.tests.test_readme_help && python -m scripts.tests.test_coverage_capability && python -m scripts.tests.test_abi_probe && python -m scripts.tests.test_asan && python -m scripts.tests.test_valgrind && python -m scripts.tests.test_native_format && python -m scripts.tests.test_build_profiles"
 
 # Repository policy: does this tree still obey its own rules? The layout and
 # invocation-policy oracle, the hosted-workflow security oracle, the

@@ -23,6 +23,7 @@ EXPECTED_NATIVE_SOURCES = (
     "tests/native/e2e_state_persistence_fault.c",
     "tests/native/main_open_fault.c",
     "tests/native/native_controls.c",
+    "tests/native/stack_protector_canary.c",
     "tests/native/test_exec_native.c",
     "tests/native/test_exec_native_signals.c",
 )

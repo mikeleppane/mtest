@@ -12,6 +12,7 @@ from unittest import mock
 
 from scripts.checks import native_abi as native_abi_check
 from scripts.checks import postfork as postfork_check
+from scripts.checks.native_sources import tracked_native_sources
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -43,12 +44,13 @@ class PostforkCheckTests(unittest.TestCase):
         self.assertEqual(postfork_check.SOURCE, SOURCE)
         self.assertTrue(postfork_check.SOURCE.is_file())
         self.assertEqual(
-            tuple(path.name for path in native_abi_check.SOURCE_FILES),
-            (
-                "mtest_exec_native.c",
-                "mtest_exec_native.h",
-                "mtest_exec_native_test.h",
-            ),
+            native_abi_check.SOURCE_FILES,
+            tracked_native_sources(ROOT),
+        )
+        self.assertEqual(postfork_check.NATIVE_SOURCES, tracked_native_sources(ROOT))
+        self.assertIn(
+            ROOT / "tests" / "native" / "stack_protector_canary.c",
+            native_abi_check.SOURCE_FILES,
         )
         self.assertGreater(len(native_abi_check.SOURCE_FILES), 0)
 
@@ -303,7 +305,7 @@ class PostforkCheckTests(unittest.TestCase):
         mutated = self.insert_at_anchor(
             self.source,
             CHILD_EXEC_CALL,
-            "        return -1;\n",
+            "        if (plan == NULL) {\n            return -1;\n        }\n",
         )
         with self.assertRaises(postfork_check.AuditFailure) as raised:
             self.audit_text(mutated)
@@ -318,7 +320,9 @@ class PostforkCheckTests(unittest.TestCase):
         mutated = self.insert_at_anchor(
             self.source,
             CHILD_EXEC_CALL,
-            "        goto mtest_parent_only;\n",
+            "        if (plan == NULL) {\n"
+            "            goto mtest_parent_only;\n"
+            "        }\n",
         ).replace(
             parent_marker,
             "mtest_parent_only:\n" + parent_marker,
@@ -358,7 +362,8 @@ class PostforkCheckTests(unittest.TestCase):
     def test_path_search_execvp_is_rejected(self) -> None:
         source = self.add_wrapper(
             "static void mtest_child_mutant(void) {\n"
-            '    char *const args[] = {"/bin/true", NULL};\n'
+            '    char executable[] = "/bin/true";\n'
+            "    char *const args[] = {executable, NULL};\n"
             "    (void)execvp(args[0], args);\n"
             "}"
         )

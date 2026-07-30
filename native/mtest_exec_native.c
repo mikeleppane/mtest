@@ -33,6 +33,8 @@
 
 extern char **environ;
 
+static char mtest_default_shell[] = "/bin/sh";
+
 #define MTEST_ETXTBSY_RETRIES 5u
 #define MTEST_ETXTBSY_DELAY_MS 50
 #define MTEST_ABORT_SLICE_NS 10000000L
@@ -911,7 +913,7 @@ static int mtest_build_candidates(struct mtest_exec_plan *plan) {
         if (plan->shell_argv[index] == NULL) {
             return -1;
         }
-        plan->shell_argv[index][0] = (char *)"/bin/sh";
+        plan->shell_argv[index][0] = mtest_default_shell;
         plan->shell_argv[index][1] = plan->candidates[index];
         for (size_t argument = 1; argument < plan->argc; ++argument) {
             plan->shell_argv[index][argument + 1] = plan->argv[argument];
@@ -1468,12 +1470,13 @@ static int mtest_execve_checked(const char *path, char *const argv[], char *cons
     return execve(path, argv, environment);
 }
 
-static void mtest_child_report(int setup_fd, uint32_t stage, int error_number) {
+_Noreturn static void mtest_child_report(int setup_write, enum mtest_exec_setup_stage stage,
+                                         int error_number) {
     struct {
         uint32_t stage;
         int32_t error_number;
     } record;
-    record.stage = stage;
+    record.stage = (uint32_t)stage;
     record.error_number = error_number;
     size_t count = sizeof(record);
     if (mtest_fail_if_requested(MTEST_EXEC_OP_CHILD_SETUP_WRITE)) {
@@ -1486,7 +1489,7 @@ static void mtest_child_report(int setup_fd, uint32_t stage, int error_number) {
     }
     ssize_t written;
     do {
-        written = write(setup_fd, &record, count);
+        written = write(setup_write, &record, count);
     } while (written < 0 && errno == EINTR);
     _exit(127);
 }
@@ -1582,7 +1585,10 @@ static void mtest_child_exec(const struct mtest_exec_plan *plan, int stdout_read
         }
         mtest_child_report(setup_write, MTEST_EXEC_STAGE_EXECVE, last_errno);
     }
-    mtest_child_report(setup_write, MTEST_EXEC_STAGE_EXECVE, saw_eacces ? EACCES : last_errno);
+    int terminal_errno = saw_eacces ? EACCES : last_errno;
+    if (terminal_errno != 0) {
+        mtest_child_report(setup_write, MTEST_EXEC_STAGE_EXECVE, terminal_errno);
+    }
 }
 
 static struct mtest_exec_process *mtest_process_from_handle(uint64_t handle) {
@@ -1813,11 +1819,16 @@ int32_t mtest_exec_process_poll(uint64_t handle, int32_t timeout_ms,
         return -1;
     }
     for (nfds_t index = 0; index < count; ++index) {
-        if ((fds[index].revents & POLLNVAL) != 0) {
-            mtest_set_error(error, MTEST_EXEC_OP_POLL, EBADF, fds[index].revents, fds[index].fd);
+        if (fds[index].revents < 0) {
+            mtest_set_error(error, MTEST_EXEC_OP_POLL, EIO, 0, fds[index].fd);
             return -1;
         }
-        if ((fds[index].revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
+        const uint16_t revents_mask = (uint16_t)fds[index].revents;
+        if ((revents_mask & (uint16_t)POLLNVAL) != 0u) {
+            mtest_set_error(error, MTEST_EXEC_OP_POLL, EBADF, revents_mask, fds[index].fd);
+            return -1;
+        }
+        if ((revents_mask & (uint16_t)(POLLIN | POLLHUP | POLLERR)) != 0u) {
             result->readiness |= readiness[index];
         }
     }
@@ -1893,12 +1904,16 @@ int32_t mtest_exec_poll_set(const uint64_t *handles, uint64_t count, int32_t tim
         return -1;
     }
     for (nfds_t index = 0; index < nfds; ++index) {
-        if ((fds[index].revents & POLLNVAL) != 0) {
-            mtest_set_error(error, MTEST_EXEC_OP_POLL_SET, EBADF, fds[index].revents,
-                            fds[index].fd);
+        if (fds[index].revents < 0) {
+            mtest_set_error(error, MTEST_EXEC_OP_POLL_SET, EIO, 0, fds[index].fd);
             return -1;
         }
-        if ((fds[index].revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
+        const uint16_t revents_mask = (uint16_t)fds[index].revents;
+        if ((revents_mask & (uint16_t)POLLNVAL) != 0u) {
+            mtest_set_error(error, MTEST_EXEC_OP_POLL_SET, EBADF, revents_mask, fds[index].fd);
+            return -1;
+        }
+        if ((revents_mask & (uint16_t)(POLLIN | POLLHUP | POLLERR)) != 0u) {
             results[owners[index]].readiness |= bits[index];
         }
     }
@@ -2503,49 +2518,54 @@ int32_t mtest_exec_process_abort(uint64_t handle, uint32_t grace_ms,
 static volatile uint8_t mtest_sanitizer_sink;
 
 __attribute__((noinline)) void mtest_exec_test_asan_oob(void) {
-    volatile uint8_t *bytes = (volatile uint8_t *)malloc(8);
-    if (bytes == NULL) {
+    uint8_t *owned = malloc(8);
+    if (owned == NULL) {
         abort();
     }
+    volatile uint8_t *bytes = owned;
     bytes[16] = 0x5a;
-    free((void *)bytes);
+    free(owned);
 }
 
 __attribute__((noinline)) void mtest_exec_test_asan_uaf(void) {
-    volatile uint8_t *bytes = (volatile uint8_t *)malloc(8);
-    if (bytes == NULL) {
+    uint8_t *owned = malloc(8);
+    if (owned == NULL) {
         abort();
     }
-    free((void *)bytes);
+    volatile uint8_t *bytes = owned;
+    free(owned);
     bytes[0] = 0x5a;
 }
 
 __attribute__((noinline)) void mtest_exec_test_asan_leak(void) {
-    volatile uint8_t *bytes = (volatile uint8_t *)malloc(64);
-    if (bytes == NULL) {
+    uint8_t *owned = malloc(64);
+    if (owned == NULL) {
         abort();
     }
+    volatile uint8_t *bytes = owned;
     bytes[0] = 0x5a;
     mtest_sanitizer_sink = bytes[0];
 }
 
 __attribute__((noinline)) void mtest_exec_test_memcheck_undefined(void) {
-    volatile uint8_t *bytes = (volatile uint8_t *)malloc(1);
-    if (bytes == NULL) {
+    uint8_t *owned = malloc(1);
+    if (owned == NULL) {
         abort();
     }
+    volatile uint8_t *bytes = owned;
     if (bytes[0] != 0) {
         mtest_sanitizer_sink = 1;
     }
-    free((void *)bytes);
+    free(owned);
 }
 
 __attribute__((noinline)) void mtest_exec_test_memcheck_invalid(void) {
-    volatile uint8_t *bytes = (volatile uint8_t *)malloc(8);
-    if (bytes == NULL) {
+    uint8_t *owned = malloc(8);
+    if (owned == NULL) {
         abort();
     }
-    free((void *)bytes);
+    volatile uint8_t *bytes = owned;
+    free(owned);
     mtest_sanitizer_sink = bytes[0];
 }
 

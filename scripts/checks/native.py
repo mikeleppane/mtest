@@ -7,15 +7,26 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from typing import TYPE_CHECKING
 
 from scripts.checks import native_abi as native_abi_check
+from scripts.checks.native_sources import tracked_native_sources
+
+
+if TYPE_CHECKING:
+    from scripts.build.profiles import ProductionProfile
 
 
 ROOT = Path(__file__).resolve().parents[2]
-NATIVE_SOURCE = ROOT / "native" / "mtest_exec_native.c"
-TEST_SOURCES = (
-    ROOT / "tests" / "native" / "test_exec_native.c",
-    ROOT / "tests" / "native" / "test_exec_native_signals.c",
+NATIVE_SOURCES = tracked_native_sources(ROOT)
+_TEST_SOURCE_NAMES = (
+    "tests/native/test_exec_native.c",
+    "tests/native/test_exec_native_signals.c",
+)
+TEST_SOURCES = tuple(
+    source
+    for source in NATIVE_SOURCES
+    if source.relative_to(ROOT).as_posix() in _TEST_SOURCE_NAMES
 )
 
 
@@ -36,53 +47,46 @@ def link_command(
     return [linker, *(str(path) for path in objects), "-o", str(output)]
 
 
+def test_compile_command(
+    cc: str,
+    source: Path,
+    output: Path,
+    profile: ProductionProfile,
+) -> list[str]:
+    """Return one strict native lifecycle-test compile command."""
+    return [
+        cc,
+        *native_abi_check.STRICT_FLAGS,
+        *profile.c_flags,
+        "-DMTEST_EXEC_TESTING=1",
+        "-I",
+        str(ROOT / "native"),
+        "-c",
+        str(source),
+        "-o",
+        str(output),
+    ]
+
+
 def main() -> int:
     """Run ABI verification, then strict native lifecycle executables."""
     if not TEST_SOURCES:
         raise SystemExit("native-check: source inventory is empty")
     native_abi_check.main()
     cc = native_abi_check.compiler()
+    profile = native_abi_check.current_profile()
     with tempfile.TemporaryDirectory(prefix="mtest-native-check-") as raw_tmp:
         tmp = Path(raw_tmp)
-        adapter = tmp / "mtest_exec_native_test.o"
-        adapter_command = [
-            cc,
-            *native_abi_check.STRICT_FLAGS,
-            "-DMTEST_EXEC_TESTING=1",
-            "-I",
-            str(ROOT / "native"),
-            "-c",
-            str(NATIVE_SOURCE),
-            "-o",
-            str(adapter),
-        ]
-        compiled_adapter = subprocess.run(
-            adapter_command,
-            cwd=ROOT,
-            check=False,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-        )
-        if compiled_adapter.returncode != 0:
-            raise SystemExit(
-                "native-check: compile failed for native/mtest_exec_native.c:\n"
-                + compiled_adapter.stdout
-            )
+        adapter = native_abi_check.TESTING_OBJECT
         for source in TEST_SOURCES:
             output = tmp / source.stem
             test_object = tmp / f"{source.stem}.o"
-            command = [
+            command = test_compile_command(
                 cc,
-                *native_abi_check.STRICT_FLAGS,
-                "-DMTEST_EXEC_TESTING=1",
-                "-I",
-                str(ROOT / "native"),
-                "-c",
-                str(source),
-                "-o",
-                str(test_object),
-            ]
+                source,
+                test_object,
+                profile,
+            )
             compiled = subprocess.run(
                 command,
                 cwd=ROOT,

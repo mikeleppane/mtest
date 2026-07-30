@@ -33,6 +33,7 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$here/../.." && pwd)"
 flags_file="$here/native_strict_flags.txt"
+profiles_file="${profiles_file:-$here/production_profiles.txt}"
 script_self="$here/$(basename "${BASH_SOURCE[0]}")"
 cd "$repo_root"
 
@@ -334,15 +335,225 @@ remove_owned_legacy_packages() {
 read_strict_flags() {
   STRICT_FLAGS=()
   local line trimmed
+  local strong_count=0
   while IFS= read -r line || [[ -n "$line" ]]; do
     trimmed="${line#"${line%%[![:space:]]*}"}"
     trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
     [[ -z "$trimmed" || "${trimmed:0:1}" == "#" ]] && continue
+    if [[ "$trimmed" == "-fstack-protector-strong" ]]; then
+      strong_count=$((strong_count + 1))
+    elif [[ "$trimmed" == "-fstack-protector" ]]; then
+      echo "production-build: forbidden weak stack-protector flag: $flags_file" >&2
+      exit 1
+    fi
     STRICT_FLAGS+=("$trimmed")
   done <"$flags_file"
   if [[ ${#STRICT_FLAGS[@]} -eq 0 ]]; then
     echo "production-build: strict flag inventory is empty: $flags_file" >&2
     exit 1
+  fi
+  if [[ $strong_count -ne 1 ]]; then
+    echo "production-build: strict flag inventory must contain exactly one -fstack-protector-strong: $flags_file" >&2
+    exit 1
+  fi
+}
+
+_profile_error() {
+  local line_number="$1"
+  shift
+  echo "production-build: $profiles_file:$line_number: $*" >&2
+  return 1
+}
+
+select_profile() {
+  local selected_system="$1"
+  local selected_machine="$2"
+  local line_number=0
+  local line trimmed key value name
+  local current_name=""
+  local current_line=0
+  local current_system="" current_machine="" current_mojo_cpu=""
+  local current_mojo_triple="" current_deployment_target=""
+  local seen_system=0 seen_machine=0 seen_mojo_cpu=0
+  local seen_mojo_triple=0 seen_deployment_target=0
+  local selected_count=0
+  local index
+  local -a current_c_flags=()
+  local -a seen_names=()
+  local -a seen_platform_systems=()
+  local -a seen_platform_machines=()
+
+  PROFILE_NAME=""
+  PROFILE_SYSTEM=""
+  PROFILE_MACHINE=""
+  MOJO_CPU=""
+  MOJO_TRIPLE=""
+  DEPLOYMENT_TARGET=""
+  PROFILE_C_FLAGS=()
+
+  _finish_profile() {
+    [[ -n "$current_name" ]] || return 0
+    if [[ $seen_system -eq 0 || $seen_machine -eq 0 || $seen_mojo_cpu -eq 0 ||
+      ${#current_c_flags[@]} -eq 0 ]]; then
+      _profile_error "$current_line" "profile '$current_name' missing required key" || return 1
+    fi
+    for ((index = 0; index < ${#seen_platform_systems[@]}; index++)); do
+      if [[ "${seen_platform_systems[index]}" == "$current_system" &&
+        "${seen_platform_machines[index]}" == "$current_machine" ]]; then
+        _profile_error "$current_line" \
+          "duplicate production platform $current_system/$current_machine" || return 1
+      fi
+    done
+    seen_platform_systems+=("$current_system")
+    seen_platform_machines+=("$current_machine")
+    if [[ "$current_system" == "$selected_system" &&
+      "$current_machine" == "$selected_machine" ]]; then
+      selected_count=$((selected_count + 1))
+      PROFILE_NAME="$current_name"
+      PROFILE_SYSTEM="$current_system"
+      PROFILE_MACHINE="$current_machine"
+      MOJO_CPU="$current_mojo_cpu"
+      MOJO_TRIPLE="$current_mojo_triple"
+      DEPLOYMENT_TARGET="$current_deployment_target"
+      PROFILE_C_FLAGS=("${current_c_flags[@]}")
+    fi
+  }
+
+  _start_profile() {
+    name="$1"
+    for value in "${seen_names[@]}"; do
+      if [[ "$value" == "$name" ]]; then
+        _profile_error "$line_number" "duplicate profile section '$name'" || return 1
+      fi
+    done
+    seen_names+=("$name")
+    current_name="$name"
+    current_line="$line_number"
+    current_system=""
+    current_machine=""
+    current_mojo_cpu=""
+    current_mojo_triple=""
+    current_deployment_target=""
+    seen_system=0
+    seen_machine=0
+    seen_mojo_cpu=0
+    seen_mojo_triple=0
+    seen_deployment_target=0
+    current_c_flags=()
+  }
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line_number=$((line_number + 1))
+    trimmed="${line#"${line%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    [[ -z "$trimmed" || "${trimmed:0:1}" == "#" ]] && continue
+    if [[ "${trimmed:0:1}" == "[" ]]; then
+      if [[ ! "$trimmed" =~ ^\[([^][]+)\]$ ]]; then
+        _profile_error "$line_number" "malformed profile section" || return 1
+      fi
+      _finish_profile || return 1
+      name="${BASH_REMATCH[1]}"
+      name="${name#"${name%%[![:space:]]*}"}"
+      name="${name%"${name##*[![:space:]]}"}"
+      if [[ -z "$name" ]]; then
+        _profile_error "$line_number" "empty profile section" || return 1
+      fi
+      _start_profile "$name" || return 1
+      continue
+    fi
+    if [[ -z "$current_name" ]]; then
+      _profile_error "$line_number" "key before profile section" || return 1
+    fi
+    if [[ "$trimmed" != *"="* ]]; then
+      _profile_error "$line_number" "malformed profile row" || return 1
+    fi
+    key="${trimmed%%=*}"
+    value="${trimmed#*=}"
+    key="${key#"${key%%[![:space:]]*}"}"
+    key="${key%"${key##*[![:space:]]}"}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    case "$key" in
+      system)
+        [[ -n "$value" ]] || {
+          _profile_error "$line_number" "empty value for 'system'"
+          return 1
+        }
+        [[ $seen_system -eq 0 ]] || {
+          _profile_error "$line_number" "duplicate key 'system'"
+          return 1
+        }
+        current_system="$value"
+        seen_system=1
+        ;;
+      machine)
+        [[ -n "$value" ]] || {
+          _profile_error "$line_number" "empty value for 'machine'"
+          return 1
+        }
+        [[ $seen_machine -eq 0 ]] || {
+          _profile_error "$line_number" "duplicate key 'machine'"
+          return 1
+        }
+        current_machine="$value"
+        seen_machine=1
+        ;;
+      mojo_cpu)
+        [[ -n "$value" ]] || {
+          _profile_error "$line_number" "empty value for 'mojo_cpu'"
+          return 1
+        }
+        [[ $seen_mojo_cpu -eq 0 ]] || {
+          _profile_error "$line_number" "duplicate key 'mojo_cpu'"
+          return 1
+        }
+        current_mojo_cpu="$value"
+        seen_mojo_cpu=1
+        ;;
+      mojo_triple)
+        [[ -n "$value" ]] || {
+          _profile_error "$line_number" "empty value for 'mojo_triple'"
+          return 1
+        }
+        [[ $seen_mojo_triple -eq 0 ]] || {
+          _profile_error "$line_number" "duplicate key 'mojo_triple'"
+          return 1
+        }
+        current_mojo_triple="$value"
+        seen_mojo_triple=1
+        ;;
+      deployment_target)
+        [[ -n "$value" ]] || {
+          _profile_error "$line_number" "empty value for 'deployment_target'"
+          return 1
+        }
+        [[ $seen_deployment_target -eq 0 ]] || {
+          _profile_error "$line_number" "duplicate key 'deployment_target'"
+          return 1
+        }
+        current_deployment_target="$value"
+        seen_deployment_target=1
+        ;;
+      c_flag)
+        [[ -n "$value" ]] || {
+          _profile_error "$line_number" "empty value for 'c_flag'"
+          return 1
+        }
+        current_c_flags+=("$value")
+        ;;
+      *)
+        _profile_error "$line_number" "unknown key '$key'" || return 1
+        ;;
+    esac
+  done <"$profiles_file"
+
+  _finish_profile || return 1
+  if [[ ${#seen_names[@]} -eq 0 ]]; then
+    _profile_error 1 "profile inventory is empty" || return 1
+  fi
+  if [[ $selected_count -ne 1 ]]; then
+    echo "production-build: unsupported production host $selected_system/$selected_machine" >&2
+    return 1
   fi
 }
 
@@ -388,11 +599,14 @@ stage_precompile() {
 }
 
 stage_native() {
+  select_profile "$(uname -s)" "$(uname -m)"
   read_strict_flags
   mkdir -p build/native
+  echo "==> production profile $PROFILE_NAME ($PROFILE_SYSTEM/$PROFILE_MACHINE)"
   echo "==> compiling native/mtest_exec_native.c -> build/native/mtest_exec_native.o"
   clang \
     "${STRICT_FLAGS[@]}" \
+    "${PROFILE_C_FLAGS[@]}" \
     -DMTEST_EXEC_TESTING=0 \
     -I native \
     -c native/mtest_exec_native.c \
