@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stdout
+from io import StringIO
 import os
 from pathlib import Path
 import platform
@@ -32,71 +34,143 @@ class NativeCheckCommandTests(unittest.TestCase):
     def test_strict_inventory_requires_strong_stack_protection(self) -> None:
         self.assertIn("-fstack-protector-strong", native_abi.STRICT_FLAGS)
         self.assertNotIn("-fstack-protector", native_abi.STRICT_FLAGS)
-        self.assertEqual(
-            native_abi.PROTECTED_FUNCTION,
-            "mtest_exec_process_open",
-        )
 
-    def test_linux_stack_check_must_be_inside_protected_function(self) -> None:
-        inside = """
+    def test_linux_stack_check_names_every_protected_function(self) -> None:
+        disassembly = """
 0000000000000010 <mtest_exec_process_open>:
   10: e8 00 00 00 00 call 15 <mtest_exec_process_open+0x5>
       11: R_X86_64_PLT32 __stack_chk_fail-0x4
 0000000000000020 <mtest_exec_process_close>:
   20: c3 ret
+0000000000000030 <mtest_exec_process_poll>:
+  30: e8 00 00 00 00 call 35 <mtest_exec_process_poll+0x5>
+      31: R_X86_64_PLT32 __stack_chk_fail-0x4
 """
-        elsewhere = """
-0000000000000010 <mtest_exec_process_open>:
-  10: c3 ret
-0000000000000020 <mtest_exec_process_close>:
-  20: e8 00 00 00 00 call 25 <mtest_exec_process_close+0x5>
-      21: R_X86_64_PLT32 __stack_chk_fail-0x4
-"""
-        self.assertTrue(
-            native_abi.function_references_symbol(
-                inside,
-                function="mtest_exec_process_open",
+        self.assertEqual(
+            native_abi.protected_function_names(
+                disassembly,
                 symbol="__stack_chk_fail",
                 platform="linux",
-            )
-        )
-        self.assertFalse(
-            native_abi.function_references_symbol(
-                elsewhere,
-                function="mtest_exec_process_open",
-                symbol="__stack_chk_fail",
-                platform="linux",
-            )
+            ),
+            ("mtest_exec_process_open", "mtest_exec_process_poll"),
         )
 
-    def test_darwin_stack_check_must_be_inside_protected_function(self) -> None:
-        inside = """
-_mtest_exec_process_open:
+    def test_darwin_stack_check_names_every_protected_function(self) -> None:
+        disassembly = """
+_mtest_exec_runtime_open:
 0000000000000010 bl ___stack_chk_fail
 _mtest_exec_process_close:
 0000000000000020 ret
+_mtest_exec_process_poll:
+0000000000000030 bl ___stack_chk_fail
 """
-        elsewhere = """
+        self.assertEqual(
+            native_abi.protected_function_names(
+                disassembly,
+                symbol="___stack_chk_fail",
+                platform="darwin",
+            ),
+            ("mtest_exec_process_poll", "mtest_exec_runtime_open"),
+        )
+
+    def test_symbol_outside_function_region_is_not_artifact_evidence(self) -> None:
+        disassembly = """
+___stack_chk_fail
+_mtest_exec_process_close:
+0000000000000020 ret
+"""
+        self.assertEqual(
+            native_abi.protected_function_names(
+                disassembly,
+                symbol="___stack_chk_fail",
+                platform="darwin",
+            ),
+            (),
+        )
+
+    def test_stack_symbol_must_be_a_complete_disassembly_token(self) -> None:
+        disassembly = """
+0000000000000010 <mtest___stack_chk_fail_probe>:
+  10: c3 ret
+"""
+        self.assertEqual(
+            native_abi.protected_function_names(
+                disassembly,
+                symbol="__stack_chk_fail",
+                platform="linux",
+            ),
+            (),
+        )
+
+    def test_empty_protected_set_names_every_parsed_function(self) -> None:
+        disassembly = """
 _mtest_exec_process_open:
 0000000000000010 ret
 _mtest_exec_process_close:
-0000000000000020 bl ___stack_chk_fail
+0000000000000020 ret
 """
-        self.assertTrue(
-            native_abi.function_references_symbol(
-                inside,
-                function="mtest_exec_process_open",
+        with self.assertRaisesRegex(
+            SystemExit,
+            "no function region references ___stack_chk_fail.*"
+            "mtest_exec_process_close, mtest_exec_process_open",
+        ):
+            native_abi.require_protected_functions(
+                disassembly,
                 symbol="___stack_chk_fail",
                 platform="darwin",
             )
-        )
-        self.assertFalse(
-            native_abi.function_references_symbol(
-                elsewhere,
-                function="mtest_exec_process_open",
+
+    def test_disassembly_drift_reports_that_no_functions_were_parsed(self) -> None:
+        with self.assertRaisesRegex(
+            SystemExit,
+            "no function region references ___stack_chk_fail.*parsed functions: <none>",
+        ):
+            native_abi.require_protected_functions(
+                "___stack_chk_fail\n",
                 symbol="___stack_chk_fail",
                 platform="darwin",
             )
+
+    def test_main_reports_sorted_stack_protected_functions(self) -> None:
+        existing = Path(__file__)
+        expected_testing = native_abi.PRODUCTION_SYMBOLS | native_abi.TEST_ONLY_SYMBOLS
+        output = StringIO()
+        with (
+            mock.patch.object(native_abi, "SOURCE_FILES", (existing,)),
+            mock.patch.object(native_abi, "PRODUCTION_OBJECT", existing),
+            mock.patch.object(native_abi, "TESTING_OBJECT", existing),
+            mock.patch.object(
+                native_abi,
+                "load_strict_flags",
+                return_value=native_abi.STRICT_FLAGS,
+            ),
+            mock.patch.object(native_abi, "compiler", return_value="clang"),
+            mock.patch.object(
+                native_abi,
+                "current_profile",
+                return_value=mock.sentinel.profile,
+            ),
+            mock.patch.object(
+                native_abi,
+                "defined_symbols",
+                side_effect=(native_abi.PRODUCTION_SYMBOLS, expected_testing),
+            ),
+            mock.patch.object(
+                native_abi,
+                "verify_stack_protector",
+                return_value=(
+                    "mtest_exec_process_poll",
+                    "mtest_exec_runtime_open",
+                ),
+            ),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(native_abi.main(), 0)
+
+        self.assertIn(
+            "native-abi-check: stack-protected functions: "
+            "mtest_exec_process_poll, mtest_exec_runtime_open\n",
+            output.getvalue(),
         )
 
     def test_copied_inventory_without_strong_flag_is_rejected(self) -> None:

@@ -28,7 +28,6 @@ SOURCE_FILES = tracked_native_sources(ROOT)
 PRODUCTION_OBJECT = ROOT / "build" / "native" / "mtest_exec_native.o"
 TESTING_OBJECT = ROOT / "build" / "native" / "mtest_exec_native_test.o"
 CANARY_SOURCE = ROOT / "tests" / "native" / "stack_protector_canary.c"
-PROTECTED_FUNCTION = "mtest_exec_process_open"
 
 # The strict production C flags are single-sourced in this file so the Python
 # checks here and the bash production-build entrypoint
@@ -224,62 +223,84 @@ def undefined_symbols(object_path: Path) -> set[str]:
     return {line.split()[-1] for line in proc.stdout.splitlines() if line.split()}
 
 
-def _function_region(
+def _function_regions(
     disassembly: str,
     *,
-    function: str,
     platform_name: str,
-) -> str | None:
+) -> dict[str, str]:
+    """Return normalized function names mapped to their disassembly regions."""
+    lines = disassembly.splitlines()
     if platform_name == "darwin":
-        label = f"_{function}:"
-        lines = disassembly.splitlines()
-        starts = [index for index, line in enumerate(lines) if line.strip() == label]
-        if len(starts) != 1:
-            return None
-        start = starts[0]
-        end = len(lines)
-        for index in range(start + 1, len(lines)):
-            if re.fullmatch(r"_[A-Za-z_$][A-Za-z0-9_.$]*:", lines[index].strip()):
-                end = index
-                break
-        return "\n".join(lines[start:end])
-    if platform_name == "linux":
-        linux_label = re.compile(rf"^[0-9A-Fa-f]+ <{re.escape(function)}>:$")
-        global_label = re.compile(r"^[0-9A-Fa-f]+ <[^>]+>:$")
-        lines = disassembly.splitlines()
-        starts = [
-            index
-            for index, line in enumerate(lines)
-            if linux_label.fullmatch(line.strip())
-        ]
-        if len(starts) != 1:
-            return None
-        start = starts[0]
-        end = len(lines)
-        for index in range(start + 1, len(lines)):
-            if global_label.fullmatch(lines[index].strip()):
-                end = index
-                break
-        return "\n".join(lines[start:end])
-    raise SystemExit(
-        f"native-abi-check: unsupported disassembly platform: {platform_name}"
+        label = re.compile(r"^_(?P<name>[A-Za-z_$][A-Za-z0-9_.$]*):$")
+    elif platform_name == "linux":
+        label = re.compile(r"^[0-9A-Fa-f]+ <(?P<name>[^>]+)>:$")
+    else:
+        raise SystemExit(
+            f"native-abi-check: unsupported disassembly platform: {platform_name}"
+        )
+
+    starts: list[tuple[int, str]] = []
+    for index, line in enumerate(lines):
+        match = label.fullmatch(line.strip())
+        if match is not None:
+            starts.append((index, match.group("name")))
+
+    regions: dict[str, str] = {}
+    for position, (start, name) in enumerate(starts):
+        require(
+            name not in regions,
+            f"duplicate disassembly function label: {name}",
+        )
+        end = starts[position + 1][0] if position + 1 < len(starts) else len(lines)
+        regions[name] = "\n".join(lines[start:end])
+    return regions
+
+
+def _references_symbol(region: str, symbol: str) -> bool:
+    """Return whether ``region`` contains ``symbol`` as one complete token."""
+    identifier = r"A-Za-z0-9_.$"
+    pattern = re.compile(rf"(?<![{identifier}]){re.escape(symbol)}(?![{identifier}])")
+    return pattern.search(region) is not None
+
+
+def _protected_names(regions: dict[str, str], symbol: str) -> tuple[str, ...]:
+    """Return sorted names for regions that reference ``symbol``."""
+    return tuple(
+        sorted(
+            name
+            for name, region in regions.items()
+            if _references_symbol(region, symbol)
+        )
     )
 
 
-def function_references_symbol(
+def protected_function_names(
     disassembly: str,
     *,
-    function: str,
     symbol: str,
     platform: str,
-) -> bool:
-    """Return whether ``symbol`` occurs inside exactly ``function``."""
-    region = _function_region(
-        disassembly,
-        function=function,
-        platform_name=platform,
+) -> tuple[str, ...]:
+    """Return every normalized function region that references ``symbol``."""
+    regions = _function_regions(disassembly, platform_name=platform)
+    return _protected_names(regions, symbol)
+
+
+def require_protected_functions(
+    disassembly: str,
+    *,
+    symbol: str,
+    platform: str,
+) -> tuple[str, ...]:
+    """Require and return nonempty stack-protector artifact evidence."""
+    regions = _function_regions(disassembly, platform_name=platform)
+    protected = _protected_names(regions, symbol)
+    parsed = ", ".join(sorted(regions)) if regions else "<none>"
+    require(
+        bool(protected),
+        f"production disassembly has no function region references {symbol}; "
+        f"parsed functions: {parsed}",
     )
-    return region is not None and symbol in region
+    return protected
 
 
 def disassembly(object_path: Path) -> str:
@@ -315,7 +336,7 @@ def verify_stack_protector(
     cc: str,
     profile: ProductionProfile,
     production: Path,
-) -> None:
+) -> tuple[str, ...]:
     """Prove stack protection in the artifact and against a compiler control."""
     symbol = stack_check_symbol()
     require(
@@ -325,15 +346,13 @@ def verify_stack_protector(
     # The compiler-inserted failure branch is artifact evidence, not an
     # ordinary source-level post-fork call: it is reachable only after a stack
     # overwrite, when normal child execution is already impossible. Keep the
-    # source call-graph allowlist unchanged.
-    require(
-        function_references_symbol(
-            disassembly(production),
-            function=PROTECTED_FUNCTION,
-            symbol=symbol,
-            platform=sys.platform,
-        ),
-        f"{PROTECTED_FUNCTION} does not reference {symbol}",
+    # source call-graph allowlist unchanged. Strong protection chooses functions
+    # by a target- and optimization-sensitive heuristic, so the portable
+    # artifact contract is a nonempty measured set rather than one fixed name.
+    protected = require_protected_functions(
+        disassembly(production),
+        symbol=symbol,
+        platform=sys.platform,
     )
     with tempfile.TemporaryDirectory(prefix="mtest-stack-canary-") as raw_tmp:
         tmp = Path(raw_tmp)
@@ -378,6 +397,7 @@ def verify_stack_protector(
             symbol not in undefined_symbols(negative),
             f"negative stack canary unexpectedly references {symbol}",
         )
+    return protected
 
 
 def main(*, strict_flags_file: Path = STRICT_FLAGS_FILE) -> int:
@@ -412,8 +432,9 @@ def main(*, strict_flags_file: Path = STRICT_FLAGS_FILE) -> int:
         f"  missing={sorted(expected_testing - testing_got)}\n"
         f"  extra={sorted(testing_got - expected_testing)}",
     )
-    verify_stack_protector(cc, profile, PRODUCTION_OBJECT)
+    protected = verify_stack_protector(cc, profile, PRODUCTION_OBJECT)
 
+    print("native-abi-check: stack-protected functions: " + ", ".join(protected))
     print(
         "native-abi-check: OK -- ABI v2 layouts and "
         f"{len(PRODUCTION_SYMBOLS)}/{len(expected_testing)} symbols exact"
