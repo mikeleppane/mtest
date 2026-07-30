@@ -145,6 +145,16 @@ class PostforkCheckTests(unittest.TestCase):
         self.assertIn("poll", allowed)
         self.assertNotIn("nanosleep", allowed)
 
+    def test_nested_interrupt_sigset_initialization_has_no_error_branch(self) -> None:
+        self.assertEqual(
+            self.source.count("(void)sigemptyset(&nodefer.sa_mask);"),
+            1,
+        )
+        self.assertNotRegex(
+            self.source,
+            r"if\s*\(\s*sigemptyset\(&nodefer\.sa_mask\)",
+        )
+
     def test_allocator_hidden_behind_local_wrapper_is_rejected(self) -> None:
         source = self.add_wrapper(
             "static void mtest_child_mutant(void) { (void)malloc(1); }"

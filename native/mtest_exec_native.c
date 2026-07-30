@@ -396,9 +396,7 @@ uint32_t mtest_exec_test_nested_interrupt_count(void) {
     memset(&nodefer, 0, sizeof(nodefer));
     nodefer.sa_handler = mtest_on_interrupt;
     nodefer.sa_flags = SA_NODEFER;
-    if (sigemptyset(&nodefer.sa_mask) != 0) {
-        return 0;
-    }
+    (void)sigemptyset(&nodefer.sa_mask);
     atomic_store(&mtest_interrupt_state, 0);
     if (sigaction(SIGINT, &nodefer, &saved) != 0) {
         return 0;
