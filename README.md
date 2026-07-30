@@ -152,7 +152,7 @@ def main() raises:
 ```
 
 ```console
-$ mtest --no-config --show-output failures \
+$ mtest --no-config --no-cache --show-output failures \
     -I <PREFIX>/share/mtest/companions/assertions/src \
     companions/assertions/examples
 mtest 0.6.0 (mojo)
@@ -1411,6 +1411,12 @@ Facts about this build worth knowing before you rely on it:
   blocking check too: it audits the native adapter, runs the direct and
   end-to-end suites, and consumes the installed conda artifact in its own job.
   ASan/LSan and Valgrind run only on linux-64.
+- **Release profiles are explicit and artifact-checked.** linux-64 binaries use
+  Mojo `x86-64` and C `x86-64` with generic tuning; osx-arm64 binaries use
+  `apple-m1` and a macOS 14.0 deployment target. Production Mojo links use
+  `-O3 -g0`, while compiler parallelism stays at Mojo's default of all
+  available compiler threads. This profile does not promise a lower Linux
+  glibc floor.
 - **GitHub annotations are capped and root-relative.** GitHub's
   workflow-step limits allow 10 error and 10 warning annotations per step
   (past the cap, one aggregate line accounts for the rest), and every
@@ -1480,6 +1486,7 @@ The tasks:
 | `pixi run native-check` | own the native verdict: Clang-Tidy and post-fork analysis, ABI/layout/export checks, and lifecycle tests |
 | `pixi run build` | precompile the vendored TOML parser and `src/mtest` to `build/toml.mojoc` and `build/mtest.mojoc`, the compile gate |
 | `pixi run build-bin` | link the runnable binary at `build/mtest` |
+| `pixi run build-profile-check` | verify the production binary and matching compiler IR against the release CPU, stripped-debug, and macOS deployment-target oracles |
 | `pixi run test` | run every classified unit and integration module through `build/mtest` itself, then reconcile its report against an inventory derived from the sources on disk |
 | `pixi run test-file -- PATH` | the same, focused on one module |
 | `pixi run assertions-check` | compile and directly execute the source-only assertion consumers at `-O0` and `-O3` |
@@ -1498,15 +1505,16 @@ uses the focused tasks above, and the required hosted checks are the merge
 verdict. The floor opens with a fail-fast preflight (version, formatting,
 harness self-tests, repository policy, release tooling, unsafe-Mojo inventory,
 post-fork and Clang-Tidy analysis, native ABI, JUnit oracle, build,
-rendered-JUnit, transcript, ABI-probe, and coverage-tripwire checks) and closes
-with `ci-memory`, so a
+production-artifact profile, rendered-JUnit, transcript, ABI-probe, and
+coverage-tripwire checks) and closes with `ci-memory`, so a
 green local run covers memory safety instead of deferring it.
 On Linux that is ASan/LSan then Memcheck; elsewhere it reports the two lanes as
 uncovered and names the Linux cells that own them. Hosted CI runs the
 behavioral floor (`test`, `assertions-check`, `e2e`) plus the two cache gates
-and `contract-check-strict` as parallel cells on both Linux and macOS, and runs
-the static preflight, the compiled oracles, and the memory-safety cells on
-Linux, on every pull request.
+and `contract-check-strict` as parallel cells on both Linux and macOS, runs the
+static preflight, compiled oracles, and memory-safety cells on Linux, and
+verifies the production artifact profile in the macOS preflight on every pull
+request.
 
 About the test setup:
 

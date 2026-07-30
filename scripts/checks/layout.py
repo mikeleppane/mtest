@@ -976,10 +976,76 @@ def check_vendored_toml_layout(repo_root: Path = REPO_ROOT) -> None:
                 f"package with the required warning-free .mojoc arrays: "
                 f"{name} expected={expected!r}, got={actual_command!r}"
             )
-    if "mojo build -I build src/main.mojo -o build/mtest" not in build_source:
-        raise AssertionError(
-            "production build does not compile and link the vendored TOML package"
+    expected_links = {
+        ("Linux", "x86_64"): (
+            "mojo",
+            "build",
+            "-I",
+            "build",
+            "src/main.mojo",
+            "-o",
+            "build/mtest",
+            "-O3",
+            "-g0",
+            "--Werror",
+            "--target-cpu",
+            "x86-64",
+            "-Xlinker",
+            "build/native/mtest_exec_native.o",
+            "-Xlinker",
+            "-lm",
+        ),
+        ("Darwin", "arm64"): (
+            "mojo",
+            "build",
+            "-I",
+            "build",
+            "src/main.mojo",
+            "-o",
+            "build/mtest",
+            "-O3",
+            "-g0",
+            "--Werror",
+            "--target-cpu",
+            "apple-m1",
+            "--target-triple",
+            "arm64-apple-macosx14.0.0",
+            "-Xlinker",
+            "build/native/mtest_exec_native.o",
+        ),
+    }
+    build_script = repo_root / "scripts" / "build" / "production_build.sh"
+    render = r"""
+set -euo pipefail
+source "$1"
+select_profile "$2" "$3"
+build_link_command
+printf '%s\n' "${LINK_CMD[@]}"
+"""
+    for (system, machine), expected in expected_links.items():
+        completed = subprocess.run(
+            [
+                "bash",
+                "-c",
+                render,
+                "layout-production-link",
+                str(build_script),
+                system,
+                machine,
+            ],
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+            text=True,
         )
+        actual_link = tuple(completed.stdout.splitlines())
+        if completed.returncode != 0 or actual_link != expected:
+            diagnostic = completed.stderr.strip()
+            raise AssertionError(
+                f"production release link for {system}/{machine} differs: "
+                f"expected={expected!r}, got={actual_link!r}, "
+                f"stderr={diagnostic!r}"
+            )
     # Exactly two precompiles, counted at the INVOCATION rather than wherever
     # the words appear: the script discusses `mojo precompile` in prose, and a
     # substring count would read those comments as build steps. Both spellings

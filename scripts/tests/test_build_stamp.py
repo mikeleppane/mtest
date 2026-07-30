@@ -160,6 +160,96 @@ def source_call(sandbox: Path, snippet: str) -> subprocess.CompletedProcess[str]
     )
 
 
+def rendered_link_command(system: str, machine: str) -> tuple[str, ...]:
+    """Render the production link argv for one supported profile."""
+    sandbox = sandbox_tree()
+    try:
+        result = source_call(
+            sandbox,
+            f"select_profile {shlex.quote(system)} {shlex.quote(machine)}\n"
+            "build_link_command\n"
+            'printf "%s\\n" "${LINK_CMD[@]}"\n',
+        )
+    finally:
+        shutil.rmtree(sandbox, ignore_errors=True)
+    if result.returncode != 0:
+        raise AssertionError(result.stdout + result.stderr)
+    return tuple(result.stdout.splitlines())
+
+
+class ProductionLinkCommandTests(unittest.TestCase):
+    """The final Mojo link command is explicit for each shipped profile."""
+
+    def test_linux_release_link_argv_is_exact(self) -> None:
+        self.assertEqual(
+            rendered_link_command("Linux", "x86_64"),
+            (
+                "mojo",
+                "build",
+                "-I",
+                "build",
+                "src/main.mojo",
+                "-o",
+                "build/mtest",
+                "-O3",
+                "-g0",
+                "--Werror",
+                "--target-cpu",
+                "x86-64",
+                "-Xlinker",
+                "build/native/mtest_exec_native.o",
+                "-Xlinker",
+                "-lm",
+            ),
+        )
+
+    def test_darwin_release_link_argv_is_exact(self) -> None:
+        self.assertEqual(
+            rendered_link_command("Darwin", "arm64"),
+            (
+                "mojo",
+                "build",
+                "-I",
+                "build",
+                "src/main.mojo",
+                "-o",
+                "build/mtest",
+                "-O3",
+                "-g0",
+                "--Werror",
+                "--target-cpu",
+                "apple-m1",
+                "--target-triple",
+                "arm64-apple-macosx14.0.0",
+                "-Xlinker",
+                "build/native/mtest_exec_native.o",
+            ),
+        )
+
+    def test_release_link_argv_never_overrides_features_or_threads(self) -> None:
+        for system, machine in (("Linux", "x86_64"), ("Darwin", "arm64")):
+            with self.subTest(system=system, machine=machine):
+                command = rendered_link_command(system, machine)
+                self.assertNotIn("--target-features", command)
+                self.assertNotIn("--num-threads", command)
+
+    def test_linux_links_libm_once_after_the_native_object(self) -> None:
+        command = rendered_link_command("Linux", "x86_64")
+        self.assertEqual(command.count("-lm"), 1)
+        self.assertEqual(
+            command[-4:],
+            (
+                "-Xlinker",
+                "build/native/mtest_exec_native.o",
+                "-Xlinker",
+                "-lm",
+            ),
+        )
+
+    def test_darwin_does_not_link_linux_libm(self) -> None:
+        self.assertNotIn("-lm", rendered_link_command("Darwin", "arm64"))
+
+
 def fabricate_valid_state(sandbox: Path, mojo_version: str | None = None) -> None:
     """Write placeholder outputs and a stamp that is genuinely valid for them.
 

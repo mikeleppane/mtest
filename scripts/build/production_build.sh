@@ -47,6 +47,7 @@ PRECOMPILE_CMD_TOML=(
 PRECOMPILE_CMD_MTEST=(
   mojo precompile --Werror -I build src/mtest -o build/mtest.mojoc
 )
+LINK_CMD=()
 
 # The precompile stage's stamp: proves nothing feeding `mojo precompile`
 # changed since the last successful run, so a second `pixi run build` can skip
@@ -622,10 +623,45 @@ stage_native() {
     -o build/native/mtest_exec_native.o
 }
 
+build_link_command() {
+  LINK_CMD=(
+    mojo build
+    -I build
+    src/main.mojo
+    -o build/mtest
+    -O3
+    -g0
+    --Werror
+    --target-cpu "$MOJO_CPU"
+  )
+  if [[ -n "$MOJO_TRIPLE" ]]; then
+    LINK_CMD+=(--target-triple "$MOJO_TRIPLE")
+  fi
+  LINK_CMD+=(-Xlinker build/native/mtest_exec_native.o)
+  if [[ "$PROFILE_SYSTEM" == "Linux" ]]; then
+    # With the portable x86-64 CPU, Mojo lowers stdlib sleep rounding to floor.
+    LINK_CMD+=(-Xlinker -lm)
+  fi
+}
+
 stage_link() {
+  select_profile "$(uname -s)" "$(uname -m)"
+  build_link_command
+  echo "==> production profile $PROFILE_NAME ($PROFILE_SYSTEM/$PROFILE_MACHINE)"
+  echo "==> mojo_cpu $MOJO_CPU"
+  if [[ -n "$MOJO_TRIPLE" ]]; then
+    echo "==> mojo_triple $MOJO_TRIPLE"
+  fi
+  local index
+  for ((index = 0; index < ${#PROFILE_C_FLAGS[@]}; index++)); do
+    echo "==> c_flag ${PROFILE_C_FLAGS[index]}"
+  done
+  if [[ -n "$DEPLOYMENT_TARGET" ]]; then
+    echo "==> deployment_target $DEPLOYMENT_TARGET"
+    export MACOSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET"
+  fi
   echo "==> linking build/mtest"
-  mojo build -I build src/main.mojo -o build/mtest \
-    -Xlinker build/native/mtest_exec_native.o
+  "${LINK_CMD[@]}"
 }
 
 # Guarded so `test_source_order_permutation_stable` (and any other test) can

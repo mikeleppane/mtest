@@ -46,8 +46,8 @@ class LayoutInventoryPolicyTests(unittest.TestCase):
                 check()
 
 
-class ProductionPrecompileLayoutTests(unittest.TestCase):
-    """The offline build keeps both checkout-owned package arrays exact."""
+class ProductionBuildLayoutTests(unittest.TestCase):
+    """The offline build keeps package and final-link argv exact."""
 
     BUILD_SOURCE = """\
 #!/usr/bin/env bash
@@ -57,7 +57,35 @@ PRECOMPILE_CMD_TOML=(
 PRECOMPILE_CMD_MTEST=(
   mojo precompile --Werror -I build src/mtest -o build/mtest.mojoc
 )
-mojo build -I build src/main.mojo -o build/mtest
+select_profile() {
+  PROFILE_SYSTEM="$1"
+  if [[ "$1" == Linux ]]; then
+    MOJO_CPU=x86-64
+    MOJO_TRIPLE=
+  else
+    MOJO_CPU=apple-m1
+    MOJO_TRIPLE=arm64-apple-macosx14.0.0
+  fi
+}
+build_link_command() {
+  LINK_CMD=(
+    mojo build
+    -I build
+    src/main.mojo
+    -o build/mtest
+    -O3
+    -g0
+    --Werror
+    --target-cpu "$MOJO_CPU"
+  )
+  if [[ -n "$MOJO_TRIPLE" ]]; then
+    LINK_CMD+=(--target-triple "$MOJO_TRIPLE")
+  fi
+  LINK_CMD+=(-Xlinker build/native/mtest_exec_native.o)
+  if [[ "$PROFILE_SYSTEM" == Linux ]]; then
+    LINK_CMD+=(-Xlinker -lm)
+  fi
+}
 """
 
     def _repo(self, build_source: str) -> Path:
@@ -69,6 +97,10 @@ mojo build -I build src/main.mojo -o build/mtest
         production = root / "scripts" / "build" / "production_build.sh"
         production.parent.mkdir(parents=True)
         production.write_text(build_source, encoding="utf-8")
+        shutil.copy2(
+            layout.REPO_ROOT / "scripts" / "build" / "production_profiles.txt",
+            production.parent / "production_profiles.txt",
+        )
         return root
 
     def test_warning_free_mojoc_precompile_arrays_are_accepted(self) -> None:
@@ -93,6 +125,62 @@ mojo build -I build src/main.mojo -o build/mtest
             ):
                 repo = self._repo(self.BUILD_SOURCE.replace(current, broken))
                 layout.check_vendored_toml_layout(repo)
+
+    def test_release_link_argv_is_rendered_for_both_profiles(self) -> None:
+        repo = self._repo(self.BUILD_SOURCE)
+
+        layout.check_vendored_toml_layout(repo)
+
+    def test_release_link_argv_rejects_missing_or_weakened_flags(self) -> None:
+        mutations = (
+            ("optimization", "\n    -O3\n", "\n    -O2\n"),
+            ("debug", "\n    -g0\n", "\n    -g1\n"),
+            ("warnings", "\n    --Werror\n", "\n"),
+            ("cpu", '\n    --target-cpu "$MOJO_CPU"\n', "\n"),
+            (
+                "Darwin deployment triple",
+                'LINK_CMD+=(--target-triple "$MOJO_TRIPLE")',
+                "LINK_CMD+=(--target-triple arm64-apple-macosx13.5.0)",
+            ),
+            (
+                "Linux libm",
+                (
+                    'if [[ "$PROFILE_SYSTEM" == Linux ]]; then\n'
+                    "    LINK_CMD+=(-Xlinker -lm)\n"
+                    "  fi"
+                ),
+                ":",
+            ),
+        )
+        for label, current, broken in mutations:
+            with (
+                self.subTest(mutation=label),
+                self.assertRaisesRegex(AssertionError, "production release link"),
+            ):
+                repo = self._repo(self.BUILD_SOURCE.replace(current, broken))
+                layout.check_vendored_toml_layout(repo)
+
+    def test_release_link_argv_rejects_feature_or_thread_overrides(self) -> None:
+        for flag in ("--target-features +neon", "--num-threads 1"):
+            with (
+                self.subTest(flag=flag),
+                self.assertRaisesRegex(AssertionError, "production release link"),
+            ):
+                source = self.BUILD_SOURCE.replace(
+                    "LINK_CMD+=(-Xlinker build/native/mtest_exec_native.o)",
+                    f"LINK_CMD+=({flag})\n"
+                    "  LINK_CMD+=(-Xlinker build/native/mtest_exec_native.o)",
+                )
+                repo = self._repo(source)
+                layout.check_vendored_toml_layout(repo)
+
+    def test_release_link_argv_rejects_libm_on_darwin(self) -> None:
+        source = self.BUILD_SOURCE.replace(
+            'if [[ "$PROFILE_SYSTEM" == Linux ]]; then',
+            'if [[ "$PROFILE_SYSTEM" == Darwin ]]; then',
+        )
+        with self.assertRaisesRegex(AssertionError, "production release link"):
+            layout.check_vendored_toml_layout(self._repo(source))
 
 
 class AssertionCompanionLayoutTests(unittest.TestCase):

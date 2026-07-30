@@ -63,6 +63,14 @@ build-bin = { cmd = "bash scripts/build/production_build.sh link", depends-on = 
     "build-native",
 ] }
 
+# Verify the real production binary and matching compiler IR against independent
+# CPU-feature, stripped-debug, and deployment-target oracles. The command tests
+# first pin the shell-rendered Linux/Darwin argv, then the checker emits IR for
+# both a minimal probe and src/main.mojo and inspects build/mtest itself.
+build-profile-check = { cmd = "python -m scripts.tests.test_build_profiles && python -m scripts.tests.test_build_profile && python -m scripts.checks.build_profile", depends-on = [
+    "build-bin",
+] }
+
 # Keep README's committed CLI reference byte-identical to the real binary. The
 # `build-bin` edge stops standalone use from reading a stale or missing binary.
 readme-help-check = { cmd = "python -m scripts.checks.readme_help", depends-on = [
@@ -81,8 +89,10 @@ package-build = "rattler-build build --recipe recipe/recipe.yaml -c https://cond
 # build, install THAT EXACT artifact (version, build string, and the installed
 # conda-meta SHA-256) into a FRESH scratch env from the local channel, then
 # probe the INSTALLED binary with the dev pixi env off PATH and this platform's
-# loader search path empty, run the dogfood probes and the known-failing fixture
-# through it, and repeat the install from the tar-bz2 fallback format. Depends
+# loader search path empty; on Darwin, recursively audit its non-system Mach-O
+# dependency closure for prefix containment and a <=14.0 minimum; run the
+# dogfood probes and the known-failing fixture through it; and repeat the
+# install from the tar-bz2 fallback format. Depends
 # on build + build-native (not build-bin) so this repo's package and
 # test-variant object exist for the probe run; the binary under test is the
 # INSTALLED one, never build/mtest. NOT wired into `pixi run ci`; each
@@ -441,11 +451,11 @@ cmd = "python -m scripts.tests.test_build_stamp"
 # buy a self-identifying failure.
 #
 # `postfork-check` and `build` are listed even though `native-check`,
-# `readme-help-check`, and `junit-render-check` already pull them in and Pixi
-# runs a shared node once either way. Their positions AHEAD of their consumers
-# are the point: this list is the readable statement of what the barrier runs
-# and in what order. Pixi errors on a name that does not exist, so unlike a
-# comment it cannot rot into fiction.
+# `build-profile-check`, `readme-help-check`, and `junit-render-check` already
+# pull them in and Pixi runs a shared node once either way. Their positions
+# AHEAD of their consumers are the point: this list is the readable statement
+# of what the barrier runs and in what order. Pixi errors on a name that does
+# not exist, so unlike a comment it cannot rot into fiction.
 [tasks.ci-preflight]
 depends-on = [
     "version-check",
@@ -459,6 +469,7 @@ depends-on = [
     "native-check",
     "junit-check",
     "build",
+    "build-profile-check",
     "readme-help-check",
     "junit-render-check",
     "transcripts-check",

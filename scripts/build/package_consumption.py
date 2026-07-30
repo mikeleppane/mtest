@@ -26,7 +26,10 @@ is that proof, with ten ordered completion records:
      package must be, via its declared Mojo runtime dependency. The same
      scrubbed probe parses a present config before an expected discovery
      refusal. A loader failure here is a recipe run-dependency gap rather than
-     a retry-able flake, so the gate stops and reports it.
+     a retry-able flake, so the gate stops and reports it. On Darwin, after
+     those executions, recursively inspect every non-system Mach-O dependency:
+     dyld runpaths resolve in loader order, every file stays inside the scratch
+     prefix, and no file requires newer than macOS 14.0.
   4. Compile and run the installed assertion source at `-O0` and `-O3` with
      the exact compiler installed as the package's run dependency.
   5. Run the committed assertion example through the installed binary and
@@ -76,6 +79,10 @@ import stat
 import subprocess
 import sys
 
+from scripts.checks.build_profile import (
+    BuildProfileError,
+    parse_macho_minimum_versions,
+)
 from scripts.harness import dogfood, watchdog
 from scripts.release.public_verify import COMPANION_FILES
 
@@ -1022,7 +1029,7 @@ def assertion_readme_command_prefix() -> str:
     installed_source = INSTALLED_ASSERTION_SOURCE_RELATIVE.as_posix()
     example_directory = ASSERTION_EXAMPLE.parent.relative_to(REPO_ROOT).as_posix()
     return (
-        "$ mtest --no-config --show-output failures \\\n"
+        "$ mtest --no-config --no-cache --show-output failures \\\n"
         f"    -I <PREFIX>/{installed_source} \\\n"
         f"    {example_directory}\n"
     )
@@ -1050,6 +1057,7 @@ def stage_assertion_example(
     command = [
         str(mtest_bin.resolve()),
         "--no-config",
+        "--no-cache",
         "--show-output",
         "failures",
         "-I",
@@ -1466,6 +1474,219 @@ def scrubbed_probe_env(target: PackagePlatform) -> dict[str, str]:
     return env
 
 
+def _run_otool(option: str, path: Path) -> str:
+    """Run one required Mach-O inspection and return its stdout."""
+    argv = ["otool", option, str(path)]
+    try:
+        completed = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=PROBE_TIMEOUT,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        raise PackageCheckError(f"`{' '.join(argv)}` did not run: {exc}") from exc
+    if completed.returncode != 0:
+        raise PackageCheckError(
+            f"`{' '.join(argv)}` exited {completed.returncode}: "
+            f"{completed.stdout}{completed.stderr}"
+        )
+    return completed.stdout
+
+
+def _macho_dependencies(text: str) -> tuple[str, ...]:
+    """Return `otool -L` dependency spellings in loader order."""
+    dependencies: list[str] = []
+    for line in text.splitlines()[1:]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        dependency, separator, _metadata = stripped.partition(" (")
+        if not separator or not dependency:
+            raise PackageCheckError(f"malformed `otool -L` row: {line!r}")
+        dependencies.append(dependency)
+    return tuple(dependencies)
+
+
+def _macho_rpaths(text: str) -> tuple[str, ...]:
+    """Return ordered LC_RPATH spellings from `otool -l` output."""
+    rpaths: list[str] = []
+    waiting_for_path = False
+    for line in text.splitlines():
+        command = re.match(r"^\s*cmd\s+(LC_[A-Z0-9_]+)\s*$", line)
+        if command is not None:
+            if waiting_for_path:
+                raise PackageCheckError("Mach-O LC_RPATH is missing its path")
+            waiting_for_path = command.group(1) == "LC_RPATH"
+            continue
+        if waiting_for_path:
+            path = re.match(r"^\s*path\s+(.+?)\s+\(offset\s+\d+\)\s*$", line)
+            if path is not None:
+                rpaths.append(path.group(1))
+                waiting_for_path = False
+    if waiting_for_path:
+        raise PackageCheckError("Mach-O LC_RPATH is missing its path")
+    return tuple(rpaths)
+
+
+def _expand_dyld_path(
+    spelling: str,
+    *,
+    loader_directory: Path,
+    executable_directory: Path,
+) -> Path:
+    """Expand direct dyld loader/executable tokens without resolving symlinks."""
+    if spelling == "@loader_path":
+        return loader_directory
+    if spelling.startswith("@loader_path/"):
+        return loader_directory / spelling.removeprefix("@loader_path/")
+    if spelling == "@executable_path":
+        return executable_directory
+    if spelling.startswith("@executable_path/"):
+        return executable_directory / spelling.removeprefix("@executable_path/")
+    if spelling.startswith("@"):
+        raise PackageCheckError(f"unsupported Mach-O dependency token {spelling!r}")
+    return Path(spelling)
+
+
+def _is_system_macho(path: Path) -> bool:
+    spelling = path.as_posix()
+    return spelling.startswith(("/usr/lib/", "/System/Library/"))
+
+
+def audit_installed_dependency_closure(
+    mtest_bin: Path,
+    target: PackagePlatform,
+) -> None:
+    """Audit the installed binary's recursive non-system Mach-O closure.
+
+    Args:
+        mtest_bin: Installed `mtest`, whose parent prefix owns the closure.
+        target: Current gated host descriptor.
+
+    Raises:
+        PackageCheckError: A dependency is missing, escapes the scratch prefix,
+            has malformed loader metadata, or requires newer than macOS 14.0.
+    """
+    if target.subdir != "osx-arm64":
+        return
+
+    try:
+        prefix = mtest_bin.parent.parent.resolve(strict=True)
+        executable = mtest_bin.resolve(strict=True)
+    except OSError as exc:
+        raise PackageCheckError(
+            f"installed Mach-O root cannot be resolved: {mtest_bin}: {exc}"
+        ) from exc
+    if not executable.is_relative_to(prefix):
+        raise PackageCheckError(
+            "installed Mach-O root escapes the scratch prefix: "
+            f"{mtest_bin} -> {executable}"
+        )
+    if not executable.is_file():
+        raise PackageCheckError(
+            f"installed Mach-O root is not a file: {executable.relative_to(prefix)}"
+        )
+    executable_directory = executable.parent
+    visited: set[Path] = set()
+
+    def resolve_dependency(
+        spelling: str,
+        *,
+        loader: Path,
+        runpaths: tuple[Path, ...],
+    ) -> Path | None:
+        if _is_system_macho(Path(spelling)):
+            return None
+        if spelling.startswith("@rpath/"):
+            suffix = spelling.removeprefix("@rpath/")
+            matches = [runpath / suffix for runpath in runpaths]
+            candidate = next((path for path in matches if path.exists()), None)
+            if candidate is None:
+                raise PackageCheckError(
+                    f"Mach-O @rpath dependency has no match for {spelling!r} "
+                    f"from {loader.relative_to(prefix)}; searched "
+                    f"{[str(path) for path in matches]}"
+                )
+        else:
+            candidate = _expand_dyld_path(
+                spelling,
+                loader_directory=loader.parent,
+                executable_directory=executable_directory,
+            )
+            if not candidate.is_absolute():
+                raise PackageCheckError(
+                    f"Mach-O dependency is not absolute or dyld-qualified: {spelling!r}"
+                )
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError as exc:
+            raise PackageCheckError(
+                f"Mach-O dependency does not exist for "
+                f"{loader.relative_to(prefix)}: {spelling!r}: {exc}"
+            ) from exc
+        if not resolved.is_relative_to(prefix):
+            raise PackageCheckError(
+                f"Mach-O dependency escapes the scratch prefix from "
+                f"{loader.relative_to(prefix)}: {spelling!r} -> {resolved}"
+            )
+        if not resolved.is_file():
+            raise PackageCheckError(
+                f"Mach-O dependency is not a file: {resolved.relative_to(prefix)}"
+            )
+        return resolved
+
+    def walk(path: Path, inherited_runpaths: tuple[Path, ...]) -> None:
+        if path in visited:
+            return
+        visited.add(path)
+
+        dependencies = _macho_dependencies(_run_otool("-L", path))
+        loads = _run_otool("-l", path)
+        local_runpaths = tuple(
+            _expand_dyld_path(
+                spelling,
+                loader_directory=path.parent,
+                executable_directory=executable_directory,
+            )
+            for spelling in _macho_rpaths(loads)
+        )
+        search_runpaths = (*local_runpaths, *inherited_runpaths)
+        resolved_dependencies: list[Path] = []
+        for spelling in dependencies:
+            dependency = resolve_dependency(
+                spelling,
+                loader=path,
+                runpaths=search_runpaths,
+            )
+            if dependency is not None:
+                resolved_dependencies.append(dependency)
+
+        try:
+            minimums = parse_macho_minimum_versions(loads)
+        except BuildProfileError as exc:
+            raise PackageCheckError(
+                f"Mach-O minimum is invalid for {path.relative_to(prefix)}: {exc}"
+            ) from exc
+        newer = [version for version in minimums if version > (14, 0, 0)]
+        if newer:
+            rendered = ", ".join(".".join(str(part) for part in item) for item in newer)
+            raise PackageCheckError(
+                f"{path.relative_to(prefix)} requires macOS {rendered}, newer than 14.0"
+            )
+
+        for dependency in resolved_dependencies:
+            walk(dependency, search_runpaths)
+
+    walk(executable, ())
+    print(
+        f"package-check: Mach-O dependency closure contains {len(visited)} "
+        "in-prefix files and every minimum is <=14.0",
+        flush=True,
+    )
+
+
 def stage_loader_clean_probe(mtest_bin: Path, target: PackagePlatform) -> None:
     """Run the INSTALLED binary under a loader-clean child environment.
 
@@ -1584,6 +1805,7 @@ def stage_loader_clean_probe(mtest_bin: Path, target: PackagePlatform) -> None:
     performed.append("--config")
 
     verify_loader_probe_roster(tuple(performed))
+    audit_installed_dependency_closure(mtest_bin, target)
     print(
         f"package-check: OK -- installed mtest {', '.join(performed)} ran with "
         "the dev pixi env absent from PATH and "

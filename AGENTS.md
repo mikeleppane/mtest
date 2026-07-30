@@ -226,6 +226,7 @@ pixi run clang-tidy-check  # parse-smoke and analyze every native C unit
 pixi run native-check      # own native analysis, ABI/layout/exports, and lifecycle
 pixi run junit-check       # validate the committed JUnit oracle and checker
 pixi run build             # the package-compiles gate
+pixi run build-profile-check  # verify release CPU/debug/deployment artifacts
 pixi run readme-help-check # compare README help with the real binary
 pixi run junit-render-check  # validate bytes emitted by the real JUnit reporter
 pixi run transcripts-check # regenerate to a temp dir and diff byte-for-byte
@@ -285,8 +286,9 @@ own marker.
 `pixi run ci-preflight` chains `version-check -> fmt-check ->
 harness-unit-check -> repo-policy-check -> abi-probe-check ->
 release-tooling-check -> safety-check -> postfork-check -> clang-tidy-check ->
-native-check -> junit-check -> build -> readme-help-check ->
-junit-render-check -> transcripts-check -> coverage-capability` in that exact
+native-check -> junit-check -> build -> build-profile-check ->
+readme-help-check -> junit-render-check -> transcripts-check ->
+coverage-capability` in that exact
 fail-fast order. Here `fmt-check` owns `mojo-fmt` plus `native-fmt`, and
 `native-check` owns `clang-tidy-check`; the expanded names make those dependency
 edges visible. The three `*-check` groups replaced a single two-dozen-command
@@ -342,15 +344,16 @@ Hosted CI runs the same logical floor as two platform-local chains:
   (`test`, `assertions-check`, `e2e`, `cache-protocol-check`,
   `build-stamp-check`, strict contract, ASan, Valgrind) and, beside it, a
   `compiled oracles` job carrying every preflight member that needs a real
-  compiler: `native-check`, `build`, `readme-help-check`,
+  compiler: `native-check`, `build`, `build-profile-check`, `readme-help-check`,
   `junit-render-check`, `transcripts-check`, and `coverage-capability`. The oracles run parallel to the matrix rather than
   ahead of it, because jobs share no filesystem and every cell compiles what
   it needs through its own task edges, so nothing downstream could ever
   consume what the preflight built.
-- macOS: preflight runs the native audit alone and releases `test`,
-  `assertions-check`, `e2e`, `cache-protocol-check`, `build-stamp-check`, and
-  strict contract cells. Both matrices run `fail-fast: false`, so one red lane
-  never cancels the verdicts of the others.
+- macOS: preflight runs the native audit and `build-profile-check`, proving the
+  native `apple-m1` IR, stripped Mach-O, and exact 14.0 minimum before it
+  releases `test`, `assertions-check`, `e2e`, `cache-protocol-check`,
+  `build-stamp-check`, and strict contract cells. Both matrices run
+  `fail-fast: false`, so one red lane never cancels the verdicts of the others.
 - There is no self-hosted dogfood cell. `scripts/harness/dogfood.py` survives
   as a local task and as the helper `package-check` reuses against the
   installed artifact on both platforms, which is where those three probes now

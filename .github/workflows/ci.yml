@@ -131,6 +131,9 @@ jobs:
       - name: Compile the package
         run: pixi run build
 
+      - name: Production artifact profile
+        run: pixi run build-profile-check
+
       - name: README CLI reference
         run: pixi run readme-help-check
 
@@ -391,23 +394,20 @@ jobs:
           pixi run mojo-version
           pixi run clang --version
 
-      # The whole barrier on this platform, and the only `ci-preflight` member
-      # whose answer is platform-specific: every other member reads this tree
-      # rather than this runner. `native-check` owns `postfork-check`, so naming
-      # that separately would repeat the audit without strengthening the gate.
+      # The barrier on this platform carries the two `ci-preflight` answers
+      # that are platform-specific. `native-check` owns `postfork-check`, so
+      # naming that separately would repeat the audit without strengthening
+      # the gate.
       #
-      # No `build-bin` step or `--help` smoke here: jobs share no filesystem, so
-      # a copy would delay every cell below and be consumed by none, and the
-      # cells that need a binary link one through their own task edges. `macOS
-      # arm64 / strict contract` runs the documented-CLI oracle `--strict`,
-      # where a SKIP fails, and `help: --help -> stdout, exit 0` is one of its
-      # roster entries; `macOS arm64 / packaged artifact` then probes `--help`
-      # through the INSTALLED artifact with the dev environment off PATH and
-      # this platform's loader search path emptied. The cost is that a
-      # macOS-only compile break reddens the cells that hit it instead of one
-      # job ahead of them.
+      # The production-profile step intentionally builds here before releasing
+      # the behavioral matrix. It proves native apple-m1 IR, a stripped Mach-O,
+      # and the exact macOS 14.0 minimum on the real binary. Jobs share no
+      # filesystem, so the cells below still build their own inputs.
       - name: Audit native adapter
         run: pixi run native-check
+
+      - name: Production artifact profile
+        run: pixi run build-profile-check
 
   macos-test-matrix:
     name: macOS arm64 / ${{ matrix.lane }}
