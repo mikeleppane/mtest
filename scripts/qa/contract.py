@@ -753,6 +753,8 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "color: --color always beats NO_COLOR",
     "precompile: success path resolves import (auto -I)",
     "symlink: a symlinked test file is collected and run, never dropped",
+    "shape: a test-named non-file walk entry is announced, never dropped",
+    "shape: an unsupported operand is refused with its real problem",
     "value: 2^63 refused for every non-negative integer flag",
     "report: --json to a readerless FIFO fails fast, never blocks",
     "path: a long-but-legal path builds, never a false COMPILE-ERROR",
@@ -1140,6 +1142,136 @@ class Runner:
             f"walk exit {r.returncode} (1 = the linked poison ran); "
             f"not-malformed={not_malformed}; direct-operand-ok={direct_ok}",
         )
+
+    def check_nonregular_walk_entry(self) -> None:
+        """Assert a test-named non-file is announced, never silently dropped.
+
+        Two shapes wear a test file's name without being one: a DIRECTORY
+        called `test_*.mojo`, which the walk used to descend — running tests
+        from under a name nothing treats as a container — and a FIFO, which
+        the walk used to pass over in total silence, shrinking the run with no
+        trace. Both are skipped now, and both are reported.
+
+        The directory holds a POISON test whose body FAILS, so descending it
+        again flips the exit code from 0 to 1 rather than merely changing text.
+        A NON-test-named FIFO stays silent: it cannot hide a test, so warning
+        about it would be noise.
+        """
+        ref = "§5 a test-named entry mtest cannot run is skipped and reported"
+        name = "shape: a test-named non-file walk entry is announced, never dropped"
+        d = self.root / "probes_shape"
+        d.mkdir(exist_ok=True)
+        (d / "test_plain.mojo").write_text(
+            HEAD + "def test_shape_plain_ok() raises:\n"
+            '    assert_equal(reverse("ab"), "ba")\n' + MAIN
+        )
+        shape_dir = d / "test_shape.mojo"
+        shape_dir.mkdir(exist_ok=True)
+        (shape_dir / "test_inside.mojo").write_text(
+            HEAD + "def test_inside_poison() raises:\n"
+            "    assert_equal(1, 2)  # POISON: a descended directory runs this\n" + MAIN
+        )
+
+        r = self.mtest(["-I", "build", "probes_shape"])
+        both = r.stdout + r.stderr
+        warned = [ln for ln in both.splitlines() if "skipped-nonregular" in ln]
+        dir_ok = (
+            r.returncode == 0
+            and "1 passed" in both
+            and "test_inside" not in both
+            and any("test_shape.mojo" in ln for ln in warned)
+        )
+        if not dir_ok:
+            self.record(
+                FAIL,
+                name,
+                ref,
+                f"directory entry: exit {r.returncode} (want 0); warnings={warned}",
+            )
+            return
+
+        f = self.root / "probes_fifo"
+        f.mkdir(exist_ok=True)
+        (f / "test_plain.mojo").write_text(
+            HEAD + "def test_fifo_plain_ok() raises:\n"
+            '    assert_equal(reverse("ab"), "ba")\n' + MAIN
+        )
+        named = f / "test_pipe.mojo"
+        unnamed = f / "events.fifo"
+        for p in (named, unnamed):
+            if p.exists() or p.is_symlink():
+                p.unlink()
+        try:
+            os.mkfifo(named)
+            os.mkfifo(unnamed)
+        except (OSError, AttributeError) as e:  # no FIFO support on this host
+            named.unlink(missing_ok=True)
+            self.record(
+                SKIP, name, ref, f"directory entry held; mkfifo unavailable: {e}"
+            )
+            return
+        try:
+            r2 = self.mtest(["-I", "build", "probes_fifo"])
+        finally:
+            named.unlink(missing_ok=True)
+            unnamed.unlink(missing_ok=True)
+        both2 = r2.stdout + r2.stderr
+        warned2 = [ln for ln in both2.splitlines() if "skipped-nonregular" in ln]
+        ok = (
+            r2.returncode == 0
+            and "1 passed" in both2
+            and any("test_pipe.mojo" in ln for ln in warned2)
+            and not any("events.fifo" in ln for ln in warned2)
+        )
+        self.record(
+            PASS if ok else FAIL,
+            name,
+            ref,
+            ""
+            if ok
+            else f"fifo entry: exit {r2.returncode} (want 0); warnings={warned2}",
+        )
+
+    def check_unsupported_operand(self) -> None:
+        """Assert an operand mtest cannot run names its real problem.
+
+        A FIFO, socket, or device named directly was refused with
+        `no such path` — a false statement about a path that plainly exists,
+        which sends the reader hunting for a typo instead of the pipe sitting
+        where a test file belongs. The refusal keeps its exit-4 class and now
+        says what was actually found. The node-id spelling reaches the same
+        classification, so it must answer the same way.
+        """
+        ref = "§5/§9 an operand of an unsupported file type -> 4, named honestly"
+        name = "shape: an unsupported operand is refused with its real problem"
+        d = self.root / "probes_operand"
+        d.mkdir(exist_ok=True)
+        pipe = d / "test_pipe.mojo"
+        if pipe.exists() or pipe.is_symlink():
+            pipe.unlink()
+        try:
+            os.mkfifo(pipe)
+        except (OSError, AttributeError) as e:  # no FIFO support on this host
+            self.record(SKIP, name, ref, f"mkfifo unavailable: {e}")
+            return
+        bad = []
+        try:
+            for operand in (
+                "probes_operand/test_pipe.mojo",
+                "probes_operand/test_pipe.mojo::test_x",
+            ):
+                r = self.mtest(["-I", "build", operand])
+                both = r.stdout + r.stderr
+                if r.returncode != 4:
+                    bad.append(f"{operand} -> exit {r.returncode} (want 4)")
+                if "unsupported file type" not in both:
+                    bad.append(f"{operand} -> no unsupported-file-type diagnostic")
+                if "no such path" in both:
+                    bad.append(f"{operand} -> still claims 'no such path'")
+        finally:
+            pipe.unlink(missing_ok=True)
+        ok = not bad
+        self.record(PASS if ok else FAIL, name, ref, "" if ok else "; ".join(bad))
 
     def check_integer_overflow_values(self) -> None:
         """Assert the decimal values `atol` wraps are refused, not accepted.
@@ -1760,6 +1892,12 @@ def main() -> int:
             runner.check_precompile_success()
         if wanted("symlink: a symlinked test file is collected and run, never dropped"):
             runner.check_symlinked_test_file()
+        if wanted(
+            "shape: a test-named non-file walk entry is announced, never dropped"
+        ):
+            runner.check_nonregular_walk_entry()
+        if wanted("shape: an unsupported operand is refused with its real problem"):
+            runner.check_unsupported_operand()
         if wanted("value: 2^63 refused for every non-negative integer flag"):
             runner.check_integer_overflow_values()
         if wanted("report: --json to a readerless FIFO fails fast, never blocks"):
