@@ -12,8 +12,15 @@ Two policies are load-bearing and documented at their definitions:
 - Lexical-only normalization. Operands are folded to root-relative form by text
   (`.` and `..` segments), never by resolving symlinks, so a reported path
   never depends on filesystem link state.
-- Symlink no-follow. Directory walks skip every symlink, whether it names a
-  subdirectory or a file, because lexical normalization cannot detect a cycle.
+- Symlinks, by kind. A directory walk never descends a symlinked directory,
+  because lexical normalization cannot detect a cycle; it collects a symlinked
+  regular test file exactly like a real one, keeping the link's own path; and
+  it refuses a dangling `test_*.mojo` link. Every refusal is reported, never
+  silent.
+- Walk totality. Each listed entry is characterized once by a raising `lstat`,
+  so an entry that cannot be inspected refuses discovery rather than folding
+  into an empty subtree, and a test-named entry that is not a runnable file is
+  reported rather than dropped.
 """
 from mtest.discover.discover import discover
 from mtest.discover.fnmatch import fnmatch

@@ -390,6 +390,11 @@ def run_session[
     # smaller than the tree suggests, so say so rather than exit 0 in silence.
     for link in disc.skipped_links:
         reporter.handle(Event.warning("skipped-symlink", link))
+    # The same honesty for a non-symlink shape: a directory, FIFO, socket, or
+    # device sitting at a test file's name. The set actually run is smaller
+    # than the tree suggests, so say so rather than exit 0 quietly.
+    for entry in disc.skipped_nonregular:
+        reporter.handle(Event.warning("skipped-nonregular", entry))
     # A `--serial` glob matching no discovered run file is stale for the same
     # reason a `--exclude` glob is: the pattern names nothing, so the caller
     # almost certainly mistyped it. This is about the glob, not the worker count,

@@ -23,7 +23,9 @@ The stages:
    a gate and an explicit path, loudly: the file moves to `excluded` with the
    pattern that removed it. A pattern matching nothing becomes a stale entry.
 5. Order. `run_files` sorted lexicographically; `gate_files` in listed order;
-   `excluded` sorted by path; `stale_excludes` in listed order.
+   `excluded` sorted by path; `stale_excludes` in listed order; both loud walk
+   channels — the refused symlinks and the test-named entries that are not
+   runnable files — deduplicated and sorted.
 """
 from std.builtin.sort import sort
 from std.os.path import exists, isdir, isfile
@@ -90,6 +92,7 @@ def _classify(
     nroot: String,
     mut into: List[String],
     mut skipped: List[String],
+    mut nonregular: List[String],
 ) raises:
     """Resolve one operand into `into` (walked files, or one explicit file).
 
@@ -98,9 +101,11 @@ def _classify(
     path is a directory, is a malformed node id. Also raises for a nonexistent
     path or an operand escaping the root. Every raise is the exit-4 class.
 
-    Any symlink a walk refused is appended to `skipped` for the caller to warn
-    about. An explicitly named operand is never refused for being a symlink:
-    naming a file is a direct selection, and `exists` already accepted it.
+    Any symlink a walk refused is appended to `skipped`, and any test-named
+    walk entry that is not a runnable file to `nonregular`, for the caller to
+    warn about. An explicitly named operand is never refused for being a
+    symlink: naming a file is a direct selection, and `exists` already accepted
+    it.
     """
     var split = split_node_token(op)
     if split.sep_count > 1:
@@ -119,6 +124,8 @@ def _classify(
             into.append(f)
         for s in walked.skipped_links:
             skipped.append(s)
+        for s in walked.skipped_nonregular:
+            nonregular.append(s)
     elif isfile(fpath):
         into.append(rel)
     else:
@@ -202,14 +209,16 @@ def discover(config: RunnerConfig, root: String) raises -> DiscoveryResult:
             operands.append(String(p))
 
     # Stage 2: normalize + classify operands and gates into raw file lists.
-    # Refused symlinks accumulate across every operand and gate walk.
+    # Refused symlinks and test-named non-files accumulate across every operand
+    # and gate walk.
     var skipped_links = List[String]()
+    var skipped_nonregular = List[String]()
     var run_raw = List[String]()
     for op in operands:
-        _classify(op, nroot, run_raw, skipped_links)
+        _classify(op, nroot, run_raw, skipped_links, skipped_nonregular)
     var gate_raw = List[String]()
     for g in config.gates:
-        _classify(g, nroot, gate_raw, skipped_links)
+        _classify(g, nroot, gate_raw, skipped_links, skipped_nonregular)
 
     # Stage 3: dedup; a gate that also appears in a walk stays a gate only.
     var gate_files = _dedup_preserve(gate_raw)
@@ -238,6 +247,8 @@ def discover(config: RunnerConfig, root: String) raises -> DiscoveryResult:
     _sort_excluded(excluded)
     var links = _dedup_preserve(skipped_links)
     sort(links)
+    var nonregular = _dedup_preserve(skipped_nonregular)
+    sort(nonregular)
 
     return DiscoveryResult(
         gate_files=gate_kept^,
@@ -245,4 +256,5 @@ def discover(config: RunnerConfig, root: String) raises -> DiscoveryResult:
         excluded=excluded^,
         stale_excludes=stale^,
         skipped_links=links^,
+        skipped_nonregular=nonregular^,
     )
