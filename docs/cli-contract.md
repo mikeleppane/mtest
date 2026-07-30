@@ -326,9 +326,12 @@ persisted across CI runs: moving compiled artifacts into shared state could
 reuse a binary built for a different host CPU. It is never shared between
 machines.
 
-Each artifact is an immutable directory named `<mangled>_h<digest>`, holding the
-binary, a record of the key that produced it, and a record of where it sits in
-its source's recency order. A build compiles into a private staging directory
+Each artifact is a directory named `<mangled>_h<digest>`, holding the binary, a
+record of the key that produced it, and a record of where it sits in its
+source's recency order. The binary and the key record are immutable once
+published; the recency record is the one file publication may rewrite
+afterwards, to place the generation relative to siblings that appeared while it
+was being built. A build compiles into a private staging directory
 beside it and is published with one `rename(2)`, so a key and a binary are never
 observably paired with anything but each other, and an interrupted publication
 leaves nothing a later run can adopt. Two runs that race for one key are not an
@@ -347,12 +350,12 @@ rebuilds nothing. A file whose bytes are identical across two branches hits on
 every switch. A file that differs keeps the generations of both states once it
 has been compiled in both, so switching it between exactly two states hits both
 ways from the second cycle on, provided every writer of that store is at this
-version. A third state evicts the oldest of the three; and a configured
-precompile output that moves can move the complete key, which no retention
-bound restores. That directory is in the key because the
-compiler resolves a bare `from helper import ...` against the source file's own
-directory, with no `-I` involved: a helper beside a test is a build input
-nothing else covers.
+version. A third state evicts the lowest-ranked of the three, which without
+concurrent publishers is the oldest; and a configured precompile output that
+moves can move the complete key, which no retention bound restores. That
+directory is in the key because the compiler resolves a bare
+`from helper import ...` against the source file's own directory, with no `-I`
+involved: a helper beside a test is a build input nothing else covers.
 The keyed `-I` spelling is exact — `-I lib` and `-I ./lib` differ — while the
 named directory's contents are walked and digested. Symlink resolution remains
 canonicalized. A wrapper script therefore relocates the keyed library directory
@@ -375,9 +378,8 @@ recorded build duration so the SLOW annotation reads the same warm as cold. An
 artifact that fails either check is deleted and rebuilt, so a store damaged from
 outside heals on the next run rather than failing every one after it. Publishing
 an artifact removes that source's generations beyond the two newest, and damage
-can quarantine one, so
-a second run over the same checkout can replace or quarantine a generation in
-the window between the check and execution. The same race can reach a generation
+can quarantine one, so a second run over the same checkout can replace or
+quarantine a generation in the window between the check and execution. The same race can reach a generation
 this run just published. A run that cannot execute a stored artifact compiles
 the file instead, emitting a `cache-rebuild` warning, and the compile is a
 recovery rather than a second admission — it moves neither counter (§15.4).

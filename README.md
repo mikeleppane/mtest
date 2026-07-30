@@ -926,11 +926,14 @@ a `git checkout` that rewrites a file with the same bytes still hits. A file
 that differs across a branch switch keeps the generations of both states once
 it has been compiled in both: switching between exactly two states of a file
 hits both ways from the second cycle on, when every writer of the store is at
-this version. A third state evicts the oldest of the three, and a configured
-precompile output that moves can move the complete key, so this is not a
-promise that every branch restoration hits. Settings that cannot change a
-compiled byte — timeouts, workers, retries,
-selection, reporters — are not in the key and never invalidate anything. The
+this version and nothing else is publishing into it concurrently. A third state
+evicts the lowest-ranked of the three, which without a concurrent publisher is
+the oldest; concurrent runs take no lock, so a source can hold more than two for
+a while, and a race can still cost one rebuild. A configured precompile output
+that moves can move the complete key besides, so none of this is a promise that
+every branch restoration hits. Settings that cannot change a compiled byte —
+timeouts, workers, retries, selection, reporters — are not in the key and never
+invalidate anything. The
 invocation root is in the key, though, so moving or renaming the checkout
 invalidates everything in it.
 
@@ -1043,7 +1046,9 @@ genuinely empty cache; `--cache-clear` alone leaves a fresh one behind.
 That flag is also the only thing that shrinks the store. Publishing a binary
 removes everything for *that* source beyond the two newest generations, so an
 edit-and-rerun loop stays flat while an alternation between two states stays
-warm, but there is no size cap and no expiry. Artifacts of tests you renamed or
+warm — a target rather than a hard bound, since concurrent runs take no lock and
+can leave a source over it until the next unraced publication. There is no size
+cap and no expiry. Artifacts of tests you renamed or
 deleted stay forever, and a build killed mid-compile — a timeout, a `Ctrl-C`,
 a CI runner going away — leaves its half-staged directory behind. On a laptop
 this is noise. On a CI checkout that lives for months it is worth clearing
