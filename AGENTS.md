@@ -545,7 +545,7 @@ The six that come up most often:
   `git diff --exit-code`, so any unstaged diff it leaves behind reds the gate.
   Stage first, then gate.
 - Never run two builds against the shared `build/` tree at once; a racing
-  build corrupts `build/mtest.mojopkg` and reads as a real regression.
+  build corrupts `build/mtest.mojoc` and reads as a real regression.
 - `fn` is fully removed from the pinned toolchain, including as a
   function-value type. Write `def(...) -> ...`.
 - Every kill targets the process group, never the direct child alone.

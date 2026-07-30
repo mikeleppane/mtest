@@ -106,7 +106,7 @@ leaves nothing in the checkout."""
 
 VENDORED_TOML_INCLUDE = ROOT / "vendor" / "mojo-toml"
 """The vendored parser `mtest.config` imports. Included as SOURCE rather than as
-the precompiled `build/toml.mojopkg`, so the TOML parsing the probe drives is
+the precompiled `build/toml.mojoc`, so the TOML parsing the probe drives is
 instrumented too."""
 
 HOSTILE_BUILD_STANDIN = (
