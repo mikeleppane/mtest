@@ -72,6 +72,7 @@ def check_main_open_failure() -> str:
             [
                 cc,
                 *native_abi_check.STRICT_FLAGS,
+                "-DMTEST_EXEC_TESTING=1",
                 "-I",
                 str(ROOT / "native"),
                 "-c",

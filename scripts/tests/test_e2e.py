@@ -350,6 +350,39 @@ class E2EFaultTopologyTests(unittest.TestCase):
     def test_main_open_has_one_package_owner(self) -> None:
         self.assertEqual(main_open.__name__, "scripts.e2e.main_open")
 
+    def test_main_open_helper_compiles_as_a_testing_adapter_consumer(self) -> None:
+        commands: list[list[str]] = []
+        run_stderr = (
+            "exec: runtime open failed (operation 5, errno 5)\n"
+            "cleanup operation 6 failed with errno 1\n"
+            "exec: runtime close failed (operation 6, errno 5)\n"
+            "main-open-probe: restore-attempts-before-atexit=3 "
+            "initial-reopen=0 repair=-2 final-reopen=0 reclose=0\n"
+        )
+
+        def capture(
+            command: list[str], *, timeout: float
+        ) -> subprocess.CompletedProcess[str]:
+            del timeout
+            commands.append(command)
+            if len(commands) == 3:
+                return subprocess.CompletedProcess(command, 3, "", run_stderr)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with (
+            mock.patch.object(main_open, "TEST_ADAPTER", Path(__file__)),
+            mock.patch(
+                "scripts.e2e.main_open.native_abi_check.compiler",
+                return_value="clang",
+            ),
+            mock.patch.object(main_open, "_run", side_effect=capture),
+        ):
+            main_open.check_main_open_failure()
+
+        helper_compile = commands[0]
+        self.assertEqual(helper_compile.count("-DMTEST_EXEC_TESTING=1"), 1)
+        self.assertNotIn("-DMTEST_EXEC_TESTING=0", helper_compile)
+
     def test_scenarios_receive_an_explicit_immutable_context(self) -> None:
         registry = tuple(e2e_main.SCENARIOS)
         context = runner.ScenarioContext(manifest={}, registry=registry)
