@@ -21,7 +21,7 @@ adds the binary's only `fsync` declaration.
 """
 from std.ffi import external_call
 from std.memory import Span, alloc, memset_zero
-from std.sys.info import CompilationTarget
+from std.sys.info import CompilationTarget, is_triple
 
 from mtest.platform.cstring import c_string_bytes
 from mtest.platform.stream import close_fd, errno_now, read_fd
@@ -82,9 +82,9 @@ def _open_read_flags() -> Int32:
         comptime assert (
             CompilationTarget.is_linux()
         ), "platform regular-file reads support Linux or macOS only"
-        comptime assert (
-            CompilationTarget.is_x86()
-        ), "platform regular-file reads support Linux x86_64 only"
+        comptime assert is_triple[
+            "x86_64-unknown-linux-gnu"
+        ](), "platform regular-file reads support Linux x86_64 only"
         return Int32(0o4000 | 0o2000000)
 
 
@@ -106,9 +106,9 @@ def _opened_mode(
         comptime assert (
             CompilationTarget.is_linux()
         ), "platform regular-file reads support Linux or macOS only"
-        comptime assert (
-            CompilationTarget.is_x86()
-        ), "platform regular-file reads support Linux x86_64 only"
+        comptime assert is_triple[
+            "x86_64-unknown-linux-gnu"
+        ](), "platform regular-file reads support Linux x86_64 only"
         # SAFETY: the caller supplies 144 initialized bytes aligned to 8 that
         # `fstat` has filled as Linux x86_64 `struct stat`. Linux's `st_mode`
         # is a fully initialized UInt32 at byte offset 24, which is element six
@@ -154,9 +154,9 @@ def _opened_size_hint(
         comptime assert (
             CompilationTarget.is_linux()
         ), "platform regular-file reads support Linux or macOS only"
-        comptime assert (
-            CompilationTarget.is_x86()
-        ), "platform regular-file reads support Linux x86_64 only"
+        comptime assert is_triple[
+            "x86_64-unknown-linux-gnu"
+        ](), "platform regular-file reads support Linux x86_64 only"
         # SAFETY: the caller supplies 144 initialized bytes aligned to 8 that
         # `fstat` has filled as Linux x86_64 `struct stat`. Linux's `st_size` is
         # a fully initialized `off_t` (Int64) at byte offset 48 — element six of
