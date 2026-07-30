@@ -216,7 +216,7 @@ def test_cache_clear_refuses_unmarked() raises:
     No "but everything in it looks like ours" exception exists on purpose: that
     heuristic is exactly how a directory somebody else created gets deleted, and
     neither does a run write the marker into a directory it merely found — that
-    would manufacture the proof one invocation later. So the refusal is
+    would manufacture deletion authority one invocation later. So the refusal is
     permanent until the user acts, and the text has to say so and hand over the
     manual removal rather than name a run that would fix it.
     """
@@ -241,7 +241,7 @@ def test_cache_clear_refuses_unmarked() raises:
         "run mtest once" in diagnostic,
         (
             "the refusal must not name a run as the way out; a run that marked"
-            " this directory would manufacture the proof: "
+            " this directory would manufacture deletion authority: "
             + diagnostic
         ),
     )
