@@ -201,6 +201,17 @@ _precompile_write_stamp() {
   } >"$stamp"
 }
 
+# Captures every stamp byte in memory before the ownership parser sees any of
+# them. `cat`'s status proves that its read reached EOF; a post-open read error
+# therefore rejects the stamp even if all three valid rows arrived first. The
+# final non-newline byte only prevents command substitution from trimming the
+# stamp's trailing newlines. It is removed by position, never searched for or
+# treated as a probabilistic end marker.
+_capture_complete_stamp() {
+  cat -- "$1" || return 1
+  printf 'x'
+}
+
 remove_owned_legacy_packages() {
   local legacy_toml="build/toml.mojopkg"
   local legacy_mtest="build/mtest.mojopkg"
@@ -213,10 +224,21 @@ remove_owned_legacy_packages() {
   local seen_toml=0 seen_mtest=0 out_ok=0
   local first=1
   local line head_digest rest path recorded actual
+  local stamp_snapshot=""
   if [[ ${#DIGEST_CMD[@]} -eq 0 || ! -f "$PRECOMPILE_STAMP" ]]; then
     owned=0
+  elif ! stamp_snapshot="$(_capture_complete_stamp "$PRECOMPILE_STAMP")"; then
+    owned=0
   else
-    if ! while IFS= read -r line || [[ -n "$line" ]]; do
+    stamp_snapshot="${stamp_snapshot%?}"
+    while [[ -n "$stamp_snapshot" ]]; do
+      if [[ "$stamp_snapshot" == *$'\n'* ]]; then
+        line="${stamp_snapshot%%$'\n'*}"
+        stamp_snapshot="${stamp_snapshot#*$'\n'}"
+      else
+        line="$stamp_snapshot"
+        stamp_snapshot=""
+      fi
       if [[ $first -eq 1 ]]; then
         first=0
         head_digest="${line#in:}"
@@ -262,9 +284,7 @@ remove_owned_legacy_packages() {
           owned=0
           ;;
       esac
-    done <"$PRECOMPILE_STAMP"; then
-      owned=0
-    fi
+    done
   fi
 
   if [[ $owned -eq 1 && $out_ok -eq 2 && $seen_toml -eq 1 && $seen_mtest -eq 1 ]]; then

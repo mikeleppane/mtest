@@ -549,6 +549,72 @@ class BuildStampTests(unittest.TestCase):
         finally:
             shutil.rmtree(sandbox, ignore_errors=True)
 
+    def test_midstream_legacy_stamp_read_failure_preserves_outputs(self) -> None:
+        """A read error after every valid row must keep ownership unproven."""
+        sandbox = sandbox_tree()
+        try:
+            build = sandbox / "build"
+            build.mkdir(exist_ok=True)
+            legacy_bytes = {
+                LEGACY_PACKAGES[0]: b"legacy-toml-package\n",
+                LEGACY_PACKAGES[1]: b"legacy-mtest-package\n",
+            }
+            for relative, contents in legacy_bytes.items():
+                (sandbox / relative).write_bytes(contents)
+            stamp = build / ".precompile.stamp"
+            stamp.write_text(
+                f"in:{hashlib.sha256(b'legacy-inputs').hexdigest()}\n"
+                + "".join(
+                    f"out:{relative.as_posix()} "
+                    f"{hashlib.sha256(contents).hexdigest()}\n"
+                    for relative, contents in legacy_bytes.items()
+                ),
+                encoding="utf-8",
+            )
+
+            result = source_call(
+                sandbox,
+                "_resolve_digest_cmd\n"
+                'injection_marker="build/.midstream-read-failure-injected"\n'
+                "stamp_reads=0\n"
+                "read() {\n"
+                '  if [[ "${FUNCNAME[1]}" == '
+                '"remove_owned_legacy_packages" ]]; then\n'
+                "    stamp_reads=$((stamp_reads + 1))\n"
+                "    if [[ $stamp_reads -eq 4 ]]; then\n"
+                '      printf -v "$2" "%s" ""\n'
+                '      : > "$injection_marker"\n'
+                "      return 74\n"
+                "    fi\n"
+                "  fi\n"
+                '  builtin read "$@"\n'
+                "}\n"
+                "cat() {\n"
+                '  if [[ "$#" -eq 2 && "$1" == "--" '
+                '&& "$2" == "$PRECOMPILE_STAMP" ]]; then\n'
+                '    command cat "$@"\n'
+                '    : > "$injection_marker"\n'
+                "    return 74\n"
+                "  fi\n"
+                '  command cat "$@"\n'
+                "}\n"
+                "status=0\n"
+                "remove_owned_legacy_packages || status=$?\n"
+                'if [[ ! -f "$injection_marker" ]]; then\n'
+                '  echo "midstream read-failure injection was not exercised" >&2\n'
+                "  exit 98\n"
+                "fi\n"
+                'exit "$status"\n',
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            for relative, contents in legacy_bytes.items():
+                self.assertEqual((sandbox / relative).read_bytes(), contents)
+                self.assertIn(relative.as_posix(), result.stderr)
+            self.assertIn("move or remove", result.stderr)
+        finally:
+            shutil.rmtree(sandbox, ignore_errors=True)
+
     def test_unowned_legacy_package_blocks_a_warm_stamp_hit(self) -> None:
         """An unproven legacy package must not shadow valid current outputs."""
         require_mojo()
