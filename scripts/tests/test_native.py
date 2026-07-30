@@ -134,8 +134,8 @@ _mtest_exec_process_close:
             profile: ProductionProfile,
             *,
             strong: bool,
-            target: str | None = None,
-        ) -> str:
+            target: str,
+        ) -> tuple[list[str], str]:
             flags = (
                 native_abi.STRICT_FLAGS
                 if strong
@@ -145,41 +145,58 @@ _mtest_exec_process_close:
                     if flag != "-fstack-protector-strong"
                 )
             )
-            command = [cc]
-            if target is not None:
-                command.append(f"--target={target}")
-            command.extend(
-                [
-                    *flags,
-                    *profile.c_flags,
-                    "-S",
-                    str(native_abi.CANARY_SOURCE),
-                    "-o",
-                    "-",
-                ]
-            )
+            command = [
+                cc,
+                f"--target={target}",
+                *flags,
+                *profile.c_flags,
+                "-S",
+                str(native_abi.CANARY_SOURCE),
+                "-o",
+                "-",
+            ]
             compiled = native_abi.run(command)
             self.assertEqual(compiled.returncode, 0, compiled.stdout)
-            return compiled.stdout
+            return command, compiled.stdout
 
-        linux_positive = assembly(linux, strong=True)
-        linux_negative = assembly(linux, strong=False)
-        self.assertIn("__stack_chk_fail", linux_positive)
-        self.assertNotIn("__stack_chk_fail", linux_negative)
-
-        self.assertIsNotNone(darwin.mojo_triple)
-        darwin_positive = assembly(
-            darwin,
-            strong=True,
-            target=darwin.mojo_triple,
+        cases = (
+            (
+                linux,
+                "x86_64-unknown-linux-gnu",
+                ("-march=x86-64", "-mtune=generic"),
+                "__stack_chk_fail",
+            ),
+            (
+                darwin,
+                "arm64-apple-macosx14.0.0",
+                ("-mcpu=apple-m1", "-mmacosx-version-min=14.0"),
+                "___stack_chk_fail",
+            ),
         )
-        darwin_negative = assembly(
-            darwin,
-            strong=False,
-            target=darwin.mojo_triple,
-        )
-        self.assertIn("___stack_chk_fail", darwin_positive)
-        self.assertNotIn("___stack_chk_fail", darwin_negative)
+        for profile, target, profile_flags, symbol in cases:
+            with self.subTest(profile=profile.name):
+                self.assertEqual(profile.c_flags, profile_flags)
+                positive_command, positive = assembly(
+                    profile,
+                    strong=True,
+                    target=target,
+                )
+                negative_command, negative = assembly(
+                    profile,
+                    strong=False,
+                    target=target,
+                )
+                for command in (positive_command, negative_command):
+                    self.assertEqual(
+                        command[:2],
+                        [cc, f"--target={target}"],
+                    )
+                    self.assertEqual(
+                        tuple(command[-6:-4]),
+                        profile_flags,
+                    )
+                self.assertIn(symbol, positive)
+                self.assertNotIn(symbol, negative)
 
     def test_production_shell_ignores_ambient_compiler_flags(self) -> None:
         profile = host_profile(

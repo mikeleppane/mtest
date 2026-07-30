@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
@@ -18,6 +19,53 @@ from scripts.build.profiles import (
 
 ROOT = Path(__file__).resolve().parents[2]
 PRODUCTION_BUILD = ROOT / "scripts" / "build" / "production_build.sh"
+TASK5_SELECTOR_ARRAYS = (
+    "current_c_flags",
+    "seen_names",
+    "seen_platform_systems",
+    "seen_platform_machines",
+)
+
+
+def braced_parameter_expansions(source: str) -> tuple[tuple[int, str], ...]:
+    """Return balanced braced parameter expansions without executing shell."""
+    expansions: list[tuple[int, str]] = []
+    search_from = 0
+    while (start := source.find("${", search_from)) != -1:
+        depth = 1
+        cursor = start + 2
+        while cursor < len(source):
+            if source.startswith("${", cursor):
+                depth += 1
+                cursor += 2
+                continue
+            if source[cursor] == "}":
+                depth -= 1
+                if depth == 0:
+                    expansions.append((start, source[start : cursor + 1]))
+                    break
+            cursor += 1
+        search_from = start + 2
+    return tuple(expansions)
+
+
+def task5_array_expansion_violations(source: str) -> tuple[str, ...]:
+    """Return non-indexed parameter expansions of Task 5 local arrays."""
+    violations: list[tuple[int, str]] = []
+    for start, expansion in braced_parameter_expansions(source):
+        body = expansion[2:-1]
+        for name in TASK5_SELECTOR_ARRAYS:
+            if body == f"{name}[index]":
+                break
+            if re.match(rf"^[#!]?{re.escape(name)}(?:$|[^A-Za-z0-9_])", body):
+                violations.append((start, expansion))
+                break
+    names = "|".join(re.escape(name) for name in TASK5_SELECTOR_ARRAYS)
+    violations.extend(
+        (match.start(), match.group(0))
+        for match in re.finditer(rf"\$(?:{names})(?![A-Za-z0-9_])", source)
+    )
+    return tuple(expansion for _, expansion in sorted(violations))
 
 
 def shell_profile(
@@ -129,14 +177,53 @@ class ProductionProfileTests(unittest.TestCase):
         start = source.index("select_profile() {")
         end = source.index("\nstage_precompile() {", start)
         selector = source[start:end]
-        self.assertNotIn("[@]", selector)
-        self.assertNotIn("${#", selector)
+        self.assertEqual(task5_array_expansion_violations(selector), ())
         for count in (
             "current_c_flag_count",
             "seen_name_count",
             "seen_platform_count",
         ):
             self.assertIn(f"local {count}=0", selector)
+        for loop in (
+            "for ((index = 0; index < current_c_flag_count; index++)); do",
+            "for ((index = 0; index < seen_name_count; index++)); do",
+            "for ((index = 0; index < seen_platform_count; index++)); do",
+        ):
+            self.assertIn(loop, selector)
+
+    def test_selector_array_scanner_rejects_every_nonindexed_form(self) -> None:
+        samples = (
+            "${current_c_flags[*]}",
+            "${seen_names[@]}",
+            "${#seen_platform_systems[@]}",
+            "${!seen_names[@]}",
+            "${!seen_names}",
+            "${seen_platform_systems}",
+            "$seen_platform_machines",
+            "${current_c_flags[${seen_name_count}]}",
+        )
+        for sample in samples:
+            with self.subTest(sample=sample):
+                self.assertEqual(
+                    task5_array_expansion_violations(f'printf "%s" "{sample}"'),
+                    (sample,),
+                )
+
+    def test_selector_array_scanner_allows_exact_indexed_reads(self) -> None:
+        for name in TASK5_SELECTOR_ARRAYS:
+            with self.subTest(name=name):
+                self.assertEqual(
+                    task5_array_expansion_violations(f'"${{{name}[index]}}"'),
+                    (),
+                )
+
+    def test_selector_array_scanner_ignores_indexed_assignments(self) -> None:
+        for name in TASK5_SELECTOR_ARRAYS:
+            with self.subTest(name=name):
+                self.assertEqual(
+                    task5_array_expansion_violations(f'{name}[index]="$value"'),
+                    (),
+                )
 
     def assert_readers_reject(self, text: str, message: str) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-profile-test-") as raw_tmp:
