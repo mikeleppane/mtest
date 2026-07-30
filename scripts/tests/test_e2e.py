@@ -605,6 +605,48 @@ class E2EFaultTopologyTests(unittest.TestCase):
         sleep.assert_not_called()
         self.assertEqual(process.communicate.call_count, 2)
 
+    def test_main_open_timeout_bounds_incomplete_output_drain(self) -> None:
+        """A detached pipe holder cannot defeat the command's hard timeout."""
+        command = ["mojo", "build", "src/main.mojo"]
+        initial_timeout = subprocess.TimeoutExpired(command, 1.0)
+        drain_timeout = subprocess.TimeoutExpired(command, 1.0)
+        process = mock.Mock()
+        process.pid = 123
+        process.stdout = mock.Mock()
+        process.stderr = mock.Mock()
+        process.communicate.side_effect = [initial_timeout, drain_timeout]
+        process.wait.return_value = -int(signal.SIGTERM)
+
+        with (
+            mock.patch(
+                "scripts.e2e.main_open.subprocess.Popen",
+                return_value=process,
+            ),
+            mock.patch(
+                "scripts.e2e.main_open.os.killpg",
+                side_effect=PermissionError(1, "Operation not permitted"),
+            ),
+            mock.patch("scripts.e2e.main_open.time.sleep"),
+            self.assertRaises(main_open.MainOpenCheckError) as raised,
+        ):
+            main_open._run(command, timeout=1.0)
+
+        self.assertIs(raised.exception.__cause__, initial_timeout)
+        self.assertIn("command timed out after 1s", str(raised.exception))
+        self.assertIn("output drain remained incomplete", str(raised.exception))
+        self.assertEqual(
+            process.communicate.call_args_list,
+            [
+                mock.call(timeout=1.0),
+                mock.call(timeout=main_open.POST_TIMEOUT_DRAIN_SECONDS),
+            ],
+        )
+        process.stdout.close.assert_called_once_with()
+        process.stderr.close.assert_called_once_with()
+        process.wait.assert_called_once_with(
+            timeout=main_open.POST_TIMEOUT_DRAIN_SECONDS
+        )
+
     def test_scenarios_receive_an_explicit_immutable_context(self) -> None:
         registry = tuple(e2e_main.SCENARIOS)
         context = runner.ScenarioContext(manifest={}, registry=registry)

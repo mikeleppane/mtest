@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 import signal
@@ -20,6 +21,7 @@ TEST_ADAPTER = ROOT / "build" / "native" / "mtest_exec_native_test.o"
 MAIN_SOURCE = ROOT / "src" / "main.mojo"
 BUILD_TIMEOUT = 120.0
 RUN_TIMEOUT = 30.0
+POST_TIMEOUT_DRAIN_SECONDS = 1.0
 
 
 class MainOpenCheckError(RuntimeError):
@@ -47,7 +49,18 @@ def _run(command: list[str], *, timeout: float) -> subprocess.CompletedProcess[s
                 # zombies. Like ESRCH, that means there is nothing to signal.
                 break
             time.sleep(0.1)
-        stdout, stderr = process.communicate()
+        try:
+            stdout, stderr = process.communicate(timeout=POST_TIMEOUT_DRAIN_SECONDS)
+        except subprocess.TimeoutExpired:
+            for stream in (process.stdout, process.stderr):
+                if stream is not None:
+                    stream.close()
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                process.wait(timeout=POST_TIMEOUT_DRAIN_SECONDS)
+            raise MainOpenCheckError(
+                f"command timed out after {timeout:.0f}s: {command}\n"
+                "output drain remained incomplete after process-group cleanup"
+            ) from error
         raise MainOpenCheckError(
             f"command timed out after {timeout:.0f}s: {command}\n" + stdout + stderr
         ) from error
