@@ -124,6 +124,20 @@ class ProductionProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "unsupported production host"):
             host_profile(system="Linux", machine="aarch64", profiles=profiles)
 
+    def test_selector_uses_only_scalar_counts_and_indexed_array_access(self) -> None:
+        source = PRODUCTION_BUILD.read_text(encoding="utf-8")
+        start = source.index("select_profile() {")
+        end = source.index("\nstage_precompile() {", start)
+        selector = source[start:end]
+        self.assertNotIn("[@]", selector)
+        self.assertNotIn("${#", selector)
+        for count in (
+            "current_c_flag_count",
+            "seen_name_count",
+            "seen_platform_count",
+        ):
+            self.assertIn(f"local {count}=0", selector)
+
     def assert_readers_reject(self, text: str, message: str) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-profile-test-") as raw_tmp:
             path = Path(raw_tmp) / "profiles.txt"
@@ -186,6 +200,9 @@ class ProductionProfileTests(unittest.TestCase):
             "[one]\nsystem Linux\n",
             r":2: malformed profile row",
         )
+
+    def test_empty_inventory_is_rejected(self) -> None:
+        self.assert_readers_reject("", "profile inventory is empty")
 
 
 if __name__ == "__main__":

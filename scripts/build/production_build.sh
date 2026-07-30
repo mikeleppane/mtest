@@ -378,10 +378,13 @@ select_profile() {
   local seen_mojo_triple=0 seen_deployment_target=0
   local selected_count=0
   local index
-  local -a current_c_flags=()
-  local -a seen_names=()
-  local -a seen_platform_systems=()
-  local -a seen_platform_machines=()
+  local current_c_flag_count=0
+  local seen_name_count=0
+  local seen_platform_count=0
+  local -a current_c_flags
+  local -a seen_names
+  local -a seen_platform_systems
+  local -a seen_platform_machines
 
   PROFILE_NAME=""
   PROFILE_SYSTEM=""
@@ -394,18 +397,19 @@ select_profile() {
   _finish_profile() {
     [[ -n "$current_name" ]] || return 0
     if [[ $seen_system -eq 0 || $seen_machine -eq 0 || $seen_mojo_cpu -eq 0 ||
-      ${#current_c_flags[@]} -eq 0 ]]; then
+      $current_c_flag_count -eq 0 ]]; then
       _profile_error "$current_line" "profile '$current_name' missing required key" || return 1
     fi
-    for ((index = 0; index < ${#seen_platform_systems[@]}; index++)); do
+    for ((index = 0; index < seen_platform_count; index++)); do
       if [[ "${seen_platform_systems[index]}" == "$current_system" &&
         "${seen_platform_machines[index]}" == "$current_machine" ]]; then
         _profile_error "$current_line" \
           "duplicate production platform $current_system/$current_machine" || return 1
       fi
     done
-    seen_platform_systems+=("$current_system")
-    seen_platform_machines+=("$current_machine")
+    seen_platform_systems[seen_platform_count]="$current_system"
+    seen_platform_machines[seen_platform_count]="$current_machine"
+    seen_platform_count=$((seen_platform_count + 1))
     if [[ "$current_system" == "$selected_system" &&
       "$current_machine" == "$selected_machine" ]]; then
       selected_count=$((selected_count + 1))
@@ -415,18 +419,22 @@ select_profile() {
       MOJO_CPU="$current_mojo_cpu"
       MOJO_TRIPLE="$current_mojo_triple"
       DEPLOYMENT_TARGET="$current_deployment_target"
-      PROFILE_C_FLAGS=("${current_c_flags[@]}")
+      PROFILE_C_FLAGS=()
+      for ((index = 0; index < current_c_flag_count; index++)); do
+        PROFILE_C_FLAGS[index]="${current_c_flags[index]}"
+      done
     fi
   }
 
   _start_profile() {
     name="$1"
-    for value in "${seen_names[@]}"; do
-      if [[ "$value" == "$name" ]]; then
+    for ((index = 0; index < seen_name_count; index++)); do
+      if [[ "${seen_names[index]}" == "$name" ]]; then
         _profile_error "$line_number" "duplicate profile section '$name'" || return 1
       fi
     done
-    seen_names+=("$name")
+    seen_names[seen_name_count]="$name"
+    seen_name_count=$((seen_name_count + 1))
     current_name="$name"
     current_line="$line_number"
     current_system=""
@@ -439,7 +447,7 @@ select_profile() {
     seen_mojo_cpu=0
     seen_mojo_triple=0
     seen_deployment_target=0
-    current_c_flags=()
+    current_c_flag_count=0
   }
 
   while IFS= read -r line || [[ -n "$line" ]]; do
@@ -539,7 +547,8 @@ select_profile() {
           _profile_error "$line_number" "empty value for 'c_flag'"
           return 1
         }
-        current_c_flags+=("$value")
+        current_c_flags[current_c_flag_count]="$value"
+        current_c_flag_count=$((current_c_flag_count + 1))
         ;;
       *)
         _profile_error "$line_number" "unknown key '$key'" || return 1
@@ -548,7 +557,7 @@ select_profile() {
   done <"$profiles_file"
 
   _finish_profile || return 1
-  if [[ ${#seen_names[@]} -eq 0 ]]; then
+  if [[ $seen_name_count -eq 0 ]]; then
     _profile_error 1 "profile inventory is empty" || return 1
   fi
   if [[ $selected_count -ne 1 ]]; then

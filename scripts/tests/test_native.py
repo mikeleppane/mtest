@@ -13,7 +13,7 @@ import unittest
 from unittest import mock
 
 from scripts.build import native as native_build
-from scripts.build.profiles import host_profile, load_profiles
+from scripts.build.profiles import ProductionProfile, host_profile, load_profiles
 from scripts.checks import native as native_check
 from scripts.checks import native_abi
 
@@ -115,6 +115,71 @@ _mtest_exec_process_close:
                 "missing required flag -fstack-protector-strong",
             ):
                 native_abi.main(strict_flags_file=inventory)
+
+    def test_stack_canary_has_four_way_strong_flag_control(self) -> None:
+        cc = native_abi.compiler()
+        profiles = load_profiles()
+        linux = host_profile(
+            system="Linux",
+            machine="x86_64",
+            profiles=profiles,
+        )
+        darwin = host_profile(
+            system="Darwin",
+            machine="arm64",
+            profiles=profiles,
+        )
+
+        def assembly(
+            profile: ProductionProfile,
+            *,
+            strong: bool,
+            target: str | None = None,
+        ) -> str:
+            flags = (
+                native_abi.STRICT_FLAGS
+                if strong
+                else tuple(
+                    flag
+                    for flag in native_abi.STRICT_FLAGS
+                    if flag != "-fstack-protector-strong"
+                )
+            )
+            command = [cc]
+            if target is not None:
+                command.append(f"--target={target}")
+            command.extend(
+                [
+                    *flags,
+                    *profile.c_flags,
+                    "-S",
+                    str(native_abi.CANARY_SOURCE),
+                    "-o",
+                    "-",
+                ]
+            )
+            compiled = native_abi.run(command)
+            self.assertEqual(compiled.returncode, 0, compiled.stdout)
+            return compiled.stdout
+
+        linux_positive = assembly(linux, strong=True)
+        linux_negative = assembly(linux, strong=False)
+        self.assertIn("__stack_chk_fail", linux_positive)
+        self.assertNotIn("__stack_chk_fail", linux_negative)
+
+        self.assertIsNotNone(darwin.mojo_triple)
+        darwin_positive = assembly(
+            darwin,
+            strong=True,
+            target=darwin.mojo_triple,
+        )
+        darwin_negative = assembly(
+            darwin,
+            strong=False,
+            target=darwin.mojo_triple,
+        )
+        self.assertIn("___stack_chk_fail", darwin_positive)
+        self.assertNotIn("___stack_chk_fail", darwin_negative)
 
     def test_production_shell_ignores_ambient_compiler_flags(self) -> None:
         profile = host_profile(
