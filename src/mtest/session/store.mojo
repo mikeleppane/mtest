@@ -4462,9 +4462,10 @@ comptime PRECOMPILE_SUBDIR = "precompile"
 """The stamp directory, inside `STORE_DIR`.
 
 A sibling of the generations rather than a name among them: a generation is a
-DIRECTORY holding `bin` and `meta`, a stamp is a single file, and `_reap_siblings`
-walks `STORE_DIR` deleting by mangled-name prefix. Keeping the two namespaces
-apart means neither reaper can ever reach the other's records.
+DIRECTORY holding `bin`, `meta`, and `seq`, a stamp is a single file, and
+`_reap_siblings` walks `STORE_DIR` ranking and deleting by mangled-name prefix.
+Keeping the two namespaces apart means neither reaper can ever reach the
+other's records.
 """
 
 
