@@ -509,6 +509,7 @@ Scope vocabulary (authoritative; keep in sync as modules emerge):
 | `cache` | in-session build/collection reuse |
 | `test` | test infrastructure (`scripts/harness/{selfhost,dogfood}.py`, `scripts/build/mojo_package.sh`, shared helpers) |
 | `e2e` | end-to-end harness (`scripts/e2e/`) and its `e2e/` manifest and scenarios |
+| `qa` | the contract gate (`scripts/qa/`) and its own tests |
 | `bench` | `benchmarks/` |
 | `docs` | docstrings, `docs/` |
 | `build` | packaging |
