@@ -454,7 +454,8 @@ anything else here.
   the compiler is the hostile case, not the developer mistake.
 
 - **The toolchain outside its library directory.** The compiler binary is keyed
-  by content, and so is every regular file in `<compiler dir>/../lib/mojo`.
+  by content, and so is every regular file in `<resolved compiler
+  dir>/../lib/mojo`.
   The linker binary beside the compiler, the shared objects it loads at run
   time, and the clang resource directory are not. An ordinary toolchain change
   moves the compiler binary too and so moves the key; a surgical replacement of
