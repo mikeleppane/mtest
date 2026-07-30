@@ -228,9 +228,9 @@ def test_resolve_without_environment_path_is_fail_closed() raises:
     # The stub (and its `chmod` child) is built while PATH is still intact.
     var stub = executable_stub(root, "b/tool")
     var saved = getenv("PATH", "")
-    var bare = Optional[String](None)
-    var slashed = Optional[String](None)
-    var injected = Optional[String](None)
+    var bare: Optional[String]
+    var slashed: Optional[String]
+    var injected: Optional[String]
     try:
         _ = unsetenv("PATH")
         bare = resolve_executable("tool")

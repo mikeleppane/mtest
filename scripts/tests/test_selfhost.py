@@ -469,6 +469,7 @@ class CommandTests(unittest.TestCase):
                 "build",
                 "-I",
                 "tests/support",
+                "--build-arg=--Werror",
                 "--build-arg=--no-optimization",
                 "--build-arg=-Xlinker",
                 "--build-arg=/tmp/native.o",

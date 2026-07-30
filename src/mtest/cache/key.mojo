@@ -378,13 +378,17 @@ def _is_known_bare_flag(token: String) -> Bool:
         token: One argv element.
 
     Returns:
-        True for `--no-optimization` or `-O0`..`-O3`.
+        True for known warning and optimization switches. Their exact spelling
+        remains included in the digest.
     """
-    if token == "--no-optimization":
-        return True
-    if token == "-O0" or token == "-O1" or token == "-O2" or token == "-O3":
-        return True
-    return False
+    return (
+        token == "--Werror"
+        or token == "--no-optimization"
+        or token == "-O0"
+        or token == "-O1"
+        or token == "-O2"
+        or token == "-O3"
+    )
 
 
 def classify_build_args(args: List[String]) -> List[ArgClass]:

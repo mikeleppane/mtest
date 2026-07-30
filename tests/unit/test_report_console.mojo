@@ -1337,30 +1337,27 @@ def _attribution(
     line in the place a real run puts it: after the file's CRASH verdict, which
     the attribution never touches.
     """
-    try:
-        var c = _console()
-        c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
-        c.handle(Event.file_started("tests/test_boom.mojo"))
-        c.handle(
-            Event.file_finished(
-                "tests/test_boom.mojo",
-                Outcome.CRASH,
-                0.3,
-                _argv("tests/test_boom.mojo"),
-                1.0,
-                List[UInt8](),
-                List[UInt8](),
-                signal_number=11,
-            )
+    var c = _console()
+    c.handle(Event.session_started("tests", "mojo 1.0.0b2", 1, 0))
+    c.handle(Event.file_started("tests/test_boom.mojo"))
+    c.handle(
+        Event.file_finished(
+            "tests/test_boom.mojo",
+            Outcome.CRASH,
+            0.3,
+            _argv("tests/test_boom.mojo"),
+            1.0,
+            List[UInt8](),
+            List[UInt8](),
+            signal_number=11,
         )
-        c.handle(
-            Event.crash_attribution(
-                "tests/test_boom.mojo", disposition, culprit, reruns, seconds
-            )
+    )
+    c.handle(
+        Event.crash_attribution(
+            "tests/test_boom.mojo", disposition, culprit, reruns, seconds
         )
-        return c.output()
-    except:
-        return String("")
+    )
+    return c.output()
 
 
 def test_attribution_attributed_names_the_culprit_reruns_and_elapsed() raises:
