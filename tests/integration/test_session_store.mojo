@@ -2624,6 +2624,172 @@ def test_precompile_publish_reaps_the_steps_stale_stamps() raises:
     assert_equal(stamps[0], second.gen_name)
 
 
+def _stamp_exists(root: String, key: FileKey) raises -> Bool:
+    """Whether the step's stamp was written at all.
+
+    The sharper question than `precompile_probe`, which also answers False for
+    a stamp that exists and disagrees — a step that was never stamped and one
+    stamped against the wrong output are different outcomes.
+
+    Args:
+        root: The invocation root.
+        key: The step's key.
+
+    Returns:
+        True if a stamp file sits at this key's stamp path.
+    """
+    return exists(root + "/" + precompile_stamp_rel(key.gen_name))
+
+
+def test_a_stamp_is_withheld_when_a_step_source_churned() raises:
+    """A restored single-file source must not stamp the step as clean.
+
+    The stamp records the pre-build key and digests only the OUTPUT, so an
+    input edited while the step ran and restored afterwards matched the stamp
+    forever — and every dependent binary compiled against the stale package,
+    on every later session, with nothing to notice it.
+    """
+    var root = temp_root()
+    write_file(root, "lib/helper.mojo", "# one\n")
+    var out_path = String("build/helper.mojopkg")
+    write_bytes(root, out_path, [UInt8(1)])
+    var no_dirs = List[String]()
+    var ctx = CacheContext()
+    var key = _step_key(
+        ctx, root, "lib/helper.mojo", no_dirs, no_dirs, out_path
+    )
+    var source = root + "/lib/helper.mojo"
+    _mutate_until_witnessed(source, "# other\n")
+    _mutate_until_witnessed(source, "# one\n")
+
+    precompile_publish(root, key, out_path)
+    assert_false(
+        _stamp_exists(root, key),
+        "a step whose source churned was stamped as clean",
+    )
+    assert_false(precompile_probe(root, key, out_path))
+
+
+def test_a_stamp_is_withheld_when_a_dir_source_file_churned() raises:
+    """Same, for a file inside a directory-shaped step source."""
+    var root = _pkg_root()
+    var out_path = String("build/pkg.mojopkg")
+    write_bytes(root, out_path, [UInt8(1)])
+    var no_dirs = List[String]()
+    var ctx = CacheContext()
+    var key = _step_key(ctx, root, "pkg", no_dirs, no_dirs, out_path)
+    var inner = root + "/pkg/__init__.mojo"
+    var original = String("def helper() -> Int:\n    return 1\n")
+    _mutate_until_witnessed(inner, "def helper() -> Int:\n    return 9\n")
+    _mutate_until_witnessed(inner, original)
+
+    precompile_publish(root, key, out_path)
+    assert_false(
+        _stamp_exists(root, key),
+        "a step whose package source churned was stamped as clean",
+    )
+
+
+def test_a_stamp_is_withheld_when_an_include_file_churned() raises:
+    """Same, for a file under one of the step's include roots."""
+    var root = _pkg_root()
+    write_file(root, "inc/lib.mojo", "# lib\n")
+    var out_path = String("build/pkg.mojopkg")
+    write_bytes(root, out_path, [UInt8(1)])
+    var no_dirs = List[String]()
+    var includes: List[String] = ["inc"]
+    var ctx = CacheContext()
+    var key = _step_key(ctx, root, "pkg", includes, no_dirs, out_path)
+    var included = root + "/inc/lib.mojo"
+    _mutate_until_witnessed(included, "# other\n")
+    _mutate_until_witnessed(included, "# lib\n")
+
+    precompile_publish(root, key, out_path)
+    assert_false(
+        _stamp_exists(root, key),
+        "a step whose include root churned was stamped as clean",
+    )
+
+
+def test_a_stamp_is_withheld_when_a_prior_output_churned() raises:
+    """Same, for an earlier step's output this step consumes.
+
+    An earlier step's package is on this step's include path, so it is an
+    input of this step however it was produced.
+    """
+    var root = _pkg_root()
+    var out_path = String("build/pkg.mojopkg")
+    write_bytes(root, out_path, [UInt8(1)])
+    write_file(root, "build/earlier.mojopkg", "# earlier\n")
+    var no_dirs = List[String]()
+    var priors: List[String] = ["build/earlier.mojopkg"]
+    var ctx = CacheContext()
+    var key = _step_key(ctx, root, "pkg", no_dirs, priors, out_path)
+    var earlier = root + "/build/earlier.mojopkg"
+    _mutate_until_witnessed(earlier, "# other\n")
+    _mutate_until_witnessed(earlier, "# earlier\n")
+
+    precompile_publish(root, key, out_path)
+    assert_false(
+        _stamp_exists(root, key),
+        "a step whose prior output churned was stamped as clean",
+    )
+
+
+def test_a_stamp_is_written_for_an_untouched_step() raises:
+    """The no-op control: capture alone must not break stamping.
+
+    All four input classes are present and none of them moves, so a capture
+    that cannot reproduce itself would leave every configured step permanently
+    unstamped and recompiling — the failure mode that costs the most and
+    announces itself the least.
+    """
+    var root = _pkg_root()
+    write_file(root, "inc/lib.mojo", "# lib\n")
+    write_file(root, "build/earlier.mojopkg", "# earlier\n")
+    var out_path = String("build/pkg.mojopkg")
+    write_bytes(root, out_path, [UInt8(1)])
+    var includes: List[String] = ["inc"]
+    var priors: List[String] = ["build/earlier.mojopkg"]
+    var ctx = CacheContext()
+    var key = _step_key(ctx, root, "pkg", includes, priors, out_path)
+
+    precompile_publish(root, key, out_path)
+    assert_true(_stamp_exists(root, key), "an untouched step was not stamped")
+    assert_true(precompile_probe(root, key, out_path))
+
+
+def test_a_stamp_is_written_when_a_step_writes_into_its_include_root() raises:
+    """A step's own output lands in a directory its own walks cover.
+
+    That is the ordinary shape — `-I build` with a step that produces
+    `build/*.mojopkg`, and every step after the first is given the previous
+    step's output directory. The step therefore changes that directory's
+    membership while it runs, by design, so the directory cannot be held to a
+    membership claim: doing so would leave every such step unstamped and
+    recompiling on every run, forever and silently. Its FILES are still held to
+    theirs, which is where an actual input would show up.
+    """
+    var root = _pkg_root()
+    var out_path = String("build/pkg.mojopkg")
+    var includes: List[String] = ["build"]
+    var no_dirs = List[String]()
+    # An earlier step's package, already in the include root the walk frames.
+    write_file(root, "build/earlier.mojopkg", "# earlier\n")
+    var ctx = CacheContext()
+    var key = _step_key(ctx, root, "pkg", includes, no_dirs, out_path)
+
+    # The step runs and creates its output inside that include root, which is
+    # what moves the directory's times.
+    write_bytes(root, out_path, [UInt8(1)])
+    precompile_publish(root, key, out_path)
+    assert_true(
+        _stamp_exists(root, key),
+        "a step that wrote its output into its own include root was refused",
+    )
+    assert_true(precompile_probe(root, key, out_path))
+
+
 # --- Configured precompile steps: the invocation oracle ----------------------
 
 comptime _COUNTING_MOJO = "/scripts/fixtures/toolchain/counting_mojo.py"

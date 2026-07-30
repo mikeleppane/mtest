@@ -903,6 +903,28 @@ def _witness_label(label_root: String, rel: String) -> String:
     return String(rel) if label_root == "" else label_root + "/" + rel
 
 
+def _witnessable_dir(abs_dir: String, exclude_abs: String) -> Bool:
+    """Whether a walked directory's own times can stand for its membership.
+
+    A walk is given a path to exclude when that path is something the build
+    PRODUCES rather than reads — a precompile step's output — and the step
+    writes it into a directory the same walk covers. That directory's
+    membership therefore changes while the step runs, by design, and recording
+    its times would withhold every stamp the ordinary `-I build` shape can
+    earn. Its FILES are still recorded, so an input inside it is still covered;
+    only the membership claim is dropped, and only for the one directory the
+    output lands in.
+
+    Args:
+        abs_dir: The directory about to be recorded, absolute.
+        exclude_abs: The walk's excluded path, absolute, or empty for none.
+
+    Returns:
+        False only for the directory the excluded path sits directly inside.
+    """
+    return exclude_abs == "" or dirname(exclude_abs) != abs_dir
+
+
 def _append_witnesses(mut dst: List[_StatWitness], src: List[_StatWitness]):
     """Copy every record of `src` onto the end of `dst`.
 
@@ -998,15 +1020,16 @@ def _walk_into(
             # would leave those times already settled — so the capture has to
             # precede the read it covers, even at the price of one stat on a
             # directory that is then skipped.
-            var dir_record: Optional[_StatWitness]
-            try:
-                dir_record = Optional(
-                    _witness_of(full, _witness_label(label_root, rel), True)
-                )
-            except:
-                return WalkOutcome.failure(
-                    "cannot read the directory '" + rel + "'"
-                )
+            var dir_record: Optional[_StatWitness] = None
+            if _witnessable_dir(full, exclude_abs):
+                try:
+                    dir_record = Optional(
+                        _witness_of(full, _witness_label(label_root, rel), True)
+                    )
+                except:
+                    return WalkOutcome.failure(
+                        "cannot read the directory '" + rel + "'"
+                    )
             var listing = _list_sorted(full)
             if not listing:
                 return WalkOutcome.failure(
@@ -1032,7 +1055,8 @@ def _walk_into(
                     + "' is reached through a directory symlink, which the"
                     " cache cannot walk safely"
                 )
-            witnesses.append(dir_record.value().copy())
+            if dir_record:
+                witnesses.append(dir_record.value().copy())
             var inner = _walk_into(
                 full,
                 rel,
@@ -1181,16 +1205,19 @@ def _walk_include_root_scanned(
         Exactly what `walk_include_root` returns. Never raises.
     """
     var abs_dir = _absolute(root, dir)
+    var exclude_abs = String("") if exclude == "" else _absolute(root, exclude)
     # The walk root's own record, taken before its listing for the reason every
     # directory record is taken before one.
-    try:
-        witnesses.append(_witness_of(abs_dir, dir, True))
-    except:
-        return WalkOutcome.failure("'" + dir + "' is not a readable directory")
+    if _witnessable_dir(abs_dir, exclude_abs):
+        try:
+            witnesses.append(_witness_of(abs_dir, dir, True))
+        except:
+            return WalkOutcome.failure(
+                "'" + dir + "' is not a readable directory"
+            )
     var listing = _list_sorted(abs_dir)
     if not listing:
         return WalkOutcome.failure("'" + dir + "' is not a readable directory")
-    var exclude_abs = String("") if exclude == "" else _absolute(root, exclude)
     var label_root = String("") if dir == "." else String(dir)
     return _walk_into(
         abs_dir,
@@ -4039,6 +4066,7 @@ def _feed_prior_outputs(
     src: String,
     prior_outputs: List[String],
     mut kb: KeyBuilder,
+    mut witnesses: List[_StatWitness],
 ) -> Bool:
     """Frame every earlier step's promoted output, in step order.
 
@@ -4049,6 +4077,8 @@ def _feed_prior_outputs(
         prior_outputs: The earlier steps' output paths, in the order the steps
             were configured.
         kb: The builder to feed.
+        witnesses: Grown with one record per prior output, taken before its
+            read; see `_StatWitness`.
 
     Returns:
         True once every prior output is framed; False when one could not be
@@ -4056,9 +4086,11 @@ def _feed_prior_outputs(
     """
     for entry in prior_outputs:
         var prior = String(entry)
+        var prior_abs = _absolute(root, prior)
         var data: List[UInt8]
         try:
-            data = read_regular_file_bytes(_absolute(root, prior), _BIN_CAP)
+            _witness_entry(prior_abs, prior, witnesses)
+            data = read_regular_file_bytes(prior_abs, _BIN_CAP)
         except:
             # An earlier step's package is on this step's include path, so a
             # package that cannot be read is an input this key cannot cover.
@@ -4153,6 +4185,8 @@ def precompile_key(
     if not ctx.enabled:
         return None
     var kb = ctx.base.copy()
+    var witnesses = List[_StatWitness]()
+    var scan = _SourceDirScan.inert()
     kb.feed_str(TAG_PRECOMPILE_STEP, src)
     kb.feed_str(TAG_PRECOMPILE_OUT, out_path)
 
@@ -4162,16 +4196,23 @@ def precompile_key(
     # on that directory would make visible.
     var src_sha = String("")
     if isdir(_absolute(root, src)):
-        var walked = walk_include_root(root, src, kb, out_path)
+        var walked = _walk_include_root_scanned(
+            root, src, kb, out_path, scan, witnesses
+        )
         if not walked.ok:
             # The walk's own words: a symlinked package and an unreadable file
             # are different things for the user to fix.
             ctx.disable("precompile step '" + src + "': " + walked.reason)
             return None
     else:
+        var src_abs = _absolute(root, src)
         var data: List[UInt8]
         try:
-            data = read_regular_file_bytes(_absolute(root, src), _WALK_FILE_CAP)
+            # Before the read, as everywhere: the walk of the file's own
+            # directory below records it a second time, but that walk runs after
+            # this read and so cannot vouch for the bytes this read took.
+            _witness_entry(src_abs, src, witnesses)
+            data = read_regular_file_bytes(src_abs, _WALK_FILE_CAP)
         except:
             ctx.disable(
                 "precompile step '"
@@ -4196,7 +4237,9 @@ def precompile_key(
         # `out_path` is excluded for the reason every walk here excludes it.
         var src_dir = _source_dir(src)
         kb.feed_str(TAG_PRECOMPILE_SRC_DIR, src_dir)
-        var beside = walk_include_root(root, src_dir, kb, out_path)
+        var beside = _walk_include_root_scanned(
+            root, src_dir, kb, out_path, scan, witnesses
+        )
         if not beside.ok:
             ctx.disable("precompile step '" + src + "': " + beside.reason)
             return None
@@ -4233,7 +4276,9 @@ def precompile_key(
         if not present:
             kb.feed_str(TAG_PRECOMPILE_INCLUDE_ABSENT, dir)
             continue
-        var walked = walk_include_root(root, dir, kb, out_path)
+        var walked = _walk_include_root_scanned(
+            root, dir, kb, out_path, scan, witnesses
+        )
         if not walked.ok:
             ctx.disable(
                 "precompile step '"
@@ -4246,10 +4291,9 @@ def precompile_key(
             return None
 
     # --- Every earlier step's output. ---------------------------------------
-    if not _feed_prior_outputs(ctx, root, src, prior_outputs, kb):
+    if not _feed_prior_outputs(ctx, root, src, prior_outputs, kb, witnesses):
         return None
 
-    var witnesses = List[_StatWitness]()
     # Two finalizations of one state: `digest32` is a true prefix of
     # `digest_full`, so the fork reads one digest at two lengths.
     var forked = kb.copy()
@@ -4260,9 +4304,10 @@ def precompile_key(
     # `gen_dir` carries the STAMP's path rather than a generation directory, and
     # `src_sha` is empty for a directory source: neither field is read by the
     # stamp protocol, which never stages, never renames a build, and has no
-    # publication guard to re-digest a source for. The directory fields are
-    # inert for the same reason. `FileKey` is reused for the digests and the
-    # name; the fields it carries for the generation protocol are unused here.
+    # source to re-digest. The directory fields are inert for the same reason.
+    # `input_witnesses` is NOT: `precompile_publish` re-checks it before
+    # stamping, because a step's inputs move in the same window a test file's
+    # do and a stamp outlives the session that wrote it.
     return Optional(
         FileKey(
             digest32^,
@@ -4415,13 +4460,22 @@ def precompile_publish(root: String, key: FileKey, out_path: String):
     the old stamp or the new one and never a half-written record — the same
     discipline the deletion-authorization marker and every generation use.
 
+    Nothing is recorded when one of the step's inputs moved while the step ran.
+    A stamp records the pre-build key and digests only the OUTPUT, so an input
+    edited during the step and restored afterwards would match that stamp
+    forever and every dependent binary would be compiled against the stale
+    package. The identity and change times captured when the step was keyed are
+    re-checked here first, and a moved — or no longer stattable — input leaves
+    the step unstamped, so the next session runs it again.
+
     Superseded stamps for this same source are reaped first, so an editing loop
     leaves one stamp per step rather than one per edit.
 
     Best-effort throughout, and deliberately: a stamp that cannot be written
     costs one recompile on the next run, while failing a session over it would
     be exactly the "cache condition fails an otherwise green run" the design
-    forbids. Never raises.
+    forbids. A withheld stamp is silent for the same reason — there is nothing
+    for a user to act on in a step that will simply run again. Never raises.
 
     Args:
         root: The invocation root.
@@ -4450,6 +4504,20 @@ def precompile_publish(root: String, key: FileKey, out_path: String):
         # The step reported success but its package cannot be read back. There
         # is nothing honest to record, and the next run rebuilds.
         return
+    for i in range(len(key.input_witnesses)):
+        var before = key.input_witnesses[i].copy()
+        var moved: Bool
+        try:
+            moved = _witness_moved(
+                before, _witness_of(before.path, before.label, before.follow)
+            )
+        except:
+            moved = True
+        if moved:
+            # The step's output may well be correct; what cannot be claimed is
+            # that it was produced from the inputs this key names. Nothing
+            # honest to record, and the next run re-runs the step.
+            return
     _reap_stamps(root, key)
     # `build_seconds` and `argv` are the generation record's fields, not this
     # one's: a stamp gates a SKIP, and nothing reports or reproduces a step that
