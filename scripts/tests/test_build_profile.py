@@ -14,6 +14,9 @@ from scripts.checks.build_profile import (
 
 
 LLVM_SAMPLE = (
+    "define void @main() #0 {\n"
+    "  ret void\n"
+    "}\n"
     'attributes #0 = { nounwind "target-cpu"="x86-64" '
     '"target-features"="+cmov,+cx8,+fxsr,+mmx,+sse,+sse2,+x87" }\n'
 )
@@ -36,14 +39,23 @@ class LlvmTargetAttributeParserTests(unittest.TestCase):
         )
 
     def test_returns_every_attribute_group_in_order(self) -> None:
-        sample = LLVM_SAMPLE + LLVM_SAMPLE.replace("#0", "#1").replace(
-            '"x86-64"', '"apple-m1"'
+        sample = (
+            "define void @first() #0 {\n"
+            "  ret void\n"
+            "}\n"
+            "define void @second() #1 {\n"
+            "  ret void\n"
+            "}\n"
+            'attributes #0 = { "target-cpu"="x86-64" '
+            '"target-features"="+sse2" }\n'
+            'attributes #1 = { "target-cpu"="apple-m1" '
+            '"target-features"="+neon" }\n'
         )
         self.assertEqual(
             parse_llvm_target_attributes(sample),
             (
-                ("x86-64", "+cmov,+cx8,+fxsr,+mmx,+sse,+sse2,+x87"),
-                ("apple-m1", "+cmov,+cx8,+fxsr,+mmx,+sse,+sse2,+x87"),
+                ("x86-64", "+sse2"),
+                ("apple-m1", "+neon"),
             ),
         )
 
@@ -51,22 +63,139 @@ class LlvmTargetAttributeParserTests(unittest.TestCase):
         for label, sample in (
             (
                 "cpu",
-                'attributes #0 = { nounwind "target-features"="+sse2" }\n',
+                (
+                    "define void @main() #0 {\n"
+                    "  ret void\n"
+                    "}\n"
+                    'attributes #0 = { nounwind "target-features"="+sse2" }\n'
+                ),
             ),
             (
                 "features",
-                'attributes #0 = { nounwind "target-cpu"="x86-64" }\n',
+                (
+                    "define void @main() #0 {\n"
+                    "  ret void\n"
+                    "}\n"
+                    'attributes #0 = { nounwind "target-cpu"="x86-64" }\n'
+                ),
             ),
-            ("attribute group", "define void @main() {\n  ret void\n}\n"),
         ):
             with self.subTest(missing=label), self.assertRaises(BuildProfileError):
                 parse_llvm_target_attributes(sample)
 
+    def test_definition_referencing_attribute_less_group_is_rejected(self) -> None:
+        sample = (
+            "define void @main() #0 {\n  ret void\n}\nattributes #0 = { nounwind }\n"
+        )
+        with self.assertRaisesRegex(
+            BuildProfileError, "references attribute group without target attributes"
+        ):
+            parse_llvm_target_attributes(sample)
+
+    def test_definition_without_attribute_group_is_rejected(self) -> None:
+        sample = (
+            "define void @main() {\n"
+            "  ret void\n"
+            "}\n"
+            'attributes #0 = { "target-cpu"="x86-64" '
+            '"target-features"="+sse2" }\n'
+        )
+        with self.assertRaisesRegex(
+            BuildProfileError, "must reference exactly one attribute group"
+        ):
+            parse_llvm_target_attributes(sample)
+
+    def test_output_without_a_function_definition_is_rejected(self) -> None:
+        sample = 'attributes #0 = { "target-cpu"="x86-64" "target-features"="+sse2" }\n'
+        with self.assertRaisesRegex(
+            BuildProfileError, "LLVM output contains no function definition"
+        ):
+            parse_llvm_target_attributes(sample)
+
+    def test_definition_referencing_missing_group_is_rejected(self) -> None:
+        sample = (
+            "define void @main() #7 {\n"
+            "  ret void\n"
+            "}\n"
+            'attributes #0 = { "target-cpu"="x86-64" '
+            '"target-features"="+sse2" }\n'
+        )
+        with self.assertRaisesRegex(
+            BuildProfileError, "references missing attribute group #7"
+        ):
+            parse_llvm_target_attributes(sample)
+
+    def test_definition_with_multiple_group_references_is_rejected(self) -> None:
+        sample = (
+            "define void @main() #0 #1 {\n"
+            "  ret void\n"
+            "}\n"
+            'attributes #0 = { "target-cpu"="x86-64" '
+            '"target-features"="+sse2" }\n'
+            'attributes #1 = { "target-cpu"="x86-64" '
+            '"target-features"="+sse2" }\n'
+        )
+        with self.assertRaisesRegex(
+            BuildProfileError, "must reference exactly one attribute group"
+        ):
+            parse_llvm_target_attributes(sample)
+
+    def test_definition_with_malformed_group_reference_is_rejected(self) -> None:
+        sample = (
+            "define void @main() #invalid {\n"
+            "  ret void\n"
+            "}\n"
+            'attributes #0 = { "target-cpu"="x86-64" '
+            '"target-features"="+sse2" }\n'
+        )
+        with self.assertRaisesRegex(
+            BuildProfileError, "must reference exactly one attribute group"
+        ):
+            parse_llvm_target_attributes(sample)
+
+    def test_duplicate_attribute_group_is_rejected(self) -> None:
+        sample = (
+            "define void @main() #0 {\n"
+            "  ret void\n"
+            "}\n"
+            'attributes #0 = { "target-cpu"="x86-64" '
+            '"target-features"="+sse2" }\n'
+            'attributes #0 = { "target-cpu"="x86-64" '
+            '"target-features"="+sse2" }\n'
+        )
+        with self.assertRaisesRegex(
+            BuildProfileError, "duplicate LLVM attribute group"
+        ):
+            parse_llvm_target_attributes(sample)
+
+    def test_declaration_does_not_require_an_attribute_group(self) -> None:
+        sample = (
+            "declare void @external() #1\n"
+            + LLVM_SAMPLE
+            + "attributes #1 = { nounwind }\n"
+        )
+        self.assertEqual(
+            parse_llvm_target_attributes(sample),
+            (("x86-64", "+cmov,+cx8,+fxsr,+mmx,+sse,+sse2,+x87"),),
+        )
+
     def test_malformed_target_attribute_is_rejected(self) -> None:
         malformed = (
+            "define void @main() #0 {\n"
+            "  ret void\n"
+            "}\n"
             'attributes #0 = { "target-cpu"="x86-64" "target-features"=+sse2 }\n'
         )
         with self.assertRaises(BuildProfileError):
+            parse_llvm_target_attributes(malformed)
+
+    def test_malformed_attribute_group_is_rejected(self) -> None:
+        malformed = (
+            "define void @main() #0 {\n  ret void\n}\nattributes #0 = nounwind\n"
+        )
+        with self.assertRaisesRegex(
+            BuildProfileError, "malformed LLVM attribute group"
+        ):
             parse_llvm_target_attributes(malformed)
 
 

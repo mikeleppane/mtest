@@ -33,7 +33,12 @@ EXPECTED_TARGETS = {
     ),
 }
 
-_LLVM_ATTRIBUTE_GROUP = re.compile(r"^attributes #\d+ = \{(?P<body>.*)\}\s*$")
+_LLVM_ATTRIBUTE_GROUP = re.compile(
+    r"^attributes #(?P<number>\d+) = \{(?P<body>.*)\}\s*$"
+)
+_LLVM_DEFINITION = re.compile(r"^[ \t]*define(?:[ \t]|$)")
+_LLVM_DEFINITION_END = re.compile(r"\{\s*(?:;.*)?$")
+_LLVM_GROUP_REFERENCE = re.compile(r"(?<!\S)#(\d+)(?=\s|$)")
 _LLVM_CPU = re.compile(r'"target-cpu"="([^"]+)"')
 _LLVM_FEATURES = re.compile(r'"target-features"="([^"]+)"')
 _ELF_SECTION = re.compile(r"^\s*\[\s*\d+\]\s+(\.\S+)")
@@ -47,7 +52,7 @@ class BuildProfileError(RuntimeError):
 
 
 def parse_llvm_target_attributes(text: str) -> tuple[tuple[str, str], ...]:
-    """Return every complete LLVM target CPU/features attribute pair.
+    """Return target pairs after validating every function definition.
 
     Args:
         text: LLVM IR emitted by the pinned Mojo compiler.
@@ -56,24 +61,81 @@ def parse_llvm_target_attributes(text: str) -> tuple[tuple[str, str], ...]:
         Target pairs in attribute-group order.
 
     Raises:
-        BuildProfileError: No target attributes exist, or a group is incomplete.
+        BuildProfileError: A group is malformed or duplicated, target attributes
+            are absent or incomplete, no function is defined, or a definition
+            does not reference exactly one existing target-bearing group.
     """
+    lines = text.splitlines()
+    groups: dict[int, tuple[str, str] | None] = {}
     targets: list[tuple[str, str]] = []
-    for line in text.splitlines():
-        if "target-cpu" not in line and "target-features" not in line:
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith("attributes "):
             continue
-        group = _LLVM_ATTRIBUTE_GROUP.fullmatch(line.strip())
+        group = _LLVM_ATTRIBUTE_GROUP.fullmatch(stripped)
         if group is None:
-            raise BuildProfileError(f"malformed LLVM target attribute group: {line!r}")
+            raise BuildProfileError(f"malformed LLVM attribute group: {line!r}")
+        number = int(group.group("number"))
+        if number in groups:
+            raise BuildProfileError(f"duplicate LLVM attribute group #{number}")
         body = group.group("body")
         cpus = _LLVM_CPU.findall(body)
         features = _LLVM_FEATURES.findall(body)
+        if not cpus and not features:
+            groups[number] = None
+            continue
         if len(cpus) != 1 or len(features) != 1:
             raise BuildProfileError(
                 "LLVM target attribute group must contain exactly one "
                 f"target-cpu and target-features pair: {line!r}"
             )
-        targets.append((cpus[0], features[0]))
+        pair = (cpus[0], features[0])
+        groups[number] = pair
+        targets.append(pair)
+
+    line_index = 0
+    definition_count = 0
+    while line_index < len(lines):
+        line = lines[line_index]
+        if _LLVM_DEFINITION.match(line) is None:
+            line_index += 1
+            continue
+        definition_count += 1
+        header_lines = [line.strip()]
+        while _LLVM_DEFINITION_END.search(header_lines[-1]) is None:
+            line_index += 1
+            if line_index >= len(lines):
+                raise BuildProfileError(
+                    f"malformed LLVM function definition: {' '.join(header_lines)!r}"
+                )
+            continuation = lines[line_index].strip()
+            if continuation.startswith(("attributes ", "declare ", "define ")):
+                raise BuildProfileError(
+                    f"malformed LLVM function definition: {' '.join(header_lines)!r}"
+                )
+            header_lines.append(continuation)
+        header = " ".join(header_lines)
+        references = _LLVM_GROUP_REFERENCE.findall(_LLVM_DEFINITION_END.sub("", header))
+        if len(references) != 1:
+            raise BuildProfileError(
+                "LLVM function definition must reference exactly one "
+                f"attribute group: {header!r}"
+            )
+        number = int(references[0])
+        if number not in groups:
+            raise BuildProfileError(
+                "LLVM function definition references missing attribute group "
+                f"#{number}: {header!r}"
+            )
+        if groups[number] is None:
+            raise BuildProfileError(
+                "LLVM function definition references attribute group without "
+                f"target attributes #{number}: {header!r}"
+            )
+        line_index += 1
+
+    if definition_count == 0:
+        raise BuildProfileError("LLVM output contains no function definition")
     if not targets:
         raise BuildProfileError("LLVM output contains no target attribute group")
     return tuple(targets)
