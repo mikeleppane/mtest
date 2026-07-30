@@ -1537,6 +1537,101 @@ def test_a_discard_is_skipped_when_the_sibling_was_republished() raises:
     assert_false(isdir(root + "/" + rival.gen_dir))
 
 
+def test_a_saturated_order_still_converges_to_the_retained_count() raises:
+    """A planted maximum record must not stop the store converging.
+
+    Once any generation of a source carries the largest value the format can
+    express, every later one saturates there too and the order collapses to a
+    comparison of names. Retention still has to end at the retained count: a
+    publication whose name happens to sort lowest would otherwise rank itself
+    out, refuse to delete itself, and leave the source one generation over the
+    target for good rather than transiently.
+    """
+    var root = temp_root()
+    var rel = String("tests/test_saturated.mojo")
+    var bodies: List[String] = ["# one\n", "# two\n", "# three\n"]
+    var keys = List[FileKey]()
+    for body in bodies:
+        keys.append(_fixture_key(root, rel, body))
+    # Rank the three deterministic names, so the scenario does not depend on
+    # which digest a given body happens to produce.
+    var hi = 0
+    var lo = 0
+    for i in range(1, len(keys)):
+        if keys[i].gen_name > keys[hi].gen_name:
+            hi = i
+        if keys[i].gen_name < keys[lo].gen_name:
+            lo = i
+    var mid = 3 - hi - lo
+    assert_not_equal(hi, lo)
+    assert_not_equal(mid, hi)
+    assert_not_equal(mid, lo)
+
+    _plant_generation(root, keys[hi].gen_dir, _SEQ_MAX)
+    # The lowest-named generation publishes LAST, which is the ordering that
+    # leaves it ranked below both saturated siblings. Each body is re-keyed
+    # immediately before its publication: the keys above have been overtaken by
+    # the writes that produced the later ones, and publishing against a key
+    # whose inputs have since moved is refused on purpose.
+    var publication_order: List[Int] = [mid, lo]
+    for idx in publication_order:
+        var key = _fixture_key(root, rel, bodies[idx])
+        assert_equal(
+            key.gen_name,
+            keys[idx].gen_name,
+            "the same bytes keyed to a different generation",
+        )
+        var target = _stage_binary(root, [UInt8(idx + 1)])
+        assert_equal(
+            store_publish(
+                root, key, target, 1.0, _build_argv(rel, target.out_rel)
+            ).kind,
+            PUB_OK,
+        )
+
+    var survivors = dir_listing(root + "/" + STORE_DIR)
+    assert_equal(
+        len(survivors),
+        _RETAIN_GENERATIONS,
+        "a saturated order left the source permanently over the target",
+    )
+    # The generation just published is one of them — the caller is running the
+    # binary inside it — and the planted maximum is the other.
+    assert_true(isdir(root + "/" + keys[lo].gen_dir))
+    assert_true(isdir(root + "/" + keys[hi].gen_dir))
+    assert_false(isdir(root + "/" + keys[mid].gen_dir))
+
+
+def test_a_ranked_out_generation_whose_inode_moved_is_spared() raises:
+    """The identity guard's inode half, on its own.
+
+    A directory replaced between the listing and the deletion can come back
+    carrying the same recency record, so the record half of the guard would
+    wave it through. Only the inode distinguishes the two, and testing the two
+    halves together cannot say whether both are wired.
+    """
+    var root = temp_root()
+    var rel = String("tests/test_inode_guard.mojo")
+    var mine = _fixture_key(root, rel, "# mine\n")
+    var rival = _fixture_key(root, rel, "# rival\n")
+    _plant_generation(root, rival.gen_dir, 4)
+    var seen = _sibling_generations(root, mine)
+    assert_equal(len(seen), 1)
+    assert_equal(seen[0].seq, 4)
+    # The record still describes what is on disk; only the inode is wrong. The
+    # directory is untouched, so nothing but the inode check can spare it.
+    var moved = _GenRecord(seen[0].name, seen[0].seq, seen[0].ino + 1)
+    _discard_ranked_out(root + "/" + STORE_DIR, moved)
+    assert_true(
+        isdir(root + "/" + rival.gen_dir),
+        "a generation whose inode no longer matches the listing was deleted",
+    )
+    # And the unmodified record still reaps, so the guard did not simply
+    # switch reaping off.
+    _discard_ranked_out(root + "/" + STORE_DIR, seen[0])
+    assert_false(isdir(root + "/" + rival.gen_dir))
+
+
 def test_publication_records_a_generations_place_in_the_order() raises:
     """Each publication ranks itself above every generation already visible.
 
