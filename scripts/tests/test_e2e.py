@@ -24,6 +24,7 @@ from unittest import mock
 
 from scripts.e2e import __main__ as e2e_main
 from scripts.e2e import main_open, runner
+from scripts.e2e.scenarios import selection
 from scripts.fixtures.toolchain import fake_retry_crash_mojo
 
 
@@ -103,6 +104,61 @@ def _recorded_signals() -> Iterator[list[tuple[str, int, int]]]:
 
 
 class E2EFaultTopologyTests(unittest.TestCase):
+    def test_stale_recovery_build_count_disables_persistent_cache(self) -> None:
+        calls: list[list[str]] = []
+
+        def run_mtest(
+            args: list[str],
+            *,
+            timeout: float | None = None,
+            env_overrides: dict[str, str] | None = None,
+        ) -> runner.Run:
+            del timeout
+            calls.append(args)
+            if env_overrides is None:
+                self.fail("scenario omitted the logging-wrapper environment")
+            log_path = env_overrides["MTEST_MOJO_LOG"]
+            build_count = 2 if "--no-cache" in args else 1
+            Path(log_path).write_text(
+                "".join(
+                    f"build\t{selection.CHAMELEON}\tmojo build\n"
+                    for _ in range(build_count)
+                ),
+                encoding="utf-8",
+            )
+            return runner.Run(
+                argv=["mtest", *args],
+                returncode=1,
+                stdout=f"MALFORMED-SUITE {selection.CHAMELEON}\n",
+                stderr="",
+                wall=0.0,
+            )
+
+        process_runner = mock.Mock(spec=runner.E2ERunner)
+        process_runner.run_mtest.side_effect = run_mtest
+        context = runner.ScenarioContext(
+            manifest={},
+            registry=(),
+            runner=process_runner,
+        )
+
+        detail = selection.s_stale_recovery_two_builds(context)
+
+        self.assertIn("2 builds logged", detail)
+        self.assertEqual(
+            calls,
+            [
+                [
+                    "--mojo",
+                    runner.LOGGING_MOJO,
+                    selection.CHAMELEON,
+                    "-k",
+                    "ghost",
+                    "--no-cache",
+                ]
+            ],
+        )
+
     def test_registry_names_are_unique_and_the_manifest_gate_runs_first(
         self,
     ) -> None:

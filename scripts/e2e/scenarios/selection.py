@@ -414,12 +414,14 @@ def s_stale_recovery_two_builds(context: ScenarioContext) -> str:
     The initial Phase-1 build, then the one recollect-once rebuild the recovery
     flow triggers when the suite refuses under `--only` a name it just listed
     under `--skip-all`. The run still ends MALFORMED-SUITE (exit-1 class) rather
-    than exit 3, because the recovery is a bounded retry.
+    than exit 3, because the recovery is a bounded retry. `--no-cache` keeps the
+    initial build observable through the logging wrapper even when an earlier
+    harness run populated the persistent artifact store.
     """
     log_path = _mojo_log_path()
     try:
         run = context.runner.run_mtest(
-            ["--mojo", LOGGING_MOJO, CHAMELEON, "-k", "ghost"],
+            ["--mojo", LOGGING_MOJO, CHAMELEON, "-k", "ghost", "--no-cache"],
             env_overrides={"MTEST_MOJO_LOG": log_path},
             timeout=SHORT_TIMEOUT,
         )
