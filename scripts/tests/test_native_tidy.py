@@ -59,8 +59,8 @@ class NativeTidyTests(unittest.TestCase):
             EXPECTED_TIDY_UNITS,
         )
 
-    def test_new_tracked_c_appears_as_a_testing_translation_unit(self) -> None:
-        new_source = ROOT / "tests" / "native" / "new_fault_driver.c"
+    def test_new_tracked_test_c_appears_as_a_testing_translation_unit(self) -> None:
+        new_source = ROOT / "tests" / "native" / "extra.c"
         sources = (
             ROOT / "native" / "mtest_exec_native.c",
             ROOT / "native" / "mtest_exec_native.h",
@@ -80,6 +80,42 @@ class NativeTidyTests(unittest.TestCase):
                 native_tidy.TranslationUnit(new_source, testing=True),
             ),
         )
+
+    def test_new_tracked_production_c_is_rejected_by_name(self) -> None:
+        extra = ROOT / "native" / "extra.c"
+        sources = (
+            ROOT / "native" / "mtest_exec_native.c",
+            extra,
+            ROOT / "tests" / "native" / "extra.c",
+        )
+        with (
+            mock.patch.object(
+                native_tidy,
+                "tracked_native_sources",
+                return_value=sources,
+            ),
+            self.assertRaisesRegex(
+                SystemExit,
+                r"production C units differ: .*unexpected=.*native/extra\.c",
+            ),
+        ):
+            native_tidy.translation_units()
+
+    def test_missing_production_c_is_rejected_by_name(self) -> None:
+        sources = (ROOT / "tests" / "native" / "extra.c",)
+        with (
+            mock.patch.object(
+                native_tidy,
+                "tracked_native_sources",
+                return_value=sources,
+            ),
+            self.assertRaisesRegex(
+                SystemExit,
+                r"production C units differ: .*missing=.*"
+                r"native/mtest_exec_native\.c",
+            ),
+        ):
+            native_tidy.translation_units()
 
     def test_root_config_owns_analyzer_only_selection(self) -> None:
         self.assertEqual(
@@ -119,6 +155,13 @@ class NativeTidyTests(unittest.TestCase):
             (
                 LINUX_DRIVER_OUTPUT.replace(
                     ' "-triple" "x86_64-conda-linux-gnu"',
+                    ' "-triple" "one" "-triple" "two"',
+                ),
+                "exactly one -triple",
+            ),
+            (
+                LINUX_DRIVER_OUTPUT.replace(
+                    ' "-triple" "x86_64-conda-linux-gnu"',
                     "",
                 ),
                 "one -triple",
@@ -141,6 +184,43 @@ class NativeTidyTests(unittest.TestCase):
         for output, message in cases:
             with (
                 self.subTest(message=message),
+                self.assertRaisesRegex(SystemExit, message),
+            ):
+                native_tidy.parse_compiler_context(output)
+
+    def test_compiler_context_rejects_malformed_field_occurrences(self) -> None:
+        prefix = (
+            '"clang" "-cc1" "-triple" "x86_64-conda-linux-gnu" "-resource-dir" "/r"'
+        )
+        cases = (
+            (
+                prefix + ' "-resource-dir"',
+                r"-resource-dir: found 2 occurrence\(s\); malformed",
+            ),
+            (
+                prefix + ' "-isysroot" "/s" "-isysroot"',
+                r"-isysroot: found 2 occurrence\(s\); malformed",
+            ),
+            (
+                '"clang" "-cc1" "-triple" "-resource-dir" "/r"',
+                r"-triple: found 1 occurrence\(s\); malformed.*option",
+            ),
+            (
+                '"clang" "-cc1" "-triple" "" "-resource-dir" "/r"',
+                r"-triple: found 1 occurrence\(s\); malformed.*empty",
+            ),
+            (
+                '"clang" "-cc1" "-triple" "target" "-resource-dir"',
+                r"-resource-dir: found 1 occurrence\(s\); malformed.*missing",
+            ),
+            (
+                prefix + ' "-isysroot"',
+                r"-isysroot: found 1 occurrence\(s\); malformed.*missing",
+            ),
+        )
+        for output, message in cases:
+            with (
+                self.subTest(output=output),
                 self.assertRaisesRegex(SystemExit, message),
             ):
                 native_tidy.parse_compiler_context(output)
@@ -329,19 +409,65 @@ class NativeTidyTests(unittest.TestCase):
         )
 
     def test_tool_version_mismatch_fails_closed(self) -> None:
-        pinned = subprocess.CompletedProcess(
-            ["tool", "--version"],
+        pinned_clang = subprocess.CompletedProcess(
+            ["clang", "--version"],
             0,
-            "LLVM version 18.1.8\n",
+            "clang version 18.1.8\n",
             "",
         )
-        wrong = subprocess.CompletedProcess(
-            ["tool", "--version"],
+        wrong_clang = subprocess.CompletedProcess(
+            ["clang", "--version"],
+            0,
+            "clang version 18.1.80\n",
+            "",
+        )
+        wrong_tidy = subprocess.CompletedProcess(
+            ["clang-tidy", "--version"],
             0,
             "LLVM version 18.1.80\n",
             "",
         )
-        for results in ((wrong,), (pinned, wrong)):
+        for results in ((wrong_clang,), (pinned_clang, wrong_tidy)):
+            with (
+                self.subTest(results=results),
+                mock.patch.object(native_tidy, "run", side_effect=results),
+                self.assertRaisesRegex(SystemExit, "expected .* 18.1.8"),
+            ):
+                native_tidy.require_toolchain("clang")
+
+    def test_versions_ignore_misleading_paths_and_secondary_text(self) -> None:
+        pinned_tidy = subprocess.CompletedProcess(
+            ["clang-tidy", "--version"],
+            0,
+            "LLVM version 18.1.8\n",
+            "",
+        )
+        cases = (
+            (
+                subprocess.CompletedProcess(
+                    ["clang", "--version"],
+                    0,
+                    "clang version 17.0.6\nInstalledDir: /opt/clang/18.1.8/bin\n",
+                    "",
+                ),
+                pinned_tidy,
+            ),
+            (
+                subprocess.CompletedProcess(
+                    ["clang", "--version"],
+                    0,
+                    "clang version 18.1.8\n",
+                    "",
+                ),
+                subprocess.CompletedProcess(
+                    ["clang-tidy", "--version"],
+                    0,
+                    "LLVM version 17.0.6\nResource: /opt/llvm/18.1.8/lib\n",
+                    "",
+                ),
+            ),
+        )
+        for results in cases:
             with (
                 self.subTest(results=results),
                 mock.patch.object(native_tidy, "run", side_effect=results),

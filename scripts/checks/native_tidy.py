@@ -23,7 +23,8 @@ if TYPE_CHECKING:
 
 ROOT = Path(__file__).resolve().parents[2]
 PINNED_VERSION = "18.1.8"
-_PINNED_VERSION_PATTERN = re.compile(r"(?<![0-9.])18\.1\.8(?![0-9.])")
+_CLANG_VERSION_LINE = re.compile(rf"clang version {re.escape(PINNED_VERSION)}(?:\s.*)?")
+_TIDY_VERSION_LINE = re.compile(rf"LLVM version {re.escape(PINNED_VERSION)}(?:\s.*)?")
 STRICT_FLAGS = native_abi_check.STRICT_FLAGS
 
 
@@ -58,20 +59,33 @@ def run(command: list[str]) -> subprocess.CompletedProcess[str]:
 def translation_units(root: Path = ROOT) -> tuple[TranslationUnit, ...]:
     """Return the production adapter and every tracked native C test unit."""
     sources = tracked_native_sources(root)
+    resolved_root = root.resolve()
+    c_sources = tuple(source for source in sources if source.suffix == ".c")
     production = tuple(
         source
-        for source in sources
-        if source.relative_to(root.resolve()).as_posix() == "native/mtest_exec_native.c"
+        for source in c_sources
+        if source.relative_to(resolved_root).parts[0] == "native"
     )
-    if len(production) != 1:
+    expected_production = (resolved_root / "native" / "mtest_exec_native.c",)
+    if production != expected_production:
+        missing = tuple(
+            path.relative_to(resolved_root).as_posix()
+            for path in expected_production
+            if path not in production
+        )
+        unexpected = tuple(
+            path.relative_to(resolved_root).as_posix()
+            for path in production
+            if path not in expected_production
+        )
         raise SystemExit(
-            "clang-tidy-check: expected exactly one tracked native/mtest_exec_native.c"
+            "clang-tidy-check: production C units differ: "
+            f"missing={list(missing)}, unexpected={list(unexpected)}"
         )
     tests = tuple(
         source
-        for source in sources
-        if source.relative_to(root.resolve()).as_posix().startswith("tests/native/")
-        and source.suffix == ".c"
+        for source in c_sources
+        if source.relative_to(resolved_root).parts[:2] == ("tests", "native")
     )
     if not tests:
         raise SystemExit("clang-tidy-check: native test unit inventory is empty")
@@ -87,10 +101,17 @@ def _diagnostic(completed: subprocess.CompletedProcess[str]) -> str:
 
 def require_toolchain(cc: str) -> None:
     """Fail unless Clang and Clang-Tidy both report the pinned version."""
-    for executable in (cc, "clang-tidy"):
+    tools = (
+        (cc, _CLANG_VERSION_LINE, True),
+        ("clang-tidy", _TIDY_VERSION_LINE, False),
+    )
+    for executable, pattern, first_line_only in tools:
         version = run([executable, "--version"])
         output = version.stdout + version.stderr
-        if version.returncode != 0 or _PINNED_VERSION_PATTERN.search(output) is None:
+        lines = tuple(line.strip() for line in output.splitlines() if line.strip())
+        candidates = lines[:1] if first_line_only else lines
+        canonical = any(pattern.fullmatch(line) is not None for line in candidates)
+        if version.returncode != 0 or not canonical:
             raise SystemExit(
                 f"clang-tidy-check: expected {executable} {PINNED_VERSION}, got:\n"
                 + output
@@ -103,18 +124,30 @@ def _single_value(
     *,
     optional: bool = False,
 ) -> str | None:
-    values = [
-        arguments[index + 1]
-        for index, argument in enumerate(arguments[:-1])
-        if argument == flag
-    ]
-    valid_count = len(values) <= 1 if optional else len(values) == 1
-    if not valid_count:
-        expected = f"at most one {flag}" if optional else f"one {flag}"
-        raise SystemExit(
-            f"clang-tidy-check: compiler context requires {expected}, "
-            f"found {len(values)}"
-        )
+    indexes = tuple(
+        index for index, argument in enumerate(arguments) if argument == flag
+    )
+    values: list[str] = []
+    malformed: list[str] = []
+    for index in indexes:
+        if index + 1 == len(arguments):
+            malformed.append(f"argv[{index}] is missing a value")
+            continue
+        value = arguments[index + 1]
+        if not value:
+            malformed.append(f"argv[{index}] value is empty")
+        elif value.startswith("-"):
+            malformed.append(f"argv[{index}] value is option {value!r}")
+        else:
+            values.append(value)
+
+    valid_count = len(indexes) <= 1 if optional else len(indexes) == 1
+    if not valid_count or malformed:
+        expected = f"at most one {flag}" if optional else f"exactly one {flag}"
+        message = f"clang-tidy-check: {flag}: found {len(indexes)} occurrence(s)"
+        if malformed:
+            message += "; malformed " + ", ".join(malformed)
+        raise SystemExit(message + f"; expected {expected}")
     return values[0] if values else None
 
 

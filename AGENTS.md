@@ -336,8 +336,9 @@ release/publication workflows keep their reviewed job permissions and forbid
 
 Hosted CI runs the same logical floor as two platform-local chains:
 
-- Linux: a static preflight — pure Python over the tree, plus `mojo format`
-  over it, and nothing that compiles — releases both the behavioral matrix
+- Linux: a static preflight — pure Python over the tree, plus Mojo and tracked
+  native C/header formatting over it, and nothing that compiles — releases both
+  the behavioral matrix
   (`test`, `assertions-check`, `e2e`, `cache-protocol-check`,
   `build-stamp-check`, strict contract, ASan, Valgrind) and, beside it, a
   `compiled oracles` job carrying every preflight member that needs a real
