@@ -840,7 +840,10 @@ def _witness_of(
 
 
 def _witness_entry(
-    path: String, label: String, mut witnesses: List[_StatWitness]
+    path: String,
+    label: String,
+    is_link: Bool,
+    mut witnesses: List[_StatWitness],
 ) raises:
     """Record an input's own identity, plus its target's when it is a link.
 
@@ -850,17 +853,116 @@ def _witness_entry(
     stable link leaves the link's own inode untouched, so the no-follow sample
     alone would agree.
 
+    Only the OUTER name and its final target are recorded. A chain of links
+    passing through intermediate names does not record those names, so an
+    intermediate one repointed and repointed back is not seen; that limit is
+    stated with the others in the contract.
+
     Args:
         path: The absolute path that was, or is about to be, read.
         label: The user-facing name for both records.
+        is_link: Whether `path` is itself a symlink. Passed in rather than
+            asked for, because every caller has already characterized the entry
+            and a second query would both cost a syscall and let the entry
+            change kind between the two.
         witnesses: The list both records are appended to.
 
     Raises:
         Error: If either stat fails.
     """
     witnesses.append(_witness_of(path, label, False))
-    if islink(path):
+    if is_link:
         witnesses.append(_witness_of(path, label, True))
+
+
+def _witness_dir(
+    path: String, label: String, mut witnesses: List[_StatWitness]
+) raises:
+    """Record a walked directory's membership, and its name when that is a link.
+
+    The membership record is followed, because what it stands for is the set of
+    entries the walk read and that set lives at the target. A walk root that IS
+    a link needs its own identity as well, for the reason any linked entry does:
+    the link can be repointed and repointed back around a compile while both
+    targets hold still.
+
+    Args:
+        path: The absolute directory, about to be listed.
+        label: The user-facing name for the records.
+        witnesses: The list the records are appended to.
+
+    Raises:
+        Error: If the directory cannot be stat'd.
+    """
+    witnesses.append(_witness_of(path, label, True))
+    if islink(path):
+        witnesses.append(_witness_of(path, label, False))
+
+
+def _first_moved_witness(records: List[_StatWitness]) -> String:
+    """The label of the first record that no longer matches the tree, if any.
+
+    Two passes, an entry's OWN identity before any followed record. Both
+    passes refuse, so the order decides only what the refusal is called — and
+    a no-follow record names a FILE the user can go and look at, while a
+    followed one may be a directory whose membership moved and can say no more
+    than "something in here". Naming `tests/helper.mojo` rather than `tests`
+    is the whole difference for whoever reads the warning.
+
+    A record that cannot be re-stat'd at all counts as moved: an input this
+    publication cannot characterize is one it cannot vouch for.
+
+    Args:
+        records: The key's witness records.
+
+    Returns:
+        The moved input's label, or an empty string when every record
+        reproduced exactly.
+    """
+    for followed in range(2):
+        for i in range(len(records)):
+            var before = records[i].copy()
+            if before.follow != (followed == 1):
+                continue
+            var moved: Bool
+            try:
+                moved = _witness_moved(
+                    before,
+                    _witness_of(before.path, before.label, before.follow),
+                )
+            except:
+                moved = True
+            if moved:
+                return String(before.label)
+    return String("")
+
+
+def _settle_own_directories(root: String):
+    """Create the directories this run writes into, before anything is keyed.
+
+    A walked directory's record stands for its membership, and mtest writes
+    into the tree as it works: `.mtest-cache` is created under the invocation
+    root at the first staging, which is AFTER the keys that record the
+    directory holding it. For a test file sitting at the invocation root that
+    directory is the walked one, so on a cold tree the run's own first write
+    looks exactly like a file appearing beside the source, and every
+    publication after it is refused — the whole session under the pool, since
+    every file is keyed before the first staging. Creating the directory up
+    front is what stops a run from witnessing itself.
+
+    Nothing here can change a key: the cache root is dot-prefixed, and every
+    walk skips dot entries.
+
+    Best-effort. A directory that cannot be created here fails again where it
+    is actually needed, with the diagnostic that belongs to that site.
+
+    Args:
+        root: The invocation root.
+    """
+    try:
+        _ensure_store(root)
+    except:
+        pass
 
 
 def _witness_moved(before: _StatWitness, now: _StatWitness) -> Bool:
@@ -922,7 +1024,24 @@ def _witnessable_dir(abs_dir: String, exclude_abs: String) -> Bool:
     Returns:
         False only for the directory the excluded path sits directly inside.
     """
-    return exclude_abs == "" or dirname(exclude_abs) != abs_dir
+    if exclude_abs == "":
+        return True
+    var holder = dirname(exclude_abs)
+    if holder == abs_dir:
+        return False
+    # The two spellings can name one directory. `_absolute` deliberately does
+    # not canonicalize — the `-I` spelling is part of the key and `-I build`
+    # and `-I ./build` are different keys on purpose — so `<root>/./build` and
+    # `<root>/build` compare unequal while being the same place. Getting that
+    # wrong costs a stamp on EVERY run, since the step rewrites its output
+    # there each time, so the question is put to the filesystem rather than to
+    # the strings whenever they disagree.
+    try:
+        if realpath(holder) == realpath(abs_dir):
+            return False
+    except:
+        pass
+    return True
 
 
 def _append_witnesses(mut dst: List[_StatWitness], src: List[_StatWitness]):
@@ -1086,7 +1205,9 @@ def _walk_into(
         # unreadable file produces, because everything that defeats the capture
         # (a vanished entry, a dangling link) defeats the read as well.
         try:
-            _witness_entry(full, _witness_label(label_root, rel), witnesses)
+            _witness_entry(
+                full, _witness_label(label_root, rel), is_link, witnesses
+            )
         except:
             return WalkOutcome.failure("cannot read the file '" + rel + "'")
         var data: List[UInt8]
@@ -1210,7 +1331,7 @@ def _walk_include_root_scanned(
     # directory record is taken before one.
     if _witnessable_dir(abs_dir, exclude_abs):
         try:
-            witnesses.append(_witness_of(abs_dir, dir, True))
+            _witness_dir(abs_dir, dir, witnesses)
         except:
             return WalkOutcome.failure(
                 "'" + dir + "' is not a readable directory"
@@ -1260,7 +1381,7 @@ def _walk_source_dir(
     """
     var abs_dir = _absolute(root, dir)
     try:
-        witnesses.append(_witness_of(abs_dir, dir, True))
+        _witness_dir(abs_dir, dir, witnesses)
     except:
         return WalkOutcome.failure("'" + dir + "' is not a readable directory")
     var listing = _list_sorted(abs_dir)
@@ -3079,6 +3200,7 @@ def file_key(
         ctx.disable("cannot read the test file 'tests/test_a.mojo'")
     ```
     """
+    _settle_own_directories(root)
     var witnesses = List[_StatWitness]()
     # Captured before the read, so nothing that happens after this point can
     # pass itself off as the state the key describes. A capture that fails is a
@@ -3086,7 +3208,7 @@ def file_key(
     # unreadable one produces.
     var src_abs = _absolute(root, rel)
     try:
-        _witness_entry(src_abs, rel, witnesses)
+        _witness_entry(src_abs, rel, islink(src_abs), witnesses)
     except:
         return None
     var data: List[UInt8]
@@ -3851,23 +3973,13 @@ def store_publish(
     # Identity and change times cannot be restored from userspace, so comparing
     # them against their key-time values refuses that publication — and it is
     # the cheap check as well, so it runs before the re-read and the re-walk.
-    for i in range(len(key.input_witnesses)):
-        var before = key.input_witnesses[i].copy()
-        var moved: Bool
-        try:
-            moved = _witness_moved(
-                before, _witness_of(before.path, before.label, before.follow)
-            )
-        except:
-            # An input that will not stat at all is one this publication cannot
-            # vouch for, which is the same answer a moved one gets.
-            moved = True
-        if moved:
-            return _publish_failed(
-                target,
-                argv,
-                "'" + before.label + "' changed while the build ran",
-            )
+    var moved_input = _first_moved_witness(key.input_witnesses)
+    if moved_input != "":
+        return _publish_failed(
+            target,
+            argv,
+            "'" + moved_input + "' changed while the build ran",
+        )
     var fresh: List[UInt8]
     try:
         fresh = read_regular_file_bytes(
@@ -4089,7 +4201,7 @@ def _feed_prior_outputs(
         var prior_abs = _absolute(root, prior)
         var data: List[UInt8]
         try:
-            _witness_entry(prior_abs, prior, witnesses)
+            _witness_entry(prior_abs, prior, islink(prior_abs), witnesses)
             data = read_regular_file_bytes(prior_abs, _BIN_CAP)
         except:
             # An earlier step's package is on this step's include path, so a
@@ -4184,6 +4296,7 @@ def precompile_key(
     """
     if not ctx.enabled:
         return None
+    _settle_own_directories(root)
     var kb = ctx.base.copy()
     var witnesses = List[_StatWitness]()
     var scan = _SourceDirScan.inert()
@@ -4211,7 +4324,7 @@ def precompile_key(
             # Before the read, as everywhere: the walk of the file's own
             # directory below records it a second time, but that walk runs after
             # this read and so cannot vouch for the bytes this read took.
-            _witness_entry(src_abs, src, witnesses)
+            _witness_entry(src_abs, src, islink(src_abs), witnesses)
             data = read_regular_file_bytes(src_abs, _WALK_FILE_CAP)
         except:
             ctx.disable(
@@ -4491,6 +4604,12 @@ def precompile_publish(root: String, key: FileKey, out_path: String):
     precompile_publish(root, key, out_path)  # after the step succeeded
     ```
     """
+    # First, and before the output is read: the step's output may well be
+    # correct, but what cannot be claimed is that it was produced from the
+    # inputs this key names. A handful of stats settles that, and there is no
+    # reason to digest a package the answer is about to discard.
+    if _first_moved_witness(key.input_witnesses) != "":
+        return
     var stamp_dir = root + "/" + STORE_DIR + "/" + PRECOMPILE_SUBDIR
     try:
         _ensure_store(root)
@@ -4504,20 +4623,6 @@ def precompile_publish(root: String, key: FileKey, out_path: String):
         # The step reported success but its package cannot be read back. There
         # is nothing honest to record, and the next run rebuilds.
         return
-    for i in range(len(key.input_witnesses)):
-        var before = key.input_witnesses[i].copy()
-        var moved: Bool
-        try:
-            moved = _witness_moved(
-                before, _witness_of(before.path, before.label, before.follow)
-            )
-        except:
-            moved = True
-        if moved:
-            # The step's output may well be correct; what cannot be claimed is
-            # that it was produced from the inputs this key names. Nothing
-            # honest to record, and the next run re-runs the step.
-            return
     _reap_stamps(root, key)
     # `build_seconds` and `argv` are the generation record's fields, not this
     # one's: a stamp gates a SKIP, and nothing reports or reproduces a step that

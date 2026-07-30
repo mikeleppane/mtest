@@ -1449,16 +1449,10 @@ def test_publish_refuses_a_helper_restored_after_an_edit() raises:
         root, key, target, 1.0, _build_argv(rel, target.out_rel)
     )
     assert_equal(pub.kind, PUB_FAILED)
-    assert_true(
-        "changed while the build ran" in pub.warning,
-        "the warning did not name the cause: " + pub.warning,
-    )
-    # The helper, not the entry source: a guard that named the wrong input
-    # would still refuse and this case would pass on the wrong mechanism.
-    assert_true(
-        "helper.mojo" in pub.warning,
-        "the warning did not name the input: " + pub.warning,
-    )
+    # The helper by its whole label, not a substring of it: `helper.mojo`
+    # also occurs inside `test_uses_helper.mojo`, so a bare membership test
+    # would be satisfied by a warning naming the entry source instead.
+    assert_equal(pub.warning, "'tests/helper.mojo' changed while the build ran")
     assert_false(isdir(root + "/" + key.gen_dir))
     # A refusal is never a failure of the run: the caller keeps running exactly
     # what it built.
@@ -1480,14 +1474,7 @@ def test_publish_refuses_a_source_restored_after_an_edit() raises:
         root, key, target, 1.0, _build_argv(rel, target.out_rel)
     )
     assert_equal(pub.kind, PUB_FAILED)
-    assert_true(
-        "changed while the build ran" in pub.warning,
-        "the warning did not name the cause: " + pub.warning,
-    )
-    assert_true(
-        rel in pub.warning,
-        "the warning did not name the input: " + pub.warning,
-    )
+    assert_equal(pub.warning, "'" + rel + "' changed while the build ran")
     assert_false(isdir(root + "/" + key.gen_dir))
 
 
@@ -1510,10 +1497,10 @@ def test_publish_refuses_a_helper_replaced_with_identical_bytes() raises:
         root, key, target, 1.0, _build_argv(rel, target.out_rel)
     )
     assert_equal(pub.kind, PUB_FAILED)
-    assert_true(
-        "changed while the build ran" in pub.warning,
-        "the warning did not name the cause: " + pub.warning,
-    )
+    # The rename also moves the DIRECTORY's times, so a guard that only held
+    # directories would refuse here too and this case would stop testing the
+    # identity comparison it is named for.
+    assert_equal(pub.warning, "'tests/helper.mojo' changed while the build ran")
     assert_false(isdir(root + "/" + key.gen_dir))
 
 
@@ -1540,10 +1527,68 @@ def test_publish_refuses_a_retargeted_and_restored_helper_link() raises:
         root, key, target, 1.0, _build_argv(rel, target.out_rel)
     )
     assert_equal(pub.kind, PUB_FAILED)
-    assert_true(
-        "changed while the build ran" in pub.warning,
-        "the warning did not name the cause: " + pub.warning,
+    # Removing and recreating the link moves the directory's times as well, so
+    # only the LINK's own label proves the no-follow record is what refused.
+    assert_equal(pub.warning, "'tests/helper.mojo' changed while the build ran")
+    assert_false(isdir(root + "/" + key.gen_dir))
+
+
+def test_publish_refuses_a_retargeted_and_restored_source_dir_link() raises:
+    """The walked directory itself was reached through a link that moved.
+
+    Everything the walk framed is reached BY FOLLOWING that link, so a link
+    repointed at another tree and repointed back hands the compiler a whole
+    different directory while both targets hold still. The followed record
+    reproduces exactly — it describes the restored target — and only the walk
+    root's own identity moved.
+    """
+    var root = temp_root()
+    var rel = String("tests/test_dir_link.mojo")
+    write_file(root, "real_tests/helper.mojo", "# a\n")
+    write_file(root, "other_tests/helper.mojo", "# b\n")
+    symlink(root + "/real_tests", root + "/tests")
+    var key = _fixture_key(root, rel, "# entry\n")
+    var target = _stage_binary(root, [UInt8(1)])
+    remove(root + "/tests")
+    symlink(root + "/other_tests", root + "/tests")
+    remove(root + "/tests")
+    symlink(root + "/real_tests", root + "/tests")
+
+    var pub = store_publish(
+        root, key, target, 1.0, _build_argv(rel, target.out_rel)
     )
+    assert_equal(pub.kind, PUB_FAILED)
+    assert_equal(pub.warning, "'tests' changed while the build ran")
+    assert_false(isdir(root + "/" + key.gen_dir))
+
+
+def test_publish_refuses_an_edit_behind_a_stable_helper_link() raises:
+    """The bytes behind a link moved while the link itself did not.
+
+    The counterpart of the retargeting case, and the only shape that isolates
+    the FOLLOWED record. The link's own identity is untouched, its directory's
+    membership is untouched, and the target lives outside the walked directory
+    so it has no record of its own — the walk read it only by following the
+    link. Nothing but the followed sample can refuse this.
+    """
+    var root = temp_root()
+    var rel = String("tests/test_behind_link.mojo")
+    write_file(root, "outside/helper_a.mojo", "# a\n")
+    # The entry source first: it is what creates `tests/` for the link to
+    # land in. `_fixture_key` rewrites the same bytes there a moment later.
+    write_file(root, rel, "# entry\n")
+    symlink(root + "/outside/helper_a.mojo", root + "/tests/helper.mojo")
+    var key = _fixture_key(root, rel, "# entry\n")
+    var target = _stage_binary(root, [UInt8(1)])
+    var behind = root + "/outside/helper_a.mojo"
+    _mutate_until_witnessed(behind, "# other\n")
+    _mutate_until_witnessed(behind, "# a\n")
+
+    var pub = store_publish(
+        root, key, target, 1.0, _build_argv(rel, target.out_rel)
+    )
+    assert_equal(pub.kind, PUB_FAILED)
+    assert_equal(pub.warning, "'tests/helper.mojo' changed while the build ran")
     assert_false(isdir(root + "/" + key.gen_dir))
 
 
@@ -1566,10 +1611,9 @@ def test_publish_refuses_a_file_that_came_and_went() raises:
         root, key, target, 1.0, _build_argv(rel, target.out_rel)
     )
     assert_equal(pub.kind, PUB_FAILED)
-    assert_true(
-        "changed while the build ran" in pub.warning,
-        "the warning did not name the cause: " + pub.warning,
-    )
+    # No file moved, so the directory is the only input that CAN be named —
+    # the other side of the pairing every case above asserts.
+    assert_equal(pub.warning, "'tests' changed while the build ran")
     assert_false(isdir(root + "/" + key.gen_dir))
 
 
@@ -1590,6 +1634,28 @@ def test_publish_accepts_an_untouched_tree_with_witness() raises:
     write_file(root, "tests/pkg/__init__.mojo", "")
     write_file(root, "tests/pkg/mod.mojo", "# mod\n")
     var key = _fixture_key(root, rel, "# entry\n")
+    var target = _stage_binary(root, [UInt8(1)])
+
+    var pub = store_publish(
+        root, key, target, 1.0, _build_argv(rel, target.out_rel)
+    )
+    assert_equal(pub.kind, PUB_OK, "warning: " + pub.warning)
+    assert_true(isdir(root + "/" + key.gen_dir))
+
+
+def test_publish_succeeds_for_a_test_file_at_the_invocation_root() raises:
+    """A cold store must not read as churn in the directory it is created in.
+
+    A test file sitting at the invocation root makes that root the walked
+    directory, and `.mtest-cache` is created inside it. Created AFTER the key,
+    that is a new entry beside the source and moves the directory's times, so
+    the run refuses its own publication — every file of the session under the
+    pool, where all of them are keyed before the first staging. It also
+    self-heals on the next run, which is exactly what makes it easy to miss.
+    """
+    var root = temp_root()
+    var rel = String("test_flat.mojo")
+    var key = _fixture_key(root, rel, "# flat\n")
     var target = _stage_binary(root, [UInt8(1)])
 
     var pub = store_publish(
