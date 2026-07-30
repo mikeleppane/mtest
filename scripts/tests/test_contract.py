@@ -605,6 +605,8 @@ class CheckRosterTests(unittest.TestCase):
                 "color: --color always beats NO_COLOR",
                 "precompile: success path resolves import (auto -I)",
                 "symlink: a symlinked test file is collected and run, never dropped",
+                "shape: a test-named non-file walk entry is announced, never dropped",
+                "shape: an unsupported operand is refused with its real problem",
                 "value: 2^63 refused for every non-negative integer flag",
                 "report: --json to a readerless FIFO fails fast, never blocks",
                 "path: a long-but-legal path builds, never a false COMPILE-ERROR",
@@ -691,6 +693,17 @@ class CheckRosterTests(unittest.TestCase):
             def check_symlinked_test_file(self) -> None:
                 self._perform(
                     "symlink: a symlinked test file is collected and run, never dropped"
+                )
+
+            def check_nonregular_walk_entry(self) -> None:
+                self._perform(
+                    "shape: a test-named non-file walk entry is announced, "
+                    "never dropped"
+                )
+
+            def check_unsupported_operand(self) -> None:
+                self._perform(
+                    "shape: an unsupported operand is refused with its real problem"
                 )
 
             def check_integer_overflow_values(self) -> None:

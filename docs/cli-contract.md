@@ -148,13 +148,50 @@ run, build, selection, state, or reporter flag is an argv applicability error
   configured paths are used when present; otherwise the default is `tests/` if
   it exists, else `.`. Configured paths are files or directories, not node ids.
 
+**Walk totality.** A directory walk characterizes every entry it lists, and no
+`test_*.mojo` entry it cannot run is dropped in silence. A symlink to a regular
+`test_*.mojo` file is collected under the link's own path; a symlinked
+directory is never descended (lexical normalization cannot detect a cycle) and
+a `test_*.mojo` link that resolves to no usable file is refused. Any other
+test-named entry that is not a regular file — a directory wearing a
+`test_*.mojo` name, or a FIFO, socket, or device sitting where a test file is
+expected — is skipped and never descended. A **run** reports each such skip as
+a warning, once per entry: kind `skipped-symlink` for a refused link,
+`skipped-nonregular` for the rest. (`collect` lists files and emits no
+discovery warnings, for either kind.) An entry the walk cannot characterize at
+all — the shape a directory this process may read but not search produces — is
+a usage error (exit 4, §9) rather than a subtree quietly reported as empty. A
+FIFO, socket, or device whose name does not match `test_*.mojo` cannot hide a
+test and is passed over silently, like any other non-matching name.
+
+Two bounds on that guarantee, stated rather than implied:
+
+- **Symlink targets are typed by following the link**, and a target that was
+  deleted cannot be told apart from one that exists but cannot be reached (a
+  parent directory that is readable but not searchable). Both resolve to
+  nothing. A `test_*.mojo` link is therefore reported in both cases — the
+  selection is never silently lost — but a link whose name does not match the
+  pattern is passed over in both cases, so the `skipped-symlink` warning that
+  a *reachable* directory symlink would have produced does not appear. No test
+  changes hands either way: a directory symlink is never descended. The same
+  ambiguity applies to the default `tests/` probe: when `tests` is a symlink
+  whose target cannot be reached, the default operand falls back to `.` as it
+  does when `tests` does not exist.
+- **An explicit directory operand is walked whatever it is named** (§5's rule
+  that naming a path selects it directly). So `mtest tests tests/test_shape.mojo`
+  both warns `skipped-nonregular: tests/test_shape.mojo` — the walk of `tests`
+  refused that entry — and runs the files under it, because the second operand
+  named it directly. Both statements are true of their own operand.
+
 **Node-id canonicalization.** Every node id is canonicalized to **root-relative**
 form. That canonical form is the single basis for `-k` matching, `collect`
 output, deduplication, and every reporter. Duplicate selections (the same test
 named twice, or via both its file and its node id) are de-duplicated; a test
 runs at most once.
 
-A nonexistent path, or a node id naming a file that exists but a test that does
+A nonexistent path, an explicit operand whose file type mtest cannot run (a
+FIFO, socket, or device — refused as `unsupported file type`, never as `no such
+path`), or a node id naming a file that exists but a test that does
 not, is a usage error (exit 4). That check happens **after** the file's
 `--skip-all` collection probe (§6) reports its universe of test names: an
 unknown node id is an exit-4 error raised post-probe, before any test body
@@ -523,7 +560,7 @@ grow:
 | 1 | at least one selected outcome is FAIL, CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT, MALFORMED-SUITE, or PRECOMPILE-ERROR |
 | 2 | interrupted (SIGINT/SIGTERM); a partial summary is printed |
 | 3 | internal `mtest` error — including protocol drift (a report present but off-grammar) and an environment/I-O failure such as a runtime report-destination open/write failure (a `--json` destination that cannot be opened at session start, or whose stream write later fails — a fatal abort; or a `--junit-xml` target that cannot be created at session start, or whose report cannot be finalized and renamed onto PATH) |
-| 4 | pre-run usage error (unknown flag, bad value, nonexistent path, unknown node id, forbidden build argument, mutually exclusive `--config`/`--no-config`, a selected project config that is missing, unreadable, malformed, or has an invalid key/value, a syntactically invalid `--json` or `--junit-xml` report destination — an empty value or a nonexistent parent directory, the machine-stdout conflict — `--json -` without an explicit `--gh-annotations off`, since the byte-pure stream and the annotation tail cannot share stdout, or a `--cache-clear` target mtest can see and cannot prove it owns, or can prove and cannot delete, §8.5 — a target it cannot characterize at all is treated as absent and exits `0`) — detected **before any test runs** |
+| 4 | pre-run usage error (unknown flag, bad value, nonexistent path, an explicit operand of a file type mtest cannot run (a FIFO, socket, or device, §5), a path discovery cannot inspect (§5), unknown node id, forbidden build argument, mutually exclusive `--config`/`--no-config`, a selected project config that is missing, unreadable, malformed, or has an invalid key/value, a syntactically invalid `--json` or `--junit-xml` report destination — an empty value or a nonexistent parent directory, the machine-stdout conflict — `--json -` without an explicit `--gh-annotations off`, since the byte-pure stream and the annotation tail cannot share stdout, or a `--cache-clear` target mtest can see and cannot prove it owns, or can prove and cannot delete, §8.5 — a target it cannot characterize at all is treated as absent and exits `0`) — detected **before any test runs** |
 | 5 | no tests collected (empty walk, `-k` matched nothing, everything excluded) |
 
 **Precedence** when outcomes mix. A usage error aborts before the run with 4.

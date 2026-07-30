@@ -6,6 +6,13 @@ directory's entries are sorted before use and the walk stays deterministic. The
 pattern gates directory walks only; an explicitly named operand bypasses it,
 which the caller handles rather than the walk.
 
+Every listed entry is characterized exactly once, by a raising `lstat` on the
+entry itself. The `isdir`/`isfile`/`islink` predicates fold every inspection
+error into `False`, and a folded error here is a silently smaller run: in a
+directory this process may read but not search, every child stat fails and the
+whole subtree would look empty. A name that came out of a listing existed a
+moment ago, so an entry that cannot be characterized refuses the walk instead.
+
 Symlinks, by kind. A symlinked **directory** is never descended: lexical
 normalization cannot detect a cycle, so following one could loop forever or
 reach outside the root. A symlinked **file** carries no such risk — it is one
@@ -15,17 +22,36 @@ file is walked exactly like a regular file, keeping its own lexical path (§2
 does not resolve symlinks). A link that resolves to neither — a dangling
 target — is unusable and reported.
 
-Nothing here prints: the skipped links ride out in `WalkResult` so the session
-can emit one loud warning apiece, the way it already does for a stale exclude.
+Other kinds, by name. A directory, FIFO, socket, or device wearing a
+`test_*.mojo` name is a tree accident: it names a test the run cannot contain.
+It is never descended and never collected, but it is always reported. A
+non-test-named entry of those kinds cannot hide a test, so it stays silent.
+
+Nothing here prints: both loud channels — the refused links and the test-named
+non-regular entries — ride out in `WalkResult` so the session can emit one loud
+warning apiece, the way it already does for a stale exclude.
 """
 from std.builtin.sort import sort
-from std.os import listdir
-from std.os.path import isdir, isfile, islink
+from std.os import listdir, lstat
+from std.os.path import isdir, isfile
 
 from mtest.discover.fnmatch import fnmatch
+from mtest.model import escape_one_line
 
 comptime _TEST_GLOB = "test_*.mojo"
 """The directory-walk pattern, matched against each file's basename."""
+
+comptime _S_IFMT = 0xF000
+"""File-type mask over `st_mode`; POSIX fixes it on Linux and Darwin alike."""
+
+comptime _S_IFDIR = 0x4000
+"""`S_IFDIR`: the `st_mode` file-type value for a directory."""
+
+comptime _S_IFLNK = 0xA000
+"""`S_IFLNK`: the `st_mode` file-type value for a symbolic link."""
+
+comptime _S_IFREG = 0x8000
+"""`S_IFREG`: the `st_mode` file-type value for a regular file."""
 
 
 def is_discovered_test_name(name: String) -> Bool:
@@ -58,7 +84,7 @@ def is_discovered_test_name(name: String) -> Bool:
 
 @fieldwise_init
 struct WalkResult(Copyable, Movable):
-    """The files a walk found, plus the links it could not use.
+    """The files a walk found, plus the entries it could not use.
 
     Owns its lists, so copies are explicit.
     """
@@ -68,7 +94,16 @@ struct WalkResult(Copyable, Movable):
 
     var skipped_links: List[String]
     """Root-relative symlinks the walk refused: a symlinked directory (cycle
-    safety) or a dangling `test_*.mojo` link (unusable). Never silent."""
+    safety), or a `test_*.mojo` link resolving to no usable file — a deleted
+    target, a target the process cannot reach, or one that is neither a
+    directory nor a regular file. Never silent."""
+
+    var skipped_nonregular: List[String]
+    """Root-relative test-named entries that are neither regular files nor
+    symlinks nor descendable directories — a directory wearing a test
+    file's name, or a FIFO, socket, or device sitting exactly where a test
+    file is expected. Never silent: each one is a test the tree suggests
+    exists and the run will not contain."""
 
 
 def walk_dir(abs_dir: String, rel_prefix: String) raises -> WalkResult:
@@ -82,10 +117,12 @@ def walk_dir(abs_dir: String, rel_prefix: String) raises -> WalkResult:
     Returns:
         The matching files as root-relative paths — symlinked files included,
         keeping the link's own path — together with every symlink the walk
-        refused to use. Each directory's entries are visited in sorted order.
+        refused to use and every test-named entry that is not a runnable file.
+        Each directory's entries are visited in sorted order.
 
     Raises:
-        Error: If a directory cannot be listed during the walk.
+        Error: If a directory cannot be listed, or an entry cannot be
+            characterized, during the walk.
     """
     var names = List[String]()
     for entry in listdir(abs_dir):
@@ -94,6 +131,7 @@ def walk_dir(abs_dir: String, rel_prefix: String) raises -> WalkResult:
 
     var out = List[String]()
     var skipped = List[String]()
+    var nonregular = List[String]()
     for name in names:
         var full = abs_dir + "/" + name
         var rel: String
@@ -101,8 +139,20 @@ def walk_dir(abs_dir: String, rel_prefix: String) raises -> WalkResult:
             rel = name
         else:
             rel = rel_prefix + "/" + name
-        # `isdir`/`isfile` both follow links, so the kind is decided here.
-        if islink(full):
+        # One raising characterization per entry: `isdir`/`isfile`/`islink`
+        # fold every inspection error into False, and a folded error here is a
+        # silently smaller run. This name came out of the listing, so it
+        # existed a moment ago; a tree the walk cannot characterize must be
+        # refused, not framed as empty.
+        var kind: Int
+        try:
+            kind = Int(lstat(full).st_mode) & _S_IFMT
+        except:
+            raise Error(
+                "discover: cannot inspect '" + escape_one_line(rel) + "'"
+            )
+        if kind == _S_IFLNK:
+            # The target's type decides; `isdir`/`isfile` follow the link.
             if isdir(full):
                 # A symlinked subtree could close a cycle: refuse, but loudly.
                 skipped.append(rel^)
@@ -114,13 +164,26 @@ def walk_dir(abs_dir: String, rel_prefix: String) raises -> WalkResult:
                 # Dangling, and named like a test the user expects to run.
                 skipped.append(rel^)
             continue
-        if isdir(full):
-            var sub = walk_dir(full, rel)
-            for f in sub.files:
-                out.append(f)
-            for s in sub.skipped_links:
-                skipped.append(s)
-        elif isfile(full):
+        if kind == _S_IFDIR:
+            if is_discovered_test_name(name):
+                # A directory NAMED like a test file: descending it would run
+                # tests under a name nothing treats as a container, or
+                # silently shrink the run. The check sits ABOVE the recursion —
+                # a terminal else can never see this case.
+                nonregular.append(rel^)
+            else:
+                var sub = walk_dir(full, rel)
+                for f in sub.files:
+                    out.append(f)
+                for s in sub.skipped_links:
+                    skipped.append(s)
+                for s in sub.skipped_nonregular:
+                    nonregular.append(s)
+        elif kind == _S_IFREG:
             if is_discovered_test_name(name):
                 out.append(rel^)
-    return WalkResult(out^, skipped^)
+        elif is_discovered_test_name(name):
+            # Characterized, and neither regular file nor directory nor
+            # symlink: a FIFO, socket, or device wearing a test file's name.
+            nonregular.append(rel^)
+    return WalkResult(out^, skipped^, nonregular^)

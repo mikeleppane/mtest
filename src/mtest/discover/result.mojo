@@ -1,9 +1,11 @@
 """The data value `discover` returns.
 
 `DiscoveryResult` is pure data: the ordered gate and run file sets, the
-excluded files each paired with the pattern that removed it, and the stale
-exclude patterns that matched nothing. The session turns this into events: a
-loud skip line per excluded file and a warning per stale pattern. This module
+excluded files each paired with the pattern that removed it, the stale exclude
+patterns that matched nothing, and the two loud channels a walk fills — the
+symlinks it refused and the test-named entries that are not runnable files. The
+session turns this into events: a loud skip line per excluded file and a
+warning per stale pattern, refused symlink, and non-regular entry. This module
 reads and prints nothing.
 """
 
@@ -47,6 +49,13 @@ struct DiscoveryResult(Copyable, Movable):
 
     var skipped_links: List[String]
     """Every symlink a walk refused, root-relative and sorted: a symlinked
-    directory (not descended, for cycle safety) or a dangling `test_*.mojo`
-    link. The session warns once per entry — a dropped selection is never
+    directory (not descended, for cycle safety) or a `test_*.mojo` link that
+    resolves to no usable file — deleted, unreachable, or a FIFO, socket, or
+    device. The session warns once per entry — a dropped selection is never
     silent."""
+
+    var skipped_nonregular: List[String]
+    """Every test-named walk entry that is not a runnable file, root-relative
+    and sorted: a directory wearing a `test_*.mojo` name, or a FIFO, socket, or
+    device sitting where a test file is expected. The session warns once per
+    entry, for the same reason it warns about a refused symlink."""

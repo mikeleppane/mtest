@@ -14,18 +14,22 @@ The stages:
    directory is walked for `test_*.mojo` files; an explicitly named file is
    taken regardless of the pattern. A node id (`PATH::TEST`) resolves to its
    file part. A nonexistent operand, an operand that escapes the root, an
-   operand with more than one `::`, and a node id whose path is a directory
-   each raise a `discover:` usage error (the exit-4 class). An empty walk is
-   not an error: it yields empty run files.
+   operand with more than one `::`, a node id whose path is a directory, an
+   operand of a file type mtest cannot run, and a path that cannot be
+   inspected each raise a `discover:` usage error (the exit-4 class). An empty
+   walk is not an error: it yields empty run files.
 3. Deduplicate on the root-relative path; a file that is both a gate and in a
    walk lands once, in `gate_files` (gate-overlap promotion).
 4. Apply excludes (fnmatch against the whole path). An exclusion wins over both
    a gate and an explicit path, loudly: the file moves to `excluded` with the
    pattern that removed it. A pattern matching nothing becomes a stale entry.
 5. Order. `run_files` sorted lexicographically; `gate_files` in listed order;
-   `excluded` sorted by path; `stale_excludes` in listed order.
+   `excluded` sorted by path; `stale_excludes` in listed order; both loud walk
+   channels — the refused symlinks and the test-named entries that are not
+   runnable files — deduplicated and sorted.
 """
 from std.builtin.sort import sort
+from std.os import lstat
 from std.os.path import exists, isdir, isfile
 
 from mtest.config import RunnerConfig
@@ -34,6 +38,18 @@ from mtest.discover.fnmatch import fnmatch
 from mtest.discover.normalize import normalize_operand, normalize_root
 from mtest.discover.result import DiscoveryResult, ExcludedEntry
 from mtest.discover.walk import walk_dir
+
+comptime _S_IFMT = 0xF000
+"""File-type mask over `st_mode`; POSIX fixes it on Linux and Darwin alike."""
+
+comptime _S_IFDIR = 0x4000
+"""`S_IFDIR`: the `st_mode` file-type value for a directory."""
+
+comptime _S_IFLNK = 0xA000
+"""`S_IFLNK`: the `st_mode` file-type value for a symbolic link."""
+
+comptime _S_IFREG = 0x8000
+"""`S_IFREG`: the `st_mode` file-type value for a regular file."""
 
 
 def _abs_of(nroot: String, rel: String) -> String:
@@ -90,17 +106,28 @@ def _classify(
     nroot: String,
     mut into: List[String],
     mut skipped: List[String],
+    mut nonregular: List[String],
 ) raises:
     """Resolve one operand into `into` (walked files, or one explicit file).
 
     A node id (`PATH::TEST`) resolves to its file part; per-test name selection
     is applied later by the session. More than one `::`, or a node id whose
     path is a directory, is a malformed node id. Also raises for a nonexistent
-    path or an operand escaping the root. Every raise is the exit-4 class.
+    path, an operand escaping the root, an operand of a file type mtest cannot
+    run (a FIFO, socket, or device — refused for what it actually is, never as
+    "no such path"), and an operand that `exists` accepted but `lstat` cannot
+    characterize. Every raise is the exit-4 class.
 
-    Any symlink a walk refused is appended to `skipped` for the caller to warn
-    about. An explicitly named operand is never refused for being a symlink:
-    naming a file is a direct selection, and `exists` already accepted it.
+    One accepted bound: `exists` folds an unsearchable parent directory into
+    plain absence, so an operand under one still reports "no such path".
+    Distinguishing the two needs errno detail this layer cannot see; neither
+    case is a silent loss, since both refuse the run.
+
+    Any symlink a walk refused is appended to `skipped`, and any test-named
+    walk entry that is not a runnable file to `nonregular`, for the caller to
+    warn about. An explicitly named operand is never refused for being a
+    symlink: naming a file is a direct selection, and `exists` already accepted
+    it.
     """
     var split = split_node_token(op)
     if split.sep_count > 1:
@@ -111,7 +138,18 @@ def _classify(
     var fpath = _abs_of(nroot, rel)
     if not exists(fpath):
         raise Error("discover: no such path '" + escape_one_line(file_op) + "'")
-    if isdir(fpath):
+    var kind: Int
+    try:
+        kind = Int(lstat(fpath).st_mode) & _S_IFMT
+    except:
+        raise Error(
+            "discover: cannot inspect '" + escape_one_line(file_op) + "'"
+        )
+    # For a symlink operand the target's type decides, as before: naming a link
+    # is a direct selection, and `exists` already followed it.
+    var names_dir = kind == _S_IFDIR or (kind == _S_IFLNK and isdir(fpath))
+    var names_file = kind == _S_IFREG or (kind == _S_IFLNK and isfile(fpath))
+    if names_dir:
         if is_node_id:
             raise _node_id_names_directory_error(op, file_op)
         var walked = walk_dir(fpath, rel)
@@ -119,10 +157,16 @@ def _classify(
             into.append(f)
         for s in walked.skipped_links:
             skipped.append(s)
-    elif isfile(fpath):
+        for s in walked.skipped_nonregular:
+            nonregular.append(s)
+    elif names_file:
         into.append(rel)
     else:
-        raise Error("discover: no such path '" + escape_one_line(file_op) + "'")
+        raise Error(
+            "discover: unsupported file type at '"
+            + escape_one_line(file_op)
+            + "'"
+        )
 
 
 def _apply_excludes(
@@ -174,8 +218,9 @@ def discover(config: RunnerConfig, root: String) raises -> DiscoveryResult:
 
     Raises:
         Error: A `discover:`-prefixed usage error (exit-4 class) for a
-            nonexistent operand, an operand escaping the root, or a malformed
-            node id. An empty walk is not an error.
+            nonexistent operand, an operand escaping the root, a malformed
+            node id, an operand whose file type mtest cannot run, or a path
+            the walk cannot inspect. An empty walk is not an error.
 
     Examples:
 
@@ -202,14 +247,16 @@ def discover(config: RunnerConfig, root: String) raises -> DiscoveryResult:
             operands.append(String(p))
 
     # Stage 2: normalize + classify operands and gates into raw file lists.
-    # Refused symlinks accumulate across every operand and gate walk.
+    # Refused symlinks and test-named non-files accumulate across every operand
+    # and gate walk.
     var skipped_links = List[String]()
+    var skipped_nonregular = List[String]()
     var run_raw = List[String]()
     for op in operands:
-        _classify(op, nroot, run_raw, skipped_links)
+        _classify(op, nroot, run_raw, skipped_links, skipped_nonregular)
     var gate_raw = List[String]()
     for g in config.gates:
-        _classify(g, nroot, gate_raw, skipped_links)
+        _classify(g, nroot, gate_raw, skipped_links, skipped_nonregular)
 
     # Stage 3: dedup; a gate that also appears in a walk stays a gate only.
     var gate_files = _dedup_preserve(gate_raw)
@@ -238,6 +285,8 @@ def discover(config: RunnerConfig, root: String) raises -> DiscoveryResult:
     _sort_excluded(excluded)
     var links = _dedup_preserve(skipped_links)
     sort(links)
+    var nonregular = _dedup_preserve(skipped_nonregular)
+    sort(nonregular)
 
     return DiscoveryResult(
         gate_files=gate_kept^,
@@ -245,4 +294,5 @@ def discover(config: RunnerConfig, root: String) raises -> DiscoveryResult:
         excluded=excluded^,
         stale_excludes=stale^,
         skipped_links=links^,
+        skipped_nonregular=nonregular^,
     )
