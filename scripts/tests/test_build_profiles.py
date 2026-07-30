@@ -27,6 +27,86 @@ TASK5_SELECTOR_ARRAYS = (
 )
 
 
+def shell_expansion_scan_text(source: str) -> str:
+    """Return executable shell text needed by the parameter scanner.
+
+    This handles quotes, backslash escapes and continuations, and unquoted
+    comments for the selector's syntax. It deliberately does not parse heredocs
+    or the interiors of command and arithmetic substitutions, which the
+    selector does not contain.
+    """
+    normalized: list[str] = []
+    state = "unquoted"
+    at_word_start = True
+    index = 0
+    while index < len(source):
+        char = source[index]
+        following = source[index + 1] if index + 1 < len(source) else ""
+
+        if state == "comment":
+            if char == "\n":
+                normalized.append(char)
+                state = "unquoted"
+                at_word_start = True
+            else:
+                normalized.append(" ")
+            index += 1
+            continue
+
+        if state == "single":
+            normalized.append("\n" if char == "\n" else " ")
+            if char == "'":
+                state = "unquoted"
+            index += 1
+            continue
+
+        if char == "\\" and following == "\n":
+            index += 2
+            continue
+
+        if state == "double":
+            if char == "\\" and following in ('"', "$", "`", "\\"):
+                normalized.extend((" ", " "))
+                index += 2
+                continue
+            if char == '"':
+                normalized.append(" ")
+                state = "unquoted"
+            else:
+                normalized.append(char)
+            index += 1
+            continue
+
+        if char == "\\":
+            normalized.extend((" ", " ") if following else (" ",))
+            at_word_start = False
+            index += 2 if following else 1
+            continue
+        if char == "'":
+            normalized.append(" ")
+            state = "single"
+            at_word_start = False
+            index += 1
+            continue
+        if char == '"':
+            normalized.append(" ")
+            state = "double"
+            at_word_start = False
+            index += 1
+            continue
+        if char == "#" and at_word_start:
+            normalized.append(" ")
+            state = "comment"
+            index += 1
+            continue
+
+        normalized.append(char)
+        at_word_start = char.isspace() or char in ";&|()<>"
+        index += 1
+
+    return "".join(normalized)
+
+
 def braced_parameter_expansions(source: str) -> tuple[tuple[int, str], ...]:
     """Return balanced braced parameter expansions without executing shell."""
     expansions: list[tuple[int, str]] = []
@@ -51,6 +131,7 @@ def braced_parameter_expansions(source: str) -> tuple[tuple[int, str], ...]:
 
 def task5_array_expansion_violations(source: str) -> tuple[str, ...]:
     """Return non-indexed parameter expansions of Task 5 local arrays."""
+    source = shell_expansion_scan_text(source)
     violations: list[tuple[int, str]] = []
     for start, expansion in braced_parameter_expansions(source):
         body = expansion[2:-1]
@@ -224,6 +305,31 @@ class ProductionProfileTests(unittest.TestCase):
                     task5_array_expansion_violations(f'{name}[index]="$value"'),
                     (),
                 )
+
+    def test_selector_array_scanner_ignores_nonexecuted_text(self) -> None:
+        samples = (
+            "# ${seen_names[@]}",
+            "printf ok # ${seen_names[@]}",
+            "printf '%s' '${seen_names[@]}'",
+            r'''printf "%s" "\${seen_names[@]}"''',
+        )
+        for sample in samples:
+            with self.subTest(sample=sample):
+                self.assertEqual(task5_array_expansion_violations(sample), ())
+
+    def test_selector_array_scanner_splices_executed_continuations(self) -> None:
+        sample = '"${seen_' + "\\\n" + 'names[@]}"'
+        self.assertEqual(
+            task5_array_expansion_violations(sample),
+            ("${seen_names[@]}",),
+        )
+
+    def test_selector_array_scanner_keeps_hash_inside_shell_word(self) -> None:
+        sample = "printf prefix#${seen_names[@]}"
+        self.assertEqual(
+            task5_array_expansion_violations(sample),
+            ("${seen_names[@]}",),
+        )
 
     def assert_readers_reject(self, text: str, message: str) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-profile-test-") as raw_tmp:
