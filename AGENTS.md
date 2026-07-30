@@ -350,9 +350,10 @@ Hosted CI runs the same logical floor as two platform-local chains:
   it needs through its own task edges, so nothing downstream could ever
   consume what the preflight built.
 - macOS: preflight runs the native audit and `build-profile-check`, proving the
-  native `apple-m1` IR, stripped Mach-O, and exact 14.0 minimum before it
-  releases `test`, `assertions-check`, `e2e`, `cache-protocol-check`,
-  `build-stamp-check`, and strict contract cells. Both matrices run
+  native `apple-m1` IR and exact 14.0 minimum before it releases `test`,
+  `assertions-check`, `e2e`, `cache-protocol-check`, `build-stamp-check`, and
+  strict contract cells. The Linux repository-policy barrier separately pins
+  `-g0` in both profiles' exact link argv. Both matrices run
   `fail-fast: false`, so one red lane never cancels the verdicts of the others.
 - There is no self-hosted dogfood cell. `scripts/harness/dogfood.py` survives
   as a local task and as the helper `package-check` reuses against the

@@ -142,7 +142,11 @@ def parse_llvm_target_attributes(text: str) -> tuple[tuple[str, str], ...]:
 
 
 def parse_elf_debug_sections(text: str) -> tuple[str, ...]:
-    """Return `.debug_*` section names from `readelf -S` output."""
+    """Return `.debug_*` section names from `readelf -S` output.
+
+    Raises:
+        BuildProfileError: The output has no recognized `.text` section.
+    """
     sections: list[str] = []
     has_text = False
     for line in text.splitlines():

@@ -198,7 +198,7 @@ jobs:
             task: contract-check-strict
           # Both memory lanes build every binary they judge from source, so no
           # `pixi run build` precedes them and neither reads `build/mtest` or
-          # `build/mtest.mojopkg`: the shipped artifact is uninstrumented and
+          # `build/mtest.mojoc`: the shipped artifact is uninstrumented and
           # carries no `-g` guarantee, so reusing it would defeat the lane. See
           # the CLI_BINARY docstrings in scripts/checks/memory/asan.py and
           # scripts/checks/memory/valgrind.py.
@@ -376,7 +376,8 @@ jobs:
   macos-preflight:
     name: macOS arm64 / preflight
     runs-on: macos-26
-    # The Linux preflight's tier: same locked Pixi install, same cheap barrier.
+    # The Linux preflight's ceiling leaves ample room for the native and profile
+    # compiles this platform-specific barrier owns.
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -400,8 +401,9 @@ jobs:
       # the gate.
       #
       # The production-profile step intentionally builds here before releasing
-      # the behavioral matrix. It proves native apple-m1 IR, a stripped Mach-O,
-      # and the exact macOS 14.0 minimum on the real binary. Jobs share no
+      # the behavioral matrix. It proves native apple-m1 IR and the exact macOS
+      # 14.0 minimum on the real binary. The Linux repository-policy barrier
+      # separately pins -g0 in both profiles' exact link argv. Jobs share no
       # filesystem, so the cells below still build their own inputs.
       - name: Audit native adapter
         run: pixi run native-check
