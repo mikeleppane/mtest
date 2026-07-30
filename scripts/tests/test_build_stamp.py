@@ -573,6 +573,73 @@ class BuildStampTests(unittest.TestCase):
         finally:
             shutil.rmtree(sandbox, ignore_errors=True)
 
+    def test_invalid_legacy_ownership_stamps_fail_with_remediation(self) -> None:
+        """Every invalid legacy-shaped stamp preserves both ambiguous outputs."""
+        legacy_bytes = {
+            LEGACY_PACKAGES[0]: b"legacy-toml-package\n",
+            LEGACY_PACKAGES[1]: b"legacy-mtest-package\n",
+        }
+        head = hashlib.sha256(b"legacy-inputs").hexdigest()
+        toml_hash = hashlib.sha256(legacy_bytes[LEGACY_PACKAGES[0]]).hexdigest()
+        mtest_hash = hashlib.sha256(legacy_bytes[LEGACY_PACKAGES[1]]).hexdigest()
+        cases = (
+            (
+                "mismatched output hash",
+                (
+                    f"in:{head}\n"
+                    f"out:{LEGACY_PACKAGES[0]} {'0' * 64}\n"
+                    f"out:{LEGACY_PACKAGES[1]} {mtest_hash}\n"
+                ),
+            ),
+            (
+                "duplicate output row",
+                (
+                    f"in:{head}\n"
+                    f"out:{LEGACY_PACKAGES[0]} {toml_hash}\n"
+                    f"out:{LEGACY_PACKAGES[0]} {toml_hash}\n"
+                    f"out:{LEGACY_PACKAGES[1]} {mtest_hash}\n"
+                ),
+            ),
+            (
+                "malformed head",
+                (
+                    "in:not-a-sha256\n"
+                    f"out:{LEGACY_PACKAGES[0]} {toml_hash}\n"
+                    f"out:{LEGACY_PACKAGES[1]} {mtest_hash}\n"
+                ),
+            ),
+            ("stamp open failure", None),
+        )
+        for label, stamp_text in cases:
+            with self.subTest(case=label):
+                sandbox = sandbox_tree()
+                try:
+                    build = sandbox / "build"
+                    build.mkdir(exist_ok=True)
+                    for relative, contents in legacy_bytes.items():
+                        (sandbox / relative).write_bytes(contents)
+                    stamp = build / ".precompile.stamp"
+                    if stamp_text is None:
+                        stamp.write_text(
+                            f"in:{head}\n"
+                            f"out:{LEGACY_PACKAGES[0]} {toml_hash}\n"
+                            f"out:{LEGACY_PACKAGES[1]} {mtest_hash}\n",
+                            encoding="utf-8",
+                        )
+                        stamp.chmod(0o000)
+                    else:
+                        stamp.write_text(stamp_text, encoding="utf-8")
+
+                    result = run_stage(sandbox)
+
+                    self.assertNotEqual(result.returncode, 0)
+                    for relative, contents in legacy_bytes.items():
+                        self.assertEqual((sandbox / relative).read_bytes(), contents)
+                        self.assertIn(relative.as_posix(), result.stderr)
+                    self.assertIn("move or remove", result.stderr)
+                finally:
+                    shutil.rmtree(sandbox, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()

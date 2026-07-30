@@ -216,7 +216,7 @@ remove_owned_legacy_packages() {
   if [[ ${#DIGEST_CMD[@]} -eq 0 || ! -f "$PRECOMPILE_STAMP" ]]; then
     owned=0
   else
-    while IFS= read -r line || [[ -n "$line" ]]; do
+    if ! while IFS= read -r line || [[ -n "$line" ]]; do
       if [[ $first -eq 1 ]]; then
         first=0
         head_digest="${line#in:}"
@@ -262,7 +262,9 @@ remove_owned_legacy_packages() {
           owned=0
           ;;
       esac
-    done <"$PRECOMPILE_STAMP"
+    done <"$PRECOMPILE_STAMP"; then
+      owned=0
+    fi
   fi
 
   if [[ $owned -eq 1 && $out_ok -eq 2 && $seen_toml -eq 1 && $seen_mtest -eq 1 ]]; then
