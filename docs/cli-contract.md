@@ -284,7 +284,9 @@ that is the runner's flag, not a forwarded user argument.
 
 Built binaries persist across invocations under `.mtest-cache/build-v1/` in the
 invocation root, so a rerun over an unchanged tree compiles nothing. The cache
-is **on by default**, is local to one checkout, and is never shared between
+is **on by default** and is local to one checkout. It is deliberately not
+persisted across CI runs: moving compiled artifacts into shared state could
+reuse a binary built for a different host CPU. It is never shared between
 machines.
 
 Each artifact is an immutable directory named `<mangled>_h<digest>`, holding the
@@ -295,17 +297,24 @@ interrupted publication leaves nothing a later run can adopt. Two runs that race
 for one key are not an error: the loser adopts the winner's artifact.
 
 The key is derived from the compile inputs, never from configuration text. It
-covers the resolved compiler and every file in the library directory beside it,
-five environment variables that move where the toolchain reads or writes
-something of its own (`MODULAR_HOME`, `MODULAR_CACHE_DIR`,
+covers the resolved compiler and every entry in `<resolved compiler
+dir>/../lib/mojo`, five environment variables that move where the toolchain
+reads or writes something of its own (`MODULAR_HOME`, `MODULAR_CACHE_DIR`,
 `MODULAR_DERIVED_PATH`, `MODULAR_NVPTX_COMPILER_PATH`, `XDG_CACHE_HOME`), the
 physical invocation root, the build arguments, every
 file named by a build argument, the walked contents of every `-I` root, the
 walked contents of the directory the test file sits in, and the test file itself
 — by CONTENT, so a modification time that moves without the bytes changing
-rebuilds nothing. That directory is in the key because the compiler resolves a
-bare `from helper import ...` against the source file's own directory, with no
-`-I` involved: a helper beside a test is a build input nothing else covers.
+rebuilds nothing. A branch switch and back hits only for files whose bytes are
+identical across branches; differing files replace their one live generation
+and recompile when switched back. That directory is in the key because the
+compiler resolves a bare `from helper import ...` against the source file's own
+directory, with no `-I` involved: a helper beside a test is a build input
+nothing else covers.
+The keyed `-I` spelling is exact — `-I lib` and `-I ./lib` differ — while the
+named directory's contents are walked and digested. Symlink resolution remains
+canonicalized. A wrapper script therefore relocates the keyed library directory
+beside the wrapper; the real compiler's libraries are not directly keyed.
 Settings that cannot change a compiled byte (timeouts, workers, retries,
 selection, reporters, and the rest of §25) are absent from it and never
 invalidate anything. There is no import-graph analysis: one change under an `-I`
@@ -323,15 +332,21 @@ restore that drops mode bits leaves the content intact — and reports the
 recorded build duration so the SLOW annotation reads the same warm as cold. An
 artifact that fails either check is deleted and rebuilt, so a store damaged from
 outside heals on the next run rather than failing every one after it. Publishing
-an artifact removes that source's older ones, so a second run over the same
-checkout can delete a validated artifact in the window between the check and the
-execution; a run that cannot execute an artifact the cache served compiles the
-file instead, emitting a `cache-rebuild` warning, and the compile is a recovery
-rather than a second admission — it moves neither counter (§15.4). Anything the key cannot characterize honestly — an
+an artifact removes that source's older ones, and damage can quarantine one, so
+a second run over the same checkout can replace or quarantine a generation in
+the window between the check and execution. The same race can reach a generation
+this run just published. A run that cannot execute a stored artifact compiles
+the file instead, emitting a `cache-rebuild` warning, and the compile is a
+recovery rather than a second admission — it moves neither counter (§15.4).
+Anything the key cannot characterize honestly — an
 unclassifiable `--build-arg`, an include tree that cannot be walked, a store
 that cannot be created — turns the cache off for the whole session with one
 warning and builds normally. No cache condition ever fails a run that would
 otherwise pass.
+
+`--compile-timeout` bounds only a compile that happens. A warm hit performs no
+compile and therefore cannot produce COMPILE-TIMEOUT; use `--no-cache` when the
+compile deadline itself must be exercised.
 
 Retries are outside the cache entirely: a crash-class retry builds to its
 invocation-private path under `build/bin/` and publishes nothing, and the file
@@ -362,12 +377,11 @@ staging, so a run that asked for no cache creates no store directory and leaves
 behind no artifact a later run could trust. It does still create `.mtest-cache`
 itself, because the last-run state lives there and is written whatever the cache
 is doing — and every `.mtest-cache` mtest creates carries the `CACHEDIR.TAG`
-ownership marker, so a directory left by a `--no-cache` run is one
-`--cache-clear` can still prove it owns and delete. The marker goes only into a
+deletion-authorization marker, so a directory left by a `--no-cache` run is one
+`--cache-clear` can still delete. The marker goes only into a
 directory mtest created: an existing `.mtest-cache` is used as it is and left
 unmarked, since writing the marker into a directory somebody else made would
-manufacture the ownership proof `--cache-clear` demands rather than establish
-it.
+manufacture `--cache-clear` deletion authority.
 
 `--cache-clear` deletes `.mtest-cache` — the artifacts and the last-run state
 together — and then runs the session normally, which legitimately repopulates
@@ -375,7 +389,7 @@ the store. Before deleting, the path is characterized without following
 symlinks and must be a real directory carrying the `CACHEDIR.TAG` marker mtest
 writes when it creates `.mtest-cache` — as a regular file holding exactly the
 text mtest writes, because `CACHEDIR.TAG` is a shared convention and a marker
-somebody else wrote proves nothing about who owns the directory. A symlink, a
+somebody else wrote does not authorize deleting the directory. A symlink, a
 missing or foreign marker, or a deletion that fails partway is a pre-session
 usage error (exit 4) with a diagnostic that names the manual removal, and there
 is deliberately no "its contents look like ours" override. Combined with `--lf`/`--ff`, a warning
@@ -398,14 +412,16 @@ this design cannot close without compiling from a snapshot, and it is listed
 first because a reader deciding whether to trust a warm run needs it before
 anything else here.
 
-- **An input edited and edited back while the compiler is running.** The key is
-  taken before the compile and re-checked after it, so an input that is
-  DIFFERENT at publication is caught: nothing is published, a `cache-publish`
-  warning is emitted, and the file is rebuilt next run. What two samples cannot
-  see is an input that changed and changed back while the compiler was reading
-  it. Both samples agree, the binary came from bytes neither of them saw, and no
-  warning is emitted because as far as the guard can tell nothing moved. A later
-  run over the restored tree hits that binary.
+- **An input edited and edited back while the compiler is running.** Build
+  inputs must remain stable while a compiler invocation runs; mutation during
+  compilation is unsupported. Test-file publication re-checks its inputs after
+  compilation, so an input that is DIFFERENT at publication is caught: nothing
+  is published, a `cache-publish` warning is emitted, and the file is rebuilt
+  next run. What those two samples cannot see is an input that changed and
+  changed back while the compiler was reading it. Both samples agree, the
+  binary came from bytes neither of them saw, and no warning is emitted because
+  as far as the guard can tell nothing moved. A later run over the restored tree
+  hits that binary.
 
   This is reachable by ordinary work — editing a helper during a slow compile
   and undoing it — and it is a real gap, not a theoretical one. Closing it takes
@@ -416,11 +432,12 @@ anything else here.
   If you suspect it, `--no-cache` compiles from what is on disk, and
   `--cache-clear` discards anything already stored.
 
-  The same two-sample limit applies more widely to the session-scoped inputs.
-  The `-I` root contents and the toolchain are sampled once for the whole
-  session rather than per build, so their window is the entire run. Re-walking
-  every include root at every publication would narrow that without closing it,
-  at a cost scaling with include-tree size times files compiled; the per-file
+  Configured precompile-step inputs are sampled once, so their unsupported
+  mutation window spans the whole step; they do not receive the test-file
+  publication re-check. The `-I` root contents and the toolchain are likewise
+  sampled once for the whole session rather than per build. Re-walking every
+  include root at every publication would narrow that without closing it, at a
+  cost scaling with include-tree size times files compiled; the per-file
   directory re-walk is bounded by one directory and paid only on a miss, which
   is why it is worth doing and the session-wide one is not.
 
@@ -439,7 +456,8 @@ anything else here.
   the compiler is the hostile case, not the developer mistake.
 
 - **The toolchain outside its library directory.** The compiler binary is keyed
-  by content, and so is every regular file in `<compiler dir>/../lib/mojo`.
+  by content, and so is every regular file in `<resolved compiler
+  dir>/../lib/mojo`.
   The linker binary beside the compiler, the shared objects it loads at run
   time, and the clang resource directory are not. An ordinary toolchain change
   moves the compiler binary too and so moves the key; a surgical replacement of
@@ -1585,8 +1603,8 @@ code exist today. Section 27 separately covers the reachable `config show` and
   including mutually exclusive config controls; a selected config that is
   missing, unreadable, malformed, or invalid; a syntactically invalid `--json`
   or `--junit-xml` destination; the `--json -`/annotations stdout conflict; and
-  a `--cache-clear` target that is a symlink, carries no ownership marker mtest
-  can prove it wrote, or cannot be deleted (§8.5), all detected pre-run.
+  a `--cache-clear` target that is a symlink, carries no deletion-authorization
+  marker, or cannot be deleted (§8.5), all detected pre-run.
 
 **`--json` reachability.** `--json PATH|-` is served (§15.4): it is parsed into a
 live event-stream reporter composed beside the console. Its destination is

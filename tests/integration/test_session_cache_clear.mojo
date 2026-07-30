@@ -10,7 +10,6 @@ The clear is a session-independent operation, so most cases here write the
 `CACHEDIR.TAG` marker by hand rather than paying for a compile to get one. The
 two that need a real session say why.
 """
-from std.ffi import external_call
 from std.os import makedirs, remove
 from std.os.path import exists, islink
 from std.testing import assert_equal, assert_false, assert_true, TestSuite
@@ -29,7 +28,7 @@ from mtest.report import (
     RecordingCoordinator,
     RecordingReporter,
 )
-from mtest.platform.cstring import c_string_bytes
+from mtest.platform import set_permissions
 from mtest.session import run_session
 from mtest.session.store import clear_cache_root
 
@@ -39,7 +38,7 @@ from tmptree import link_dir, temp_root
 
 
 comptime _CACHE_ROOT = ".mtest-cache"
-"""The whole directory mtest owns, relative to a run root."""
+"""The cache root whose exact marker authorizes deletion."""
 
 
 comptime _STORE_DIR = ".mtest-cache/build-v1"
@@ -54,8 +53,8 @@ comptime _MARKER_TEXT = (
 )
 """A hand-written `CACHEDIR.TAG` body, for cases with no session to write one.
 
-Byte-identical to what the store writes, and it has to be: the clear proves
-ownership by comparing the whole marker, so a fixture that abbreviated it would
+Byte-identical to what the store writes, and it has to be: the clear authorizes
+deletion by comparing the whole marker, so a fixture that abbreviated it would
 be refused. The signature line alone would not do — it is the cachedir
 convention's, shared by every tool that marks a cache directory, so a marker
 carrying only that says nothing about who created this one.
@@ -64,42 +63,6 @@ Only `test_cache_clear_deletes_a_store_a_real_session_wrote` needs the marker a
 session actually writes; every other clear case only needs a marker to be there,
 so it writes this rather than paying for a compile.
 """
-
-
-def _chmod(path: String, mode: Int) raises:
-    """Set `path`'s permission bits.
-
-    The pinned `std.os` exposes no `chmod`, and the partial-delete refusal
-    cannot be reached without one: that path only opens when the removal fails
-    on a child the process genuinely may not unlink, which is a permission fact
-    and not something a fault injector can stand in for.
-
-    Args:
-        path: An existing path whose mode is replaced.
-        mode: The POSIX permission bits, for example `0o500`.
-
-    Raises:
-        Error: If `chmod` reports a failure.
-    """
-    var c = c_string_bytes(path)
-    # SAFETY: libc `chmod` has the exact ABI `int chmod(const char*, mode_t)` on
-    # both Linux and Darwin — a fixed arity of two with no variadic tail, so the
-    # NON-variadic call `external_call` emits is the correct one on every target
-    # this suite builds for. The pointer names a complete, fully initialized,
-    # NUL-terminated byte copy this function uniquely owns: `c_string_bytes`
-    # allocates it here, nothing else holds a reference, and `c` stays a live
-    # local that is consumed only after the call returns, so the pointer is valid
-    # for the whole synchronous call and aliases nothing. It does not escape —
-    # `chmod` reads the path and retains nothing past its return — and the callee
-    # writes through it not at all. The mode is a plain scalar widened to the
-    # `unsigned int` Linux uses; Darwin's narrower `mode_t` reads the same low
-    # bits from the same register, and every value passed here fits in nine bits.
-    # Nothing is allocated for the callee to free, and the result is a plain
-    # status; `errno` is never read, so no ordering constraint against the
-    # release of `c` exists.
-    var rc = external_call["chmod", Int32](c.unsafe_ptr(), UInt32(mode))
-    _ = c^
-    assert_equal(rc, Int32(0), "could not chmod " + path)
 
 
 def _clear_diagnostic(root: String) -> String:
@@ -166,7 +129,7 @@ def _saw_warning_kind(rec: RecordingReporter, kind: String) raises -> Bool:
     return False
 
 
-def test_cache_clear_removes_owned_store() raises:
+def test_cache_clear_removes_marked_store() raises:
     """A marked `.mtest-cache` is deleted whole — store, marker, and lastrun."""
     var root = temp_root()
     write_file(root, ".mtest-cache/CACHEDIR.TAG", _MARKER_TEXT)
@@ -175,7 +138,7 @@ def test_cache_clear_removes_owned_store() raises:
     write_file(root, ".mtest-cache/lastrun", "v1\n")
 
     var diagnostic = _clear_diagnostic(root)
-    assert_equal(diagnostic, "", "clearing an owned store must not refuse")
+    assert_equal(diagnostic, "", "clearing an authorized store must not refuse")
     assert_false(
         exists(root + "/" + _CACHE_ROOT),
         "--cache-clear deletes the whole directory, not just the generations",
@@ -195,10 +158,17 @@ def test_cache_clear_refuses_symlink() raises:
     link_dir(root, "victim", _CACHE_ROOT)
 
     var diagnostic = _clear_diagnostic(root)
-    assert_true(diagnostic != "", "a symlinked cache root must be refused")
-    assert_true(
-        "symlink" in diagnostic,
-        "the refusal must say what it refused: " + diagnostic,
+    assert_equal(
+        diagnostic,
+        (
+            "cache-clear: "
+            + root
+            + "/.mtest-cache: refusing to delete a symlink — only a real cache"
+            " directory carrying mtest's exact deletion-authorization marker"
+            " may be deleted, and following this link would delete whatever it"
+            " points at; remove or repoint the link yourself, then rerun"
+        ),
+        "the refusal must state the marker's exact deletion authority",
     )
     assert_true(
         exists(root + "/victim/precious.txt"),
@@ -216,7 +186,7 @@ def test_cache_clear_refuses_unmarked() raises:
     No "but everything in it looks like ours" exception exists on purpose: that
     heuristic is exactly how a directory somebody else created gets deleted, and
     neither does a run write the marker into a directory it merely found — that
-    would manufacture the proof one invocation later. So the refusal is
+    would manufacture deletion authority one invocation later. So the refusal is
     permanent until the user acts, and the text has to say so and hand over the
     manual removal rather than name a run that would fix it.
     """
@@ -230,6 +200,10 @@ def test_cache_clear_refuses_unmarked() raises:
         "the refusal must name the marker it looked for: " + diagnostic,
     )
     assert_true(
+        "deletion-authorization marker" in diagnostic,
+        "the refusal must name the marker's deletion authority: " + diagnostic,
+    )
+    assert_true(
         "never into one it finds" in diagnostic,
         ("the refusal must say why no later run can fix it: " + diagnostic),
     )
@@ -237,7 +211,7 @@ def test_cache_clear_refuses_unmarked() raises:
         "run mtest once" in diagnostic,
         (
             "the refusal must not name a run as the way out; a run that marked"
-            " this directory would manufacture the proof: "
+            " this directory would manufacture deletion authority: "
             + diagnostic
         ),
     )
@@ -259,8 +233,8 @@ def test_cache_clear_refuses_a_marker_it_did_not_write() raises:
     scripts are actively encouraged to drop one into any directory they want
     backups to skip. So a marker's mere presence — even a marker leading with
     the standard signature — says only that somebody marked this as a cache, not
-    that mtest created it. Ownership is proven against the whole text mtest
-    writes, or the deletion does not happen.
+    that mtest created it. The whole text mtest writes authorizes deletion, or
+    the deletion does not happen.
     """
     var root = temp_root()
     write_file(root, ".mtest-cache/CACHEDIR.TAG", "Signature: deadbeef\n")
@@ -287,7 +261,7 @@ def test_cache_clear_refuses_a_marker_it_did_not_write() raises:
 def test_cache_clear_refuses_a_marker_that_is_not_a_regular_file() raises:
     """A directory named `CACHEDIR.TAG` is not the marker mtest writes.
 
-    The cheapest way to defeat an ownership proof is to satisfy it with the
+    The cheapest way to defeat a deletion check is to satisfy it with the
     wrong kind of object: a bare existence test accepts a directory, a symlink,
     a socket, or a device node at the marker's path, and each of those
     authorizes deleting a tree mtest never created.
@@ -330,12 +304,12 @@ def test_cache_clear_reports_a_partial_delete() raises:
     var locked = root + "/" + _STORE_DIR + "/tests_stest_uok_h00"
     # `r-x`: the walk can still list and characterize the generation, so it
     # reaches the `unlink` that the missing write bit denies.
-    _chmod(locked, 0o500)
+    set_permissions(locked, 0o500)
 
     var diagnostic = _clear_diagnostic(root)
     # Restored BEFORE the first assertion, so a failing case still leaves a
     # removable temp tree behind rather than an undeletable one.
-    _chmod(locked, 0o700)
+    set_permissions(locked, 0o700)
 
     assert_true(
         diagnostic != "",
@@ -388,11 +362,16 @@ def test_cache_clear_deletes_a_store_a_real_session_wrote() raises:
     assert_equal(first.built_files, 1, "the cold run compiles the one file")
     assert_true(
         exists(root + "/.mtest-cache/CACHEDIR.TAG"),
-        "a cache-enabled session must have written the ownership marker",
+        (
+            "a cache-enabled session must have written the"
+            " deletion-authorization marker"
+        ),
     )
 
     assert_equal(
-        _clear_diagnostic(root), "", "a store mtest wrote is a store it owns"
+        _clear_diagnostic(root),
+        "",
+        "a store with the marker authorizes deletion",
     )
     assert_false(
         exists(root + "/" + _CACHE_ROOT), "the cleared store must be gone"

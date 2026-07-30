@@ -18,7 +18,7 @@ bytes and neither pays for the other's presence. The fault adapter is
 configured and reset inside the case that wants it, so the retry cases below
 run against an adapter with an empty fault table exactly as they would alone.
 """
-from std.os import getenv, makedirs, remove
+from std.os import getenv, makedirs, remove, setenv, unsetenv
 from std.os.path import exists, isdir
 from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
@@ -39,7 +39,7 @@ from mtest.report import (
 )
 from mtest.platform import read_bounded_regular_file, read_regular_file_bytes
 from mtest.session import run_session
-from mtest.session.store import PRECOMPILE_SUBDIR
+from mtest.session.store import PRECOMPILE_SUBDIR, STORE_FAULT_ENV
 
 from cache_fixtures import dir_listing, run_recording_session
 from foreign_abi import configure_native_fault, reset_native_faults
@@ -65,6 +65,19 @@ comptime _STORE_DIR = ".mtest-cache/build-v1"
 comptime _EIO = 5
 """`EIO`, the errno a faulted native adapter operation reports."""
 
+
+comptime _FAULT_PUBLISHED_ABSENT = "published-absent"
+"""Hide a newly published generation just before this session executes it."""
+
+
+comptime _CACHE_REBUILD_PATTERN = (
+    "the stored binary for 'tests/test_ok.mojo' could not be started, so the"
+    " file is being rebuilt. Another mtest run may have replaced or quarantined"
+    " that generation."
+)
+"""The exact cause-neutral warning shared by warm and fresh recovery."""
+
+
 comptime _RUN_SPAWN_OCCURRENCE = 3
 """Which stdout-pipe open is the RUN spawn of a one-file cached session.
 
@@ -82,9 +95,9 @@ Two children are dispatched, in this order: `<compiler> --version`, which feeds
 the key's toolchain-version frame and is not memoized across sessions, and the
 run of the stored binary. There is no build, which is what a warm run means.
 The cases that use this do not trust the arithmetic — they assert the
-`cache-rebuild` warning only a failed cache-hit run can produce, so a fault that
-landed on the `--version` child fails loudly rather than passing over a run that
-never reached the store.
+`cache-rebuild` warning produced by the run dispatch, so a fault that landed on
+the `--version` child fails loudly rather than passing over a run that never
+reached the store.
 """
 
 
@@ -133,6 +146,27 @@ def _saw_warning_kind(rec: RecordingReporter, kind: String) raises -> Bool:
             if e.data[WarningPayload].warning_kind == kind:
                 return True
     return False
+
+
+def _warning_pattern(rec: RecordingReporter, kind: String) raises -> String:
+    """The pattern of the one warning carrying `kind`.
+
+    Args:
+        rec: The recorder to read back.
+        kind: The warning kind to find.
+
+    Returns:
+        The matching warning pattern.
+
+    Raises:
+        Error: If no warning carries `kind`.
+    """
+    for i in range(rec.count()):
+        var e = rec.event_at(i)
+        if e.kind == EventKind.WARNING:
+            if e.data[WarningPayload].warning_kind == kind:
+                return e.data[WarningPayload].warning_pattern
+    raise Error("no warning carried kind '" + kind + "'")
 
 
 # --- Injected dispatch faults: a spawn this process could not make. ----------
@@ -246,6 +280,7 @@ def test_a_cached_binary_that_will_not_start_costs_a_rebuild() raises:
             " fault landed on a spawn other than the cached run"
         ),
     )
+    assert_equal(_warning_pattern(rec, "cache-rebuild"), _CACHE_REBUILD_PATTERN)
     var totals = _counters(rec)
     assert_equal(totals.cached_files, 1, "the file was admitted as a hit")
     assert_equal(
@@ -290,9 +325,78 @@ def test_a_pooled_cached_binary_that_will_not_start_costs_a_rebuild() raises:
         _saw_warning_kind(rec, "cache-rebuild"),
         "the pool must announce the rebuild the same way",
     )
+    assert_equal(_warning_pattern(rec, "cache-rebuild"), _CACHE_REBUILD_PATTERN)
     var totals = _counters(rec)
     assert_equal(totals.cached_files, 1, "the file was admitted as a hit")
     assert_equal(totals.built_files, 0, "and admitted exactly once")
+
+
+def test_a_freshly_published_binary_that_vanishes_rebuilds_sequentially() raises:
+    """A publish-to-exec ENOENT falls back without a second admission.
+
+    The store fault leaves the just-committed generation absent exactly for the
+    run dispatch. Unlike a warm hit, this file was already charged to
+    `built_files`; rebuilding it under `build/bin` must preserve that accounting
+    while keeping a cache-race ENOENT from becoming exit 3.
+    """
+    var root = temp_root()
+    write_file(root, "tests/test_ok.mojo", SRC_PASS)
+
+    var comp = _recorder()
+    var code: Int
+    var saved = getenv(STORE_FAULT_ENV, "")
+    var was_set = getenv(STORE_FAULT_ENV, "\x01unset") != "\x01unset"
+    try:
+        _ = setenv(STORE_FAULT_ENV, _FAULT_PUBLISHED_ABSENT, True)
+        code = run_session(base_config(), root, comp)
+    finally:
+        if was_set:
+            _ = setenv(STORE_FAULT_ENV, saved, True)
+        else:
+            _ = unsetenv(STORE_FAULT_ENV)
+
+    assert_equal(code, 0, "a vanished published binary must rebuild and pass")
+    ref rec = comp.composite.reporters[0]
+    assert_true(
+        _saw_warning_kind(rec, "cache-rebuild"),
+        "the publish-to-exec recovery must be visible",
+    )
+    assert_equal(_warning_pattern(rec, "cache-rebuild"), _CACHE_REBUILD_PATTERN)
+    var totals = _counters(rec)
+    assert_equal(totals.built_files, 1, "the cold admission stays singular")
+    assert_equal(totals.cached_files, 0, "the session never had a warm hit")
+
+
+def test_a_freshly_published_binary_that_vanishes_rebuilds_in_pool() raises:
+    """The pool recovers the same publish-to-exec ENOENT independently."""
+    var root = temp_root()
+    write_file(root, "tests/test_ok.mojo", SRC_PASS)
+    var config = base_config()
+    config.workers = 2
+
+    var comp = _recorder()
+    var code: Int
+    var saved = getenv(STORE_FAULT_ENV, "")
+    var was_set = getenv(STORE_FAULT_ENV, "\x01unset") != "\x01unset"
+    try:
+        _ = setenv(STORE_FAULT_ENV, _FAULT_PUBLISHED_ABSENT, True)
+        code = run_session(config, root, comp)
+    finally:
+        if was_set:
+            _ = setenv(STORE_FAULT_ENV, saved, True)
+        else:
+            _ = unsetenv(STORE_FAULT_ENV)
+
+    assert_equal(code, 0, "a vanished published binary must rebuild and pass")
+    ref rec = comp.composite.reporters[0]
+    assert_true(
+        _saw_warning_kind(rec, "cache-rebuild"),
+        "the pool publish-to-exec recovery must be visible",
+    )
+    assert_equal(_warning_pattern(rec, "cache-rebuild"), _CACHE_REBUILD_PATTERN)
+    var totals = _counters(rec)
+    assert_equal(totals.built_files, 1, "the cold admission stays singular")
+    assert_equal(totals.cached_files, 0, "the pool never had a warm hit")
 
 
 # --- A build the run did not keep: retried, killed, or superseded. -----------

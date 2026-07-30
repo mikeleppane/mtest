@@ -77,23 +77,23 @@ that won a rename race, because adopting an unvalidated winner is how a single
 corrupt generation spreads to every process that loses to it.
 
 Deletion inside the store goes through `remove_tree_no_follow`, which refuses a
-symlinked root and unlinks child symlinks rather than descending them. The cache
-deletes only what it owns, and it proves ownership with the `CACHEDIR.TAG`
-marker written at `CACHE_ROOT_DIR` — above the store, because `--cache-clear`
-deletes the whole owned directory and that is what must be proven mtest's.
+symlinked root and unlinks child symlinks rather than descending them. The
+`CACHEDIR.TAG` marker at `CACHE_ROOT_DIR` authorizes `--cache-clear` deletion
+when its whole text matches — above the store, because that flag deletes the
+whole cache root.
 `ensure_cache_root` writes that marker on EVERY path that CREATES the directory,
 including the one that only wants somewhere to keep last-run state, and on no
 other path: a directory that was already there was made by somebody else, and
-marking it would manufacture the very proof the deletion demands. The proof is
-the marker's whole text, since `CACHEDIR.TAG` is a shared convention and a
-marker somebody else wrote says nothing about who owns the directory.
+marking it would manufacture deletion authority for a directory this invocation
+did not create. The whole marker text matters because `CACHEDIR.TAG` is a
+shared convention and its presence says nothing about who owns the directory.
 
-**The publication fault seam — TEST ONLY.** `store_publish` reads the
-environment variable `MTEST_STORE_FAULT` exactly ONCE per call, through the same
-`_env_value` accessor `MODULAR_HOME` goes through, and what it reads never
-reaches a `KeyBuilder`: the seam is not a key input, not a config field, and not
-part of the tag namespace. Absent or empty — the only shape any real invocation
-has — means no effect at all, and so does any value outside the two names below.
+**The store fault seam — TEST ONLY.** The store reads the environment variable
+`MTEST_STORE_FAULT` through the same `_env_value` accessor `MODULAR_HOME` goes
+through, and what it reads never reaches a `KeyBuilder`: the seam is not a key
+input, not a config field, and not part of the tag namespace. Absent or empty
+— the only shape any real invocation has — means no effect at all, and so does
+any value outside the five names below.
 
 It exists because the two publication windows worth faulting are inside mtest's
 own process, AFTER the compiler child has exited, so no fake compiler can reach
@@ -102,9 +102,19 @@ directory that was never flushed; `before-rename` abandons it after step 4 and
 before step 5, so the generation is fully durable and simply never committed.
 Both take the ordinary `PUB_FAILED` path — the staged binary stays alive and the
 session keeps running it — so the seam introduces no state and no control flow
-the protocol does not already have. `scripts/tests/test_cache_protocol.py` drives
-both windows and asserts the property they exist to demonstrate: an interrupted
-publication leaves no generation a later run could probe.
+the protocol does not already have. `unreadable-replacement` moves the
+test-prepared replacement into the final name after unreadable detection and
+before quarantine, pinning that the atomic move reconciles the object it
+actually moved. `unreadable-tombstone-lstat` faults identity inspection after
+that move, so the helper has to restore rather than strand its only generation
+under a tombstone. `unreadable-prepare-failure` faults Darwin's permission
+preparation, pinning that quarantine still gets its own authoritative attempt.
+`published-absent` moves a just-committed generation aside before the caller
+executes it, pinning the driver contract for the otherwise unavoidable pathname
+gap in a concurrent quarantine.
+`scripts/tests/test_cache_protocol.py` drives the two
+publication windows and asserts the property they exist to demonstrate: an
+interrupted publication leaves no generation a later run could probe.
 """
 from std.ffi import _Global
 from std.os import getenv, listdir, lstat, mkdir, rmdir, stat, unlink
@@ -132,6 +142,7 @@ from mtest.platform import (
     create_unique_temp,
     fsync_path,
     is_executable_file,
+    prepare_directory_for_rename,
     process_id,
     read_bounded_regular_file,
     read_regular_file_bytes,
@@ -1818,12 +1829,12 @@ def collect_env_base(
                     _absolute(root, row.value), _BIN_CAP
                 )
             except:
-                # The grammar took this token for a file; it is not one this run
-                # can read, so what it contributes to the build is unknown.
+                # `-Xlinker` accepts linker options as well as paths. A token
+                # this cache cannot digest leaves its build effect unknown.
                 ctx.disable(
-                    "build argument '"
+                    "cache cannot characterize -Xlinker argument '"
                     + row.value
-                    + "' does not name a readable file"
+                    + "'"
                 )
                 return ctx^
             ctx.base.feed_file(
@@ -1894,19 +1905,19 @@ def finalize_includes(
     ctx.include_unscannable = scan.unscannable
 
 
-# --- The owned store: layout and the ownership marker. -----------------------
+# --- The store: layout and the deletion-authorization marker. ----------------
 
 comptime CACHE_ROOT_DIR = ".mtest-cache"
-"""The whole directory mtest owns, relative to the invocation root.
+"""The whole cache directory, relative to the invocation root.
 
 `STORE_DIR` lives inside it, and so does the last-run reselection state, which
-is why the ownership marker sits HERE rather than beside the generations:
-`--cache-clear` deletes this directory, so this is the directory whose ownership
-has to be provable before anything is removed.
+is why the deletion-authorization marker sits HERE rather than beside the
+generations: `--cache-clear` deletes this directory, so the marker has to
+authorize deleting this whole tree.
 """
 
 comptime CACHEDIR_TAG_REL = ".mtest-cache/CACHEDIR.TAG"
-"""The ownership marker, relative to the invocation root.
+"""The deletion-authorization marker, relative to the invocation root.
 
 Spelled out rather than composed from `CACHE_ROOT_DIR`, because the pinned
 toolchain's `comptime` bindings are literals; the two must agree, and
@@ -1918,7 +1929,7 @@ comptime CACHEDIR_TAG_SIGNATURE = "Signature: 8a477f597d28d172789f06886806bc55"
 
 Backup and archiving tools recognize this exact byte string and skip the
 directory holding it — which is correct for a build cache, and a free side
-effect of the marker mtest needs anyway to prove the directory is its own.
+effect of the marker that authorizes `--cache-clear` deletion.
 """
 
 comptime _BIN_NAME = "bin"
@@ -1956,8 +1967,8 @@ def _cachedir_tag_text() -> String:
     """The marker file's full contents.
 
     Returns:
-        The standard signature line, then two comment lines naming mtest as the
-        owner and the convention as the reference.
+        The standard signature line, then two comment lines naming the cache
+        creator and the convention as the reference.
     """
     var out = String(CACHEDIR_TAG_SIGNATURE) + "\n"
     out += "# This file is a cache directory tag created by mtest.\n"
@@ -1975,13 +1986,14 @@ def ensure_cache_root(root: String) raises:
     still has the directory — and if the marker were tied to staging, that
     directory would be unmarked and `--cache-clear` would refuse to delete a
     tree mtest itself had just created, blaming an older mtest that was never
-    there. Every directory mtest makes is one mtest can prove it owns.
+    there. Every directory mtest makes carries the marker that authorizes its
+    `--cache-clear` deletion.
 
-    The converse is what makes that proof worth anything, and it is why the
+    The converse is what makes that authorization meaningful, and it is why the
     `mkdir` here is exclusive rather than an "ensure it exists". A `.mtest-cache`
     that was ALREADY THERE was made by something else — an older mtest, another
-    tool, or the user — and marking it would hand `clear_cache_root` a proof of
-    ownership this process invented, one invocation after that same function
+    tool, or the user — and marking it would hand `clear_cache_root` deletion
+    authority this process invented, one invocation after that same function
     refused to delete the directory for want of it. So an existing directory is
     used as-is and left unmarked, and `--cache-clear` keeps refusing it until the
     user removes it themselves.
@@ -1991,8 +2003,7 @@ def ensure_cache_root(root: String) raises:
     half-written tag — and `--cache-clear`, whose entire safety argument rests on
     the marker's contents, can never be defeated by a torn write. A directory
     whose marker cannot be written is removed again rather than left behind
-    unmarked, since an unmarked directory is one no later run can ever prove is
-    mtest's.
+    unmarked, since no later run can authorize `--cache-clear` deletion there.
 
     Args:
         root: The invocation root the cache directory hangs under.
@@ -2048,7 +2059,8 @@ def ensure_cache_root(root: String) raises:
         except:
             pass
         raise Error(
-            "session: could not write the cache ownership marker at '"
+            "session: could not write the cache deletion-authorization marker"
+            " at '"
             + tag
             + "'"
         )
@@ -2169,15 +2181,159 @@ def _discard(path: String):
         pass
 
 
-def cache_rebuild_note(rel: String) -> String:
-    """Why a validated cache hit is being compiled after all.
+comptime STORE_FAULT_ENV = "MTEST_STORE_FAULT"
+"""The test-only store fault seam's environment variable."""
 
-    The store deletes a source's older generations when it publishes a new one,
-    so a second run over the same checkout — another terminal, another shard
-    with different build arguments — can remove a generation this run has
-    already validated and is about to execute. The reader's answer is to build
-    the file, because a cache condition must never fail a run that would
-    otherwise pass; this is the sentence that says so.
+comptime _FAULT_UNREADABLE_REPLACEMENT = "unreadable-replacement"
+"""Move the test-prepared replacement between detection and quarantine."""
+
+
+comptime _FAULT_UNREADABLE_TOMBSTONE_LSTAT = "unreadable-tombstone-lstat"
+"""Fail the post-move identity read after the original reaches its tombstone."""
+
+
+comptime _FAULT_UNREADABLE_PREPARE_FAILURE = "unreadable-prepare-failure"
+"""Fail permission preparation before the quarantine rename."""
+
+
+def _restore_tombstone(tombstone_path: String, gen_abs: String):
+    """Put a moved generation back unless a newer nonempty one occupies it.
+
+    Directory `rename(2)` refuses to replace a nonempty target, so a publisher
+    that filled `gen_abs` after quarantine claimed the original is never
+    overwritten. Failure leaves the tombstone as inert store-owned litter,
+    which is safer than deleting a binary another process may have begun to
+    execute.
+
+    Args:
+        tombstone_path: The private pathname holding the moved generation.
+        gen_abs: Its public generation pathname.
+    """
+    try:
+        rename_path(tombstone_path, gen_abs)
+    except:
+        pass
+
+
+def _discard_unreadable_generation(
+    gen_abs: String, store_abs: String, gen_name: String
+):
+    """Remove an unreadable generation without racing a replacement.
+
+    A failed read invalidates the generation even when it was a transient
+    `EACCES`: the store cannot validate an artifact it cannot read, and its
+    established rule is to discard every failed validation before rebuilding.
+    The generation's device/inode pair is captured before the unreadable list.
+    The final pathname then moves atomically to a private name, and that moved
+    directory's identity decides the result: the observed unreadable directory
+    is discarded; a readable replacement that arrived meanwhile is restored.
+    Restoring uses directory `rename(2)`, which refuses to replace a nonempty
+    newer generation, so a later publisher remains runnable. An undeletable
+    original remains inert `.tmp-` litter that no probe, publisher, or reaper
+    serves.
+
+    Args:
+        gen_abs: The unreadable generation's absolute path.
+        store_abs: The containing store directory's absolute path.
+        gen_name: The generation's one-component name within `store_abs`.
+    """
+    var observed_dev: Int
+    var observed_ino: Int
+    var kind: Int
+    try:
+        var observed = lstat(gen_abs)
+        observed_dev = Int(observed.st_dev)
+        observed_ino = Int(observed.st_ino)
+        kind = Int(observed.st_mode) & _S_IFMT
+    except:
+        return
+    if kind != _S_IFDIR:
+        return
+    if _list_sorted(gen_abs):
+        return
+
+    var requested = _env_value(STORE_FAULT_ENV)
+    # Darwin refuses to rename a write-disabled directory even within one
+    # parent. The platform helper opens the canonical store as an anchor, then
+    # identity-checks and changes the observed one-component generation without
+    # following any path below that anchor. A preparation failure does not
+    # suppress the rename: Linux needs no preparation, and Darwin's rename
+    # remains the authoritative attempt.
+    try:
+        if requested and requested.value() == _FAULT_UNREADABLE_PREPARE_FAILURE:
+            raise Error("test-only unreadable preparation fault")
+        prepare_directory_for_rename(
+            store_abs, gen_name, observed_dev, observed_ino
+        )
+    except:
+        pass
+
+    # This names one test-only interleaving: a peer has prepared a valid
+    # generation in the store and publishes it after this helper observed the
+    # unreadable directory. Production runs never set the fault, so no extra
+    # filesystem mutation occurs outside the existing quarantine protocol.
+    if requested and requested.value() == _FAULT_UNREADABLE_REPLACEMENT:
+        try:
+            rename_path(
+                store_abs + "/" + _TMP_PREFIX + "unreadable-replacement",
+                gen_abs,
+            )
+        except:
+            pass
+
+    var tombstone_path = String("")
+    try:
+        var tombstone = create_unique_temp(
+            store_abs + "/" + _TMP_PREFIX + "unreadable.XXXXXX"
+        )
+        tombstone_path = tombstone.path.copy()
+        close_checked_fd(tombstone.fd)
+        unlink(tombstone_path)
+        rename_path(gen_abs, tombstone_path)
+    except:
+        if tombstone_path != "":
+            _discard(tombstone_path)
+        return
+    var moved_dev: Int
+    var moved_ino: Int
+    try:
+        if requested and requested.value() == _FAULT_UNREADABLE_TOMBSTONE_LSTAT:
+            raise Error("test-only tombstone identity fault")
+        var moved = lstat(tombstone_path)
+        moved_dev = Int(moved.st_dev)
+        moved_ino = Int(moved.st_ino)
+    except:
+        # Moving the final path above created a temporary absence. If inspecting
+        # the moved object fails, restoration is the only safe conservative
+        # answer: leaving it private would make a cache cleanup turn into a
+        # spawn-time ENOENT for another session. `_restore_tombstone` refuses to
+        # overwrite a newer nonempty generation a publisher may have installed.
+        _restore_tombstone(tombstone_path, gen_abs)
+        return
+    if moved_dev == observed_dev and moved_ino == observed_ino:
+        _discard(tombstone_path)
+        return
+    if not _list_sorted(tombstone_path):
+        _discard(tombstone_path)
+        return
+    # A valid replacement raced in after the unreadable observation. If another
+    # publisher has already filled `gen_abs`, this directory-to-directory rename
+    # fails because that generation contains `meta` and `bin`; retain this
+    # private duplicate rather than overwrite a newer final generation.
+    try:
+        rename_path(tombstone_path, gen_abs)
+    except:
+        pass
+
+
+def cache_rebuild_note(rel: String) -> String:
+    """Why a stored binary is being compiled after all.
+
+    A second run can replace or quarantine a generation after this run validates
+    it, and the same race can reach an artifact this run just published. The
+    reader's answer is to build the file, because a cache condition must never
+    fail a run that would otherwise pass; this is the cause-neutral sentence
+    that says so.
 
     Args:
         rel: The test file's root-relative path.
@@ -2193,23 +2349,25 @@ def cache_rebuild_note(rel: String) -> String:
     var note = cache_rebuild_note("tests/test_a.mojo")
     ```
     """
-    var note = String("the cached binary for '") + rel
-    note += "' was gone before it could run, so the file is being rebuilt."
-    note += " Another mtest run over this checkout publishing a different key"
-    note += " for the same file removes that file's older entries."
+    var note = String("the stored binary for '") + rel
+    note += "' could not be started, so the file is being rebuilt."
+    note += " Another mtest run may have replaced or quarantined that"
+    note += " generation."
     return note^
 
 
-def _ownership_proof_failure(root: String) -> Optional[String]:
-    """Why `<root>/.mtest-cache` is not provably mtest's, or nothing if it is.
+def _deletion_authorization_failure(root: String) -> Optional[String]:
+    """Why `<root>/.mtest-cache` does not authorize `--cache-clear` deletion.
 
-    The proof is the whole marker file, not its presence and not its first line.
+    Authorization is the whole marker file, not its presence and not its first
+    line.
     `CACHEDIR.TAG` is a published convention: the signature line is a fixed byte
     string shared by every tool that marks a cache directory, and users are
     actively encouraged to drop one into any directory they want backup tools to
     skip. A marker that merely exists, or that merely carries the convention's
     signature, therefore says somebody marked this as a cache — not that mtest
-    created it. Only the exact text `_cachedir_tag_text` writes says that.
+    created it. Only the exact text `_cachedir_tag_text` writes authorizes this
+    deletion.
 
     Args:
         root: The invocation root the cache directory hangs under.
@@ -2217,19 +2375,21 @@ def _ownership_proof_failure(root: String) -> Optional[String]:
     Returns:
         What failed and what to do about it, ready to finish a refusal, or
         `None` when the marker is a regular file holding exactly what mtest
-        writes. Never raises: an unprovable directory is a refusal, not an
+        writes. Never raises: an unauthorized deletion is a refusal, not an
         error.
 
         The two shapes are different facts with one remedy. mtest writes the
         marker only when it creates the directory itself, and neither writes one
         into a directory it finds nor overwrites one that is already there —
-        either would manufacture the proof this function exists to demand. So a
+        either would manufacture deletion authority this function exists to
+        demand. So a
         missing marker and a foreign marker both mean the same thing: nothing a
-        later run does can make this directory provably mtest's, and the way out
+        later run does can authorize deletion of this directory, and the way out
         is the user's own deletion.
     """
     var tag = root + "/" + CACHEDIR_TAG_REL
-    var quoted = String("the ownership marker '") + CACHEDIR_TAG_REL + "' "
+    var quoted = String("the deletion-authorization marker '")
+    quoted += CACHEDIR_TAG_REL + "' "
     var manual = String(" delete the directory yourself with 'rm -rf ")
     manual += CACHE_ROOT_DIR
     manual += "'"
@@ -2278,8 +2438,7 @@ def _ownership_proof_failure(root: String) -> Optional[String]:
 
 
 def clear_cache_root(root: String) -> Optional[String]:
-    """Delete `<root>/.mtest-cache` whole, but only where mtest can prove it
-    owns it.
+    """Delete `<root>/.mtest-cache` whole when its marker authorizes deletion.
 
     `--cache-clear`'s entire implementation, and the one place in mtest that
     removes a directory the USER named rather than one mtest invented. Three
@@ -2287,13 +2446,13 @@ def clear_cache_root(root: String) -> Optional[String]:
 
     1. The path is characterized `lstat`-no-follow FIRST. A symlink is REFUSED,
        never removed and never followed — following it would delete whatever it
-       points at, which is outside the tree mtest owns.
+       points at, which is outside the named cache root.
     2. The directory must hold the `CACHEDIR.TAG` marker mtest writes when it
        creates the directory — as a regular file, holding exactly the text mtest
        writes. Presence alone proves nothing: `CACHEDIR.TAG` is a published
        convention whose signature line every cache-marking tool writes, and
        users add one by hand to keep backups out, so a marker somebody else
-       wrote would otherwise hand mtest deletion rights over their directory.
+       wrote does not authorize deleting their directory.
        There is deliberately no "but its contents look like ours" exception
        either: that heuristic is exactly how a directory somebody else created
        gets deleted. A checkout whose cache predates the marker therefore
@@ -2301,7 +2460,7 @@ def clear_cache_root(root: String) -> Optional[String]:
        removal.
     3. Removal itself goes through `remove_tree_no_follow`, which unlinks child
        symlinks rather than descending them, so the blast radius stays inside
-       the proven directory.
+       the authorized directory.
 
     An ABSENT cache root is success, not a diagnostic: there is nothing to
     clear, which is the ordinary shape of a first run. A root that cannot be
@@ -2347,16 +2506,17 @@ def clear_cache_root(root: String) -> Optional[String]:
     if kind == _S_IFLNK:
         var symlink_note = String("cache-clear: ") + cache_root
         symlink_note += ": refusing to delete a symlink"
-        symlink_note += " — mtest deletes only the cache directory it created,"
+        symlink_note += " — only a real cache directory carrying mtest's exact"
+        symlink_note += " deletion-authorization marker may be deleted,"
         symlink_note += " and following this link would delete whatever it"
         symlink_note += " points at; remove or repoint the link yourself, then"
         symlink_note += " rerun"
         return Optional[String](symlink_note^)
-    var unproven = _ownership_proof_failure(root)
-    if unproven:
+    var authorization_failure = _deletion_authorization_failure(root)
+    if authorization_failure:
         var unmarked_note = String("cache-clear: ") + cache_root
         unmarked_note += ": refusing to delete a directory mtest cannot prove"
-        unmarked_note += " it owns — " + unproven.value()
+        unmarked_note += " it owns — " + authorization_failure.value()
         return Optional[String](unmarked_note^)
     try:
         remove_tree_no_follow(cache_root)
@@ -2853,13 +3013,16 @@ def store_probe(root: String, key: FileKey) -> ProbeResult:
     6. `bin` is readable.
     7. `bin`'s content digest equals the digest `meta` recorded.
 
-    Any failed check deletes the generation, so a corruption cannot be re-read
-    on the next probe and the next build republishes cleanly — and the removal
-    unlinks a child symlink rather than descending it, so refusing a linked
-    `bin` never reaches whatever it pointed at. The one deliberate exception is
-    a SYMLINK at the generation path itself: that is refused and left exactly
-    where it is, because a link the cache did not create is not the cache's to
-    delete.
+    Any failed check discards the generation, so a corruption cannot be re-read
+    on the next probe and the next build republishes cleanly. A failed root
+    listing is the unreadable case: ordinary deletion is attempted first, then
+    an undeletable directory is moved to an inert temporary name so it cannot
+    block publication. A transient `EACCES` gets the same treatment because an
+    artifact the store cannot validate must never be served. The removal unlinks
+    a child symlink rather than descending it, so refusing a linked `bin` never
+    reaches whatever it pointed at. The one deliberate exception is a SYMLINK
+    at the generation path itself: that is refused and left exactly where it
+    is, because a link the cache did not create is not the cache's to delete.
 
     Args:
         root: The invocation root.
@@ -2896,6 +3059,18 @@ def store_probe(root: String, key: FileKey) -> ProbeResult:
         # A plain file (or a device, or a socket) where a generation belongs is
         # not a generation, and it occupies the name the next publish needs.
         _discard(gen_abs)
+        return _probe_miss()
+
+    # `lstat` above established that this path is a real directory. A failed
+    # listing therefore means unreadable rather than absent — the same
+    # distinction `_toolchain_lib_listing` preserves for key inputs. Do this
+    # before trying `meta`: an unreadable generation cannot be recursively
+    # removed, so simply treating its unreadable record as a normal miss would
+    # leave the final name occupied and make every later publish fail.
+    if not _list_sorted(gen_abs):
+        _discard_unreadable_generation(
+            gen_abs, root + "/" + STORE_DIR, key.gen_name
+        )
         return _probe_miss()
 
     # --- Checks 2 and 3: the record parses and names THIS key. --------------
@@ -3052,19 +3227,15 @@ def _publish_failed(
     )
 
 
-comptime STORE_FAULT_ENV = "MTEST_STORE_FAULT"
-"""The test-only publication fault seam's environment variable.
-
-Read once per `store_publish` call and never fed to a `KeyBuilder`. See the
-module docstring's "The publication fault seam" note for why the seam exists
-and what each recognized value abandons.
-"""
-
 comptime _FAULT_BEFORE_FSYNC = "before-fsync"
 """Abandon the publication before the durability flush."""
 
 comptime _FAULT_BEFORE_RENAME = "before-rename"
 """Abandon the publication after the flush and before the commit rename."""
+
+
+comptime _FAULT_PUBLISHED_ABSENT = "published-absent"
+"""Hide a newly committed generation before its caller executes it."""
 
 
 def _store_fault() -> String:
@@ -3113,6 +3284,27 @@ def _fault_abandoned(
         + src_rel
         + "'",
     )
+
+
+def _fault_hide_published_generation(final_abs: String, store_abs: String):
+    """Move a committed generation to inert litter for the driver fault seam.
+
+    Args:
+        final_abs: The newly committed generation directory.
+        store_abs: Its containing store directory.
+    """
+    var hidden = String("")
+    try:
+        var temp = create_unique_temp(
+            store_abs + "/" + _TMP_PREFIX + "published-absent.XXXXXX"
+        )
+        hidden = temp.path.copy()
+        close_checked_fd(temp.fd)
+        unlink(hidden)
+        rename_path(final_abs, hidden)
+    except:
+        if hidden != "":
+            _discard(hidden)
 
 
 def _rewrite_output(
@@ -3442,6 +3634,10 @@ def store_publish(
     except:
         pass
     _reap_siblings(root, key)
+    if fault == _FAULT_PUBLISHED_ABSENT:
+        _fault_hide_published_generation(
+            root + "/" + key.gen_dir, root + "/" + STORE_DIR
+        )
     return PublishResult(PUB_OK, final_bin_rel^, recorded^, String(""))
 
 
@@ -3882,7 +4078,7 @@ def precompile_publish(root: String, key: FileKey, out_path: String):
     over an unchanged tree can skip it. The record is written to a unique
     temporary file and renamed onto its name, so a concurrent probe reads either
     the old stamp or the new one and never a half-written record — the same
-    discipline the ownership marker and every generation use.
+    discipline the deletion-authorization marker and every generation use.
 
     Superseded stamps for this same source are reaped first, so an editing loop
     leaves one stamp per step rather than one per edit.

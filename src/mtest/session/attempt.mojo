@@ -86,6 +86,10 @@ comptime _ATTEMPT_STREAM_TAIL = 65536
 """Tail bytes of each stream kept in a non-final attempt's excerpt (64 KiB)."""
 
 
+comptime _ENOENT = 2
+"""The POSIX spawn error for the cache pathname that vanished before exec."""
+
+
 @fieldwise_init
 struct _AttemptResult(Copyable, Movable):
     """The raw result of one build, run, and classify attempt for a file.
@@ -889,14 +893,16 @@ def _run_one(
     # asked about a key this call is genuinely about to build or run.
     var key = Optional[FileKey](None)
     var target = _no_staging()
-    # Whether this file is about to run a binary the store served, and whether
-    # it has already fallen back from one. Publishing a generation deletes that
-    # source's older ones, so a second run over this checkout can remove the
-    # generation this one validated between the probe and the exec. A binary
-    # that is no longer there is a reason to compile the file, not an internal
-    # error — and once, so a binary that will not spawn for any other reason
-    # still reaches the internal-error path rather than looping.
+    # Whether this file is about to run a binary the store served, whether it
+    # just published or adopted one, and whether it has already fallen back.
+    # Publishing deletes a source's older generations, so a second run over the
+    # same checkout can remove the generation this one validated between probe
+    # and exec. A binary that is no longer there is a reason to compile the
+    # file, not an internal error — and once, so a binary that will not spawn
+    # for any other reason still reaches the internal-error path rather than
+    # looping.
     var store_hit = False
+    var published_store_artifact = False
     var store_rebuilt = False
     if ctx.enabled:
         key = file_key(ctx, root, rel)
@@ -1031,6 +1037,13 @@ def _run_one(
                     attempt_events.append(
                         Event.warning("cache-publish", pub.warning)
                     )
+                else:
+                    # The cache has just taken ownership of the binary this
+                    # session will execute. A concurrent unreadable-generation
+                    # quarantine can briefly move that final pathname aside;
+                    # a real ENOENT from this next exec gets the same bounded
+                    # local rebuild as a warm hit below.
+                    published_store_artifact = True
                 # The run pass, over the settled binary and carrying this
                 # build's facts forward exactly as a run-side retry does.
                 var built_term = att.bterm
@@ -1057,15 +1070,28 @@ def _run_one(
             var ie_step = String(
                 att.internal_event.data[InternalErrorPayload].step
             )
-            if store_hit and not store_rebuilt and ie_step == "run":
-                # The store's binary would not spawn. Compile the file rather
-                # than fail a run whose only fault was that its binary was
-                # cached. This is not a retry: `attempt_index` does not move,
-                # no attempt is reported, and the file was already admitted as
-                # a cache hit, so neither counter moves either. The key was
-                # dropped at the hit, so the rebuild stages and publishes
-                # nothing — it lands in `build/bin` like every uncached build.
+            var ie_errno = att.internal_event.data[InternalErrorPayload].errno
+            if (
+                (
+                    store_hit
+                    or (published_store_artifact and ie_errno == _ENOENT)
+                )
+                and not store_rebuilt
+                and ie_step == "run"
+            ):
+                # The store's binary would not spawn. A warm hit may degrade
+                # over any run-spawn failure, as before; a binary this session
+                # just published degrades only over ENOENT, the concrete
+                # quarantine pathname gap, so an unrelated supervisor failure
+                # remains an internal error. This is not a retry:
+                # `attempt_index` does not move, no attempt is reported, and
+                # the file was already admitted either as a cache hit or its
+                # first cold build, so neither counter moves. The key was
+                # dropped at the hit or after publication, so the rebuild
+                # stages and publishes nothing — it lands in `build/bin` like
+                # every uncached build.
                 store_hit = False
+                published_store_artifact = False
                 store_rebuilt = True
                 do_build = True
                 out_bin = plain_out

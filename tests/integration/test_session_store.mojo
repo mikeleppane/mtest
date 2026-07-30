@@ -25,8 +25,18 @@ the transparent wrapper `session_fixtures.base_config` names, on purpose: their
 subject is the store's own behavior rather than the pinned toolchain's layout,
 and a stub or a wrapper proves that just as well for nothing.
 """
-from std.os import getenv, makedirs, remove, setenv, symlink, unsetenv
+from std.os import (
+    getenv,
+    link,
+    lstat,
+    makedirs,
+    remove,
+    setenv,
+    symlink,
+    unsetenv,
+)
 from std.os.path import exists, isdir, islink, realpath
+from std.sys.info import CompilationTarget
 from std.testing import (
     TestSuite,
     assert_equal,
@@ -40,10 +50,12 @@ from mtest.cache import ImportScan, KeyBuilder, scan_imports
 from mtest.config import Precompile, RunnerConfig
 from mtest.exec import ExecRuntime, ProcessResult, ProcessSpec, run_supervised
 from mtest.platform import (
+    prepare_directory_for_rename,
     read_bounded_regular_file,
     read_regular_file_bytes,
     rename_path,
     resolve_executable,
+    set_permissions,
 )
 from mtest.session.scratch import _mangle
 from mtest.session.store import (
@@ -53,12 +65,14 @@ from mtest.session.store import (
     PRECOMPILE_SUBDIR,
     PUB_FAILED,
     PUB_OK,
+    STORE_FAULT_ENV,
     STORE_DIR,
     CacheContext,
     FileKey,
     StoreBuildTarget,
     _MEMO_PATH_CAP,
     _ToolchainMemo,
+    _discard_unreadable_generation,
     _toolchain_identity,
     cache_key_tags,
     clear_cache_root,
@@ -627,13 +641,12 @@ def _near(a: Float64, b: Float64) -> Bool:
 
 
 def test_staging_directory_name_carries_the_mangled_source() raises:
-    # A first-attempt cached build is compiled into staging AND RUN from
-    # staging: the rename into a generation happens only after the file's
-    # verdict is settled. So the staged path is the only name a live test child
-    # has, and anything identifying that child from outside the process — the
-    # release contract's SIGINT probe, a `ps` a human reads during a hang — has
-    # nothing else to match on. A name built from pid and clock alone hid every
-    # running child from `pgrep`.
+    # The compiler child writes to staging for the whole first-attempt build.
+    # Publication normally finishes before the test child starts, so the test
+    # child runs there only when publication fails. Anything identifying either
+    # live child from outside the process — the release contract's SIGINT probe,
+    # a `ps` a human reads during a hang — has only that path to go on. A name
+    # built from pid and clock alone hid every running child from `pgrep`.
     var root = temp_root()
     var mangled = _mangle("irq/test_1hang.mojo")
     assert_equal(mangled, "irq_stest_u1hang")
@@ -662,9 +675,9 @@ def test_marker_written_at_mtest_cache_root() raises:
     assert_true(target.ok())
     assert_true(isdir(root + "/" + STORE_DIR))
     assert_true(isdir(root + "/" + target.tmp_dir_rel))
-    # The tag marks the WHOLE owned directory, not just the store, because that
-    # is the directory `--cache-clear` deletes and the marker is what proves the
-    # directory is mtest's before anything is removed.
+    # The tag covers the WHOLE cache root, not just the store, because that is
+    # the directory `--cache-clear` deletes and the marker authorizes deletion
+    # of that whole tree.
     var tag = read_bounded_regular_file(
         root + "/.mtest-cache/CACHEDIR.TAG", 4096
     )
@@ -676,7 +689,7 @@ def test_marker_written_at_mtest_cache_root() raises:
 
 
 def test_a_cache_root_made_for_state_alone_is_still_marked() raises:
-    """The directory mtest creates is always one mtest can prove it owns.
+    """A directory mtest creates carries the marker authorizing its deletion.
 
     `.mtest-cache` holds the last-run reselection state as well as the store,
     and the state is written whether the cache is on or off — so the directory
@@ -701,8 +714,8 @@ def test_a_cache_root_made_for_state_alone_is_still_marked() raises:
         tag.text.startswith("Signature: 8a477f597d28d172789f06886806bc55"),
         "the tag did not lead with the standard signature: " + tag.text,
     )
-    # The ownership proof and the marker writer have to agree byte for byte, or
-    # the directory is marked and still unclearable.
+    # The deletion check and marker writer have to agree byte for byte, or the
+    # directory is marked and still unclearable.
     assert_false(
         Bool(clear_cache_root(root)),
         "a directory mtest marked itself must clear without a refusal",
@@ -790,6 +803,246 @@ def test_probe_rejects_a_bin_that_lost_its_execute_bit() raises:
     # forever.
     assert_false(isdir(root + "/" + key.gen_dir))
     assert_equal(store_probe(root, key).kind, PROBE_MISS)
+
+
+def test_probe_heals_an_unreadable_generation() raises:
+    var root = temp_root()
+    var rel = String("tests/test_unreadable.mojo")
+    var key = _fixture_key(root, rel, "# unreadable\n")
+    var first = _stage_binary(root, [UInt8(1), UInt8(2), UInt8(3)])
+    assert_equal(
+        store_publish(
+            root, key, first, 1.0, _build_argv(rel, first.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+
+    # A cache directory can survive a permissions-damaging archive restore or
+    # manual repair. It must not occupy this generation's final name forever:
+    # the first probe misses, then the replacement publishes and the next probe
+    # hits as if the unreadable directory had never existed.
+    chmod_path("000", root + "/" + key.gen_dir)
+    assert_equal(store_probe(root, key).kind, PROBE_MISS)
+    var replacement = _stage_binary(root, [UInt8(4), UInt8(5), UInt8(6)])
+    assert_equal(
+        store_publish(
+            root, key, replacement, 1.0, _build_argv(rel, replacement.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+    assert_equal(store_probe(root, key).kind, PROBE_HIT)
+
+
+def test_permission_repair_never_follows_a_replaced_symlink() raises:
+    var root = temp_root()
+    var outside = root + "/outside"
+    makedirs(outside)
+    set_permissions(outside, 0o755)
+    var replacement = root + "/replacement"
+    makedirs(replacement)
+    var observed = lstat(replacement)
+    rename_path(replacement, root + "/old-observed")
+    symlink(outside, replacement)
+
+    # A peer can replace the observed cache directory before Darwin prepares it
+    # for repair. The anchored no-follow lookup must reject the replacement
+    # rather than chmod its target.
+    try:
+        prepare_directory_for_rename(
+            root, "replacement", Int(observed.st_dev), Int(observed.st_ino)
+        )
+    except:
+        pass
+    assert_equal(Int(lstat(outside).st_mode) & 0o777, 0o755)
+
+
+def test_permission_repair_rejects_a_symlinked_ancestor() raises:
+    var root = temp_root()
+    var ancestor = root + "/ancestor"
+    var generation = ancestor + "/generation"
+    makedirs(generation)
+    set_permissions(generation, 0o755)
+    var observed = lstat(generation)
+    var moved_ancestor = root + "/moved-ancestor"
+    rename_path(ancestor, moved_ancestor)
+    symlink(moved_ancestor, ancestor)
+
+    # The final component still resolves to the originally observed directory,
+    # so final-only O_NOFOLLOW plus the identity check would accept it.
+    # O_NOFOLLOW_ANY must reject the substituted ancestor before fchmod.
+    try:
+        prepare_directory_for_rename(
+            root,
+            "ancestor/generation",
+            Int(observed.st_dev),
+            Int(observed.st_ino),
+        )
+    except:
+        pass
+    assert_equal(
+        Int(lstat(moved_ancestor + "/generation").st_mode) & 0o777, 0o755
+    )
+
+
+def test_permission_repair_never_mutates_a_hard_link_replacement() raises:
+    var root = temp_root()
+    var outside = root + "/outside.bin"
+    write_bytes(root, "outside.bin", [UInt8(1)])
+    set_permissions(outside, 0o644)
+    var replacement = root + "/replacement"
+    makedirs(replacement)
+    var observed = lstat(replacement)
+    rename_path(replacement, root + "/old-observed")
+    link(outside, replacement)
+
+    # The anchored identity check rejects the hard-linked regular file before
+    # fchmodat. Even though its inode is shared with a path outside the cache,
+    # that outside object's mode must remain untouched.
+    try:
+        prepare_directory_for_rename(
+            root, "replacement", Int(observed.st_dev), Int(observed.st_ino)
+        )
+    except:
+        pass
+    assert_equal(Int(lstat(outside).st_mode) & 0o777, 0o644)
+
+
+def test_unreadable_healer_leaves_a_readable_replacement_alone() raises:
+    var root = temp_root()
+    var rel = String("tests/test_replacement.mojo")
+    var key = _fixture_key(root, rel, "# replacement\n")
+    var target = _stage_binary(root, [UInt8(7), UInt8(8), UInt8(9)])
+    assert_equal(
+        store_publish(
+            root, key, target, 1.0, _build_argv(rel, target.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+
+    # A concurrent publisher may replace the unreadable directory after the
+    # detecting probe has returned. The healer must re-check the final name and
+    # leave that readable replacement runnable rather than moving it aside.
+    _discard_unreadable_generation(
+        root + "/" + key.gen_dir, root + "/" + STORE_DIR, key.gen_name
+    )
+    assert_equal(store_probe(root, key).kind, PROBE_HIT)
+
+
+def test_unreadable_healer_restores_a_replacement_raced_before_quarantine() raises:
+    var root = temp_root()
+    var rel = String("tests/test_raced_replacement.mojo")
+    var key = _fixture_key(root, rel, "# raced replacement\n")
+    var target = _stage_binary(root, [UInt8(10), UInt8(11), UInt8(12)])
+    assert_equal(
+        store_publish(
+            root, key, target, 1.0, _build_argv(rel, target.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+    var store_abs = root + "/" + STORE_DIR
+    var replacement = store_abs + "/.tmp-unreadable-replacement"
+    rename_path(root + "/" + key.gen_dir, replacement)
+    makedirs(root + "/" + key.gen_dir)
+    chmod_path("000", root + "/" + key.gen_dir)
+
+    # The fault installs the valid replacement after the helper has observed
+    # the unreadable directory but before the helper claims its quarantine.
+    # That exact interleaving used to move the replacement into a tombstone and
+    # immediately delete it.
+    var saved = getenv(STORE_FAULT_ENV, "")
+    var was_set = getenv(STORE_FAULT_ENV, "\x01unset") != "\x01unset"
+    try:
+        _ = setenv(STORE_FAULT_ENV, "unreadable-replacement", True)
+        _discard_unreadable_generation(
+            root + "/" + key.gen_dir, store_abs, key.gen_name
+        )
+    finally:
+        if was_set:
+            _ = setenv(STORE_FAULT_ENV, saved, True)
+        else:
+            _ = unsetenv(STORE_FAULT_ENV)
+    assert_equal(store_probe(root, key).kind, PROBE_HIT)
+
+
+def test_unreadable_healer_restores_after_tombstone_inspection_failure() raises:
+    """A failed identity read puts the moved generation back at its final path.
+    """
+    var root = temp_root()
+    var rel = String("tests/test_tombstone_lstat.mojo")
+    var key = _fixture_key(root, rel, "# tombstone lstat\n")
+    var target = _stage_binary(root, [UInt8(13), UInt8(14), UInt8(15)])
+    assert_equal(
+        store_publish(
+            root, key, target, 1.0, _build_argv(rel, target.out_rel)
+        ).kind,
+        PUB_OK,
+    )
+
+    # The helper has already moved this directory when its identity inspection
+    # faults. It must restore the original rather than strand the only
+    # generation under a private tombstone and leave the final path absent.
+    var final_abs = root + "/" + key.gen_dir
+    chmod_path("000", final_abs)
+    var saved = getenv(STORE_FAULT_ENV, "")
+    var was_set = getenv(STORE_FAULT_ENV, "\x01unset") != "\x01unset"
+    try:
+        _ = setenv(STORE_FAULT_ENV, "unreadable-tombstone-lstat", True)
+        _discard_unreadable_generation(
+            final_abs, root + "/" + STORE_DIR, key.gen_name
+        )
+    finally:
+        if was_set:
+            _ = setenv(STORE_FAULT_ENV, saved, True)
+        else:
+            _ = unsetenv(STORE_FAULT_ENV)
+
+    assert_true(
+        isdir(final_abs),
+        "the identity-read failure must not leave the final generation absent",
+    )
+    chmod_path("755", final_abs)
+    assert_equal(store_probe(root, key).kind, PROBE_HIT)
+
+
+def test_unreadable_healer_still_quarantines_after_preparation_failure() raises:
+    comptime if CompilationTarget.is_macos():
+        # Darwin is the platform that needs successful preparation to rename a
+        # mode-000 directory. Linux isolates the separate contract under test:
+        # a failed preparation must not suppress a rename the parent permits.
+        return
+
+    var root = temp_root()
+    var store_abs = root + "/" + STORE_DIR
+    var final_rel = (
+        STORE_DIR + "/tests_stest_empty_h00000000000000000000000000000000"
+    )
+    var final_abs = root + "/" + final_rel
+    makedirs(final_abs)
+    write_bytes(root, final_rel + "/damage", [UInt8(1)])
+    set_permissions(final_abs, 0o000)
+
+    # Linux authorizes this rename through the writable parent even though the
+    # directory itself cannot be listed. Faulting the best-effort preparation
+    # proves its error never suppresses that authoritative rename attempt.
+    var saved = getenv(STORE_FAULT_ENV, "")
+    var was_set = getenv(STORE_FAULT_ENV, "\x01unset") != "\x01unset"
+    try:
+        _ = setenv(STORE_FAULT_ENV, "unreadable-prepare-failure", True)
+        _discard_unreadable_generation(
+            final_abs,
+            store_abs,
+            "tests_stest_empty_h00000000000000000000000000000000",
+        )
+    finally:
+        if was_set:
+            _ = setenv(STORE_FAULT_ENV, saved, True)
+        else:
+            _ = unsetenv(STORE_FAULT_ENV)
+    if exists(final_abs):
+        # Restore before asserting so a regression still leaves a removable
+        # temporary tree rather than an inaccessible one.
+        set_permissions(final_abs, 0o700)
+    assert_false(exists(final_abs))
 
 
 def test_probe_rejects_wrong_key_meta() raises:
@@ -2534,9 +2787,9 @@ def test_env_base_disables_on_missing_arg_file() raises:
     config.build_args = ["-Xlinker", "absent.o"]
     var ctx = env_base(config^, root)
     assert_false(ctx.enabled)
-    assert_true(
-        "absent.o" in ctx.disable_reason,
-        "reason did not name the token: " + ctx.disable_reason,
+    assert_equal(
+        ctx.disable_reason,
+        "cache cannot characterize -Xlinker argument 'absent.o'",
     )
 
 
