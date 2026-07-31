@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """Rewrite every version literal in one edit so the gates cannot disagree.
 
-Ten files carry the release version, in five syntaxes plus rendered CLI
-transcripts in prose, SVG, and a compiled Mojo assertion. Only three of them
-are covered by `scripts/checks/version.py`; `scripts/qa/contract.py` and
-`tests/unit/test_cli_parse.mojo` each fail at a different gate, and the
-transcripts in `README.md`, `docs/cli-contract.md`, and the two banner SVGs
-are gated by nothing at all. Bumping by hand means ten edits, and the ones
-that go unnoticed are exactly the ones no gate is watching.
+Nine files carry the release version, in four syntaxes plus rendered CLI
+transcripts in prose and SVG. Only three of them are covered by
+`scripts/checks/version.py`; `scripts/qa/contract.py` fails at a different
+gate, and the transcripts in `README.md`, `docs/cli-contract.md`, and the two
+banner SVGs are gated by nothing at all. Bumping by hand means nine edits, and
+the ones that go unnoticed are exactly the ones no gate is watching.
 
-The site list is ground truth from the 1.0.0 bump, not inference. Files that
-pin a deliberately arbitrary version are excluded on purpose; see
-`TRANSCRIPT_RE`.
+The site list derives from what the 1.0.0 bump changed, not from a search over
+likely file types: such a search is what misses the SVGs. That bump also
+touched `tests/unit/test_cli_parse.mojo`, which no longer belongs here because
+it composes the string from `MTEST_VERSION` instead of pinning a literal.
+Files that pin a deliberately arbitrary version are excluded for the same
+reason; see `TRANSCRIPT_RE`.
 
 Rewriting `EXPECTED_VERSION` from here is deliberate, not an oversight. That
 pin exists so a coordinated hand-edit of the other files cannot reach main
@@ -39,12 +41,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # `v`, no pre-release suffix, no zero-padded component.
 VERSION_RE = re.compile(r"(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2}\Z")
 
-# Every rendered `mtest <version>` the repository commits, in prose, SVG, and
-# compiled test expectations alike. The trailing guard stops `1.0.0` from
-# matching inside `1.0.01`. Fixtures that pin a deliberately arbitrary version
-# (`scripts/fixtures/json_stream/*.ndjson`, the report unit tests, and the
-# `stream_header` docstring, all still on 0.6.0) are NOT sites: they inject
-# their version explicitly and must not move with the release.
+# Every rendered `mtest <version>` the repository commits, in prose and in SVG.
+# The trailing guard stops `1.0.0` from matching inside `1.0.01`. Fixtures that
+# pin a deliberately arbitrary version (`scripts/fixtures/json_stream/*.ndjson`,
+# the report unit tests, and the `stream_header` docstring, all still on 0.6.0)
+# are NOT sites: they inject their version explicitly and must not move with the
+# release.
 TRANSCRIPT_RE = re.compile(r"mtest (\d+\.\d+\.\d+)(?![\d.])")
 
 
@@ -89,13 +91,6 @@ SITES = (
     Site(
         REPO_ROOT / "scripts" / "qa" / "contract.py",
         re.compile(r'out_has=\["mtest ([^"]*)"\]'),
-    ),
-    # A compiled assertion on `version_text()`. Miss this one and the unit
-    # suite fails on a truth it no longer holds, which is the loudest of these
-    # failures and the least obvious from the version's name.
-    Site(
-        REPO_ROOT / "tests" / "unit" / "test_cli_parse.mojo",
-        TRANSCRIPT_RE,
     ),
     # The CLI contract document, whose transcripts are the spec the qa gate
     # renders against.

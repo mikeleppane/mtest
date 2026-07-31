@@ -46,7 +46,7 @@ mojo-version = "mojo --version"
 # covers.
 version-check = "python -m scripts.checks.version"
 
-# The write side of `version-check`: rewrite the release version across all ten
+# The write side of `version-check`: rewrite the release version across all nine
 # files that carry it in one edit, e.g. `pixi run bump 1.1.0`. Only three are
 # gated by `version-check` itself; the rest fail at other gates or, for the
 # README, `docs/cli-contract.md`, and the banner SVGs, at none. Not wired into
