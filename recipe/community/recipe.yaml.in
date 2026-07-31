@@ -76,5 +76,5 @@ about:
 
 extra:
   project_name: mtest
-  recipe-maintainers:
+  maintainers:
     - mikeleppane

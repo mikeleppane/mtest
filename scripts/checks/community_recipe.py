@@ -98,6 +98,10 @@ def check_recipe_drift(local_recipe: Path, community_template: Path) -> None:
         "          mtest --no-config test_smoke.mojo",
         "  repository: https://github.com/mikeleppane/mtest",
         "  project_name: mtest",
+        # `maintainers`, not conda-forge's `recipe-maintainers`: this is the key
+        # the Mojo packaging guide's template uses and the one 34 of the 38
+        # recipes already in modular-community carry.
+        "  maintainers:",
         "    - mikeleppane",
     )
     for line in exact_community_lines:
