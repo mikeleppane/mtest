@@ -314,6 +314,7 @@ jobs:
               "prerelease": None if release is None else release["prerelease"],
               "immutable": None if release is None else release.get("immutable"),
           }
+          Path("build").mkdir(exist_ok=True)
           Path("build/release-snapshot.json").write_text(
               json.dumps(snapshot, separators=(",", ":"), sort_keys=True) + "\n",
               encoding="utf-8",
