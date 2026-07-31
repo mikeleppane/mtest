@@ -375,8 +375,9 @@ jobs:
             > "$RUNNER_TEMP/submitted-stdout.json" \
             2> "$RUNNER_TEMP/submitted-stderr.jsonl"
           test "$(tr -d '[:space:]' < "$RUNNER_TEMP/submitted-stdout.json")" = "[]"
-          grep -q '"mtest"' "$RUNNER_TEMP/submitted-stderr.jsonl"
-          grep -qi 'skip' "$RUNNER_TEMP/submitted-stderr.jsonl"
+          grep -q 'Build variant: mtest-' "$RUNNER_TEMP/submitted-stderr.jsonl"
+          grep -q 'Skipping build for variant' \
+            "$RUNNER_TEMP/submitted-stderr.jsonl"
           test -z "$(find output-aarch64 -type f -name '*.conda' -print 2>/dev/null)"
 
           cp -R recipes/mtest "$RUNNER_TEMP/mtest-control"
