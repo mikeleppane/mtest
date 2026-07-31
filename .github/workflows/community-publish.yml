@@ -546,7 +546,11 @@ jobs:
           branch="$(tr -d '\r\n' < "$RUNNER_TEMP/branch.txt")"
 
           for platform in linux-64 osx-arm64; do
-            curl --fail --silent --show-error \
+            # --location is required: repo.prefix.dev answers channel repodata
+            # with a 303 to its storage origin. --fail only rejects >=400, so
+            # without it curl exits 0 having written an empty file and the
+            # failure surfaces later as a JSON parse error on empty input.
+            curl --fail --silent --show-error --location \
               "https://repo.prefix.dev/modular-community/$platform/repodata.json" \
               > "$RUNNER_TEMP/$platform-repodata.json"
             PLATFORM="$platform" VERSION="$VERSION" BUILD_NUMBER="$BUILD_NUMBER" \
