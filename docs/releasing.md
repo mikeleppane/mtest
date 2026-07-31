@@ -47,30 +47,32 @@ release responses.
 
 ## Release procedure
 
-1. Merge the version and contract changes to `main`. Wait for the exact
-   resulting `main` push to finish all required `CI` checks successfully.
-2. Run **Community Publish** from `main` with mode `dry-run`, no tag, and build
-   number `0`. Both supported platform builds and the linux-aarch64 selector
-   proof must pass. Record the workflow run ID.
-3. If this is the first release, create the fine-grained fork token described
+1. Merge the version and contract changes to `main`. This automatically starts
+   `CI` for the exact resulting `main` push.
+2. Without waiting for `CI`, run **Community Publish** from `main` with mode
+   `dry-run`, no tag, and build number `0`. Both supported platform builds and
+   the linux-aarch64 selector proof must pass. Record the workflow run ID.
+3. Wait for both the dry run and the exact resulting `main` push to finish all
+   required `CI` checks successfully.
+4. If this is the first release, create the fine-grained fork token described
    above and add `COMMUNITY_FORK_OWNER=mikeleppane`.
-4. Run **Release** from `main`, entering the stable version without `v` and the
+5. Run **Release** from `main`, entering the stable version without `v` and the
    dry-run ID. Approve the `github-release` environment after checking the
    displayed commit and version.
-5. The successful new release triggers **Community Publish** in `prepare`
+6. The successful new release triggers **Community Publish** in `prepare`
    mode. Approve the `community-publish` environment. The workflow rechecks
    the upstream tip, public channels, recipe digest, fork identity, and token
    expiration before it prepares the fork branch.
-6. Open the compare URL in the workflow summary. Disable **Allow edits from
+7. Open the compare URL in the workflow summary. Disable **Allow edits from
    maintainers**, use the generated title and validation facts, and open the
    pull request against `modular/modular-community`.
-7. Wait for the upstream `OK to test` label, CI, review, merge, and channel
+8. Wait for the upstream `OK to test` label, CI, review, merge, and channel
    build.
-8. Run **Community Verify** with the release tag and build number. It installs
+9. Run **Community Verify** with the release tag and build number. It installs
    only from the public Modular, modular-community, and conda-forge channels
    on Linux and macOS and exercises the installed runner and assertion
    companion.
-9. Only after public verification passes, update README installation text and
+10. Only after public verification passes, update README installation text and
    release notes to say the package is publicly available.
 
 ## Recovery

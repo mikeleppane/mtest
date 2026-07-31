@@ -526,10 +526,21 @@ def check_release_workflows(repo_root: Path = REPO_ROOT) -> None:
         or community.count('test "$WORKFLOW_DEFINITION_SHA" = "$WORKFLOW_RUN_SHA"') != 1
     ):
         raise AssertionError("triggering release workflow identity is not exact")
+    ci_endpoint = "actions/workflows/ci.yml/runs?"
+    prepare_start = community.find('            if test "$mode" = "prepare"; then\n')
+    prepare_end_marker = '              test -n "$tag"\n            fi'
+    prepare_end = community.find(prepare_end_marker, prepare_start)
+    if (
+        community.count(ci_endpoint) != 1
+        or prepare_start < 0
+        or prepare_end < prepare_start
+        or ci_endpoint
+        not in community[prepare_start : prepare_end + len(prepare_end_marker)]
+    ):
+        raise AssertionError("manual prepare CI gate is not isolated from dry run")
     required_community_markers = (
         "github.event.workflow_run.conclusion == 'success'",
         'test "$GITHUB_REF_NAME" = "$DEFAULT_BRANCH"',
-        "actions/workflows/ci.yml/runs?",
         "repos/$GITHUB_REPOSITORY/branches/main",
         "repos/modular/modular-community/commits/main",
         "pixi run lint",

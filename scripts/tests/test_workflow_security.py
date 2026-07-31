@@ -355,6 +355,18 @@ class ReleaseWorkflowTests(unittest.TestCase):
         )
         self.assertIn("scripts.release.community fork", community)
 
+    def test_manual_prepare_ci_gate_cannot_apply_to_dry_run(self) -> None:
+        workflow = self._workflow("community-publish.yml")
+        self._reject(
+            "community-publish.yml",
+            workflow.replace(
+                '            if test "$mode" = "prepare"; then\n',
+                "            if true; then\n",
+                1,
+            ),
+            "manual prepare CI",
+        )
+
     def test_candidate_workflow_identity_tautology_is_rejected(self) -> None:
         self._reject(
             "release.yml",

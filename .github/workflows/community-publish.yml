@@ -114,19 +114,19 @@ jobs:
               gh api "repos/$GITHUB_REPOSITORY/branches/main" --jq .commit.sha
             )"
             test "$GITHUB_SHA" = "$main_sha"
-            gh api \
-              "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=push&branch=main&status=completed&head_sha=$GITHUB_SHA&per_page=100" \
-              > "$RUNNER_TEMP/ci-runs.json"
-            jq -e --arg sha "$GITHUB_SHA" '
-              any(
-                .workflow_runs[];
-                .event == "push" and
-                .head_branch == "main" and
-                .head_sha == $sha and
-                .conclusion == "success"
-              )
-            ' "$RUNNER_TEMP/ci-runs.json" >/dev/null
             if test "$mode" = "prepare"; then
+              gh api \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?event=push&branch=main&status=completed&head_sha=$GITHUB_SHA&per_page=100" \
+                > "$RUNNER_TEMP/ci-runs.json"
+              jq -e --arg sha "$GITHUB_SHA" '
+                any(
+                  .workflow_runs[];
+                  .event == "push" and
+                  .head_branch == "main" and
+                  .head_sha == $sha and
+                  .conclusion == "success"
+                )
+              ' "$RUNNER_TEMP/ci-runs.json" >/dev/null
               test -n "$tag"
             fi
             if test -n "$tag"; then
