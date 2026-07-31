@@ -2,15 +2,14 @@
 
 #if defined(__APPLE__)
 #define MTEST_PRELOAD_VARIABLE "DYLD_INSERT_LIBRARIES"
-#define DYLD_INTERPOSE(_replacement, _replacee) \
-    __attribute__((used)) static struct { \
-        const void *replacement; \
-        const void *replacee; \
-    } _interpose_##_replacee \
-        __attribute__((section("__DATA,__interpose,interposing"))) = { \
-            (const void *)(unsigned long)&_replacement, \
-            (const void *)(unsigned long)&_replacee, \
-        };
+#define DYLD_INTERPOSE(_replacement, _replacee)                                                    \
+    __attribute__((used)) static struct {                                                          \
+        const void *replacement;                                                                   \
+        const void *replacee;                                                                      \
+    } _interpose_##_replacee __attribute__((section("__DATA,__interpose,interposing"))) = {        \
+        (const void *)(unsigned long)&_replacement,                                                \
+        (const void *)(unsigned long)&_replacee,                                                   \
+    };
 #else
 #define MTEST_PRELOAD_VARIABLE "LD_PRELOAD"
 #include <dlfcn.h>
@@ -126,9 +125,7 @@ __attribute__((constructor)) static void mtest_initialize_faults(void) {
     const char *requested = getenv("MTEST_STATE_FAULT");
 
 #if !defined(__APPLE__)
-    mtest_copy_symbol(
-        &mtest_real_mkstemp, sizeof(mtest_real_mkstemp), "mkstemp"
-    );
+    mtest_copy_symbol(&mtest_real_mkstemp, sizeof(mtest_real_mkstemp), "mkstemp");
     mtest_copy_symbol(&mtest_real_write, sizeof(mtest_real_write), "write");
     mtest_copy_symbol(&mtest_real_close, sizeof(mtest_real_close), "close");
     mtest_copy_symbol(&mtest_real_rename, sizeof(mtest_real_rename), "rename");
@@ -149,38 +146,27 @@ __attribute__((constructor)) static void mtest_initialize_faults(void) {
 static int mtest_faulting_mkstemp(char *template) {
     int fd = mtest_pass_mkstemp(template);
 
-    if (
-        fd >= 0 && template != NULL
-        && strstr(template, "lastrun.tmp.") != NULL
-    ) {
+    if (fd >= 0 && template != NULL && strstr(template, "lastrun.tmp.") != NULL) {
         mtest_state_fd = fd;
         mtest_write_phase = 0;
     }
     return fd;
 }
 
-static ssize_t mtest_faulting_write(
-    int fd, const void *buffer, size_t count
-) {
+static ssize_t mtest_faulting_write(int fd, const void *buffer, size_t count) {
     if (fd == mtest_state_fd) {
         if (mtest_mode == MTEST_FAULT_WRITE) {
             errno = EIO;
             return -1;
         }
-        if (
-            mtest_mode == MTEST_FAULT_SHORT_EINTR
-            && mtest_write_phase == 0 && count > 1
-        ) {
+        if (mtest_mode == MTEST_FAULT_SHORT_EINTR && mtest_write_phase == 0 && count > 1) {
             size_t short_count = count > 3 ? 3 : 1;
 
             mtest_write_phase = 1;
             return mtest_pass_write(fd, buffer, short_count);
         }
-        if (
-            mtest_mode == MTEST_FAULT_SHORT_EINTR
-            && mtest_write_phase >= 1
-            && mtest_write_phase <= mtest_eintr_count
-        ) {
+        if (mtest_mode == MTEST_FAULT_SHORT_EINTR && mtest_write_phase >= 1 &&
+            mtest_write_phase <= mtest_eintr_count) {
             mtest_write_phase += 1;
             errno = EINTR;
             return -1;
@@ -201,13 +187,9 @@ static int mtest_faulting_close(int fd) {
     return mtest_pass_close(fd);
 }
 
-static int mtest_faulting_rename(
-    const char *source, const char *destination
-) {
-    if (
-        mtest_mode == MTEST_FAULT_RENAME && source != NULL
-        && strstr(source, "lastrun.tmp.") != NULL
-    ) {
+static int mtest_faulting_rename(const char *source, const char *destination) {
+    if (mtest_mode == MTEST_FAULT_RENAME && source != NULL &&
+        strstr(source, "lastrun.tmp.") != NULL) {
         errno = EIO;
         return -1;
     }

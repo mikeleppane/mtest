@@ -1,0 +1,7 @@
+Checks: >-
+  -*,
+  clang-analyzer-*,
+  -clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling
+WarningsAsErrors: '*'
+SystemHeaders: false
+FormatStyle: file

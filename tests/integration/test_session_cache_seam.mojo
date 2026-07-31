@@ -211,6 +211,34 @@ def test_selection_second_run_hits_cache() raises:
     assert_equal(second.built_files, 0, "the warm run compiles nothing")
 
 
+def test_werror_second_run_hits_cache_without_cache_off() raises:
+    """`--Werror` remains cacheable through the exact argument digest."""
+    var root = temp_root()
+    write_file(root, "tests/test_ok.mojo", SRC_PASS)
+    var config = base_config()
+    config.keyword = "test"
+    config.build_args = ["--Werror"]
+
+    var first = run_recording_session(config.copy(), root)
+    assert_equal(first.code, 0, "the cold warning-strict build must pass")
+    assert_equal(first.built_files, 1, "the cold run compiles the one file")
+    assert_false(
+        _saw_cache_off(first.warnings),
+        "the known warning switch must not disable the cache",
+    )
+
+    var second = run_recording_session(config^, root)
+    assert_equal(second.code, 0, "the warm run must pass on the cached binary")
+    assert_equal(
+        second.cached_files, 1, "the warm run is served from the store"
+    )
+    assert_equal(second.built_files, 0, "the warm run compiles nothing")
+    assert_false(
+        _saw_cache_off(second.warnings),
+        "the known warning switch must emit zero cache-off events",
+    )
+
+
 def test_selection_rebuilds_a_freshly_published_binary_that_vanishes() raises:
     """The selection probe recovers a publish-to-exec cache ENOENT once."""
     var root = temp_root()

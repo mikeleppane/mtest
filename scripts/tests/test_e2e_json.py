@@ -36,10 +36,64 @@ DARWIN_INTERPOSE_DECLARATION = r"""#if defined(__APPLE__)
 #include <dlfcn.h>
 #endif"""
 
+_POLICY_TOKEN = re.compile(
+    r'"(?:\\.|[^"\\])*"'
+    r"|'(?:\\.|[^'\\])*'"
+    r"|[A-Za-z_][A-Za-z0-9_]*"
+    r"|[0-9]+"
+    r"|##"
+    r"|[^\s]"
+)
+
+
+def _policy_tokens(source: str) -> tuple[str, ...]:
+    """Return every exact non-whitespace C/preprocessor token."""
+    spliced = re.sub(r"\\[ \t]*\r?\n", "", source)
+    return tuple(match.group(0) for match in _POLICY_TOKEN.finditer(spliced))
+
+
+def _contains_policy_tokens(source: str, required: str) -> bool:
+    """Return whether ``source`` contains ``required`` as consecutive tokens."""
+    source_tokens = _policy_tokens(source)
+    required_tokens = _policy_tokens(required)
+    width = len(required_tokens)
+    return any(
+        source_tokens[offset : offset + width] == required_tokens
+        for offset in range(len(source_tokens) - width + 1)
+    )
+
+
+def _apple_preprocessor_blocks(source: str) -> tuple[str, ...]:
+    """Return complete ``#if defined(__APPLE__)`` blocks by directive depth."""
+    lines = source.splitlines()
+    marker = _policy_tokens("#if defined(__APPLE__)")
+    blocks: list[str] = []
+    for start, line in enumerate(lines):
+        if _policy_tokens(line) != marker:
+            continue
+        depth = 0
+        for end in range(start, len(lines)):
+            directive = _policy_tokens(lines[end])
+            if directive[:2] in (("#", "if"), ("#", "ifdef"), ("#", "ifndef")):
+                depth += 1
+            elif directive[:2] == ("#", "endif"):
+                depth -= 1
+                if depth == 0:
+                    blocks.append("\n".join(lines[start : end + 1]))
+                    break
+        else:
+            raise AssertionError("E2E interposer has an unterminated Apple block")
+    return tuple(blocks)
+
 
 def _check_e2e_interposer_source_policy(source: str) -> None:
     """Validate the write-fault fixture's platform forwarding contracts."""
-    if source.count(DARWIN_INTERPOSE_DECLARATION) != 1:
+    expected_declaration = _policy_tokens(DARWIN_INTERPOSE_DECLARATION)
+    matching_declarations = sum(
+        _policy_tokens(block) == expected_declaration
+        for block in _apple_preprocessor_blocks(source)
+    )
+    if matching_declarations != 1:
         raise AssertionError(
             "E2E interposer must contain the canonical local Darwin declaration "
             "and select dlfcn.h only elsewhere"
@@ -77,16 +131,21 @@ def _check_e2e_interposer_source_policy(source: str) -> None:
     active_apple = active_source(apple_branch)
     active_other = active_source(other_branch)
     active_tail = active_source(tail)
-    active_apple_lines = {line.strip() for line in active_apple.splitlines()}
-    apple_required = {
-        "struct iovec vector = {(void *)buffer, count};",
+    apple_required = (
+        "struct iovec vector = {.iov_base = NULL, .iov_len = count};",
+        (
+            "_Static_assert(sizeof(vector.iov_base) == sizeof(buffer), "
+            '"qualified void pointers must share a representation");'
+        ),
+        "memcpy(&vector.iov_base, &buffer, sizeof(vector.iov_base));",
         "return writev(fd, &vector, 1);",
         "DYLD_INTERPOSE(mtest_faulting_write, write)",
-    }
+    )
     apple_forbidden = (
         "RTLD_NEXT",
         "mtest_real_write",
         "__interpose",
+        "(void *)buffer",
         "return write(fd, buffer, count);",
         "ssize_t write(int fd, const void *buffer, size_t count)",
     )
@@ -95,9 +154,13 @@ def _check_e2e_interposer_source_policy(source: str) -> None:
         'dlsym(RTLD_NEXT, "write")',
         "ssize_t write(int fd, const void *buffer, size_t count)",
     )
-    if not apple_required.issubset(active_apple_lines):
+    if any(
+        not _contains_policy_tokens(active_apple, required)
+        for required in apple_required
+    ):
         raise AssertionError(
-            "Darwin E2E interposer must use DYLD_INTERPOSE and writev forwarding"
+            "Darwin E2E interposer must preserve const pointer representation "
+            "and use DYLD_INTERPOSE with writev forwarding"
         )
     if any(fragment in active_apple for fragment in apple_forbidden):
         raise AssertionError(
@@ -122,6 +185,7 @@ def check_e2e_interposer_source_policy() -> None:
     """The interposer policy rejects known source-level bypass mutations."""
     source = Path(runner.JSON_TERMINAL_WRITE_FAULT).read_text(encoding="utf-8")
     _check_e2e_interposer_source_policy(source)
+    declaration = _apple_preprocessor_blocks(source)[0]
 
     registration = "DYLD_INTERPOSE(mtest_faulting_write, write)"
     call_through = "return writev(fd, &vector, 1);"
@@ -137,11 +201,24 @@ def check_e2e_interposer_source_policy() -> None:
         "commented Darwin call-through": source.replace(
             call_through, "// " + call_through, 1
         ),
+        "qualifier-dropping Darwin pointer cast": source.replace(
+            "    memcpy(&vector.iov_base, &buffer, sizeof(vector.iov_base));",
+            "    vector.iov_base = (void *)buffer;",
+            1,
+        ),
         "exported Darwin write wrapper": source.replace(
             registration + "\n", registration + "\n\n" + wrapper, 1
         ),
         "legacy Darwin section declaration": source.replace(
             "__DATA,__interpose,interposing", "__DATA,__interpose", 1
+        ),
+        "mutable Darwin replacee field": source.replace(
+            "const void *replacee;", "void *replacee;", 1
+        ),
+        "duplicate Darwin declaration": source.replace(
+            declaration,
+            declaration + "\n" + declaration,
+            1,
         ),
         "preload inherited by compiler child": source.replace(
             "    unsetenv(MTEST_PRELOAD_VARIABLE);",

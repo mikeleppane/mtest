@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import tempfile
 from typing import override
 import unittest
@@ -11,10 +12,23 @@ from unittest import mock
 
 from scripts.checks import native_abi as native_abi_check
 from scripts.checks import postfork as postfork_check
+from scripts.checks.native_sources import tracked_native_sources
 
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "native" / "mtest_exec_native.c"
+CHILD_EXEC_DEFINITION = re.compile(r"^static void mtest_child_exec\s*\(", re.MULTILINE)
+PROCESS_OPEN_DEFINITION = re.compile(
+    r"^int32_t mtest_exec_process_open\s*\(", re.MULTILINE
+)
+CHILD_EXEC_CALL = re.compile(r"^        mtest_child_exec\s*\(", re.MULTILINE)
+FAIL_REQUESTED_DEFINITION = re.compile(
+    r"^static int mtest_fail_if_requested\s*\([^)]*\)\s*\{", re.MULTILINE
+)
+CHILD_SETPGID_GUARD = re.compile(
+    r"^    if \(mtest_fail_if_requested\(MTEST_EXEC_OP_CHILD_SETPGID\) \|\|",
+    re.MULTILINE,
+)
 
 
 class PostforkCheckTests(unittest.TestCase):
@@ -30,12 +44,13 @@ class PostforkCheckTests(unittest.TestCase):
         self.assertEqual(postfork_check.SOURCE, SOURCE)
         self.assertTrue(postfork_check.SOURCE.is_file())
         self.assertEqual(
-            tuple(path.name for path in native_abi_check.SOURCE_FILES),
-            (
-                "mtest_exec_native.c",
-                "mtest_exec_native.h",
-                "mtest_exec_native_test.h",
-            ),
+            native_abi_check.SOURCE_FILES,
+            tracked_native_sources(ROOT),
+        )
+        self.assertEqual(postfork_check.NATIVE_SOURCES, tracked_native_sources(ROOT))
+        self.assertIn(
+            ROOT / "tests" / "native" / "stack_protector_canary.c",
+            native_abi_check.SOURCE_FILES,
         )
         self.assertGreater(len(native_abi_check.SOURCE_FILES), 0)
 
@@ -69,14 +84,37 @@ class PostforkCheckTests(unittest.TestCase):
                 )
             return postfork_check.audit_source(path, testing=testing, cc=self.cc)
 
+    def insert_at_anchor(
+        self,
+        source: str,
+        anchor: re.Pattern[str],
+        insertion: str,
+        *,
+        expected_matches: int = 1,
+        before: bool = True,
+    ) -> str:
+        matches = tuple(anchor.finditer(source))
+        self.assertEqual(len(matches), expected_matches)
+
+        def replace(match: re.Match[str]) -> str:
+            if before:
+                return insertion + match.group(0)
+            return match.group(0) + insertion
+
+        return anchor.sub(replace, source, count=1)
+
     def add_wrapper(self, definition: str, source: str | None = None) -> str:
         source = self.source if source is None else source
-        marker = "static void mtest_child_exec(\n"
-        self.assertEqual(source.count(marker), 1)
-        source = source.replace(marker, definition + "\n\n" + marker)
-        call_site = "    if (mtest_fail_if_requested(MTEST_EXEC_OP_CHILD_SETPGID) ||\n"
-        self.assertEqual(source.count(call_site), 1)
-        return source.replace(call_site, "    mtest_child_mutant();\n" + call_site)
+        source = self.insert_at_anchor(
+            source,
+            CHILD_EXEC_DEFINITION,
+            definition + "\n\n",
+        )
+        return self.insert_at_anchor(
+            source,
+            CHILD_SETPGID_GUARD,
+            "    mtest_child_mutant();\n",
+        )
 
     def assert_forbidden(self, source: str, callee: str) -> None:
         with self.assertRaises(postfork_check.AuditFailure) as raised:
@@ -106,6 +144,16 @@ class PostforkCheckTests(unittest.TestCase):
         allowed = postfork_check.platform_allowlist()
         self.assertIn("poll", allowed)
         self.assertNotIn("nanosleep", allowed)
+
+    def test_nested_interrupt_sigset_initialization_has_no_error_branch(self) -> None:
+        self.assertEqual(
+            self.source.count("(void)sigemptyset(&nodefer.sa_mask);"),
+            1,
+        )
+        self.assertNotRegex(
+            self.source,
+            r"if\s*\(\s*sigemptyset\(&nodefer\.sa_mask\)",
+        )
 
     def test_allocator_hidden_behind_local_wrapper_is_rejected(self) -> None:
         source = self.add_wrapper(
@@ -153,15 +201,14 @@ class PostforkCheckTests(unittest.TestCase):
         self.assertIn("forbidden post-fork call", message)
 
     def test_call_enclosing_fork_is_rejected(self) -> None:
-        definition_marker = "int32_t mtest_exec_process_open(\n"
-        self.assertEqual(self.source.count(definition_marker), 1)
-        mutated = self.source.replace(
-            definition_marker,
+        mutated = self.insert_at_anchor(
+            self.source,
+            PROCESS_OPEN_DEFINITION,
             (
                 "static pid_t mtest_child_mutant(void *memory, pid_t child) {\n"
                 "    free(memory);\n"
                 "    return child;\n"
-                "}\n\n" + definition_marker
+                "}\n\n"
             ),
         )
         fork_marker = "        leader = fork();\n"
@@ -177,14 +224,10 @@ class PostforkCheckTests(unittest.TestCase):
         self.assertIn("forbidden post-fork call", message)
 
     def test_implicit_cleanup_after_fork_is_rejected(self) -> None:
-        definition_marker = "int32_t mtest_exec_process_open(\n"
-        self.assertEqual(self.source.count(definition_marker), 1)
-        mutated = self.source.replace(
-            definition_marker,
-            (
-                "static void mtest_child_cleanup(void **slot) { free(*slot); }\n\n"
-                + definition_marker
-            ),
+        mutated = self.insert_at_anchor(
+            self.source,
+            PROCESS_OPEN_DEFINITION,
+            ("static void mtest_child_cleanup(void **slot) { free(*slot); }\n\n"),
         )
         fork_marker = "        leader = fork();\n"
         self.assertEqual(mutated.count(fork_marker), 1)
@@ -269,9 +312,11 @@ class PostforkCheckTests(unittest.TestCase):
         )
 
     def test_early_return_from_child_branch_is_rejected(self) -> None:
-        marker = "        mtest_child_exec(\n"
-        self.assertEqual(self.source.count(marker), 1)
-        mutated = self.source.replace(marker, "        return -1;\n" + marker)
+        mutated = self.insert_at_anchor(
+            self.source,
+            CHILD_EXEC_CALL,
+            "        if (plan == NULL) {\n            return -1;\n        }\n",
+        )
         with self.assertRaises(postfork_check.AuditFailure) as raised:
             self.audit_text(mutated)
         self.assertIn(
@@ -280,13 +325,14 @@ class PostforkCheckTests(unittest.TestCase):
         )
 
     def test_goto_from_child_branch_to_parent_code_is_rejected(self) -> None:
-        child_marker = "        mtest_child_exec(\n"
         parent_marker = "    process->leader = leader;\n"
-        self.assertEqual(self.source.count(child_marker), 1)
         self.assertEqual(self.source.count(parent_marker), 1)
-        mutated = self.source.replace(
-            child_marker,
-            "        goto mtest_parent_only;\n" + child_marker,
+        mutated = self.insert_at_anchor(
+            self.source,
+            CHILD_EXEC_CALL,
+            "        if (plan == NULL) {\n"
+            "            goto mtest_parent_only;\n"
+            "        }\n",
         ).replace(
             parent_marker,
             "mtest_parent_only:\n" + parent_marker,
@@ -326,7 +372,8 @@ class PostforkCheckTests(unittest.TestCase):
     def test_path_search_execvp_is_rejected(self) -> None:
         source = self.add_wrapper(
             "static void mtest_child_mutant(void) {\n"
-            '    char *const args[] = {"/bin/true", NULL};\n'
+            '    char executable[] = "/bin/true";\n'
+            "    char *const args[] = {executable, NULL};\n"
             "    (void)execvp(args[0], args);\n"
             "}"
         )
@@ -409,12 +456,12 @@ class PostforkCheckTests(unittest.TestCase):
         self.assertIn("mtest_unknown_child_call", str(raised.exception))
 
     def test_testing_only_fault_path_is_audited(self) -> None:
-        marker = "static int mtest_fail_if_requested(uint32_t operation) {\n"
-        self.assertEqual(self.source.count(marker), 2)
-        source = self.source.replace(
-            marker,
-            marker + "    (void)malloc(1);\n",
-            1,
+        source = self.insert_at_anchor(
+            self.source,
+            FAIL_REQUESTED_DEFINITION,
+            "    (void)malloc(1);\n",
+            expected_matches=2,
+            before=False,
         )
         production = self.audit_text(source, testing=False)
         self.assertNotIn("malloc", production.platform_calls)

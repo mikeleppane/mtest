@@ -8,7 +8,7 @@ refuses cleanup, which is reported as a failed check.
 from std.os import getenv, makedirs, remove, rmdir
 from std.os.path import dirname, exists, isdir
 from std.pathlib import cwd
-from std.sys.info import CompilationTarget
+from std.sys.info import CompilationTarget, is_triple
 
 from mtest.cli.parse_result import ParseResult
 from mtest.config import (
@@ -682,9 +682,9 @@ def _execute_check(
             comptime assert (
                 CompilationTarget.is_linux()
             ), "doctor supports Linux or macOS only"
-            comptime assert (
-                CompilationTarget.is_x86()
-            ), "doctor supports Linux x86_64 only"
+            comptime assert is_triple[
+                "x86_64-unknown-linux-gnu"
+            ](), "doctor supports Linux x86_64 only"
             return _platform_line(False)
     if index == 2:
         context.root = String(cwd())

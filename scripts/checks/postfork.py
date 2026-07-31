@@ -20,6 +20,7 @@ import sys
 from typing import TYPE_CHECKING, cast
 
 from scripts.checks import native_abi as native_abi_check
+from scripts.checks.native_sources import tracked_native_sources
 
 
 if TYPE_CHECKING:
@@ -27,7 +28,17 @@ if TYPE_CHECKING:
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SOURCE = ROOT / "native" / "mtest_exec_native.c"
+NATIVE_SOURCES = tracked_native_sources(ROOT)
+_SOURCE_MATCHES = tuple(
+    source
+    for source in NATIVE_SOURCES
+    if source.relative_to(ROOT).as_posix() == "native/mtest_exec_native.c"
+)
+if len(_SOURCE_MATCHES) != 1:
+    raise SystemExit(
+        "postfork-check: expected exactly one tracked native/mtest_exec_native.c"
+    )
+SOURCE = _SOURCE_MATCHES[0]
 ROOT_FUNCTION = "mtest_child_exec"
 OPEN_FUNCTION = "mtest_exec_process_open"
 _PLATFORM_ENTRY_POINTS = frozenset(
@@ -230,9 +241,11 @@ def _calls(node: dict[str, object], source_text: str) -> tuple[_Call, ...]:
 
 
 def _compiler_ast(source: Path, *, testing: bool, cc: str) -> dict[str, object]:
+    profile = native_abi_check.current_profile()
     command = [
         cc,
         *native_abi_check.STRICT_FLAGS,
+        *profile.c_flags,
         f"-DMTEST_EXEC_TESTING={1 if testing else 0}",
         "-I",
         str(ROOT / "native"),

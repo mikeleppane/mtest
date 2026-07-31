@@ -29,7 +29,7 @@ on.
 ## The TestSuite mechanics
 
 mtest's own tests are ordinary `def ... raises` functions discovered by
-`TestSuite` and run against the **precompiled package** (`build/mtest.mojopkg` —
+`TestSuite` and run against the **precompiled package** (`build/mtest.mojoc` —
 `mojo package` does not exist in `1.0.0b2`, only `mojo precompile`). Classified
 modules under `tests/unit/` and `tests/integration/` declare their `test_*`
 functions **and their own `main()`**, exactly like every other test file in

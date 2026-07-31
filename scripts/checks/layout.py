@@ -30,6 +30,8 @@ BUILD_SOURCE_PATHS = (
     Path("scripts/build/native_strict_flags.txt"),
     Path("scripts/build/package_consumption.py"),
     Path("scripts/build/production_build.sh"),
+    Path("scripts/build/production_profiles.txt"),
+    Path("scripts/build/profiles.py"),
 )
 COMPANION_ROOT = Path("companions/assertions")
 COMPANION_SOURCE_ROOT = COMPANION_ROOT / "src"
@@ -934,15 +936,116 @@ def check_vendored_toml_layout(repo_root: Path = REPO_ROOT) -> None:
     build_source = (repo_root / "scripts" / "build" / "production_build.sh").read_text(
         encoding="utf-8"
     )
-    required_commands = (
-        "mojo precompile vendor/mojo-toml/toml -o build/toml.mojopkg",
-        "mojo precompile -I build src/mtest -o build/mtest.mojopkg",
-        "mojo build -I build src/main.mojo -o build/mtest",
+    expected_precompile_arrays = (
+        (
+            "PRECOMPILE_CMD_TOML",
+            (
+                "mojo",
+                "precompile",
+                "--Werror",
+                "vendor/mojo-toml/toml",
+                "-o",
+                "build/toml.mojoc",
+            ),
+        ),
+        (
+            "PRECOMPILE_CMD_MTEST",
+            (
+                "mojo",
+                "precompile",
+                "--Werror",
+                "-I",
+                "build",
+                "src/mtest",
+                "-o",
+                "build/mtest.mojoc",
+            ),
+        ),
     )
-    if any(command not in build_source for command in required_commands):
-        raise AssertionError(
-            "production build does not compile and link the vendored TOML package"
+    for name, expected in expected_precompile_arrays:
+        definitions = re.findall(
+            rf"(?ms)^{re.escape(name)}=\(\s*(.*?)^\s*\)\s*$",
+            build_source,
         )
+        actual_command = (
+            tuple(shlex.split(definitions[0])) if len(definitions) == 1 else ()
+        )
+        if actual_command != expected:
+            raise AssertionError(
+                "production build does not compile and link the vendored TOML "
+                f"package with the required warning-free .mojoc arrays: "
+                f"{name} expected={expected!r}, got={actual_command!r}"
+            )
+    expected_links = {
+        ("Linux", "x86_64"): (
+            "mojo",
+            "build",
+            "-I",
+            "build",
+            "src/main.mojo",
+            "-o",
+            "build/mtest",
+            "-O3",
+            "-g0",
+            "--Werror",
+            "--target-cpu",
+            "x86-64",
+            "-Xlinker",
+            "build/native/mtest_exec_native.o",
+            "-Xlinker",
+            "-lm",
+        ),
+        ("Darwin", "arm64"): (
+            "mojo",
+            "build",
+            "-I",
+            "build",
+            "src/main.mojo",
+            "-o",
+            "build/mtest",
+            "-O3",
+            "-g0",
+            "--Werror",
+            "--target-cpu",
+            "apple-m1",
+            "--target-triple",
+            "arm64-apple-macosx14.0.0",
+            "-Xlinker",
+            "build/native/mtest_exec_native.o",
+        ),
+    }
+    build_script = repo_root / "scripts" / "build" / "production_build.sh"
+    render = r"""
+set -euo pipefail
+source "$1"
+select_profile "$2" "$3"
+build_link_command
+printf '%s\n' "${LINK_CMD[@]}"
+"""
+    for (system, machine), expected in expected_links.items():
+        completed = subprocess.run(
+            [
+                "bash",
+                "-c",
+                render,
+                "layout-production-link",
+                str(build_script),
+                system,
+                machine,
+            ],
+            cwd=repo_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        actual_link = tuple(completed.stdout.splitlines())
+        if completed.returncode != 0 or actual_link != expected:
+            diagnostic = completed.stderr.strip()
+            raise AssertionError(
+                f"production release link for {system}/{machine} differs: "
+                f"expected={expected!r}, got={actual_link!r}, "
+                f"stderr={diagnostic!r}"
+            )
     # Exactly two precompiles, counted at the INVOCATION rather than wherever
     # the words appear: the script discusses `mojo precompile` in prose, and a
     # substring count would read those comments as build steps. Both spellings

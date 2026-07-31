@@ -128,7 +128,7 @@ def test_select_names_empty_selection_keeps_all() raises:
 
 def test_invocation_nonce_is_nonempty_and_stable() raises:
     var a = _invocation_nonce()
-    assert_true(len(a) > 0)
+    assert_true(a.byte_length() > 0)
     # Stable within one process, so every construction site agrees.
     assert_equal(a, _invocation_nonce())
 

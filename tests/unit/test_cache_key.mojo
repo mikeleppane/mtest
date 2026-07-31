@@ -94,6 +94,11 @@ def test_meta_rejects_truncation() raises:
 
 
 def test_classify_known_forms() raises:
+    var result = classify_build_args(["--Werror"])
+    assert_equal(len(result), 1)
+    assert_equal(result[0].kind, ARG_FLAG)
+    assert_equal(result[0].value, "--Werror")
+
     var args: List[String] = [
         "--no-optimization",
         "-O0",
@@ -107,7 +112,7 @@ def test_classify_known_forms() raises:
         "-I",
         "vendor/include",
     ]
-    var result = classify_build_args(args)
+    result = classify_build_args(args)
     assert_true(len(result) <= len(args))
     assert_equal(len(result), 9)
     assert_equal(result[0].kind, ARG_FLAG)

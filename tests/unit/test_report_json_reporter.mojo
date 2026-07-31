@@ -48,6 +48,7 @@ def test_created_destination_is_readable_with_header_first() raises:
     assert_false(exists(path))
     var fd = open_json_fd(path)
     var rep = JsonStreamReporter(fd, "0.6.0", True)
+    assert_false(rep.status().failed)
     _ = close_json_fd(fd)
     var content = _read_file(path)
     var lines = _lines(content)
@@ -138,6 +139,7 @@ def test_open_json_fd_truncates_a_preexisting_destination() raises:
         stale.write("STALE-TAIL-" * 512)
     var fd = open_json_fd(path)
     var rep = JsonStreamReporter(fd, "0.6.0", True)
+    assert_false(rep.status().failed)
     _ = close_json_fd(fd)
     var lines = _lines(_read_file(path))
     assert_equal(

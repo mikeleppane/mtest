@@ -506,7 +506,7 @@ def check_release_workflows(repo_root: Path = REPO_ROOT) -> None:
         raise AssertionError("skip-existing output cannot prove package creation")
     if "target_commitish ==" in release + community + verify:
         raise AssertionError("release identity must come from dereferenced tags")
-    for runner in ("ubuntu-24.04", "macos-15"):
+    for runner in ("ubuntu-24.04", "macos-26"):
         if community.count(f"runner: {runner}") != 1:
             raise AssertionError(f"community supported-platform matrix lost {runner}")
     if 'test -n "$tag"' not in community:
@@ -524,7 +524,7 @@ def check_release_workflows(repo_root: Path = REPO_ROOT) -> None:
         raise AssertionError("community verification must remain read-only")
     if (
         verify.count("runner: ubuntu-24.04") != 1
-        or verify.count("runner: macos-15") != 1
+        or verify.count("runner: macos-26") != 1
     ):
         raise AssertionError("community verification platform matrix mismatch")
     if "scripts.release.public_verify" not in verify:

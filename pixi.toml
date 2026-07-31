@@ -22,6 +22,7 @@ python = "3.12.*"
 # pinned compiler on both targets keeps its ABI and sanitizer behavior
 # reproducible; the linked object adds no runtime library dependency.
 clang = "==18.1.8"
+clang-tools = "==18.1.8"
 # xmllint checks the vendored junit-10.xsd against the shipped artifact. Pinned
 # so the JUnit gate's verdict cannot drift with an unpinned system copy.
 libxml2 = "==2.15.3"
@@ -40,10 +41,10 @@ mojo-version = "mojo --version"
 # covers.
 version-check = "python -m scripts.checks.version"
 
-# Precompile the src/mtest package into build/mtest.mojopkg. The
-# package-compiles GATE: an empty-but-broken package fails here before any test
-# does. `mojo package` does not exist in 1.0.0b2; `mojo precompile` produces the
-# same artifact.
+# Precompile the vendored TOML parser and src/mtest into build/toml.mojoc and
+# build/mtest.mojoc. The package-compiles GATE: an empty-but-broken package
+# fails here before any test does. `mojo package` does not exist in 1.0.0b2;
+# `mojo precompile` produces the compiled artifacts.
 build = "bash scripts/build/mojo_package.sh"
 
 # Compile the exec-private C adapter to the one production object linked into
@@ -60,6 +61,14 @@ build-native = "python -m scripts.build.native"
 build-bin = { cmd = "bash scripts/build/production_build.sh link", depends-on = [
     "build",
     "build-native",
+] }
+
+# Verify the real production binary and matching compiler IR against independent
+# CPU-feature, stripped-debug, and deployment-target oracles. The command tests
+# first pin the shell-rendered Linux/Darwin argv, then the checker emits IR for
+# both a minimal probe and src/main.mojo and inspects build/mtest itself.
+build-profile-check = { cmd = "python -m scripts.tests.test_build_profiles && python -m scripts.tests.test_build_profile && python -m scripts.checks.build_profile", depends-on = [
+    "build-bin",
 ] }
 
 # Keep README's committed CLI reference byte-identical to the real binary. The
@@ -80,8 +89,10 @@ package-build = "rattler-build build --recipe recipe/recipe.yaml -c https://cond
 # build, install THAT EXACT artifact (version, build string, and the installed
 # conda-meta SHA-256) into a FRESH scratch env from the local channel, then
 # probe the INSTALLED binary with the dev pixi env off PATH and this platform's
-# loader search path empty, run the dogfood probes and the known-failing fixture
-# through it, and repeat the install from the tar-bz2 fallback format. Depends
+# loader search path empty; on Darwin, recursively audit its non-system Mach-O
+# dependency closure for prefix containment and a <=14.0 minimum; run the
+# dogfood probes and the known-failing fixture through it; and repeat the
+# install from the tar-bz2 fallback format. Depends
 # on build + build-native (not build-bin) so this repo's package and
 # test-variant object exist for the probe run; the binary under test is the
 # INSTALLED one, never build/mtest. NOT wired into `pixi run ci`; each
@@ -103,10 +114,10 @@ py-fmt = "python -m scripts.checks.python_quality --fix"
 # why the versions are pinned exactly.
 py-check = "python -m scripts.checks.python_quality"
 
-# Rewrite every real Mojo file in its own invocation; run locally before
-# committing. Mojo 1.0.0b2 can stall when one formatter invocation spans several
-# paths. `find -P` does not traverse symlinks; the C-locale sort fixes ordering.
-fmt = '''sh -c '
+# Rewrite every real Mojo file in its own invocation. Mojo 1.0.0b2 can stall
+# when one formatter invocation spans several paths. `find -P` does not traverse
+# symlinks; the C-locale sort fixes ordering.
+mojo-fmt = '''sh -c '
 set -eu
 source_list="$(mktemp "${TMPDIR:-/tmp}/mtest-format.XXXXXX")"
 sorted_list="${source_list}.sorted"
@@ -123,9 +134,17 @@ while IFS= read -r source; do
 done < "$source_list"
 '
 '''
-# CI gate: format, then fail if anything changed (never edits in CI). A format
-# that shifts a fixture's `At <path>:<line>:<col>` coordinates is an oracle-side
-# change: regenerate transcripts, do not fight the gate.
+
+# Rewrite the complete Git-tracked native C/header inventory through the pinned
+# ClangFormat configuration and preserve the native ASCII-only invariant.
+native-fmt = "python -m scripts.checks.native_format"
+
+# The ordinary formatting path owns both source languages.
+fmt = { depends-on = ["mojo-fmt", "native-fmt"] }
+
+# CI gate: format, then fail if anything changed. A format that shifts a
+# fixture's `At <path>:<line>:<col>` coordinates is an oracle-side change:
+# regenerate transcripts, do not fight the gate.
 fmt-check = { cmd = "git diff --exit-code", depends-on = ["fmt"] }
 
 # Stdlib-only unsafe-operation inventory. Mutation tests pin every syntax family
@@ -139,12 +158,20 @@ safety-check = "python -m scripts.tests.test_safety && python -m scripts.checks.
 # platform allowlist.
 postfork-check = "python -m scripts.tests.test_postfork && python -m scripts.checks.postfork"
 
+# Parse-smoke then analyze every native C translation unit with the exact
+# strict host compilation context. The root `.clang-tidy` exclusively owns the
+# analyzer selection; the driver never overrides it.
+clang-tidy-check = "python -m scripts.tests.test_native_tidy && python -m scripts.checks.native_tidy"
+
 # Strict C17 ABI/layout/symbol verification plus native lifecycle tests for the
-# private exec adapter. The standalone post-fork audit is a prerequisite. This
-# remains separate from the Mojo suite so the test object can expose deterministic
-# fault and sanitizer controls that production linkage proves absent.
+# private exec adapter. The standalone post-fork and Clang-Tidy audits are
+# prerequisites. This remains separate from the Mojo suite so the test object
+# can expose deterministic fault and sanitizer controls that production linkage
+# proves absent.
 native-check = { cmd = "python -m scripts.tests.test_native && python -m scripts.checks.native", depends-on = [
     "postfork-check",
+    "clang-tidy-check",
+    "build-native",
 ] }
 
 # Source-build the native adapter and a risk-weighted exec subset with matching
@@ -288,7 +315,7 @@ recipe-check = "python -m scripts.tests.test_community_recipe && python -m scrip
 # only check that the probe oracle duplicated into both lanes has not diverged.
 # Left solely in `valgrind-check` that check is unreachable on macOS and costs a
 # full instrumented lane on Linux to learn a docstring was reworded in one copy.
-harness-unit-check = "python -m scripts.tests.test_process_watchdog && python -m scripts.tests.test_dogfood && python -m scripts.tests.test_package_consumption && python -m scripts.tests.test_selfhost && python -m scripts.tests.test_e2e && python -m scripts.tests.test_e2e_json && python -m scripts.tests.test_contract && python -m scripts.tests.test_transcript_compare && python -m scripts.tests.test_readme_help && python -m scripts.tests.test_coverage_capability && python -m scripts.tests.test_abi_probe && python -m scripts.tests.test_asan && python -m scripts.tests.test_valgrind"
+harness-unit-check = "python -m scripts.tests.test_process_watchdog && python -m scripts.tests.test_dogfood && python -m scripts.tests.test_package_consumption && python -m scripts.tests.test_selfhost && python -m scripts.tests.test_e2e && python -m scripts.tests.test_e2e_json && python -m scripts.tests.test_contract && python -m scripts.tests.test_transcript_compare && python -m scripts.tests.test_readme_help && python -m scripts.tests.test_coverage_capability && python -m scripts.tests.test_abi_probe && python -m scripts.tests.test_asan && python -m scripts.tests.test_valgrind && python -m scripts.tests.test_native_format && python -m scripts.tests.test_build_profiles"
 
 # Repository policy: does this tree still obey its own rules? The layout and
 # invocation-policy oracle, the hosted-workflow security oracle, the
@@ -405,7 +432,7 @@ depends-on = ["build-bin"]
 # `scripts/build/production_build.sh` against its inputs (the script, the exact
 # stage command lines, and every file under src/mtest + vendor/mojo-toml), so a
 # second `pixi run build` with nothing changed skips `mojo precompile` entirely.
-# That skip is the only way two builds can leave `build/mtest.mojopkg`
+# That skip is the only way two builds can leave `build/mtest.mojoc`
 # byte-identical, because `mojo precompile` is not byte-reproducible on this
 # toolchain (see production_build.sh). No `depends-on`: every scenario copies
 # its own throwaway sandbox and runs the script there, never against this
@@ -424,11 +451,11 @@ cmd = "python -m scripts.tests.test_build_stamp"
 # buy a self-identifying failure.
 #
 # `postfork-check` and `build` are listed even though `native-check`,
-# `readme-help-check`, and `junit-render-check` already pull them in and Pixi
-# runs a shared node once either way. Their positions AHEAD of their consumers
-# are the point: this list is the readable statement of what the barrier runs
-# and in what order. Pixi errors on a name that does not exist, so unlike a
-# comment it cannot rot into fiction.
+# `build-profile-check`, `readme-help-check`, and `junit-render-check` already
+# pull them in and Pixi runs a shared node once either way. Their positions
+# AHEAD of their consumers are the point: this list is the readable statement
+# of what the barrier runs and in what order. Pixi errors on a name that does
+# not exist, so unlike a comment it cannot rot into fiction.
 [tasks.ci-preflight]
 depends-on = [
     "version-check",
@@ -442,6 +469,7 @@ depends-on = [
     "native-check",
     "junit-check",
     "build",
+    "build-profile-check",
     "readme-help-check",
     "junit-render-check",
     "transcripts-check",
@@ -483,7 +511,7 @@ valgrind = "==3.27.1"
 # last in `ci` because it is the broadest and slowest member, and it needs
 # nothing from the earlier ones: both lanes compile the suites and the CLI from
 # source with `-I src` so every frame is instrumented, and neither reads
-# `build/mtest.mojopkg` or `build/mtest`. So `pixi run ci-memory` standalone is
+# `build/mtest.mojoc` or `build/mtest`. So `pixi run ci-memory` standalone is
 # identical to how `ci` reaches it, unlike `contract-check-strict` above.
 [target.linux-64.tasks]
 ci-memory = { depends-on = ["asan-check", "valgrind-check"] }

@@ -33,6 +33,8 @@
 
 extern char **environ;
 
+static char mtest_default_shell[] = "/bin/sh";
+
 #define MTEST_ETXTBSY_RETRIES 5u
 #define MTEST_ETXTBSY_DELAY_MS 50
 #define MTEST_ABORT_SLICE_NS 10000000L
@@ -81,10 +83,7 @@ enum mtest_runtime_state {
    hold for any capacity. */
 #define MTEST_EXEC_SLOT_CAPACITY 64u
 
-enum mtest_slot_lifecycle {
-    MTEST_SLOT_FREE = 0,
-    MTEST_SLOT_ACTIVE = 1
-};
+enum mtest_slot_lifecycle { MTEST_SLOT_FREE = 0, MTEST_SLOT_ACTIVE = 1 };
 
 /* SAFETY: the signal handler accesses only `mtest_interrupt_state`, a lock-free
    atomic int it advances with a saturating strong compare-exchange (see
@@ -161,14 +160,14 @@ static uint32_t mtest_monotonic_wait_fired;
 
 int32_t mtest_exec_test_constant(uint32_t constant_id) {
     switch (constant_id) {
-        case MTEST_EXEC_TEST_CONSTANT_SIGCHLD:
-            return SIGCHLD;
-        case MTEST_EXEC_TEST_CONSTANT_EIO:
-            return EIO;
-        case MTEST_EXEC_TEST_CONSTANT_ETXTBSY:
-            return ETXTBSY;
-        default:
-            return -1;
+    case MTEST_EXEC_TEST_CONSTANT_SIGCHLD:
+        return SIGCHLD;
+    case MTEST_EXEC_TEST_CONSTANT_EIO:
+        return EIO;
+    case MTEST_EXEC_TEST_CONSTANT_ETXTBSY:
+        return ETXTBSY;
+    default:
+        return -1;
     }
 }
 
@@ -193,8 +192,7 @@ static int mtest_fail_if_requested(uint32_t operation) {
 }
 
 static int mtest_fail_if_requested_handle(uint32_t operation, uint64_t handle) {
-    if (mtest_handle_fault.handle == 0 ||
-        mtest_handle_fault.handle != handle ||
+    if (mtest_handle_fault.handle == 0 || mtest_handle_fault.handle != handle ||
         mtest_handle_fault.operation != operation) {
         return 0;
     }
@@ -209,12 +207,10 @@ static int mtest_fail_if_requested_handle(uint32_t operation, uint64_t handle) {
 static int64_t mtest_fault_result(uint32_t operation) {
     if (operation <= MTEST_EXEC_OP_FD_LIMIT) {
         const struct mtest_fault_state *fault = &mtest_faults[operation];
-        if (fault->operation == operation &&
-            fault->seen == fault->occurrence) {
+        if (fault->operation == operation && fault->seen == fault->occurrence) {
             return fault->result_value;
         }
-        if (fault->operation == operation &&
-            fault->seen == fault->secondary_occurrence) {
+        if (fault->operation == operation && fault->seen == fault->secondary_occurrence) {
             return fault->secondary_result_value;
         }
     }
@@ -235,22 +231,16 @@ void mtest_exec_test_fault_reset(void) {
     mtest_monotonic_wait_fired = 0;
 }
 
-int32_t mtest_exec_test_fault_configure(
-    uint32_t operation,
-    uint32_t occurrence,
-    int32_t error_number,
-    int64_t result_value
-) {
-    if (operation == MTEST_EXEC_OP_NONE || operation > MTEST_EXEC_OP_FD_LIMIT ||
-        occurrence == 0 || error_number < 0 || result_value < 0) {
+int32_t mtest_exec_test_fault_configure(uint32_t operation, uint32_t occurrence,
+                                        int32_t error_number, int64_t result_value) {
+    if (operation == MTEST_EXEC_OP_NONE || operation > MTEST_EXEC_OP_FD_LIMIT || occurrence == 0 ||
+        error_number < 0 || result_value < 0) {
         return -1;
     }
     if (operation == MTEST_EXEC_OP_CHILD_SETUP_WRITE) {
         if (error_number == 0 &&
             (result_value < 1 ||
-             result_value >= (int64_t)sizeof(
-                 ((struct mtest_exec_setup_state *)0)->raw
-             ))) {
+             result_value >= (int64_t)sizeof(((struct mtest_exec_setup_state *)0)->raw))) {
             return -1;
         }
         if (error_number > 0 && result_value != 0) {
@@ -271,14 +261,10 @@ int32_t mtest_exec_test_fault_configure(
     return 0;
 }
 
-int32_t mtest_exec_test_fault_configure_secondary(
-    uint32_t operation,
-    uint32_t occurrence,
-    int32_t error_number,
-    int64_t result_value
-) {
-    if (operation == MTEST_EXEC_OP_NONE || operation > MTEST_EXEC_OP_FD_LIMIT ||
-        occurrence == 0 || error_number < 0 || result_value < 0) {
+int32_t mtest_exec_test_fault_configure_secondary(uint32_t operation, uint32_t occurrence,
+                                                  int32_t error_number, int64_t result_value) {
+    if (operation == MTEST_EXEC_OP_NONE || operation > MTEST_EXEC_OP_FD_LIMIT || occurrence == 0 ||
+        error_number < 0 || result_value < 0) {
         return -1;
     }
     struct mtest_fault_state *fault = &mtest_faults[operation];
@@ -288,9 +274,7 @@ int32_t mtest_exec_test_fault_configure_secondary(
     if (operation == MTEST_EXEC_OP_CHILD_SETUP_WRITE) {
         if (error_number == 0 &&
             (result_value < 1 ||
-             result_value >= (int64_t)sizeof(
-                 ((struct mtest_exec_setup_state *)0)->raw
-             ))) {
+             result_value >= (int64_t)sizeof(((struct mtest_exec_setup_state *)0)->raw))) {
             return -1;
         }
         if (error_number > 0 && result_value != 0) {
@@ -313,12 +297,8 @@ uint32_t mtest_exec_test_fault_seen(uint32_t operation) {
     return fault->operation == operation ? fault->seen : 0;
 }
 
-int32_t mtest_exec_test_group_signal_eperm_configure(
-    uint32_t operation,
-    uint32_t forced_failures
-) {
-    if ((operation != MTEST_EXEC_OP_GROUP_TERM &&
-         operation != MTEST_EXEC_OP_GROUP_KILL) ||
+int32_t mtest_exec_test_group_signal_eperm_configure(uint32_t operation, uint32_t forced_failures) {
+    if ((operation != MTEST_EXEC_OP_GROUP_TERM && operation != MTEST_EXEC_OP_GROUP_KILL) ||
         forced_failures == 0) {
         return -1;
     }
@@ -329,17 +309,11 @@ int32_t mtest_exec_test_group_signal_eperm_configure(
 }
 
 uint32_t mtest_exec_test_group_signal_eperm_seen(uint32_t operation) {
-    return operation == mtest_group_signal_eperm_operation
-        ? mtest_group_signal_eperm_seen
-        : 0;
+    return operation == mtest_group_signal_eperm_operation ? mtest_group_signal_eperm_seen : 0;
 }
 
-int32_t mtest_exec_test_monotonic_wait_configure(
-    uint32_t occurrence,
-    uint32_t max_wait_ms
-) {
-    if (occurrence == 0 || max_wait_ms == 0 ||
-        max_wait_ms > MTEST_TEST_MONOTONIC_WAIT_MAX_MS) {
+int32_t mtest_exec_test_monotonic_wait_configure(uint32_t occurrence, uint32_t max_wait_ms) {
+    if (occurrence == 0 || max_wait_ms == 0 || max_wait_ms > MTEST_TEST_MONOTONIC_WAIT_MAX_MS) {
         return -1;
     }
     mtest_monotonic_wait_occurrence = occurrence;
@@ -366,8 +340,7 @@ static void mtest_wait_before_monotonic_if_requested(void) {
     struct mtest_exec_process *process = NULL;
     for (size_t index = 0; index < MTEST_EXEC_SLOT_CAPACITY; ++index) {
         if (atomic_load(&mtest_slot_lifecycle[index]) == MTEST_SLOT_ACTIVE &&
-            mtest_process[index].handle != 0 &&
-            mtest_process[index].leader > 0) {
+            mtest_process[index].handle != 0 && mtest_process[index].leader > 0) {
             process = &mtest_process[index];
             break;
         }
@@ -376,19 +349,13 @@ static void mtest_wait_before_monotonic_if_requested(void) {
         return;
     }
     const struct timespec delay = {0, 1000000L};
-    for (uint32_t attempt = 0;
-         attempt <= mtest_monotonic_wait_max_ms;
-         ++attempt) {
+    for (uint32_t attempt = 0; attempt <= mtest_monotonic_wait_max_ms; ++attempt) {
         siginfo_t information;
         memset(&information, 0, sizeof(information));
         int wait_status;
         do {
-            wait_status = waitid(
-                P_PID,
-                (id_t)process->leader,
-                &information,
-                WEXITED | WNOHANG | WNOWAIT
-            );
+            wait_status =
+                waitid(P_PID, (id_t)process->leader, &information, WEXITED | WNOHANG | WNOWAIT);
         } while (wait_status != 0 && errno == EINTR);
         if (wait_status != 0) {
             return;
@@ -429,9 +396,7 @@ uint32_t mtest_exec_test_nested_interrupt_count(void) {
     memset(&nodefer, 0, sizeof(nodefer));
     nodefer.sa_handler = mtest_on_interrupt;
     nodefer.sa_flags = SA_NODEFER;
-    if (sigemptyset(&nodefer.sa_mask) != 0) {
-        return 0;
-    }
+    (void)sigemptyset(&nodefer.sa_mask);
     atomic_store(&mtest_interrupt_state, 0);
     if (sigaction(SIGINT, &nodefer, &saved) != 0) {
         return 0;
@@ -442,15 +407,10 @@ uint32_t mtest_exec_test_nested_interrupt_count(void) {
     return (uint32_t)atomic_load(&mtest_interrupt_state);
 }
 
-int32_t mtest_exec_test_fault_configure_handle(
-    uint64_t handle,
-    uint32_t operation,
-    uint32_t occurrence,
-    int32_t error_number
-) {
-    if (handle == 0 || operation == MTEST_EXEC_OP_NONE ||
-        operation > MTEST_EXEC_OP_FD_LIMIT || occurrence == 0 ||
-        error_number <= 0) {
+int32_t mtest_exec_test_fault_configure_handle(uint64_t handle, uint32_t operation,
+                                               uint32_t occurrence, int32_t error_number) {
+    if (handle == 0 || operation == MTEST_EXEC_OP_NONE || operation > MTEST_EXEC_OP_FD_LIMIT ||
+        occurrence == 0 || error_number <= 0) {
         return -1;
     }
     mtest_handle_fault.handle = handle;
@@ -465,14 +425,9 @@ uint32_t mtest_exec_test_fault_handle_seen(void) {
     return mtest_handle_fault.seen;
 }
 
-int32_t mtest_exec_test_deliver_interrupt_after(
-    uint32_t operation,
-    int32_t signal_number
-) {
-    if ((operation != MTEST_EXEC_OP_SIGACTION_INSTALL_INT ||
-         signal_number != SIGINT) &&
-        (operation != MTEST_EXEC_OP_SIGACTION_INSTALL_TERM ||
-         signal_number != SIGTERM)) {
+int32_t mtest_exec_test_deliver_interrupt_after(uint32_t operation, int32_t signal_number) {
+    if ((operation != MTEST_EXEC_OP_SIGACTION_INSTALL_INT || signal_number != SIGINT) &&
+        (operation != MTEST_EXEC_OP_SIGACTION_INSTALL_TERM || signal_number != SIGTERM)) {
         return -1;
     }
     mtest_interrupt_delivery_operation = operation;
@@ -504,11 +459,8 @@ static int64_t mtest_fault_result(uint32_t operation) {
    call; mode 2, a real raise(2) so an unmasked install nests synchronously).
    This is genuine nesting, used to prove the saturating strong-CAS loop loses
    no transition -- unlike raising a masked signal, which only queues. */
-__attribute__((no_sanitize("address")))
-static void mtest_interrupt_reentry_if_armed(void) {
-    int mode = atomic_exchange_explicit(
-        &mtest_interrupt_reentry_armed, 0, memory_order_relaxed
-    );
+__attribute__((no_sanitize("address"))) static void mtest_interrupt_reentry_if_armed(void) {
+    int mode = atomic_exchange_explicit(&mtest_interrupt_reentry_armed, 0, memory_order_relaxed);
     if (mode == 1) {
         mtest_on_interrupt(SIGINT);
     } else if (mode == 2) {
@@ -517,8 +469,7 @@ static void mtest_interrupt_reentry_if_armed(void) {
 }
 #endif
 
-__attribute__((no_sanitize("address")))
-static void mtest_on_interrupt(int signal_number) {
+__attribute__((no_sanitize("address"))) static void mtest_on_interrupt(int signal_number) {
     (void)signal_number;
     /* SAFETY: a signal handler may advance a lock-free atomic int. ASan
        instrumentation is excluded here because its reporting path is not
@@ -531,20 +482,13 @@ static void mtest_on_interrupt(int signal_number) {
        most twice before a CAS succeeds or `current` has already reached 2 --
        no overflow, no unbounded spin. The count records OBSERVED activations
        (standard signals coalesce); a second observed activation escalates. */
-    int current = atomic_load_explicit(
-        &mtest_interrupt_state, memory_order_relaxed
-    );
+    int current = atomic_load_explicit(&mtest_interrupt_state, memory_order_relaxed);
     while (current < 2) {
 #if MTEST_EXEC_TESTING
         mtest_interrupt_reentry_if_armed();
 #endif
-        if (atomic_compare_exchange_strong_explicit(
-                &mtest_interrupt_state,
-                &current,
-                current + 1,
-                memory_order_relaxed,
-                memory_order_relaxed
-            )) {
+        if (atomic_compare_exchange_strong_explicit(&mtest_interrupt_state, &current, current + 1,
+                                                    memory_order_relaxed, memory_order_relaxed)) {
             break;
         }
     }
@@ -556,13 +500,8 @@ static void mtest_clear_error(struct mtest_exec_error *error) {
     }
 }
 
-static void mtest_set_error(
-    struct mtest_exec_error *error,
-    uint32_t operation,
-    int error_number,
-    uint64_t detail,
-    int64_t subject
-) {
+static void mtest_set_error(struct mtest_exec_error *error, uint32_t operation, int error_number,
+                            uint64_t detail, int64_t subject) {
     if (error == NULL) {
         return;
     }
@@ -572,23 +511,16 @@ static void mtest_set_error(
     error->subject = subject;
 }
 
-static void mtest_set_cleanup_error(
-    struct mtest_exec_error *error,
-    uint32_t operation,
-    int error_number
-) {
+static void mtest_set_cleanup_error(struct mtest_exec_error *error, uint32_t operation,
+                                    int error_number) {
     if (error != NULL && error->cleanup_operation == MTEST_EXEC_OP_NONE) {
         error->cleanup_operation = operation;
         error->cleanup_error_number = error_number;
     }
 }
 
-static int mtest_checked_sigaction(
-    uint32_t operation,
-    int signal_number,
-    const struct sigaction *action,
-    struct sigaction *old_action
-) {
+static int mtest_checked_sigaction(uint32_t operation, int signal_number,
+                                   const struct sigaction *action, struct sigaction *old_action) {
     if (mtest_fail_if_requested(operation)) {
         return -1;
     }
@@ -649,11 +581,7 @@ static void *mtest_allocate(uint32_t operation, size_t size) {
     return memory;
 }
 
-static char *mtest_copy_bytes(
-    uint32_t operation,
-    const uint8_t *data,
-    uint64_t length
-) {
+static char *mtest_copy_bytes(uint32_t operation, const uint8_t *data, uint64_t length) {
     /* SAFETY: on success this function owns `length + 1` bytes, copies only the
        caller-declared initialized range, rejects embedded NUL, initializes the
        terminator, and returns sole ownership to the plan that frees it. */
@@ -713,19 +641,14 @@ static void mtest_free_plan(struct mtest_exec_plan *plan) {
     free(plan);
 }
 
-static int mtest_copy_argv(
-    const struct mtest_exec_process_spec *spec,
-    struct mtest_exec_plan *plan
-) {
-    if (spec->argc == 0 || spec->argc > SIZE_MAX / sizeof(char *) - 1 ||
-        spec->argv == NULL) {
+static int mtest_copy_argv(const struct mtest_exec_process_spec *spec,
+                           struct mtest_exec_plan *plan) {
+    if (spec->argc == 0 || spec->argc > SIZE_MAX / sizeof(char *) - 1 || spec->argv == NULL) {
         errno = EINVAL;
         return -1;
     }
-    plan->argv = mtest_allocate(
-        MTEST_EXEC_OP_PLAN_ALLOC,
-        ((size_t)spec->argc + 1) * sizeof(char *)
-    );
+    plan->argv =
+        mtest_allocate(MTEST_EXEC_OP_PLAN_ALLOC, ((size_t)spec->argc + 1) * sizeof(char *));
     if (plan->argv == NULL) {
         return -1;
     }
@@ -735,11 +658,8 @@ static int mtest_copy_argv(
             errno = EINVAL;
             return -1;
         }
-        plan->argv[index] = mtest_copy_bytes(
-            MTEST_EXEC_OP_PLAN_ALLOC,
-            spec->argv[index].data,
-            spec->argv[index].length
-        );
+        plan->argv[index] = mtest_copy_bytes(MTEST_EXEC_OP_PLAN_ALLOC, spec->argv[index].data,
+                                             spec->argv[index].length);
         if (plan->argv[index] == NULL) {
             return -1;
         }
@@ -758,10 +678,8 @@ static size_t mtest_env_key_length(const uint8_t *data, size_t length) {
     return length;
 }
 
-static int mtest_validate_env_extra(
-    const struct mtest_exec_process_spec *spec,
-    struct mtest_exec_error *error
-) {
+static int mtest_validate_env_extra(const struct mtest_exec_process_spec *spec,
+                                    struct mtest_exec_error *error) {
     /* Validate the caller's environment overrides BEFORE any resource is
        acquired: every entry must contain '=', carry a nonempty key, and hold no
        embedded NUL; no two extras may share a key. A zero count is the v1
@@ -776,17 +694,13 @@ static int mtest_validate_env_extra(
     for (uint64_t index = 0; index < spec->env_extra_count; ++index) {
         const struct mtest_exec_bytes *entry = &spec->env_extra[index];
         if (entry->length == 0 || entry->data == NULL) {
-            mtest_set_error(
-                error, MTEST_EXEC_OP_ENV_SNAPSHOT, EINVAL, index, 0
-            );
+            mtest_set_error(error, MTEST_EXEC_OP_ENV_SNAPSHOT, EINVAL, index, 0);
             return -1;
         }
         size_t separator = (size_t)entry->length;
         for (size_t byte = 0; byte < entry->length; ++byte) {
             if (entry->data[byte] == '\0') {
-                mtest_set_error(
-                    error, MTEST_EXEC_OP_ENV_SNAPSHOT, EINVAL, index, 0
-                );
+                mtest_set_error(error, MTEST_EXEC_OP_ENV_SNAPSHOT, EINVAL, index, 0);
                 return -1;
             }
             if (entry->data[byte] == '=' && separator == (size_t)entry->length) {
@@ -795,19 +709,14 @@ static int mtest_validate_env_extra(
         }
         if (separator == (size_t)entry->length || separator == 0) {
             /* No '=' at all, or an empty key ("=value"). */
-            mtest_set_error(
-                error, MTEST_EXEC_OP_ENV_SNAPSHOT, EINVAL, index, 0
-            );
+            mtest_set_error(error, MTEST_EXEC_OP_ENV_SNAPSHOT, EINVAL, index, 0);
             return -1;
         }
         for (uint64_t prior = 0; prior < index; ++prior) {
             const struct mtest_exec_bytes *other = &spec->env_extra[prior];
             size_t other_key = mtest_env_key_length(other->data, other->length);
-            if (other_key == separator &&
-                memcmp(entry->data, other->data, separator) == 0) {
-                mtest_set_error(
-                    error, MTEST_EXEC_OP_ENV_SNAPSHOT, EINVAL, index, 0
-                );
+            if (other_key == separator && memcmp(entry->data, other->data, separator) == 0) {
+                mtest_set_error(error, MTEST_EXEC_OP_ENV_SNAPSHOT, EINVAL, index, 0);
                 return -1;
             }
         }
@@ -815,28 +724,23 @@ static int mtest_validate_env_extra(
     return 0;
 }
 
-static int mtest_env_extra_overrides(
-    const struct mtest_exec_process_spec *spec,
-    const char *inherited
-) {
+static int mtest_env_extra_overrides(const struct mtest_exec_process_spec *spec,
+                                     const char *inherited) {
     /* Whether some override shares the inherited entry's key. Validated extras
        all carry a '='; the inherited key runs up to its own first '='. */
     size_t inherited_key = strcspn(inherited, "=");
     for (uint64_t index = 0; index < spec->env_extra_count; ++index) {
         const struct mtest_exec_bytes *entry = &spec->env_extra[index];
         size_t entry_key = mtest_env_key_length(entry->data, entry->length);
-        if (entry_key == inherited_key &&
-            memcmp(entry->data, inherited, entry_key) == 0) {
+        if (entry_key == inherited_key && memcmp(entry->data, inherited, entry_key) == 0) {
             return 1;
         }
     }
     return 0;
 }
 
-static int mtest_copy_environment(
-    const struct mtest_exec_process_spec *spec,
-    struct mtest_exec_plan *plan
-) {
+static int mtest_copy_environment(const struct mtest_exec_process_spec *spec,
+                                  struct mtest_exec_plan *plan) {
     /* SAFETY: runtime ownership requires no concurrent environment mutation.
        Each observed NUL-terminated entry is copied into plan-owned storage
        before fork, and the child only reads its copy until execve. The merge is
@@ -854,30 +758,23 @@ static int mtest_copy_environment(
         }
         count += 1;
     }
-    if ((size_t)spec->env_extra_count >
-        SIZE_MAX / sizeof(char *) - 1 - count) {
+    if ((size_t)spec->env_extra_count > SIZE_MAX / sizeof(char *) - 1 - count) {
         errno = EOVERFLOW;
         return -1;
     }
     plan->environment = mtest_allocate(
-        MTEST_EXEC_OP_ENV_SNAPSHOT,
-        (count + (size_t)spec->env_extra_count + 1) * sizeof(char *)
-    );
+        MTEST_EXEC_OP_ENV_SNAPSHOT, (count + (size_t)spec->env_extra_count + 1) * sizeof(char *));
     if (plan->environment == NULL) {
         return -1;
     }
     size_t out = 0;
     for (size_t index = 0; index < count; ++index) {
-        if (spec->env_extra_count != 0 &&
-            mtest_env_extra_overrides(spec, environ[index])) {
+        if (spec->env_extra_count != 0 && mtest_env_extra_overrides(spec, environ[index])) {
             continue;
         }
         size_t length = strlen(environ[index]);
-        plan->environment[out] = mtest_copy_bytes(
-            MTEST_EXEC_OP_ENV_SNAPSHOT,
-            (const uint8_t *)environ[index],
-            length
-        );
+        plan->environment[out] =
+            mtest_copy_bytes(MTEST_EXEC_OP_ENV_SNAPSHOT, (const uint8_t *)environ[index], length);
         if (plan->environment[out] == NULL) {
             return -1;
         }
@@ -885,9 +782,8 @@ static int mtest_copy_environment(
     }
     for (uint64_t index = 0; index < spec->env_extra_count; ++index) {
         const struct mtest_exec_bytes *entry = &spec->env_extra[index];
-        plan->environment[out] = mtest_copy_bytes(
-            MTEST_EXEC_OP_ENV_SNAPSHOT, entry->data, entry->length
-        );
+        plan->environment[out] =
+            mtest_copy_bytes(MTEST_EXEC_OP_ENV_SNAPSHOT, entry->data, entry->length);
         if (plan->environment[out] == NULL) {
             return -1;
         }
@@ -934,18 +830,11 @@ static int mtest_has_slash(const char *text) {
     return strchr(text, '/') != NULL;
 }
 
-static char *mtest_join_candidate(
-    const char *component,
-    size_t component_length,
-    const char *program
-) {
+static char *mtest_join_candidate(const char *component, size_t component_length,
+                                  const char *program) {
     size_t program_length = strlen(program);
     if (component_length == 0) {
-        return mtest_copy_bytes(
-            MTEST_EXEC_OP_PLAN_ALLOC,
-            (const uint8_t *)program,
-            program_length
-        );
+        return mtest_copy_bytes(MTEST_EXEC_OP_PLAN_ALLOC, (const uint8_t *)program, program_length);
     }
     if (component_length > SIZE_MAX - program_length - 2) {
         errno = EOVERFLOW;
@@ -983,14 +872,10 @@ static int mtest_build_candidates(struct mtest_exec_plan *plan) {
             }
         }
     }
-    plan->candidates = mtest_allocate(
-        MTEST_EXEC_OP_PLAN_ALLOC,
-        (plan->candidate_count + 1) * sizeof(char *)
-    );
-    plan->shell_argv = mtest_allocate(
-        MTEST_EXEC_OP_PLAN_ALLOC,
-        plan->candidate_count * sizeof(char **)
-    );
+    plan->candidates =
+        mtest_allocate(MTEST_EXEC_OP_PLAN_ALLOC, (plan->candidate_count + 1) * sizeof(char *));
+    plan->shell_argv =
+        mtest_allocate(MTEST_EXEC_OP_PLAN_ALLOC, plan->candidate_count * sizeof(char **));
     if (plan->candidates == NULL || plan->shell_argv == NULL) {
         free(owned_default);
         return -1;
@@ -1005,12 +890,8 @@ static int mtest_build_candidates(struct mtest_exec_plan *plan) {
         const char *component = path;
         for (size_t index = 0; index < plan->candidate_count; ++index) {
             const char *separator = strchr(component, ':');
-            size_t length = separator == NULL
-                ? strlen(component)
-                : (size_t)(separator - component);
-            plan->candidates[index] = mtest_join_candidate(
-                component, length, plan->argv[0]
-            );
+            size_t length = separator == NULL ? strlen(component) : (size_t)(separator - component);
+            plan->candidates[index] = mtest_join_candidate(component, length, plan->argv[0]);
             if (plan->candidates[index] == NULL && candidate_error == 0) {
                 candidate_error = errno;
             }
@@ -1025,14 +906,12 @@ static int mtest_build_candidates(struct mtest_exec_plan *plan) {
         }
     }
     for (size_t index = 0; index < plan->candidate_count; ++index) {
-        plan->shell_argv[index] = mtest_allocate(
-            MTEST_EXEC_OP_PLAN_ALLOC,
-            (plan->argc + 2) * sizeof(char *)
-        );
+        plan->shell_argv[index] =
+            mtest_allocate(MTEST_EXEC_OP_PLAN_ALLOC, (plan->argc + 2) * sizeof(char *));
         if (plan->shell_argv[index] == NULL) {
             return -1;
         }
-        plan->shell_argv[index][0] = (char *)"/bin/sh";
+        plan->shell_argv[index][0] = mtest_default_shell;
         plan->shell_argv[index][1] = plan->candidates[index];
         for (size_t argument = 1; argument < plan->argc; ++argument) {
             plan->shell_argv[index][argument + 1] = plan->argv[argument];
@@ -1041,21 +920,16 @@ static int mtest_build_candidates(struct mtest_exec_plan *plan) {
     return 0;
 }
 
-static struct mtest_exec_plan *mtest_build_plan(
-    const struct mtest_exec_process_spec *spec,
-    struct mtest_exec_error *error
-) {
-    if (spec == NULL || spec->reserved != 0 ||
-        (spec->flags & ~MTEST_EXEC_PROCESS_HAS_CWD) != 0) {
+static struct mtest_exec_plan *mtest_build_plan(const struct mtest_exec_process_spec *spec,
+                                                struct mtest_exec_error *error) {
+    if (spec == NULL || spec->reserved != 0 || (spec->flags & ~MTEST_EXEC_PROCESS_HAS_CWD) != 0) {
         mtest_set_error(error, MTEST_EXEC_OP_PLAN_ALLOC, EINVAL, 0, 0);
         return NULL;
     }
     if (mtest_validate_env_extra(spec, error) != 0) {
         return NULL;
     }
-    struct mtest_exec_plan *plan = mtest_allocate(
-        MTEST_EXEC_OP_PLAN_ALLOC, sizeof(*plan)
-    );
+    struct mtest_exec_plan *plan = mtest_allocate(MTEST_EXEC_OP_PLAN_ALLOC, sizeof(*plan));
     if (plan == NULL) {
         mtest_set_error(error, MTEST_EXEC_OP_PLAN_ALLOC, errno, 0, 0);
         return NULL;
@@ -1067,9 +941,7 @@ static struct mtest_exec_plan *mtest_build_plan(
     }
     plan->has_cwd = (spec->flags & MTEST_EXEC_PROCESS_HAS_CWD) != 0;
     if (plan->has_cwd) {
-        plan->cwd = mtest_copy_bytes(
-            MTEST_EXEC_OP_PLAN_ALLOC, spec->cwd.data, spec->cwd.length
-        );
+        plan->cwd = mtest_copy_bytes(MTEST_EXEC_OP_PLAN_ALLOC, spec->cwd.data, spec->cwd.length);
         if (plan->cwd == NULL) {
             mtest_set_error(error, MTEST_EXEC_OP_PLAN_ALLOC, errno, 0, 0);
             mtest_free_plan(plan);
@@ -1082,9 +954,8 @@ static struct mtest_exec_plan *mtest_build_plan(
         return NULL;
     }
     if (mtest_build_candidates(plan) != 0) {
-        uint32_t operation = errno == EINVAL
-            ? MTEST_EXEC_OP_PATH_CONFSTR
-            : MTEST_EXEC_OP_PLAN_ALLOC;
+        uint32_t operation =
+            errno == EINVAL ? MTEST_EXEC_OP_PATH_CONFSTR : MTEST_EXEC_OP_PLAN_ALLOC;
         mtest_set_error(error, operation, errno, 0, 0);
         mtest_free_plan(plan);
         return NULL;
@@ -1100,9 +971,8 @@ static struct mtest_exec_process *mtest_claim_slot(void) {
        maps to the capacity-exhausted EBUSY. */
     for (size_t index = 0; index < MTEST_EXEC_SLOT_CAPACITY; ++index) {
         int expected = MTEST_SLOT_FREE;
-        if (atomic_compare_exchange_strong(
-                &mtest_slot_lifecycle[index], &expected, MTEST_SLOT_ACTIVE
-            )) {
+        if (atomic_compare_exchange_strong(&mtest_slot_lifecycle[index], &expected,
+                                           MTEST_SLOT_ACTIVE)) {
             return &mtest_process[index];
         }
     }
@@ -1171,9 +1041,7 @@ int32_t mtest_exec_runtime_open(struct mtest_exec_error *error) {
     int rollback_errno = 0;
 
     mtest_clear_error(error);
-    if (!atomic_compare_exchange_strong(
-            &mtest_runtime_state, &expected, MTEST_RUNTIME_OPENING
-        )) {
+    if (!atomic_compare_exchange_strong(&mtest_runtime_state, &expected, MTEST_RUNTIME_OPENING)) {
         mtest_set_error(error, MTEST_EXEC_OP_NONE, EBUSY, 0, 0);
         return -1;
     }
@@ -1191,35 +1059,27 @@ int32_t mtest_exec_runtime_open(struct mtest_exec_error *error) {
        lock-free saturating atomic that is correct under reentry regardless of
        masking (see mtest_on_interrupt). The mask merely narrows the reentry
        window in production. */
-    if (sigemptyset(&action.sa_mask) != 0 ||
-        sigaddset(&action.sa_mask, SIGINT) != 0 ||
-        sigaddset(&action.sa_mask, SIGTERM) != 0 ||
-        sigemptyset(&child_action.sa_mask) != 0) {
+    if (sigemptyset(&action.sa_mask) != 0 || sigaddset(&action.sa_mask, SIGINT) != 0 ||
+        sigaddset(&action.sa_mask, SIGTERM) != 0 || sigemptyset(&child_action.sa_mask) != 0) {
         saved_errno = errno;
         atomic_store(&mtest_runtime_state, MTEST_RUNTIME_CLOSED);
         mtest_set_error(error, MTEST_EXEC_OP_NONE, saved_errno, 0, 0);
         return -1;
     }
-    if (mtest_checked_sigaction(
-            MTEST_EXEC_OP_SIGACTION_QUERY_INT, SIGINT, NULL, &mtest_old_int
-        ) != 0) {
+    if (mtest_checked_sigaction(MTEST_EXEC_OP_SIGACTION_QUERY_INT, SIGINT, NULL, &mtest_old_int) !=
+        0) {
         saved_errno = errno;
         atomic_store(&mtest_runtime_state, MTEST_RUNTIME_CLOSED);
-        mtest_set_error(
-            error, MTEST_EXEC_OP_SIGACTION_QUERY_INT, saved_errno, 0, SIGINT
-        );
+        mtest_set_error(error, MTEST_EXEC_OP_SIGACTION_QUERY_INT, saved_errno, 0, SIGINT);
         return -1;
     }
     mtest_old_int_saved = 1;
-    if (mtest_checked_sigaction(
-            MTEST_EXEC_OP_SIGACTION_QUERY_TERM, SIGTERM, NULL, &mtest_old_term
-        ) != 0) {
+    if (mtest_checked_sigaction(MTEST_EXEC_OP_SIGACTION_QUERY_TERM, SIGTERM, NULL,
+                                &mtest_old_term) != 0) {
         saved_errno = errno;
         mtest_old_int_saved = 0;
         atomic_store(&mtest_runtime_state, MTEST_RUNTIME_CLOSED);
-        mtest_set_error(
-            error, MTEST_EXEC_OP_SIGACTION_QUERY_TERM, saved_errno, 0, SIGTERM
-        );
+        mtest_set_error(error, MTEST_EXEC_OP_SIGACTION_QUERY_TERM, saved_errno, 0, SIGTERM);
         return -1;
     }
     mtest_old_term_saved = 1;
@@ -1232,30 +1092,21 @@ int32_t mtest_exec_runtime_open(struct mtest_exec_error *error) {
         return -1;
     }
     mtest_old_chld_saved = 1;
-    if (mtest_checked_sigaction(
-            MTEST_EXEC_OP_SIGACTION_INSTALL_INT, SIGINT, &action, NULL
-        ) != 0) {
+    if (mtest_checked_sigaction(MTEST_EXEC_OP_SIGACTION_INSTALL_INT, SIGINT, &action, NULL) != 0) {
         saved_errno = errno;
         mtest_old_int_saved = 0;
         mtest_old_term_saved = 0;
         mtest_old_chld_saved = 0;
         atomic_store(&mtest_runtime_state, MTEST_RUNTIME_CLOSED);
-        mtest_set_error(
-            error, MTEST_EXEC_OP_SIGACTION_INSTALL_INT, saved_errno, 0, SIGINT
-        );
+        mtest_set_error(error, MTEST_EXEC_OP_SIGACTION_INSTALL_INT, saved_errno, 0, SIGINT);
         return -1;
     }
     mtest_int_installed = 1;
-    if (mtest_checked_sigaction(
-            MTEST_EXEC_OP_SIGACTION_INSTALL_TERM, SIGTERM, &action, NULL
-        ) != 0) {
+    if (mtest_checked_sigaction(MTEST_EXEC_OP_SIGACTION_INSTALL_TERM, SIGTERM, &action, NULL) !=
+        0) {
         saved_errno = errno;
-        if (mtest_checked_sigaction(
-                MTEST_EXEC_OP_SIGACTION_RESTORE_INT,
-                SIGINT,
-                &mtest_old_int,
-                NULL
-            ) != 0) {
+        if (mtest_checked_sigaction(MTEST_EXEC_OP_SIGACTION_RESTORE_INT, SIGINT, &mtest_old_int,
+                                    NULL) != 0) {
             rollback_errno = errno;
         } else {
             mtest_int_installed = 0;
@@ -1266,21 +1117,11 @@ int32_t mtest_exec_runtime_open(struct mtest_exec_error *error) {
             mtest_old_chld_saved = 0;
             atomic_store(&mtest_runtime_state, MTEST_RUNTIME_CLOSED);
         } else {
-            atomic_store(
-                &mtest_runtime_state, MTEST_RUNTIME_RESTORE_REQUIRED
-            );
+            atomic_store(&mtest_runtime_state, MTEST_RUNTIME_RESTORE_REQUIRED);
         }
-        mtest_set_error(
-            error,
-            MTEST_EXEC_OP_SIGACTION_INSTALL_TERM,
-            saved_errno,
-            0,
-            SIGTERM
-        );
+        mtest_set_error(error, MTEST_EXEC_OP_SIGACTION_INSTALL_TERM, saved_errno, 0, SIGTERM);
         if (rollback_errno != 0) {
-            mtest_set_cleanup_error(
-                error, MTEST_EXEC_OP_SIGACTION_RESTORE_INT, rollback_errno
-            );
+            mtest_set_cleanup_error(error, MTEST_EXEC_OP_SIGACTION_RESTORE_INT, rollback_errno);
         }
         return -1;
     }
@@ -1288,23 +1129,15 @@ int32_t mtest_exec_runtime_open(struct mtest_exec_error *error) {
     if (sigaction(SIGCHLD, &child_action, NULL) != 0) {
         saved_errno = errno;
         uint32_t rollback_operation = MTEST_EXEC_OP_NONE;
-        if (mtest_checked_sigaction(
-                MTEST_EXEC_OP_SIGACTION_RESTORE_TERM,
-                SIGTERM,
-                &mtest_old_term,
-                NULL
-            ) != 0) {
+        if (mtest_checked_sigaction(MTEST_EXEC_OP_SIGACTION_RESTORE_TERM, SIGTERM, &mtest_old_term,
+                                    NULL) != 0) {
             rollback_operation = MTEST_EXEC_OP_SIGACTION_RESTORE_TERM;
             rollback_errno = errno;
         } else {
             mtest_term_installed = 0;
         }
-        if (mtest_checked_sigaction(
-                MTEST_EXEC_OP_SIGACTION_RESTORE_INT,
-                SIGINT,
-                &mtest_old_int,
-                NULL
-            ) != 0) {
+        if (mtest_checked_sigaction(MTEST_EXEC_OP_SIGACTION_RESTORE_INT, SIGINT, &mtest_old_int,
+                                    NULL) != 0) {
             if (rollback_errno == 0) {
                 rollback_operation = MTEST_EXEC_OP_SIGACTION_RESTORE_INT;
                 rollback_errno = errno;
@@ -1322,9 +1155,7 @@ int32_t mtest_exec_runtime_open(struct mtest_exec_error *error) {
         }
         mtest_set_error(error, MTEST_EXEC_OP_NONE, saved_errno, 0, SIGCHLD);
         if (rollback_errno != 0) {
-            mtest_set_cleanup_error(
-                error, rollback_operation, rollback_errno
-            );
+            mtest_set_cleanup_error(error, rollback_operation, rollback_errno);
         }
         return -1;
     }
@@ -1343,8 +1174,7 @@ int32_t mtest_exec_runtime_open(struct mtest_exec_error *error) {
         struct sigaction pipe_action;
         memset(&pipe_action, 0, sizeof(pipe_action));
         pipe_action.sa_handler = SIG_IGN;
-        if (sigemptyset(&pipe_action.sa_mask) != 0 ||
-            sigaction(SIGPIPE, &pipe_action, NULL) != 0) {
+        if (sigemptyset(&pipe_action.sa_mask) != 0 || sigaction(SIGPIPE, &pipe_action, NULL) != 0) {
             saved_errno = errno;
             mtest_old_pipe_saved = 0;
             goto sigpipe_rollback;
@@ -1369,12 +1199,8 @@ sigpipe_rollback:
     }
     {
         uint32_t rollback_operation = MTEST_EXEC_OP_NONE;
-        if (mtest_checked_sigaction(
-                MTEST_EXEC_OP_SIGACTION_RESTORE_TERM,
-                SIGTERM,
-                &mtest_old_term,
-                NULL
-            ) != 0) {
+        if (mtest_checked_sigaction(MTEST_EXEC_OP_SIGACTION_RESTORE_TERM, SIGTERM, &mtest_old_term,
+                                    NULL) != 0) {
             if (rollback_errno == 0) {
                 rollback_operation = MTEST_EXEC_OP_SIGACTION_RESTORE_TERM;
                 rollback_errno = errno;
@@ -1382,12 +1208,8 @@ sigpipe_rollback:
         } else {
             mtest_term_installed = 0;
         }
-        if (mtest_checked_sigaction(
-                MTEST_EXEC_OP_SIGACTION_RESTORE_INT,
-                SIGINT,
-                &mtest_old_int,
-                NULL
-            ) != 0) {
+        if (mtest_checked_sigaction(MTEST_EXEC_OP_SIGACTION_RESTORE_INT, SIGINT, &mtest_old_int,
+                                    NULL) != 0) {
             if (rollback_errno == 0) {
                 rollback_operation = MTEST_EXEC_OP_SIGACTION_RESTORE_INT;
                 rollback_errno = errno;
@@ -1421,9 +1243,7 @@ int32_t mtest_exec_runtime_close(struct mtest_exec_error *error) {
     mtest_clear_error(error);
 retry_runtime_ownership:
     expected = MTEST_RUNTIME_OPEN;
-    if (!atomic_compare_exchange_strong(
-            &mtest_runtime_state, &expected, MTEST_RUNTIME_OPENING
-        )) {
+    if (!atomic_compare_exchange_strong(&mtest_runtime_state, &expected, MTEST_RUNTIME_OPENING)) {
         if (expected == MTEST_RUNTIME_CHILD_ACTIVE) {
             /* SAFETY: CHILD_ACTIVE means at least one slot still owns a live
                handle. Runtime close is the cross-ABI retry token: it aborts one
@@ -1444,37 +1264,27 @@ retry_runtime_ownership:
         }
         if (expected == MTEST_RUNTIME_RESTORE_REQUIRED) {
             expected = MTEST_RUNTIME_RESTORE_REQUIRED;
-            if (atomic_compare_exchange_strong(
-                    &mtest_runtime_state, &expected, MTEST_RUNTIME_OPENING
-                )) {
+            if (atomic_compare_exchange_strong(&mtest_runtime_state, &expected,
+                                               MTEST_RUNTIME_OPENING)) {
                 goto restore_handlers;
             }
         }
-        int error_number = expected == MTEST_RUNTIME_CHILD_ACTIVE
-            ? EBUSY
-            : EINVAL;
-        mtest_set_error(
-            error,
-            MTEST_EXEC_OP_NONE,
-            error_number,
-            expected == MTEST_RUNTIME_CHILD_ACTIVE ? 1u : 0u,
-            0
-        );
+        int error_number = expected == MTEST_RUNTIME_CHILD_ACTIVE ? EBUSY : EINVAL;
+        mtest_set_error(error, MTEST_EXEC_OP_NONE, error_number,
+                        expected == MTEST_RUNTIME_CHILD_ACTIVE ? 1u : 0u, 0);
         return -1;
     }
 restore_handlers:
     /* Restore the SIGPIPE disposition first (a plain sigaction like SIGCHLD;
        the restore order among the independent signals does not matter). */
-    if (mtest_pipe_installed &&
-        sigaction(SIGPIPE, &mtest_old_pipe, NULL) != 0) {
+    if (mtest_pipe_installed && sigaction(SIGPIPE, &mtest_old_pipe, NULL) != 0) {
         first_errno = errno;
         had_failure = 1;
     } else {
         mtest_pipe_installed = 0;
         mtest_old_pipe_saved = 0;
     }
-    if (mtest_chld_installed &&
-        sigaction(SIGCHLD, &mtest_old_chld, NULL) != 0) {
+    if (mtest_chld_installed && sigaction(SIGCHLD, &mtest_old_chld, NULL) != 0) {
         if (!had_failure) {
             first_errno = errno;
         }
@@ -1483,12 +1293,8 @@ restore_handlers:
         mtest_chld_installed = 0;
         mtest_old_chld_saved = 0;
     }
-    if (mtest_term_installed && mtest_checked_sigaction(
-            MTEST_EXEC_OP_SIGACTION_RESTORE_TERM,
-            SIGTERM,
-            &mtest_old_term,
-            NULL
-        ) != 0) {
+    if (mtest_term_installed && mtest_checked_sigaction(MTEST_EXEC_OP_SIGACTION_RESTORE_TERM,
+                                                        SIGTERM, &mtest_old_term, NULL) != 0) {
         if (!had_failure) {
             first_operation = MTEST_EXEC_OP_SIGACTION_RESTORE_TERM;
             first_errno = errno;
@@ -1498,12 +1304,8 @@ restore_handlers:
         mtest_term_installed = 0;
         mtest_old_term_saved = 0;
     }
-    if (mtest_int_installed && mtest_checked_sigaction(
-            MTEST_EXEC_OP_SIGACTION_RESTORE_INT,
-            SIGINT,
-            &mtest_old_int,
-            NULL
-        ) != 0) {
+    if (mtest_int_installed && mtest_checked_sigaction(MTEST_EXEC_OP_SIGACTION_RESTORE_INT, SIGINT,
+                                                       &mtest_old_int, NULL) != 0) {
         if (!had_failure) {
             first_operation = MTEST_EXEC_OP_SIGACTION_RESTORE_INT;
             first_errno = errno;
@@ -1514,9 +1316,7 @@ restore_handlers:
         mtest_old_int_saved = 0;
     }
     if (had_failure) {
-        atomic_store(
-            &mtest_runtime_state, MTEST_RUNTIME_RESTORE_REQUIRED
-        );
+        atomic_store(&mtest_runtime_state, MTEST_RUNTIME_RESTORE_REQUIRED);
         mtest_set_error(error, first_operation, first_errno, 0, 0);
         return -1;
     }
@@ -1525,9 +1325,7 @@ restore_handlers:
 }
 
 static int mtest_interrupt_seen(void) {
-    return atomic_load_explicit(
-        &mtest_interrupt_state, memory_order_relaxed
-    ) != 0;
+    return atomic_load_explicit(&mtest_interrupt_state, memory_order_relaxed) != 0;
 }
 
 int32_t mtest_exec_interrupt_requested(void) {
@@ -1535,38 +1333,28 @@ int32_t mtest_exec_interrupt_requested(void) {
 }
 
 int32_t mtest_exec_interrupt_count(void) {
-    return (int32_t)atomic_load_explicit(
-        &mtest_interrupt_state, memory_order_relaxed
-    );
+    return (int32_t)atomic_load_explicit(&mtest_interrupt_state, memory_order_relaxed);
 }
 
-int32_t mtest_exec_fd_limit(
-    uint64_t *soft_limit,
-    struct mtest_exec_error *error
-) {
+int32_t mtest_exec_fd_limit(uint64_t *soft_limit, struct mtest_exec_error *error) {
     mtest_clear_error(error);
     if (soft_limit == NULL) {
         mtest_set_error(error, MTEST_EXEC_OP_FD_LIMIT, EINVAL, 0, 0);
         return -1;
     }
     struct rlimit limit;
-    if (mtest_fail_if_requested(MTEST_EXEC_OP_FD_LIMIT) ||
-        getrlimit(RLIMIT_NOFILE, &limit) != 0) {
+    if (mtest_fail_if_requested(MTEST_EXEC_OP_FD_LIMIT) || getrlimit(RLIMIT_NOFILE, &limit) != 0) {
         mtest_set_error(error, MTEST_EXEC_OP_FD_LIMIT, errno, 0, 0);
         return -1;
     }
     /* RLIM_INFINITY becomes the documented UINT64_MAX sentinel so the Mojo
        effective-cap derivation can map it onto its compile-time ceiling. */
-    *soft_limit = limit.rlim_cur == RLIM_INFINITY
-        ? MTEST_EXEC_FD_LIMIT_UNBOUNDED
-        : (uint64_t)limit.rlim_cur;
+    *soft_limit =
+        limit.rlim_cur == RLIM_INFINITY ? MTEST_EXEC_FD_LIMIT_UNBOUNDED : (uint64_t)limit.rlim_cur;
     return 0;
 }
 
-int32_t mtest_exec_monotonic_ms(
-    int64_t *milliseconds,
-    struct mtest_exec_error *error
-) {
+int32_t mtest_exec_monotonic_ms(int64_t *milliseconds, struct mtest_exec_error *error) {
     struct timespec now;
     mtest_clear_error(error);
     if (milliseconds == NULL) {
@@ -1589,12 +1377,7 @@ int32_t mtest_exec_monotonic_ms(
     return 0;
 }
 
-static int mtest_set_fd_flag(
-    int fd,
-    int command,
-    int flag,
-    uint32_t operation
-) {
+static int mtest_set_fd_flag(int fd, int command, int flag, uint32_t operation) {
     if (mtest_fail_if_requested(operation)) {
         return -1;
     }
@@ -1619,9 +1402,7 @@ static int mtest_relocate_standard_fd(int *fd) {
        closes; if that close reports an error, the original slot is already
        consumed, the duplicate is closed, and no cleanup retries either numeric
        descriptor. */
-    int relocated = fcntl(
-        *fd, F_DUPFD_CLOEXEC, STDERR_FILENO + 1
-    );
+    int relocated = fcntl(*fd, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
     if (relocated < 0) {
         return -1;
     }
@@ -1637,11 +1418,8 @@ static int mtest_relocate_standard_fd(int *fd) {
     return 0;
 }
 
-static int mtest_prepare_pipe(
-    int pipe_fds[2],
-    uint32_t pipe_operation,
-    struct mtest_exec_error *error
-) {
+static int mtest_prepare_pipe(int pipe_fds[2], uint32_t pipe_operation,
+                              struct mtest_exec_error *error) {
     if (mtest_fail_if_requested(pipe_operation) || pipe(pipe_fds) != 0) {
         mtest_set_error(error, pipe_operation, errno, 0, 0);
         return -1;
@@ -1652,37 +1430,25 @@ static int mtest_prepare_pipe(
             int saved_errno = errno;
             mtest_close_quietly(&pipe_fds[0]);
             mtest_close_quietly(&pipe_fds[1]);
-            mtest_set_error(
-                error, MTEST_EXEC_OP_FD_CLOEXEC, saved_errno, 0, subject
-            );
+            mtest_set_error(error, MTEST_EXEC_OP_FD_CLOEXEC, saved_errno, 0, subject);
             return -1;
         }
     }
-    if (mtest_set_fd_flag(
-            pipe_fds[0], F_GETFD, FD_CLOEXEC, MTEST_EXEC_OP_FD_CLOEXEC
-        ) != 0 ||
-        mtest_set_fd_flag(
-            pipe_fds[1], F_GETFD, FD_CLOEXEC, MTEST_EXEC_OP_FD_CLOEXEC
-        ) != 0) {
+    if (mtest_set_fd_flag(pipe_fds[0], F_GETFD, FD_CLOEXEC, MTEST_EXEC_OP_FD_CLOEXEC) != 0 ||
+        mtest_set_fd_flag(pipe_fds[1], F_GETFD, FD_CLOEXEC, MTEST_EXEC_OP_FD_CLOEXEC) != 0) {
         int saved_errno = errno;
         int subject = pipe_fds[0];
         mtest_close_quietly(&pipe_fds[0]);
         mtest_close_quietly(&pipe_fds[1]);
-        mtest_set_error(
-            error, MTEST_EXEC_OP_FD_CLOEXEC, saved_errno, 0, subject
-        );
+        mtest_set_error(error, MTEST_EXEC_OP_FD_CLOEXEC, saved_errno, 0, subject);
         return -1;
     }
-    if (mtest_set_fd_flag(
-            pipe_fds[0], F_GETFL, O_NONBLOCK, MTEST_EXEC_OP_FD_NONBLOCK
-        ) != 0) {
+    if (mtest_set_fd_flag(pipe_fds[0], F_GETFL, O_NONBLOCK, MTEST_EXEC_OP_FD_NONBLOCK) != 0) {
         int saved_errno = errno;
         int subject = pipe_fds[0];
         mtest_close_quietly(&pipe_fds[0]);
         mtest_close_quietly(&pipe_fds[1]);
-        mtest_set_error(
-            error, MTEST_EXEC_OP_FD_NONBLOCK, saved_errno, 0, subject
-        );
+        mtest_set_error(error, MTEST_EXEC_OP_FD_NONBLOCK, saved_errno, 0, subject);
         return -1;
     }
     return 0;
@@ -1695,27 +1461,20 @@ static int mtest_child_close(int fd) {
     return close(fd);
 }
 
-static int mtest_execve_checked(
-    const char *path,
-    char *const argv[],
-    char *const environment[]
-) {
+static int mtest_execve_checked(const char *path, char *const argv[], char *const environment[]) {
     if (mtest_fail_if_requested(MTEST_EXEC_OP_CHILD_EXECVE)) {
         return -1;
     }
     return execve(path, argv, environment);
 }
 
-static void mtest_child_report(
-    int setup_fd,
-    uint32_t stage,
-    int error_number
-) {
+_Noreturn static void mtest_child_report(int setup_write, enum mtest_exec_setup_stage stage,
+                                         int error_number) {
     struct {
         uint32_t stage;
         int32_t error_number;
     } record;
-    record.stage = stage;
+    record.stage = (uint32_t)stage;
     record.error_number = error_number;
     size_t count = sizeof(record);
     if (mtest_fail_if_requested(MTEST_EXEC_OP_CHILD_SETUP_WRITE)) {
@@ -1728,26 +1487,18 @@ static void mtest_child_report(
     }
     ssize_t written;
     do {
-        written = write(setup_fd, &record, count);
+        written = write(setup_write, &record, count);
     } while (written < 0 && errno == EINTR);
     _exit(127);
 }
 
 static int mtest_is_search_miss(int error_number) {
-    return error_number == ENOENT || error_number == ESTALE ||
-        error_number == ENOTDIR || error_number == ENODEV ||
-        error_number == ETIMEDOUT;
+    return error_number == ENOENT || error_number == ESTALE || error_number == ENOTDIR ||
+           error_number == ENODEV || error_number == ETIMEDOUT;
 }
 
-static void mtest_child_exec(
-    const struct mtest_exec_plan *plan,
-    int stdout_read,
-    int stdout_write,
-    int stderr_read,
-    int stderr_write,
-    int setup_read,
-    int setup_write
-) {
+static void mtest_child_exec(const struct mtest_exec_plan *plan, int stdout_read, int stdout_write,
+                             int stderr_read, int stderr_write, int setup_read, int setup_write) {
     /* SAFETY: this is the complete post-fork child region. Every pointer and
        argv slot was fully constructed in the parent and survives in the child's
        copy-on-write image. Only sigaction, setpgid, chdir, dup2, close, execve,
@@ -1767,17 +1518,13 @@ static void mtest_child_exec(
        fault-injection hook, and reuses the same report-and-exit path as the
        other pre-exec setup steps. */
     if (sigaction(SIGPIPE, &mtest_old_pipe, NULL) != 0) {
-        mtest_child_report(
-            setup_write, MTEST_EXEC_STAGE_SIGPIPE_RESTORE, errno
-        );
+        mtest_child_report(setup_write, MTEST_EXEC_STAGE_SIGPIPE_RESTORE, errno);
     }
-    if (mtest_fail_if_requested(MTEST_EXEC_OP_CHILD_SETPGID) ||
-        setpgid(0, 0) != 0) {
+    if (mtest_fail_if_requested(MTEST_EXEC_OP_CHILD_SETPGID) || setpgid(0, 0) != 0) {
         mtest_child_report(setup_write, MTEST_EXEC_STAGE_SETPGID, errno);
     }
     if (plan->has_cwd &&
-        (mtest_fail_if_requested(MTEST_EXEC_OP_CHILD_CHDIR) ||
-         chdir(plan->cwd) != 0)) {
+        (mtest_fail_if_requested(MTEST_EXEC_OP_CHILD_CHDIR) || chdir(plan->cwd) != 0)) {
         mtest_child_report(setup_write, MTEST_EXEC_STAGE_CHDIR, errno);
     }
     if (mtest_fail_if_requested(MTEST_EXEC_OP_CHILD_DUP2_STDOUT) ||
@@ -1788,16 +1535,9 @@ static void mtest_child_exec(
         dup2(stderr_write, STDERR_FILENO) < 0) {
         mtest_child_report(setup_write, MTEST_EXEC_STAGE_DUP2_STDERR, errno);
     }
-    int child_fds[] = {
-        stdout_read,
-        stdout_write,
-        stderr_read,
-        stderr_write,
-        setup_read
-    };
+    int child_fds[] = {stdout_read, stdout_write, stderr_read, stderr_write, setup_read};
     for (size_t index = 0; index < sizeof(child_fds) / sizeof(child_fds[0]); ++index) {
-        if (child_fds[index] != STDOUT_FILENO &&
-            child_fds[index] != STDERR_FILENO &&
+        if (child_fds[index] != STDOUT_FILENO && child_fds[index] != STDERR_FILENO &&
             mtest_child_close(child_fds[index]) != 0) {
             mtest_child_report(setup_write, MTEST_EXEC_STAGE_CLOSE, errno);
         }
@@ -1808,18 +1548,14 @@ static void mtest_child_exec(
     for (size_t index = 0; index < plan->candidate_count; ++index) {
         uint32_t retries = 0;
         for (;;) {
-            (void)mtest_execve_checked(
-                plan->candidates[index], plan->argv, plan->environment
-            );
+            (void)mtest_execve_checked(plan->candidates[index], plan->argv, plan->environment);
             last_errno = errno;
             if (last_errno != ETXTBSY || retries >= MTEST_ETXTBSY_RETRIES) {
                 break;
             }
             for (;;) {
                 if (mtest_fail_if_requested(MTEST_EXEC_OP_CHILD_POLL)) {
-                    mtest_child_report(
-                        setup_write, MTEST_EXEC_STAGE_EXECVE, errno
-                    );
+                    mtest_child_report(setup_write, MTEST_EXEC_STAGE_EXECVE, errno);
                 }
                 /* SAFETY: POSIX requires poll to be async-signal-safe. With
                    nfds zero, the null descriptor pointer is never accessed;
@@ -1829,20 +1565,14 @@ static void mtest_child_exec(
                     break;
                 }
                 if (errno != EINTR) {
-                    mtest_child_report(
-                        setup_write, MTEST_EXEC_STAGE_EXECVE, errno
-                    );
+                    mtest_child_report(setup_write, MTEST_EXEC_STAGE_EXECVE, errno);
                 }
             }
             retries += 1;
         }
         if (last_errno == ENOEXEC) {
-            (void)mtest_execve_checked(
-                "/bin/sh", plan->shell_argv[index], plan->environment
-            );
-            mtest_child_report(
-                setup_write, MTEST_EXEC_STAGE_EXECVE, errno
-            );
+            (void)mtest_execve_checked("/bin/sh", plan->shell_argv[index], plan->environment);
+            mtest_child_report(setup_write, MTEST_EXEC_STAGE_EXECVE, errno);
         }
         if (last_errno == EACCES) {
             saw_eacces = 1;
@@ -1851,15 +1581,12 @@ static void mtest_child_exec(
         if (mtest_is_search_miss(last_errno)) {
             continue;
         }
-        mtest_child_report(
-            setup_write, MTEST_EXEC_STAGE_EXECVE, last_errno
-        );
+        mtest_child_report(setup_write, MTEST_EXEC_STAGE_EXECVE, last_errno);
     }
-    mtest_child_report(
-        setup_write,
-        MTEST_EXEC_STAGE_EXECVE,
-        saw_eacces ? EACCES : last_errno
-    );
+    int terminal_errno = saw_eacces ? EACCES : last_errno;
+    if (terminal_errno != 0) {
+        mtest_child_report(setup_write, MTEST_EXEC_STAGE_EXECVE, terminal_errno);
+    }
 }
 
 static struct mtest_exec_process *mtest_process_from_handle(uint64_t handle) {
@@ -1911,11 +1638,9 @@ static int mtest_waitpid_exact(pid_t leader, int *raw_status) {
     return -1;
 }
 
-int32_t mtest_exec_process_open(
-    const struct mtest_exec_process_spec *spec,
-    struct mtest_exec_process_ref *process_ref,
-    struct mtest_exec_error *error
-) {
+int32_t mtest_exec_process_open(const struct mtest_exec_process_spec *spec,
+                                struct mtest_exec_process_ref *process_ref,
+                                struct mtest_exec_error *error) {
     int stdout_pipe[2] = {-1, -1};
     int stderr_pipe[2] = {-1, -1};
     int setup_pipe[2] = {-1, -1};
@@ -1929,9 +1654,9 @@ int32_t mtest_exec_process_open(
         return -1;
     }
     int expected = MTEST_RUNTIME_OPEN;
-    if (!atomic_compare_exchange_strong(
-            &mtest_runtime_state, &expected, MTEST_RUNTIME_CHILD_ACTIVE
-        ) && expected != MTEST_RUNTIME_CHILD_ACTIVE) {
+    if (!atomic_compare_exchange_strong(&mtest_runtime_state, &expected,
+                                        MTEST_RUNTIME_CHILD_ACTIVE) &&
+        expected != MTEST_RUNTIME_CHILD_ACTIVE) {
         /* OPEN admits the first child (CAS to CHILD_ACTIVE); an already
            CHILD_ACTIVE runtime admits further children up to capacity, so it is
            not an error here. Any other state -- CLOSED, an OPENING/closing
@@ -1988,22 +1713,14 @@ int32_t mtest_exec_process_open(
         return -1;
     }
     if (leader == 0) {
-        mtest_child_exec(
-            plan,
-            stdout_pipe[0],
-            stdout_pipe[1],
-            stderr_pipe[0],
-            stderr_pipe[1],
-            setup_pipe[0],
-            setup_pipe[1]
-        );
+        mtest_child_exec(plan, stdout_pipe[0], stdout_pipe[1], stderr_pipe[0], stderr_pipe[1],
+                         setup_pipe[0], setup_pipe[1]);
         _exit(127);
     }
 
     process->leader = leader;
     process->process_group = leader;
-    if (mtest_fail_if_requested(MTEST_EXEC_OP_PARENT_SETPGID) ||
-        setpgid(leader, leader) != 0) {
+    if (mtest_fail_if_requested(MTEST_EXEC_OP_PARENT_SETPGID) || setpgid(leader, leader) != 0) {
         int saved_errno = errno;
         if (saved_errno != EACCES && saved_errno != ESRCH) {
             (void)kill(-leader, SIGKILL);
@@ -2012,13 +1729,9 @@ int32_t mtest_exec_process_open(
             int wait_errno = errno;
             mtest_cleanup_pipes(stdout_pipe, stderr_pipe, setup_pipe);
             mtest_free_plan(plan);
-            mtest_set_error(
-                error, MTEST_EXEC_OP_PARENT_SETPGID, saved_errno, 0, leader
-            );
+            mtest_set_error(error, MTEST_EXEC_OP_PARENT_SETPGID, saved_errno, 0, leader);
             if (wait_result != 0 && wait_errno != ECHILD) {
-                mtest_set_cleanup_error(
-                    error, MTEST_EXEC_OP_WAITPID, wait_errno
-                );
+                mtest_set_cleanup_error(error, MTEST_EXEC_OP_WAITPID, wait_errno);
                 /* Fail closed because exact-child reaping is unproven and no
                    handle was published for a later abort. Returning the
                    runtime to OPEN here would hide an owned zombie and permit
@@ -2053,12 +1766,9 @@ int32_t mtest_exec_process_open(
     return 0;
 }
 
-int32_t mtest_exec_process_poll(
-    uint64_t handle,
-    int32_t timeout_ms,
-    struct mtest_exec_poll_result *result,
-    struct mtest_exec_error *error
-) {
+int32_t mtest_exec_process_poll(uint64_t handle, int32_t timeout_ms,
+                                struct mtest_exec_poll_result *result,
+                                struct mtest_exec_error *error) {
     mtest_clear_error(error);
     if (result == NULL || timeout_ms < -1) {
         mtest_set_error(error, MTEST_EXEC_OP_POLL, EINVAL, 0, timeout_ms);
@@ -2107,32 +1817,31 @@ int32_t mtest_exec_process_poll(
         return -1;
     }
     for (nfds_t index = 0; index < count; ++index) {
-        if ((fds[index].revents & POLLNVAL) != 0) {
-            mtest_set_error(
-                error, MTEST_EXEC_OP_POLL, EBADF, fds[index].revents, fds[index].fd
-            );
+        if (fds[index].revents < 0) {
+            mtest_set_error(error, MTEST_EXEC_OP_POLL, EIO, 0, fds[index].fd);
             return -1;
         }
-        if ((fds[index].revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
+        const uint16_t revents_mask = (uint16_t)fds[index].revents;
+        if ((revents_mask & (uint16_t)POLLNVAL) != 0u) {
+            mtest_set_error(error, MTEST_EXEC_OP_POLL, EBADF, revents_mask, fds[index].fd);
+            return -1;
+        }
+        if ((revents_mask & (uint16_t)(POLLIN | POLLHUP | POLLERR)) != 0u) {
             result->readiness |= readiness[index];
         }
     }
     return 0;
 }
 
-int32_t mtest_exec_poll_set(
-    const uint64_t *handles,
-    uint64_t count,
-    int32_t timeout_ms,
-    struct mtest_exec_poll_result *results,
-    struct mtest_exec_error *error
-) {
+int32_t mtest_exec_poll_set(const uint64_t *handles, uint64_t count, int32_t timeout_ms,
+                            struct mtest_exec_poll_result *results,
+                            struct mtest_exec_error *error) {
     mtest_clear_error(error);
     /* PHASE ONE -- scalar/structural, WITHOUT dereferencing either array. A
        violation returns with `results` UNTOUCHED: zeroing an over-capacity or
        NULL buffer would be the very overrun this phase exists to prevent. */
-    if (count == 0 || count > MTEST_EXEC_SLOT_CAPACITY || handles == NULL ||
-        results == NULL || timeout_ms < -1) {
+    if (count == 0 || count > MTEST_EXEC_SLOT_CAPACITY || handles == NULL || results == NULL ||
+        timeout_ms < -1) {
         mtest_set_error(error, MTEST_EXEC_OP_POLL_SET, EINVAL, count, timeout_ms);
         return -1;
     }
@@ -2145,9 +1854,7 @@ int32_t mtest_exec_poll_set(
     for (uint64_t index = 0; index < count; ++index) {
         for (uint64_t prior = 0; prior < index; ++prior) {
             if (handles[prior] == handles[index]) {
-                mtest_set_error(
-                    error, MTEST_EXEC_OP_POLL_SET, EINVAL, index, 0
-                );
+                mtest_set_error(error, MTEST_EXEC_OP_POLL_SET, EINVAL, index, 0);
                 return -1;
             }
         }
@@ -2157,22 +1864,16 @@ int32_t mtest_exec_poll_set(
     uint64_t owners[MTEST_EXEC_SLOT_CAPACITY * 3];
     nfds_t nfds = 0;
     for (uint64_t index = 0; index < count; ++index) {
-        struct mtest_exec_process *process =
-            mtest_process_from_handle(handles[index]);
+        struct mtest_exec_process *process = mtest_process_from_handle(handles[index]);
         if (process == NULL) {
             /* Stale or invalid handle: report its index. The zeroed span is
                guaranteed on this path. */
             mtest_set_error(error, MTEST_EXEC_OP_POLL_SET, errno, index, 0);
             return -1;
         }
-        const int channel_fds[3] = {
-            process->stdout_fd, process->stderr_fd, process->setup_fd
-        };
-        const uint32_t channel_bits[3] = {
-            MTEST_EXEC_READY_STDOUT,
-            MTEST_EXEC_READY_STDERR,
-            MTEST_EXEC_READY_SETUP
-        };
+        const int channel_fds[3] = {process->stdout_fd, process->stderr_fd, process->setup_fd};
+        const uint32_t channel_bits[3] = {MTEST_EXEC_READY_STDOUT, MTEST_EXEC_READY_STDERR,
+                                          MTEST_EXEC_READY_SETUP};
         for (size_t channel = 0; channel < 3; ++channel) {
             if (channel_fds[channel] < 0) {
                 continue;
@@ -2201,27 +1902,23 @@ int32_t mtest_exec_poll_set(
         return -1;
     }
     for (nfds_t index = 0; index < nfds; ++index) {
-        if ((fds[index].revents & POLLNVAL) != 0) {
-            mtest_set_error(
-                error,
-                MTEST_EXEC_OP_POLL_SET,
-                EBADF,
-                fds[index].revents,
-                fds[index].fd
-            );
+        if (fds[index].revents < 0) {
+            mtest_set_error(error, MTEST_EXEC_OP_POLL_SET, EIO, 0, fds[index].fd);
             return -1;
         }
-        if ((fds[index].revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
+        const uint16_t revents_mask = (uint16_t)fds[index].revents;
+        if ((revents_mask & (uint16_t)POLLNVAL) != 0u) {
+            mtest_set_error(error, MTEST_EXEC_OP_POLL_SET, EBADF, revents_mask, fds[index].fd);
+            return -1;
+        }
+        if ((revents_mask & (uint16_t)(POLLIN | POLLHUP | POLLERR)) != 0u) {
             results[owners[index]].readiness |= bits[index];
         }
     }
     return 0;
 }
 
-static int *mtest_channel_fd(
-    struct mtest_exec_process *process,
-    uint32_t channel
-) {
+static int *mtest_channel_fd(struct mtest_exec_process *process, uint32_t channel) {
     if (channel == MTEST_EXEC_CHANNEL_STDOUT) {
         return &process->stdout_fd;
     }
@@ -2245,17 +1942,12 @@ static uint32_t mtest_read_operation(uint32_t channel) {
     return MTEST_EXEC_OP_READ_SETUP;
 }
 
-int32_t mtest_exec_process_read(
-    uint64_t handle,
-    uint32_t channel,
-    uint8_t *buffer,
-    uint64_t capacity,
-    struct mtest_exec_read_result *result,
-    struct mtest_exec_error *error
-) {
+int32_t mtest_exec_process_read(uint64_t handle, uint32_t channel, uint8_t *buffer,
+                                uint64_t capacity, struct mtest_exec_read_result *result,
+                                struct mtest_exec_error *error) {
     mtest_clear_error(error);
-    if (result == NULL || buffer == NULL || capacity == 0 ||
-        capacity > (uint64_t)SSIZE_MAX || channel == MTEST_EXEC_CHANNEL_SETUP) {
+    if (result == NULL || buffer == NULL || capacity == 0 || capacity > (uint64_t)SSIZE_MAX ||
+        channel == MTEST_EXEC_CHANNEL_SETUP) {
         mtest_set_error(error, mtest_read_operation(channel), EINVAL, capacity, channel);
         return -1;
     }
@@ -2291,16 +1983,13 @@ int32_t mtest_exec_process_read(
     if (count == 0) {
         int closing = *fd;
         if (mtest_close_owned(fd) != 0) {
-            mtest_set_error(
-                error, MTEST_EXEC_OP_CLOSE_CHANNEL, errno, 0, closing
-            );
+            mtest_set_error(error, MTEST_EXEC_OP_CLOSE_CHANNEL, errno, 0, closing);
             return -1;
         }
         result->state = MTEST_EXEC_READ_EOF;
         return 0;
     }
-    if (errno == EAGAIN || errno == EWOULDBLOCK ||
-        (errno == EINTR && mtest_interrupt_seen())) {
+    if (errno == EAGAIN || errno == EWOULDBLOCK || (errno == EINTR && mtest_interrupt_seen())) {
         result->state = MTEST_EXEC_READ_WOULD_BLOCK;
         return 0;
     }
@@ -2314,8 +2003,8 @@ static int mtest_validate_setup_record(struct mtest_exec_setup_state *state) {
     int32_t error_number;
     memcpy(&stage, state->raw, sizeof(stage));
     memcpy(&error_number, state->raw + sizeof(stage), sizeof(error_number));
-    if (stage < MTEST_EXEC_STAGE_SETPGID ||
-        stage > MTEST_EXEC_STAGE_SIGPIPE_RESTORE || error_number <= 0) {
+    if (stage < MTEST_EXEC_STAGE_SETPGID || stage > MTEST_EXEC_STAGE_SIGPIPE_RESTORE ||
+        error_number <= 0) {
         state->outcome = MTEST_EXEC_SETUP_CORRUPT;
         return 0;
     }
@@ -2325,11 +2014,8 @@ static int mtest_validate_setup_record(struct mtest_exec_setup_state *state) {
     return 0;
 }
 
-int32_t mtest_exec_process_setup_drain(
-    uint64_t handle,
-    struct mtest_exec_setup_state *state,
-    struct mtest_exec_error *error
-) {
+int32_t mtest_exec_process_setup_drain(uint64_t handle, struct mtest_exec_setup_state *state,
+                                       struct mtest_exec_error *error) {
     mtest_clear_error(error);
     if (state == NULL || state->length > sizeof(state->raw) ||
         state->outcome > MTEST_EXEC_SETUP_CORRUPT) {
@@ -2345,19 +2031,16 @@ int32_t mtest_exec_process_setup_drain(
         return 0;
     }
     if (process->setup_fd < 0) {
-        state->outcome = state->length == 0
-            ? MTEST_EXEC_SETUP_EXEC_SUCCEEDED
-            : MTEST_EXEC_SETUP_CORRUPT;
+        state->outcome =
+            state->length == 0 ? MTEST_EXEC_SETUP_EXEC_SUCCEEDED : MTEST_EXEC_SETUP_CORRUPT;
         return 0;
     }
     for (;;) {
         uint8_t extra;
-        uint8_t *destination = state->length < sizeof(state->raw)
-            ? state->raw + state->length
-            : &extra;
-        size_t capacity = state->length < sizeof(state->raw)
-            ? sizeof(state->raw) - state->length
-            : 1;
+        uint8_t *destination =
+            state->length < sizeof(state->raw) ? state->raw + state->length : &extra;
+        size_t capacity =
+            state->length < sizeof(state->raw) ? sizeof(state->raw) - state->length : 1;
         ssize_t count;
         do {
             if (mtest_fail_if_requested(MTEST_EXEC_OP_READ_SETUP)) {
@@ -2375,24 +2058,17 @@ int32_t mtest_exec_process_setup_drain(
             continue;
         }
         if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK ||
-                         (errno == EINTR && mtest_interrupt_seen()))) {
+                          (errno == EINTR && mtest_interrupt_seen()))) {
             return 0;
         }
         if (count < 0) {
-            mtest_set_error(
-                error,
-                MTEST_EXEC_OP_READ_SETUP,
-                errno,
-                state->length,
-                process->setup_fd
-            );
+            mtest_set_error(error, MTEST_EXEC_OP_READ_SETUP, errno, state->length,
+                            process->setup_fd);
             return -1;
         }
         int closed_fd = process->setup_fd;
         if (mtest_close_owned(&process->setup_fd) != 0) {
-            mtest_set_error(
-                error, MTEST_EXEC_OP_CLOSE_CHANNEL, errno, 0, closed_fd
-            );
+            mtest_set_error(error, MTEST_EXEC_OP_CLOSE_CHANNEL, errno, 0, closed_fd);
             return -1;
         }
         if (state->length == 0) {
@@ -2407,11 +2083,8 @@ int32_t mtest_exec_process_setup_drain(
     }
 }
 
-int32_t mtest_exec_process_channel_close(
-    uint64_t handle,
-    uint32_t channel,
-    struct mtest_exec_error *error
-) {
+int32_t mtest_exec_process_channel_close(uint64_t handle, uint32_t channel,
+                                         struct mtest_exec_error *error) {
     mtest_clear_error(error);
     struct mtest_exec_process *process = mtest_process_from_handle(handle);
     if (process == NULL) {
@@ -2428,8 +2101,7 @@ int32_t mtest_exec_process_channel_close(
     }
     int closing = *fd;
     int close_result = mtest_close_owned(fd);
-    if (close_result != 0 ||
-        mtest_fail_if_requested(MTEST_EXEC_OP_CLOSE_CHANNEL)) {
+    if (close_result != 0 || mtest_fail_if_requested(MTEST_EXEC_OP_CLOSE_CHANNEL)) {
         mtest_set_error(error, MTEST_EXEC_OP_CLOSE_CHANNEL, errno, 0, closing);
         return -1;
     }
@@ -2446,19 +2118,14 @@ static uint32_t mtest_group_operation(uint32_t action) {
     return MTEST_EXEC_OP_GROUP_KILL;
 }
 
-static int mtest_signal_process_group(
-    pid_t process_group,
-    int signal_number,
-    uint32_t operation
-) {
+static int mtest_signal_process_group(pid_t process_group, int signal_number, uint32_t operation) {
 #if MTEST_EXEC_TESTING
     /* This seam emulates a real kill(2) EPERM sequence and is deliberately
        separate from named fault injection. The latter must remain an immediate
        fail-closed error and never enter Darwin's transient retry path. */
     if (operation == mtest_group_signal_eperm_operation) {
         mtest_group_signal_eperm_seen += 1;
-        if (mtest_group_signal_eperm_seen <=
-            mtest_group_signal_eperm_forced_failures) {
+        if (mtest_group_signal_eperm_seen <= mtest_group_signal_eperm_forced_failures) {
             errno = EPERM;
             return -1;
         }
@@ -2480,8 +2147,8 @@ static int mtest_darwin_group_is_zombie_only(pid_t process_group) {
     if (members == NULL) {
         return 0;
     }
-    int complete = sysctl(query, 4, members, &length, NULL, 0) == 0 &&
-        length > 0 && length % sizeof(*members) == 0;
+    int complete = sysctl(query, 4, members, &length, NULL, 0) == 0 && length > 0 &&
+                   length % sizeof(*members) == 0;
     int zombie_only = complete;
     if (complete) {
         size_t count = length / sizeof(*members);
@@ -2517,15 +2184,12 @@ static int mtest_group_is_proven_zombie_only(pid_t process_group) {
 }
 #endif
 
-static int mtest_process_group_checked(
-    struct mtest_exec_process *process,
-    uint32_t action,
-    struct mtest_exec_group_result *result,
-    struct mtest_exec_error *error
-) {
+static int mtest_process_group_checked(struct mtest_exec_process *process, uint32_t action,
+                                       struct mtest_exec_group_result *result,
+                                       struct mtest_exec_error *error) {
     int signal_number = action == MTEST_EXEC_GROUP_PROBE
-        ? 0
-        : (action == MTEST_EXEC_GROUP_TERM ? SIGTERM : SIGKILL);
+                            ? 0
+                            : (action == MTEST_EXEC_GROUP_TERM ? SIGTERM : SIGKILL);
     uint32_t operation = mtest_group_operation(action);
 #if defined(__APPLE__) || MTEST_EXEC_TESTING
     uint32_t eperm_retries = 0;
@@ -2536,12 +2200,10 @@ static int mtest_process_group_checked(
        production builds have no fault table or transient test seam. */
     for (;;) {
         int fault_injected = mtest_fail_if_requested(operation) ||
-            mtest_fail_if_requested_handle(operation, process->handle);
-        int group_status = fault_injected
-            ? -1
-            : mtest_signal_process_group(
-                process->process_group, signal_number, operation
-            );
+                             mtest_fail_if_requested_handle(operation, process->handle);
+        int group_status = fault_injected ? -1
+                                          : mtest_signal_process_group(process->process_group,
+                                                                       signal_number, operation);
         if (group_status == 0) {
             break;
         }
@@ -2566,8 +2228,7 @@ static int mtest_process_group_checked(
            so cleanup still fails closed. The MTEST_EXEC_TESTING branch exercises
            this Darwin-only algorithm on Linux without changing production Linux
            behavior. */
-        if (!fault_injected && group_errno == EPERM &&
-            action != MTEST_EXEC_GROUP_PROBE &&
+        if (!fault_injected && group_errno == EPERM && action != MTEST_EXEC_GROUP_PROBE &&
             mtest_group_eperm_can_retry(operation)) {
             if (mtest_group_is_proven_zombie_only(process->process_group)) {
                 process->group_swept = 1;
@@ -2575,19 +2236,14 @@ static int mtest_process_group_checked(
                 return 0;
             }
             if (eperm_retries < MTEST_DARWIN_GROUP_EPERM_RETRIES) {
-                const struct timespec delay = {
-                    0, MTEST_DARWIN_GROUP_EPERM_RETRY_NS
-                };
+                const struct timespec delay = {0, MTEST_DARWIN_GROUP_EPERM_RETRY_NS};
                 eperm_retries += 1;
                 (void)nanosleep(&delay, NULL);
                 continue;
             }
         }
 #endif
-        mtest_set_error(
-            error, operation, group_errno, 0,
-            -((int64_t)process->process_group)
-        );
+        mtest_set_error(error, operation, group_errno, 0, -((int64_t)process->process_group));
         return -1;
     }
     if (action == MTEST_EXEC_GROUP_KILL) {
@@ -2601,12 +2257,9 @@ static int mtest_process_group_checked(
     return 0;
 }
 
-int32_t mtest_exec_process_group(
-    uint64_t handle,
-    uint32_t action,
-    struct mtest_exec_group_result *result,
-    struct mtest_exec_error *error
-) {
+int32_t mtest_exec_process_group(uint64_t handle, uint32_t action,
+                                 struct mtest_exec_group_result *result,
+                                 struct mtest_exec_error *error) {
     mtest_clear_error(error);
     if (result == NULL || action > MTEST_EXEC_GROUP_KILL) {
         mtest_set_error(error, MTEST_EXEC_OP_GROUP_PROBE, EINVAL, 0, action);
@@ -2626,11 +2279,8 @@ int32_t mtest_exec_process_group(
     return mtest_process_group_checked(process, action, result, error);
 }
 
-int32_t mtest_exec_process_observe(
-    uint64_t handle,
-    struct mtest_exec_observe_result *result,
-    struct mtest_exec_error *error
-) {
+int32_t mtest_exec_process_observe(uint64_t handle, struct mtest_exec_observe_result *result,
+                                   struct mtest_exec_error *error) {
     mtest_clear_error(error);
     if (result == NULL) {
         mtest_set_error(error, MTEST_EXEC_OP_WAITID, EINVAL, 0, 0);
@@ -2653,18 +2303,12 @@ int32_t mtest_exec_process_observe(
         if (mtest_fail_if_requested(MTEST_EXEC_OP_WAITID)) {
             status = -1;
         } else {
-            status = waitid(
-                P_PID,
-                (id_t)process->leader,
-                &information,
-                WEXITED | WNOHANG | WNOWAIT
-            );
+            status =
+                waitid(P_PID, (id_t)process->leader, &information, WEXITED | WNOHANG | WNOWAIT);
         }
     } while (status != 0 && errno == EINTR);
     if (status != 0) {
-        mtest_set_error(
-            error, MTEST_EXEC_OP_WAITID, errno, 0, process->leader
-        );
+        mtest_set_error(error, MTEST_EXEC_OP_WAITID, errno, 0, process->leader);
         return -1;
     }
     if (information.si_pid == process->leader) {
@@ -2676,11 +2320,8 @@ int32_t mtest_exec_process_observe(
     return 0;
 }
 
-int32_t mtest_exec_process_reap(
-    uint64_t handle,
-    struct mtest_exec_reap_result *result,
-    struct mtest_exec_error *error
-) {
+int32_t mtest_exec_process_reap(uint64_t handle, struct mtest_exec_reap_result *result,
+                                struct mtest_exec_error *error) {
     mtest_clear_error(error);
     if (result == NULL) {
         mtest_set_error(error, MTEST_EXEC_OP_WAITPID, EINVAL, 0, 0);
@@ -2702,9 +2343,7 @@ int32_t mtest_exec_process_reap(
         }
     } while (reaped < 0 && errno == EINTR);
     if (reaped != process->leader) {
-        mtest_set_error(
-            error, MTEST_EXEC_OP_WAITPID, errno, 0, process->leader
-        );
+        mtest_set_error(error, MTEST_EXEC_OP_WAITPID, errno, 0, process->leader);
         return -1;
     }
     process->reaped = 1;
@@ -2721,11 +2360,8 @@ int32_t mtest_exec_process_reap(
     return 0;
 }
 
-static int mtest_process_all_channels_closed(
-    const struct mtest_exec_process *process
-) {
-    return process->stdout_fd < 0 && process->stderr_fd < 0 &&
-        process->setup_fd < 0;
+static int mtest_process_all_channels_closed(const struct mtest_exec_process *process) {
+    return process->stdout_fd < 0 && process->stderr_fd < 0 && process->setup_fd < 0;
 }
 
 static void mtest_free_process(struct mtest_exec_process *process) {
@@ -2738,18 +2374,14 @@ static void mtest_free_process(struct mtest_exec_process *process) {
     mtest_runtime_settle();
 }
 
-int32_t mtest_exec_process_close(
-    uint64_t handle,
-    struct mtest_exec_error *error
-) {
+int32_t mtest_exec_process_close(uint64_t handle, struct mtest_exec_error *error) {
     mtest_clear_error(error);
     struct mtest_exec_process *process = mtest_process_from_handle(handle);
     if (process == NULL) {
         mtest_set_error(error, MTEST_EXEC_OP_NONE, errno, 0, 0);
         return -1;
     }
-    if (!process->reaped || !process->group_swept ||
-        !mtest_process_all_channels_closed(process)) {
+    if (!process->reaped || !process->group_swept || !mtest_process_all_channels_closed(process)) {
         mtest_set_error(error, MTEST_EXEC_OP_NONE, EBUSY, 0, process->leader);
         return -1;
     }
@@ -2757,11 +2389,8 @@ int32_t mtest_exec_process_close(
     return 0;
 }
 
-int32_t mtest_exec_process_abort(
-    uint64_t handle,
-    uint32_t grace_ms,
-    struct mtest_exec_error *error
-) {
+int32_t mtest_exec_process_abort(uint64_t handle, uint32_t grace_ms,
+                                 struct mtest_exec_error *error) {
     struct mtest_exec_error local_error;
     if (error == NULL) {
         error = &local_error;
@@ -2778,9 +2407,7 @@ int32_t mtest_exec_process_abort(
 
     if (process->reaped) {
         if (!process->group_swept) {
-            mtest_set_error(
-                error, MTEST_EXEC_OP_NONE, EBUSY, 0, process->leader
-            );
+            mtest_set_error(error, MTEST_EXEC_OP_NONE, EBUSY, 0, process->leader);
             return -1;
         }
         mtest_free_process(process);
@@ -2791,12 +2418,9 @@ int32_t mtest_exec_process_abort(
     struct mtest_exec_error group_error;
     memset(&group_result, 0, sizeof(group_result));
     mtest_clear_error(&group_error);
-    if (mtest_process_group_checked(
-            process, MTEST_EXEC_GROUP_TERM, &group_result, &group_error
-        ) != 0) {
-        mtest_set_cleanup_error(
-            error, group_error.operation, group_error.error_number
-        );
+    if (mtest_process_group_checked(process, MTEST_EXEC_GROUP_TERM, &group_result, &group_error) !=
+        0) {
+        mtest_set_cleanup_error(error, group_error.operation, group_error.error_number);
     }
     int64_t start_ms = 0;
     int64_t now_ms = 0;
@@ -2805,32 +2429,21 @@ int32_t mtest_exec_process_abort(
     mtest_clear_error(&clock_error);
     if (mtest_exec_monotonic_ms(&start_ms, &clock_error) != 0) {
         start_ms = 0;
-        mtest_set_error(
-            error,
-            clock_error.operation,
-            clock_error.error_number,
-            clock_error.detail,
-            clock_error.subject
-        );
+        mtest_set_error(error, clock_error.operation, clock_error.error_number, clock_error.detail,
+                        clock_error.subject);
     }
     while (!process->observed && start_ms != 0) {
         struct mtest_exec_observe_result observation;
         struct mtest_exec_error observe_error;
-        if (mtest_exec_process_observe(
-                handle, &observation, &observe_error
-            ) != 0) {
-            mtest_set_cleanup_error(
-                error, observe_error.operation, observe_error.error_number
-            );
+        if (mtest_exec_process_observe(handle, &observation, &observe_error) != 0) {
+            mtest_set_cleanup_error(error, observe_error.operation, observe_error.error_number);
             break;
         }
         if (observation.state == MTEST_EXEC_LEADER_WAITABLE) {
             break;
         }
         if (mtest_exec_monotonic_ms(&now_ms, &observe_error) != 0) {
-            mtest_set_cleanup_error(
-                error, observe_error.operation, observe_error.error_number
-            );
+            mtest_set_cleanup_error(error, observe_error.operation, observe_error.error_number);
             break;
         }
         if (now_ms - start_ms >= (int64_t)grace_ms) {
@@ -2841,12 +2454,9 @@ int32_t mtest_exec_process_abort(
     if (!process->group_swept) {
         memset(&group_result, 0, sizeof(group_result));
         mtest_clear_error(&group_error);
-        if (mtest_process_group_checked(
-                process, MTEST_EXEC_GROUP_KILL, &group_result, &group_error
-            ) != 0) {
-            mtest_set_cleanup_error(
-                error, group_error.operation, group_error.error_number
-            );
+        if (mtest_process_group_checked(process, MTEST_EXEC_GROUP_KILL, &group_result,
+                                        &group_error) != 0) {
+            mtest_set_cleanup_error(error, group_error.operation, group_error.error_number);
             /* Preserve the unreaped leader, whether live or waitable, as a
                PID/PGID identity pin. A later abort can retry the group sweep
                safely; reaping here would make the numeric group identity
@@ -2865,12 +2475,7 @@ int32_t mtest_exec_process_abort(
         memset(&information, 0, sizeof(information));
         int status;
         do {
-            status = waitid(
-                P_PID,
-                (id_t)process->leader,
-                &information,
-                WEXITED | WNOWAIT
-            );
+            status = waitid(P_PID, (id_t)process->leader, &information, WEXITED | WNOWAIT);
         } while (status != 0 && errno == EINTR);
         if (status == 0) {
             process->observed = 1;
@@ -2896,8 +2501,8 @@ int32_t mtest_exec_process_abort(
         }
         return -1;
     }
-    int had_error = error->operation != MTEST_EXEC_OP_NONE ||
-        error->cleanup_operation != MTEST_EXEC_OP_NONE;
+    int had_error =
+        error->operation != MTEST_EXEC_OP_NONE || error->cleanup_operation != MTEST_EXEC_OP_NONE;
     /* Reap + group sweep + the eager channel closes above prove that native
        ownership is complete even when an earlier diagnostic must be returned. */
     mtest_free_process(process);
@@ -2908,66 +2513,67 @@ int32_t mtest_exec_process_abort(
 }
 
 #if MTEST_EXEC_TESTING
+// NOLINTBEGIN(clang-analyzer-unix.Malloc,clang-analyzer-core.UndefinedBinaryOperatorResult)
 static volatile uint8_t mtest_sanitizer_sink;
 
-__attribute__((noinline))
-void mtest_exec_test_asan_oob(void) {
-    volatile uint8_t *bytes = (volatile uint8_t *)malloc(8);
-    if (bytes == NULL) {
+__attribute__((noinline)) void mtest_exec_test_asan_oob(void) {
+    uint8_t *owned = malloc(8);
+    if (owned == NULL) {
         abort();
     }
+    volatile uint8_t *bytes = owned;
     bytes[16] = 0x5a;
-    free((void *)bytes);
+    free(owned);
 }
 
-__attribute__((noinline))
-void mtest_exec_test_asan_uaf(void) {
-    volatile uint8_t *bytes = (volatile uint8_t *)malloc(8);
-    if (bytes == NULL) {
+__attribute__((noinline)) void mtest_exec_test_asan_uaf(void) {
+    uint8_t *owned = malloc(8);
+    if (owned == NULL) {
         abort();
     }
-    free((void *)bytes);
+    volatile uint8_t *bytes = owned;
+    free(owned);
     bytes[0] = 0x5a;
 }
 
-__attribute__((noinline))
-void mtest_exec_test_asan_leak(void) {
-    volatile uint8_t *bytes = (volatile uint8_t *)malloc(64);
-    if (bytes == NULL) {
+__attribute__((noinline)) void mtest_exec_test_asan_leak(void) {
+    uint8_t *owned = malloc(64);
+    if (owned == NULL) {
         abort();
     }
+    volatile uint8_t *bytes = owned;
     bytes[0] = 0x5a;
     mtest_sanitizer_sink = bytes[0];
 }
 
-__attribute__((noinline))
-void mtest_exec_test_memcheck_undefined(void) {
-    volatile uint8_t *bytes = (volatile uint8_t *)malloc(1);
-    if (bytes == NULL) {
+__attribute__((noinline)) void mtest_exec_test_memcheck_undefined(void) {
+    uint8_t *owned = malloc(1);
+    if (owned == NULL) {
         abort();
     }
+    volatile uint8_t *bytes = owned;
     if (bytes[0] != 0) {
         mtest_sanitizer_sink = 1;
     }
-    free((void *)bytes);
+    free(owned);
 }
 
-__attribute__((noinline))
-void mtest_exec_test_memcheck_invalid(void) {
-    volatile uint8_t *bytes = (volatile uint8_t *)malloc(8);
-    if (bytes == NULL) {
+__attribute__((noinline)) void mtest_exec_test_memcheck_invalid(void) {
+    uint8_t *owned = malloc(8);
+    if (owned == NULL) {
         abort();
     }
-    free((void *)bytes);
+    volatile uint8_t *bytes = owned;
+    free(owned);
     mtest_sanitizer_sink = bytes[0];
 }
 
-__attribute__((noinline))
-void mtest_exec_test_memcheck_fd_leak(void) {
+__attribute__((noinline)) void mtest_exec_test_memcheck_fd_leak(void) {
     int fd = open("/dev/null", O_RDONLY);
     if (fd < 0) {
         abort();
     }
     mtest_sanitizer_sink = (uint8_t)fd;
 }
+// NOLINTEND(clang-analyzer-unix.Malloc,clang-analyzer-core.UndefinedBinaryOperatorResult)
 #endif

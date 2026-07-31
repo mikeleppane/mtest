@@ -245,6 +245,13 @@ append here as later phases teach more.
   binary is illegal on this host.
 - Capture a gate's real exit as its own statement (`cmd; echo "x=$?"`); a
   trailing pipe silently reports 0.
+- An E2E oracle that reads compiler-wrapper side effects (invocation counts,
+  build windows, or wrapper-created logs) must pass `--no-cache`. A warm
+  artifact store returns before the wrapper is invoked, so the same oracle is
+  green on a cold checkout and either empty or one invocation short on the
+  second run. This rule applies only when compiler dispatch itself is the
+  evidence; the dedicated cold-then-warm cache scenario deliberately keeps the
+  cache enabled.
 - One test module is one process under one run deadline (300s by default), so a
   module that keeps growing eventually reports TIMEOUT — the one verdict that
   says nothing about the code — and it lands first on the slowest machine in

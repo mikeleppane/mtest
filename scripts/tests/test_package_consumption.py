@@ -45,6 +45,7 @@ from scripts.build import package_consumption
 from scripts.build.package_consumption import (
     BuiltArtifact,
     PackageCheckError,
+    audit_installed_dependency_closure,
     check_failing_fixture_consumption,
     package_platform,
     scratch_manifest_text,
@@ -144,6 +145,482 @@ class PackagePlatformDescriptorTests(unittest.TestCase):
                     package_platform(sys_platform, machine)
                 self.assertIn(repr(sys_platform), str(caught.exception))
                 self.assertIn(repr(machine), str(caught.exception))
+
+
+class DarwinDependencyClosureTests(unittest.TestCase):
+    """The installed Mach-O closure stays inside the prefix and targets 14.0."""
+
+    @override
+    def setUp(self) -> None:
+        self._temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        self.prefix = Path(self._temp.name).resolve() / "prefix"
+        self.mtest = self.prefix / "bin" / "mtest"
+        self.first = self.prefix / "lib" / "first"
+        self.second = self.prefix / "lib" / "second"
+        self.lib_a = self.first / "libA.dylib"
+        self.shadow_a = self.second / "libA.dylib"
+        self.lib_b = self.first / "libB.dylib"
+        for path in (self.mtest, self.lib_a, self.shadow_a, self.lib_b):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"Mach-O fixture\n")
+
+    @staticmethod
+    def _loads(
+        version: str = "14.0",
+        *rpaths: str,
+        platform: str = "1",
+    ) -> str:
+        return "".join(
+            "          cmd LC_RPATH\n"
+            "      cmdsize 48\n"
+            f"         path {rpath} (offset 12)\n"
+            for rpath in rpaths
+        ) + (
+            "          cmd LC_BUILD_VERSION\n"
+            f"     platform {platform}\n"
+            f"        minos {version}\n"
+            "          sdk 26.0\n"
+        )
+
+    @staticmethod
+    def _dependency_loads(*dependencies: str) -> str:
+        return "".join(
+            "          cmd LC_LOAD_DYLIB\n"
+            "      cmdsize 56\n"
+            f"         name {dependency} (offset 24)\n"
+            "   time stamp 2 Thu Jan  1 00:00:02 1970\n"
+            "      current version 1.0.0\n"
+            "compatibility version 1.0.0\n"
+            for dependency in dependencies
+        )
+
+    def _run_with(
+        self,
+        dependencies: dict[Path, str],
+        loads: dict[Path, str],
+        *,
+        architectures: dict[Path, tuple[str, ...]] | None = None,
+    ) -> mock.Mock:
+        runner = mock.Mock()
+
+        def fake_run(
+            argv: list[str], **_kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            """Return one exact Mach-O tool fixture for the requested file."""
+            runner(argv)
+            path = Path(argv[-1]).resolve()
+            if argv[0] == "lipo":
+                output = " ".join((architectures or {}).get(path, ("arm64",))) + "\n"
+            elif "-L" in argv:
+                raise AssertionError("dependency closure must not invoke `otool -L`")
+            elif "-l" in argv:
+                output = dependencies[path] + loads[path]
+            else:
+                output = (
+                    "Mach header\n"
+                    "      magic  cputype cpusubtype  caps    filetype ncmds "
+                    "sizeofcmds      flags\n"
+                    "MH_MAGIC_64    ARM64        ALL  0x00       DYLIB    20 "
+                    "2048   NOUNDEFS DYLDLINK TWOLEVEL\n"
+                )
+            return subprocess.CompletedProcess(argv, 0, output, "")
+
+        with mock.patch.object(subprocess, "run", side_effect=fake_run):
+            audit_installed_dependency_closure(
+                self.mtest,
+                package_platform("darwin", "arm64"),
+            )
+        return runner
+
+    def test_dependency_loads_exclude_the_dylib_identity(self) -> None:
+        loads = (
+            "Load command 0\n"
+            "          cmd LC_ID_DYLIB\n"
+            "      cmdsize 56\n"
+            "         name @rpath/libSelf.dylib (offset 24)\n"
+            "   time stamp 2 Thu Jan  1 00:00:02 1970\n"
+            "      current version 1.0.0\n"
+            "compatibility version 1.0.0\n"
+            "Load command 1\n"
+            "          cmd LC_LOAD_DYLIB\n"
+            "      cmdsize 56\n"
+            "         name @rpath/libActual.dylib (offset 24)\n"
+            "   time stamp 2 Thu Jan  1 00:00:02 1970\n"
+            "      current version 1.0.0\n"
+            "compatibility version 1.0.0\n"
+        )
+
+        self.assertEqual(
+            package_consumption._macho_dependencies(loads),
+            ("@rpath/libActual.dylib",),
+        )
+
+    def test_dependency_loads_preserve_every_supported_command_family(
+        self,
+    ) -> None:
+        commands = (
+            "LC_LOAD_DYLIB",
+            "LC_LOAD_WEAK_DYLIB",
+            "LC_REEXPORT_DYLIB",
+            "LC_LOAD_UPWARD_DYLIB",
+            "LC_LAZY_LOAD_DYLIB",
+        )
+        loads = "".join(
+            "Load command 1\n"
+            f"          cmd {command}\n"
+            "      cmdsize 56\n"
+            f"         name @rpath/{index}.dylib (offset 24)\n"
+            for index, command in enumerate(commands)
+        )
+
+        self.assertEqual(
+            package_consumption._macho_dependencies(loads),
+            tuple(f"@rpath/{index}.dylib" for index in range(len(commands))),
+        )
+
+    def test_dependency_loads_reject_malformed_command_blocks(self) -> None:
+        cases = (
+            (
+                (
+                    "          cmd LC_LOAD_DYLIB\n"
+                    "      cmdsize 56\n"
+                    "          cmd LC_BUILD_VERSION\n"
+                ),
+                "LC_LOAD_DYLIB is missing its name",
+            ),
+            (
+                (
+                    "          cmd LC_LOAD_WEAK_DYLIB\n"
+                    "      cmdsize 56\n"
+                    "         name ?(bad offset 24)\n"
+                ),
+                "LC_LOAD_WEAK_DYLIB is missing its name",
+            ),
+            (
+                (
+                    "          cmd LC_LOAD_UPWARD_DYLIB\n"
+                    "      cmdsize 56\n"
+                    "         name     (offset 24)\n"
+                ),
+                "LC_LOAD_UPWARD_DYLIB is missing its name",
+            ),
+            (
+                (
+                    "          cmd LC_REEXPORT_DYLIB\n"
+                    "      cmdsize 56\n"
+                    "         name @rpath/one.dylib (offset 24)\n"
+                    "         name @rpath/two.dylib (offset 24)\n"
+                ),
+                "LC_REEXPORT_DYLIB repeats its name",
+            ),
+            (
+                (
+                    "          cmd LC_PREBOUND_DYLIB\n"
+                    "      cmdsize 56\n"
+                    "         name @rpath/old.dylib (offset 24)\n"
+                ),
+                "unsupported Mach-O dylib command LC_PREBOUND_DYLIB",
+            ),
+        )
+        for loads, message in cases:
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(PackageCheckError, message),
+            ):
+                package_consumption._macho_dependencies(loads)
+
+    def test_closure_ignores_an_absolute_dylib_identity(self) -> None:
+        outside_id = self.prefix.parent / "identity-only.dylib"
+        outside_id.write_bytes(b"not a dependency\n")
+        root_loads = (
+            self._loads("14.0", "@executable_path/../lib/first")
+            + "          cmd LC_LOAD_DYLIB\n"
+            "      cmdsize 56\n"
+            "         name @rpath/libA.dylib (offset 24)\n"
+        )
+        library_loads = (
+            self._loads("14.0") + "          cmd LC_ID_DYLIB\n"
+            "      cmdsize 80\n"
+            f"         name {outside_id} (offset 24)\n"
+        )
+        loads = {
+            self.mtest: root_loads,
+            self.lib_a: library_loads,
+        }
+        commands: list[list[str]] = []
+
+        def fake_run(
+            argv: list[str], **_kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            commands.append(argv)
+            path = Path(argv[-1]).resolve()
+            if argv[0] == "lipo":
+                output = "arm64\n"
+            elif "-hv" in argv:
+                output = (
+                    "Mach header\n"
+                    "      magic  cputype cpusubtype  caps    filetype ncmds "
+                    "sizeofcmds      flags\n"
+                    "MH_MAGIC_64    ARM64        ALL  0x00       DYLIB    20 "
+                    "2048   NOUNDEFS DYLDLINK TWOLEVEL\n"
+                )
+            elif "-l" in argv:
+                output = loads[path]
+            else:
+                raise AssertionError(f"unexpected Mach-O command: {argv}")
+            return subprocess.CompletedProcess(argv, 0, output, "")
+
+        with mock.patch.object(subprocess, "run", side_effect=fake_run):
+            audit_installed_dependency_closure(
+                self.mtest,
+                package_platform("darwin", "arm64"),
+            )
+
+        self.assertFalse(any("-L" in command for command in commands))
+        self.assertFalse(any(Path(command[-1]) == outside_id for command in commands))
+
+    def test_walks_ordered_inherited_runpaths_and_terminates_a_cycle(self) -> None:
+        dependencies = {
+            self.mtest: self._dependency_loads("@rpath/libA.dylib"),
+            self.lib_a: self._dependency_loads("@rpath/libB.dylib"),
+            self.lib_b: self._dependency_loads(
+                "@loader_path/libA.dylib",
+                "@executable_path/../lib/first/libA.dylib",
+            ),
+        }
+        loads = {
+            self.mtest: self._loads(
+                "14.0",
+                "@executable_path/../lib/first",
+                "@executable_path/../lib/second",
+            ),
+            self.lib_a: self._loads("13.5"),
+            self.lib_b: self._loads("14.0"),
+        }
+
+        runner = self._run_with(dependencies, loads)
+
+        inspected = [
+            Path(call.args[0][-1]).resolve()
+            for call in runner.call_args_list
+            if call.args[0][0] == "otool" and call.args[0][-2] in ("-L", "-l")
+        ]
+        self.assertEqual(inspected.count(self.mtest), 1)
+        self.assertEqual(inspected.count(self.lib_a), 1)
+        self.assertEqual(inspected.count(self.lib_b), 1)
+        self.assertNotIn(self.shadow_a, inspected)
+
+    def test_rpath_skips_wrong_architecture_before_a_loadable_candidate(
+        self,
+    ) -> None:
+        dependencies = {
+            self.mtest: self._dependency_loads("@rpath/libA.dylib"),
+            self.lib_a: self._dependency_loads(),
+            self.shadow_a: self._dependency_loads(),
+        }
+        loads = {
+            self.mtest: self._loads(
+                "14.0",
+                "@executable_path/../lib/first",
+                "@executable_path/../lib/second",
+            ),
+            self.lib_a: self._loads("14.0"),
+            self.shadow_a: self._loads("14.1"),
+        }
+
+        with self.assertRaisesRegex(
+            PackageCheckError,
+            r"lib/second/libA\.dylib.*14\.1.*14\.0",
+        ):
+            self._run_with(
+                dependencies,
+                loads,
+                architectures={
+                    self.lib_a: ("x86_64",),
+                    self.shadow_a: ("arm64",),
+                },
+            )
+
+    def test_rpath_skips_non_macos_platform_before_a_loadable_candidate(
+        self,
+    ) -> None:
+        dependencies = {
+            self.mtest: self._dependency_loads("@rpath/libA.dylib"),
+            self.lib_a: self._dependency_loads(),
+            self.shadow_a: self._dependency_loads(),
+        }
+        loads = {
+            self.mtest: self._loads(
+                "14.0",
+                "@executable_path/../lib/first",
+                "@executable_path/../lib/second",
+            ),
+            self.lib_a: self._loads("14.0", platform="2"),
+            self.shadow_a: self._loads("14.1"),
+        }
+
+        with self.assertRaisesRegex(
+            PackageCheckError,
+            r"lib/second/libA\.dylib.*14\.1.*14\.0",
+        ):
+            self._run_with(dependencies, loads)
+
+    def test_rpath_rejects_malformed_architecture_metadata(self) -> None:
+        dependencies = {
+            self.mtest: self._dependency_loads("@rpath/libA.dylib"),
+            self.lib_a: self._dependency_loads(),
+        }
+        loads = {
+            self.mtest: self._loads(
+                "14.0",
+                "@executable_path/../lib/first",
+            ),
+            self.lib_a: self._loads("14.0"),
+        }
+
+        with self.assertRaisesRegex(
+            PackageCheckError,
+            r"malformed.*architecture.*lib/first/libA\.dylib",
+        ):
+            self._run_with(
+                dependencies,
+                loads,
+                architectures={self.lib_a: ("arm64???",)},
+            )
+
+    def test_rpath_rejects_missing_platform_metadata(self) -> None:
+        dependencies = {
+            self.mtest: self._dependency_loads("@rpath/libA.dylib"),
+            self.lib_a: self._dependency_loads(),
+        }
+        loads = {
+            self.mtest: self._loads(
+                "14.0",
+                "@executable_path/../lib/first",
+            ),
+            self.lib_a: (
+                "          cmd LC_BUILD_VERSION\n"
+                "        minos 14.0\n"
+                "          sdk 26.0\n"
+            ),
+        }
+
+        with self.assertRaisesRegex(
+            PackageCheckError,
+            r"missing platform.*lib/first/libA\.dylib",
+        ):
+            self._run_with(dependencies, loads)
+
+    def test_rpath_rejects_incompatible_candidate_that_escapes_prefix(
+        self,
+    ) -> None:
+        outside = self.prefix.parent / "outside.dylib"
+        outside.write_bytes(b"foreign Mach-O fixture\n")
+        self.lib_a.unlink()
+        self.lib_a.symlink_to(outside)
+        dependencies = {
+            self.mtest: self._dependency_loads("@rpath/libA.dylib"),
+            self.shadow_a: self._dependency_loads(),
+        }
+        loads = {
+            self.mtest: self._loads(
+                "14.0",
+                "@executable_path/../lib/first",
+                "@executable_path/../lib/second",
+            ),
+            self.shadow_a: self._loads("14.0"),
+        }
+
+        with self.assertRaisesRegex(PackageCheckError, "escapes.*scratch prefix"):
+            self._run_with(
+                dependencies,
+                loads,
+                architectures={outside: ("x86_64",)},
+            )
+
+    def test_prefix_escape_is_rejected(self) -> None:
+        outside = self.prefix.parent / "outside.dylib"
+        outside.write_bytes(b"foreign Mach-O fixture\n")
+        dependencies = self._dependency_loads(str(outside)) + self._loads("14.0")
+        with (
+            mock.patch.object(
+                subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    ["otool"], 0, dependencies, ""
+                ),
+            ),
+            self.assertRaisesRegex(PackageCheckError, "escapes.*scratch prefix"),
+        ):
+            audit_installed_dependency_closure(
+                self.mtest,
+                package_platform("darwin", "arm64"),
+            )
+
+    def test_installed_root_symlink_escape_is_rejected_before_otool(self) -> None:
+        outside = self.prefix.parent / "outside-mtest"
+        outside.write_bytes(b"foreign Mach-O fixture\n")
+        self.mtest.unlink()
+        self.mtest.symlink_to(outside)
+        with (
+            mock.patch.object(package_consumption, "_run_otool") as run_otool,
+            self.assertRaisesRegex(
+                PackageCheckError,
+                "installed Mach-O root escapes the scratch prefix",
+            ),
+        ):
+            audit_installed_dependency_closure(
+                self.mtest,
+                package_platform("darwin", "arm64"),
+            )
+        run_otool.assert_not_called()
+
+    def test_missing_rpath_match_is_rejected(self) -> None:
+        dependencies = self._dependency_loads("@rpath/missing.dylib")
+        loads = self._loads("14.0", "@executable_path/../lib/first")
+
+        def fake_run(
+            argv: list[str], **_kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                dependencies + loads,
+                "",
+            )
+
+        with (
+            mock.patch.object(subprocess, "run", side_effect=fake_run),
+            self.assertRaisesRegex(PackageCheckError, "no match.*missing.dylib"),
+        ):
+            audit_installed_dependency_closure(
+                self.mtest,
+                package_platform("darwin", "arm64"),
+            )
+
+    def test_newer_dependency_minimum_names_its_relative_path(self) -> None:
+        dependencies = {
+            self.mtest: self._dependency_loads("@rpath/libA.dylib"),
+            self.lib_a: self._dependency_loads(),
+        }
+        loads = {
+            self.mtest: self._loads("14.0", "@executable_path/../lib/first"),
+            self.lib_a: self._loads("14.1"),
+        }
+        with self.assertRaisesRegex(
+            PackageCheckError,
+            r"lib/first/libA\.dylib.*14\.1.*14\.0",
+        ):
+            self._run_with(dependencies, loads)
+
+    def test_linux_returns_without_invoking_otool(self) -> None:
+        with mock.patch.object(subprocess, "run") as run:
+            audit_installed_dependency_closure(
+                self.mtest,
+                package_platform("linux", "x86_64"),
+            )
+        run.assert_not_called()
 
 
 class DescriptorThreadingTests(unittest.TestCase):
@@ -621,6 +1098,9 @@ class CallSiteTests(unittest.TestCase):
 
     def test_loader_clean_stage_calls_the_probe_roster_check(self) -> None:
         roster = mock.Mock()
+        closure = mock.Mock()
+        installed = self.root / "bin" / "mtest"
+        target = package_platform("linux", "x86_64")
 
         def fake_run(
             argv: list[str], **_kwargs: object
@@ -641,15 +1121,17 @@ class CallSiteTests(unittest.TestCase):
                 package_consumption,
                 LOADER_PROBE_CWD=self.root / "loader-probe-cwd",
                 verify_loader_probe_roster=roster,
+                audit_installed_dependency_closure=closure,
             ),
             mock.patch.object(subprocess, "run", side_effect=fake_run),
             contextlib.redirect_stdout(io.StringIO()),
         ):
             package_consumption.stage_loader_clean_probe(
-                self.root / "bin" / "mtest",
-                package_platform("linux", "x86_64"),
+                installed,
+                target,
             )
         roster.assert_called_once_with(package_consumption.LOADER_PROBE_FLAGS)
+        closure.assert_called_once_with(installed, target)
 
     def test_dogfood_stage_drives_the_installed_binary_through_the_probes(
         self,
@@ -668,7 +1150,7 @@ class CallSiteTests(unittest.TestCase):
         installed.write_text("", encoding="utf-8")
         include = self.root / "include"
         include.mkdir(parents=True, exist_ok=True)
-        (include / "mtest.mojopkg").write_text("", encoding="utf-8")
+        (include / "mtest.mojoc").write_text("", encoding="utf-8")
         native = self.root / "mtest_exec_native_test.o"
         native.write_text("", encoding="utf-8")
         verify = mock.Mock(return_value=0)
@@ -676,7 +1158,7 @@ class CallSiteTests(unittest.TestCase):
         with (
             mock.patch.multiple(
                 package_consumption,
-                MOJOPKG_INCLUDE_DIR=include,
+                CHECKOUT_PACKAGE_INCLUDE_DIR=include,
                 NATIVE_TEST_OBJECT=native,
             ),
             mock.patch.object(dogfood, "verify", verify),
@@ -693,14 +1175,14 @@ class CallSiteTests(unittest.TestCase):
         installed.write_text("", encoding="utf-8")
         include = self.root / "include"
         include.mkdir(parents=True, exist_ok=True)
-        (include / "mtest.mojopkg").write_text("", encoding="utf-8")
+        (include / "mtest.mojoc").write_text("", encoding="utf-8")
         native = self.root / "mtest_exec_native_test.o"
         native.write_text("", encoding="utf-8")
 
         with (
             mock.patch.multiple(
                 package_consumption,
-                MOJOPKG_INCLUDE_DIR=include,
+                CHECKOUT_PACKAGE_INCLUDE_DIR=include,
                 NATIVE_TEST_OBJECT=native,
             ),
             mock.patch.object(dogfood, "verify", mock.Mock(return_value=1)),
@@ -882,10 +1364,18 @@ class AssertionPackageCommandTests(unittest.TestCase):
                 prefix,
                 prefix / "bin/mtest",
             )
+        command = run.call_args.args[0]
         self.assertEqual(
-            run.call_args.args[0][:4],
-            ["/prefix/bin/mtest", "--no-config", "--show-output", "failures"],
+            command[:5],
+            [
+                "/prefix/bin/mtest",
+                "--no-config",
+                "--no-cache",
+                "--show-output",
+                "failures",
+            ],
         )
+        self.assertEqual(command.count("--no-cache"), 1)
 
     def test_assertion_process_helper_delegates_environment_and_timeout(
         self,
@@ -1180,9 +1670,13 @@ class AssertionReadmeExampleTests(unittest.TestCase):
         ).as_posix()
         self.assertEqual(
             package_consumption.assertion_readme_command_prefix(),
-            "$ mtest --no-config --show-output failures \\\n"
+            "$ mtest --no-config --no-cache --show-output failures \\\n"
             f"    -I <PREFIX>/{installed_source} \\\n"
             f"    {example_directory}\n",
+        )
+        self.assertEqual(
+            package_consumption.assertion_readme_command_prefix().count("--no-cache"),
+            1,
         )
 
 

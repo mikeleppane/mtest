@@ -2,15 +2,14 @@
 
 #if defined(__APPLE__)
 #define MTEST_PRELOAD_VARIABLE "DYLD_INSERT_LIBRARIES"
-#define DYLD_INTERPOSE(_replacement, _replacee) \
-    __attribute__((used)) static struct { \
-        const void *replacement; \
-        const void *replacee; \
-    } _interpose_##_replacee \
-        __attribute__((section("__DATA,__interpose,interposing"))) = { \
-            (const void *)(unsigned long)&_replacement, \
-            (const void *)(unsigned long)&_replacee, \
-        };
+#define DYLD_INTERPOSE(_replacement, _replacee)                                                    \
+    __attribute__((used)) static struct {                                                          \
+        const void *replacement;                                                                   \
+        const void *replacee;                                                                      \
+    } _interpose_##_replacee __attribute__((section("__DATA,__interpose,interposing"))) = {        \
+        (const void *)(unsigned long)&_replacement,                                                \
+        (const void *)(unsigned long)&_replacee,                                                   \
+    };
 #else
 #define MTEST_PRELOAD_VARIABLE "LD_PRELOAD"
 #include <dlfcn.h>
@@ -57,7 +56,15 @@ static ssize_t mtest_faulting_write(int fd, const void *buffer, size_t count) {
         errno = EIO;
         return -1;
     }
-    struct iovec vector = {(void *)buffer, count};
+    struct iovec vector = {.iov_base = NULL, .iov_len = count};
+    _Static_assert(sizeof(vector.iov_base) == sizeof(buffer),
+                   "qualified void pointers must share a representation");
+    /*
+     * POSIX declares iov_base as void * even though writev only reads it.
+     * C17 gives qualified and unqualified pointers the same representation,
+     * so copying that representation avoids claiming the buffer is writable.
+     */
+    memcpy(&vector.iov_base, &buffer, sizeof(vector.iov_base));
     return writev(fd, &vector, 1);
 }
 
@@ -72,10 +79,8 @@ static mtest_write_fn mtest_real_write;
 __attribute__((constructor)) static void mtest_resolve_real_write(void) {
     void *symbol = dlsym(RTLD_NEXT, "write");
 
-    _Static_assert(
-        sizeof(mtest_real_write) == sizeof(symbol),
-        "function and object pointers must share a representation"
-    );
+    _Static_assert(sizeof(mtest_real_write) == sizeof(symbol),
+                   "function and object pointers must share a representation");
     memcpy(&mtest_real_write, &symbol, sizeof(mtest_real_write));
 }
 

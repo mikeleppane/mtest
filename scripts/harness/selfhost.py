@@ -693,6 +693,7 @@ def mtest_argv(
         "build",
         "-I",
         "tests/support",
+        "--build-arg=--Werror",
         "--build-arg=--no-optimization",
         "--build-arg=-Xlinker",
         f"--build-arg={native_object}",

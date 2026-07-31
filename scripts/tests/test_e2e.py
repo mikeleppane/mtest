@@ -24,6 +24,7 @@ from unittest import mock
 
 from scripts.e2e import __main__ as e2e_main
 from scripts.e2e import main_open, runner
+from scripts.e2e.scenarios import config_file, selection
 from scripts.fixtures.toolchain import fake_retry_crash_mojo
 
 
@@ -103,6 +104,188 @@ def _recorded_signals() -> Iterator[list[tuple[str, int, int]]]:
 
 
 class E2EFaultTopologyTests(unittest.TestCase):
+    def test_single_build_count_disables_persistent_cache(self) -> None:
+        calls: list[list[str]] = []
+
+        def run_mtest(
+            args: list[str],
+            *,
+            timeout: float | None = None,
+            env_overrides: dict[str, str] | None = None,
+        ) -> runner.Run:
+            del timeout
+            calls.append(args)
+            if env_overrides is None:
+                self.fail("scenario omitted the logging-wrapper environment")
+            log_path = env_overrides["MTEST_MOJO_LOG"]
+            lines = ["version\t--version\n"]
+            if "--no-cache" in args:
+                lines.extend(
+                    [
+                        f"build\t{selection.MATRIX_ALPHA}\tmojo build\n",
+                        f"build\t{selection.MATRIX_BETA}\tmojo build\n",
+                    ]
+                )
+            Path(log_path).write_text("".join(lines), encoding="utf-8")
+            return runner.Run(
+                argv=["mtest", *args],
+                returncode=0,
+                stdout="",
+                stderr="",
+                wall=0.0,
+            )
+
+        process_runner = mock.Mock(spec=runner.E2ERunner)
+        process_runner.run_mtest.side_effect = run_mtest
+        context = runner.ScenarioContext(
+            manifest={},
+            registry=(),
+            runner=process_runner,
+        )
+
+        detail = selection.s_single_build(context)
+
+        self.assertIn("each built exactly once", detail)
+        self.assertEqual(
+            calls,
+            [
+                [
+                    "--mojo",
+                    runner.LOGGING_MOJO,
+                    "-k",
+                    "one",
+                    "e2e/matrix",
+                    "--no-cache",
+                ]
+            ],
+        )
+
+    def test_config_serial_window_disables_persistent_cache(self) -> None:
+        calls: list[list[str]] = []
+
+        def run_mtest(
+            args: list[str],
+            *,
+            timeout: float | None = None,
+            env_overrides: dict[str, str] | None = None,
+        ) -> runner.Run:
+            del timeout
+            calls.append(args)
+            if len(calls) == 1:
+                return runner.Run(
+                    argv=["mtest", *args],
+                    returncode=1,
+                    stdout="TIMEOUT e2e/slow/test_hanging.mojo after 1s\n",
+                    stderr="",
+                    wall=1.0,
+                )
+            if len(calls) == 2:
+                return runner.Run(
+                    argv=["mtest", *args],
+                    returncode=1,
+                    stdout="",
+                    stderr="collect timed out after 1s\n",
+                    wall=1.0,
+                )
+            if env_overrides is None:
+                self.fail("serial override omitted the window environment")
+            if "--no-cache" in args:
+                Path(env_overrides["MTEST_WINDOW_LOG"]).write_text(
+                    "build\te2e/parallel/test_window_a.mojo\t1.0\n"
+                    "build\te2e/parallel/test_window_a.mojo\t2.0\n"
+                    "build\te2e/parallel/test_window_b.mojo\t1.0\n"
+                    "build\te2e/parallel/test_window_b.mojo\t2.0\n"
+                    "build\te2e/parallel/test_window_c.mojo\t3.0\n"
+                    "build\te2e/parallel/test_window_c.mojo\t4.0\n",
+                    encoding="utf-8",
+                )
+                Path(env_overrides["MTEST_WINDOW_RUN_LOG"]).write_text(
+                    "run\ta\t1.0\n"
+                    "run\ta\t2.0\n"
+                    "run\tb\t1.0\n"
+                    "run\tb\t2.0\n"
+                    "run\tc\t3.0\n"
+                    "run\tc\t4.0\n",
+                    encoding="utf-8",
+                )
+            return runner.Run(
+                argv=["mtest", *args],
+                returncode=0,
+                stdout="",
+                stderr="",
+                wall=4.0,
+            )
+
+        process_runner = mock.Mock(spec=runner.E2ERunner)
+        process_runner.run_mtest.side_effect = run_mtest
+        context = runner.ScenarioContext(
+            manifest={},
+            registry=(),
+            runner=process_runner,
+        )
+
+        detail = config_file.s_config_overrides(context)
+
+        self.assertIn("override serial=true drained serial-last", detail)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[2][0], "--config")
+        self.assertEqual(calls[2][2:], ["--no-cache"])
+
+    def test_stale_recovery_build_count_disables_persistent_cache(self) -> None:
+        calls: list[list[str]] = []
+
+        def run_mtest(
+            args: list[str],
+            *,
+            timeout: float | None = None,
+            env_overrides: dict[str, str] | None = None,
+        ) -> runner.Run:
+            del timeout
+            calls.append(args)
+            if env_overrides is None:
+                self.fail("scenario omitted the logging-wrapper environment")
+            log_path = env_overrides["MTEST_MOJO_LOG"]
+            build_count = 2 if "--no-cache" in args else 1
+            Path(log_path).write_text(
+                "".join(
+                    f"build\t{selection.CHAMELEON}\tmojo build\n"
+                    for _ in range(build_count)
+                ),
+                encoding="utf-8",
+            )
+            return runner.Run(
+                argv=["mtest", *args],
+                returncode=1,
+                stdout=f"MALFORMED-SUITE {selection.CHAMELEON}\n",
+                stderr="",
+                wall=0.0,
+            )
+
+        process_runner = mock.Mock(spec=runner.E2ERunner)
+        process_runner.run_mtest.side_effect = run_mtest
+        context = runner.ScenarioContext(
+            manifest={},
+            registry=(),
+            runner=process_runner,
+        )
+
+        detail = selection.s_stale_recovery_two_builds(context)
+
+        self.assertIn("2 builds logged", detail)
+        self.assertEqual(
+            calls,
+            [
+                [
+                    "--mojo",
+                    runner.LOGGING_MOJO,
+                    selection.CHAMELEON,
+                    "-k",
+                    "ghost",
+                    "--no-cache",
+                ]
+            ],
+        )
+
     def test_registry_names_are_unique_and_the_manifest_gate_runs_first(
         self,
     ) -> None:
@@ -349,6 +532,120 @@ class E2EFaultTopologyTests(unittest.TestCase):
 
     def test_main_open_has_one_package_owner(self) -> None:
         self.assertEqual(main_open.__name__, "scripts.e2e.main_open")
+
+    def test_main_open_helper_compiles_as_a_testing_adapter_consumer(self) -> None:
+        commands: list[list[str]] = []
+        run_stderr = (
+            "exec: runtime open failed (operation 5, errno 5)\n"
+            "cleanup operation 6 failed with errno 1\n"
+            "exec: runtime close failed (operation 6, errno 5)\n"
+            "main-open-probe: restore-attempts-before-atexit=3 "
+            "initial-reopen=0 repair=-2 final-reopen=0 reclose=0\n"
+        )
+
+        def capture(
+            command: list[str], *, timeout: float
+        ) -> subprocess.CompletedProcess[str]:
+            del timeout
+            commands.append(command)
+            if len(commands) == 3:
+                return subprocess.CompletedProcess(command, 3, "", run_stderr)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with (
+            mock.patch.object(main_open, "TEST_ADAPTER", Path(__file__)),
+            mock.patch(
+                "scripts.e2e.main_open.native_abi_check.compiler",
+                return_value="clang",
+            ),
+            mock.patch.object(main_open, "_run", side_effect=capture),
+        ):
+            main_open.check_main_open_failure()
+
+        helper_compile = commands[0]
+        self.assertEqual(helper_compile.count("-DMTEST_EXEC_TESTING=1"), 1)
+        self.assertNotIn("-DMTEST_EXEC_TESTING=0", helper_compile)
+        main_compile = commands[1]
+        self.assertEqual(
+            main_compile[:4],
+            ["mojo", "build", "--Werror", "--no-optimization"],
+        )
+        self.assertEqual(main_compile.count("--Werror"), 1)
+        self.assertEqual(main_compile.count("--no-optimization"), 1)
+
+    def test_main_open_timeout_preserves_diagnosis_for_darwin_eperm(self) -> None:
+        """A zombie-only Darwin group must not mask the timeout diagnosis."""
+        command = ["mojo", "build", "src/main.mojo"]
+        process = mock.Mock()
+        process.pid = 123
+        process.returncode = -int(signal.SIGTERM)
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired(command, 1.0),
+            ("captured stdout\n", "captured stderr\n"),
+        ]
+
+        with (
+            mock.patch(
+                "scripts.e2e.main_open.subprocess.Popen",
+                return_value=process,
+            ),
+            mock.patch(
+                "scripts.e2e.main_open.os.killpg",
+                side_effect=PermissionError(1, "Operation not permitted"),
+            ) as killpg,
+            mock.patch("scripts.e2e.main_open.time.sleep") as sleep,
+            self.assertRaises(main_open.MainOpenCheckError) as raised,
+        ):
+            main_open._run(command, timeout=1.0)
+
+        self.assertIn("command timed out after 1s", str(raised.exception))
+        self.assertIn("captured stdout", str(raised.exception))
+        self.assertIn("captured stderr", str(raised.exception))
+        killpg.assert_called_once_with(123, signal.SIGTERM)
+        sleep.assert_not_called()
+        self.assertEqual(process.communicate.call_count, 2)
+
+    def test_main_open_timeout_bounds_incomplete_output_drain(self) -> None:
+        """A detached pipe holder cannot defeat the command's hard timeout."""
+        command = ["mojo", "build", "src/main.mojo"]
+        initial_timeout = subprocess.TimeoutExpired(command, 1.0)
+        drain_timeout = subprocess.TimeoutExpired(command, 1.0)
+        process = mock.Mock()
+        process.pid = 123
+        process.stdout = mock.Mock()
+        process.stderr = mock.Mock()
+        process.communicate.side_effect = [initial_timeout, drain_timeout]
+        process.wait.return_value = -int(signal.SIGTERM)
+
+        with (
+            mock.patch(
+                "scripts.e2e.main_open.subprocess.Popen",
+                return_value=process,
+            ),
+            mock.patch(
+                "scripts.e2e.main_open.os.killpg",
+                side_effect=PermissionError(1, "Operation not permitted"),
+            ),
+            mock.patch("scripts.e2e.main_open.time.sleep"),
+            self.assertRaises(main_open.MainOpenCheckError) as raised,
+        ):
+            main_open._run(command, timeout=1.0)
+
+        self.assertIs(raised.exception.__cause__, initial_timeout)
+        self.assertIn("command timed out after 1s", str(raised.exception))
+        self.assertIn("output drain remained incomplete", str(raised.exception))
+        self.assertEqual(
+            process.communicate.call_args_list,
+            [
+                mock.call(timeout=1.0),
+                mock.call(timeout=main_open.POST_TIMEOUT_DRAIN_SECONDS),
+            ],
+        )
+        process.stdout.close.assert_called_once_with()
+        process.stderr.close.assert_called_once_with()
+        process.wait.assert_called_once_with(
+            timeout=main_open.POST_TIMEOUT_DRAIN_SECONDS
+        )
 
     def test_scenarios_receive_an_explicit_immutable_context(self) -> None:
         registry = tuple(e2e_main.SCENARIOS)

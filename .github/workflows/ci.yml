@@ -131,6 +131,9 @@ jobs:
       - name: Compile the package
         run: pixi run build
 
+      - name: Production artifact profile
+        run: pixi run build-profile-check
+
       - name: README CLI reference
         run: pixi run readme-help-check
 
@@ -195,7 +198,7 @@ jobs:
             task: contract-check-strict
           # Both memory lanes build every binary they judge from source, so no
           # `pixi run build` precedes them and neither reads `build/mtest` or
-          # `build/mtest.mojopkg`: the shipped artifact is uninstrumented and
+          # `build/mtest.mojoc`: the shipped artifact is uninstrumented and
           # carries no `-g` guarantee, so reusing it would defeat the lane. See
           # the CLI_BINARY docstrings in scripts/checks/memory/asan.py and
           # scripts/checks/memory/valgrind.py.
@@ -372,8 +375,9 @@ jobs:
 
   macos-preflight:
     name: macOS arm64 / preflight
-    runs-on: macos-15
-    # The Linux preflight's tier: same locked Pixi install, same cheap barrier.
+    runs-on: macos-26
+    # The Linux preflight's ceiling leaves ample room for the native and profile
+    # compiles this platform-specific barrier owns.
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -391,23 +395,21 @@ jobs:
           pixi run mojo-version
           pixi run clang --version
 
-      # The whole barrier on this platform, and the only `ci-preflight` member
-      # whose answer is platform-specific: every other member reads this tree
-      # rather than this runner. `native-check` owns `postfork-check`, so naming
-      # that separately would repeat the audit without strengthening the gate.
+      # The barrier on this platform carries the two `ci-preflight` answers
+      # that are platform-specific. `native-check` owns `postfork-check`, so
+      # naming that separately would repeat the audit without strengthening
+      # the gate.
       #
-      # No `build-bin` step or `--help` smoke here: jobs share no filesystem, so
-      # a copy would delay every cell below and be consumed by none, and the
-      # cells that need a binary link one through their own task edges. `macOS
-      # arm64 / strict contract` runs the documented-CLI oracle `--strict`,
-      # where a SKIP fails, and `help: --help -> stdout, exit 0` is one of its
-      # roster entries; `macOS arm64 / packaged artifact` then probes `--help`
-      # through the INSTALLED artifact with the dev environment off PATH and
-      # this platform's loader search path emptied. The cost is that a
-      # macOS-only compile break reddens the cells that hit it instead of one
-      # job ahead of them.
+      # The production-profile step intentionally builds here before releasing
+      # the behavioral matrix. It proves native apple-m1 IR and the exact macOS
+      # 14.0 minimum on the real binary. The Linux repository-policy barrier
+      # separately pins -g0 in both profiles' exact link argv. Jobs share no
+      # filesystem, so the cells below still build their own inputs.
       - name: Audit native adapter
         run: pixi run native-check
+
+      - name: Production artifact profile
+        run: pixi run build-profile-check
 
   macos-test-matrix:
     name: macOS arm64 / ${{ matrix.lane }}
@@ -417,7 +419,7 @@ jobs:
       matrix:
         include:
           # As on the Linux matrix, a row carries only the keys it uses, and
-          # `lane` is an externally configured required-check name. A macos-15
+          # `lane` is an externally configured required-check name. A macos-26
           # arm64 runner has 3 vCPUs, so `auto` (cores // 2) would give exactly
           # 1 worker. See DEFAULT_WORKERS in scripts/harness/selfhost.py.
           - lane: classified suite
@@ -437,7 +439,7 @@ jobs:
             task: build-stamp-check
           - lane: strict contract
             task: contract-check-strict
-    runs-on: macos-15
+    runs-on: macos-26
     # The Linux matrix's wide tier, flat because this platform has no memory
     # lanes.
     timeout-minutes: 40
@@ -465,7 +467,7 @@ jobs:
   macos-package:
     name: macOS arm64 / packaged artifact
     needs: macos-preflight
-    runs-on: macos-15
+    runs-on: macos-26
     # The Linux package job's tier, for the same external-channel solve.
     timeout-minutes: 20
     steps:
