@@ -1,8 +1,9 @@
-# Vendored JUnit XML schemas
+# Vendored schemas
 
-Both files are vendored verbatim (including their license headers) from
-upstream and are not modified. Attribution below is read directly from each
-file's own header comment.
+Every file here is vendored verbatim from upstream and is not modified.
+Attribution for the JUnit schemas is read directly from each file's own header
+comment; JSON Schema carries no header, so `recipe-format.schema.json` records
+its exact upstream commit below.
 
 ## `junit-10.xsd` — validation dialect
 
@@ -16,6 +17,23 @@ file's own header comment.
   `skipped` attribute, so an aggregate `skipped` there is a schema violation;
   the root-level skipped total is instead an arithmetic invariant the checker
   recomputes from the child `<testsuite>` elements.
+
+## `recipe-format.schema.json` — validation dialect
+
+- Source: `schema.json` from `prefix-dev/recipe-format` at commit
+  `7e9363f2c7288b859c51e341a159fdfdd02bff79`. Pinned by commit because that
+  project's tagged releases stop at `v0.9.3` (2024) while the schema
+  rattler-build and modular-community reference is the one on `main`.
+- License: **BSD 3-Clause "New" or "Revised" License**.
+- Role: the schema `scripts/checks/community_recipe.py` validates both
+  `recipe/recipe.yaml` and the rendered community recipe against
+  (`check-jsonschema --schemafile recipe-format.schema.json`). It is vendored
+  rather than fetched so the check stays hermetic, matching every other gate in
+  this repository.
+- Note: a forty-character all-digit `source[].rev` parses as a YAML integer and
+  fails this schema's `string` requirement. Real commit SHAs are hex and
+  effectively never all-digit, so the checker renders its schema probe with a
+  SHA carrying a letter rather than quoting `rev` in the template.
 
 ## `surefire-test-report.xsd` — provenance only
 

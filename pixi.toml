@@ -29,6 +29,11 @@ libxml2 = "==2.15.3"
 # Builds recipe/recipe.yaml into a local conda channel. Build-time only, and
 # pinned exact so the recipe's proven isolated-build-env behavior cannot drift.
 rattler-build = "==0.69.1"
+# check-jsonschema validates both recipes against the vendored recipe-format
+# schema. Pinned for the same reason as libxml2: the gate's verdict must not
+# drift with an unpinned system copy. modular-community's own recipe-lint hook
+# never fires (see scripts/checks/community_recipe.py), so this owns that check.
+check-jsonschema = "==0.37.4"
 
 [tasks]
 # Print the pinned Mojo version. First CI step, so a broken toolchain fails fast

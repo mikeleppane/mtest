@@ -1,19 +1,35 @@
 #!/usr/bin/env python3
-"""Prove the local and modular-community recipes share one package contract."""
+"""Prove the local and modular-community recipes share one package contract.
+
+Also validates both recipes against the vendored `recipe-format` schema.
+modular-community's own `pixi run lint` appears to schema-check submissions but
+does not: its hook selects `^[^/]+/recipe.yaml$`, which cannot match the
+`recipes/<package>/recipe.yaml` path every recipe in that channel actually
+lives at, so the hook reports "no files to check" and skips. This check owns
+that verdict here instead of inheriting a gate that never fires.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
 import re
+import subprocess
 import sys
+import tempfile
 
 from scripts.release.public_verify import COMPANION_FILES
 from scripts.release.recipe import RenderRequest, render_recipe
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+SCHEMA = REPO_ROOT / "scripts" / "schemas" / "recipe-format.schema.json"
 ZERO_SHA = "0" * 40
+# Forty digits is a YAML integer, not a string, so the all-zero drift probe
+# above cannot exercise the schema's `source[].rev: string` requirement. Real
+# commit SHAs are hex and effectively never all-digit; this probe carries a
+# letter so the schema check sees the shape a real render produces.
+SCHEMA_PROBE_SHA = "a" + "0" * 39
 
 
 @dataclass(frozen=True)
@@ -59,6 +75,48 @@ def _facts(text: str) -> SharedRecipeFacts:
         license_file=_one(text, r"^  license_file: ([^\n]+)$", "license file"),
         homepage=_one(text, r"^  homepage: ([^\n]+)$", "homepage"),
     )
+
+
+def validate_recipe_schema(recipe: str, label: str, schema: Path = SCHEMA) -> None:
+    """Validate one recipe document against the vendored recipe-format schema.
+
+    Args:
+        recipe: Recipe YAML text to validate.
+        label: Name identifying the document in a failure message.
+        schema: Vendored JSON Schema to validate against.
+
+    Raises:
+        AssertionError: If `check-jsonschema` rejects the document.
+    """
+    with tempfile.TemporaryDirectory() as scratch:
+        staged = Path(scratch) / "recipe.yaml"
+        staged.write_text(recipe, encoding="utf-8")
+        result = subprocess.run(
+            ["check-jsonschema", "--schemafile", str(schema), str(staged)],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+    if result.returncode != 0:
+        raise AssertionError(
+            f"{label} does not validate against {schema.name}:\n{result.stdout}"
+        )
+
+
+def check_recipe_schemas(local_recipe: Path, community_template: Path) -> None:
+    """Validate both recipe sources against the vendored recipe-format schema."""
+    local = local_recipe.read_text(encoding="utf-8")
+    validate_recipe_schema(local, "local recipe")
+    rendered = render_recipe(
+        community_template.read_bytes(),
+        RenderRequest(
+            version=_one(local, r'^  version: "([^"]+)"$', "local version"),
+            source_rev=SCHEMA_PROBE_SHA,
+            build_number=0,
+        ),
+    ).decode("utf-8")
+    validate_recipe_schema(rendered, "community recipe")
 
 
 def check_recipe_drift(local_recipe: Path, community_template: Path) -> None:
@@ -118,11 +176,11 @@ def check_recipe_drift(local_recipe: Path, community_template: Path) -> None:
 
 def main() -> int:
     """Check the repository's two recipe sources."""
+    local = REPO_ROOT / "recipe" / "recipe.yaml"
+    community = REPO_ROOT / "recipe" / "community" / "recipe.yaml.in"
     try:
-        check_recipe_drift(
-            REPO_ROOT / "recipe" / "recipe.yaml",
-            REPO_ROOT / "recipe" / "community" / "recipe.yaml.in",
-        )
+        check_recipe_drift(local, community)
+        check_recipe_schemas(local, community)
     except (AssertionError, OSError, UnicodeError, ValueError) as exc:
         print(f"community-recipe-check: FAIL: {exc}", file=sys.stderr)
         return 1

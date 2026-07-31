@@ -10,7 +10,11 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from scripts.checks.community_recipe import check_recipe_drift
+from scripts.checks.community_recipe import (
+    check_recipe_drift,
+    check_recipe_schemas,
+    validate_recipe_schema,
+)
 from scripts.release import recipe as release_recipe
 from scripts.release.recipe import (
     ManifestEntry,
@@ -411,6 +415,31 @@ class CommunityRecipeDriftTests(unittest.TestCase):
             )
             with self.assertRaises(AssertionError):
                 check_recipe_drift(local, community)
+
+
+class CommunityRecipeSchemaTests(unittest.TestCase):
+    def test_live_recipes_validate_against_the_vendored_schema(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        check_recipe_schemas(
+            root / "recipe" / "recipe.yaml",
+            root / "recipe" / "community" / "recipe.yaml.in",
+        )
+
+    def test_schema_check_rejects_invalid_recipe_documents(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        valid = (root / "recipe" / "recipe.yaml").read_text(encoding="utf-8")
+        # Two independent violation classes: a typed field carrying the wrong
+        # scalar type, and a key the recipe format does not define at all.
+        mutations = (
+            ("  number: 0", '  number: "zero"'),
+            ("schema_version: 1", "schema_version: 1\nnot_a_recipe_key: 1"),
+        )
+        for old, new in mutations:
+            with self.subTest(old=old):
+                mutated = valid.replace(old, new, 1)
+                self.assertNotEqual(mutated, valid)
+                with self.assertRaises(AssertionError):
+                    validate_recipe_schema(mutated, "mutated recipe")
 
 
 if __name__ == "__main__":
