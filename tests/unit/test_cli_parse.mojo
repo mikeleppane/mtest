@@ -275,7 +275,7 @@ def test_color_modes() raises:
 
 
 def test_version_text_uses_version_constant() raises:
-    assert_equal(version_text(), "mtest 0.6.0")
+    assert_equal(version_text(), "mtest 1.0.0")
 
 
 def _rendered_option_spellings() -> List[String]:
