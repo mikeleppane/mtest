@@ -1,5 +1,17 @@
 name: Community Publish
 
+# Without this every run is titled `Community Publish`, so a dry run that only
+# renders and builds is indistinguishable in the run list from one that pushes a
+# branch to the maintainer fork. The resolve step hardcodes `mode=prepare` for
+# workflow_run, so the trigger alone determines the label there; a manual
+# dispatch is whatever the operator chose.
+#
+# `prepare` states the intent, not the outcome. A run-name is evaluated before
+# any job starts, so it cannot know that resolve will later set `active=false`
+# because the release already existed. Such a run is labelled `prepare` and
+# pushes nothing; the jobs themselves are the record of what happened.
+run-name: Community Publish (${{ github.event_name == 'workflow_run' && 'prepare' || inputs.mode }})
+
 on:
   workflow_run:
     workflows: [Release]
