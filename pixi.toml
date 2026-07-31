@@ -46,6 +46,15 @@ mojo-version = "mojo --version"
 # covers.
 version-check = "python -m scripts.checks.version"
 
+# The write side of `version-check`: rewrite the release version across all nine
+# files that carry it in one edit, e.g. `pixi run bump 1.1.0`. Only three are
+# gated by `version-check` itself; the rest fail at other gates or, for the
+# README, `docs/cli-contract.md`, and the banner SVGs, at none. Not wired into
+# `pixi run ci`; this is the first step of cutting a release, and `version-check`
+# is what proves it landed. Refuses to touch a tree whose sites already
+# disagree, so drift gets repaired rather than buried under a bump.
+bump = "python -m scripts.release.bump"
+
 # Precompile the vendored TOML parser and src/mtest into build/toml.mojoc and
 # build/mtest.mojoc. The package-compiles GATE: an empty-but-broken package
 # fails here before any test does. `mojo package` does not exist in 1.0.0b2;

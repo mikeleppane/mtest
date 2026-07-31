@@ -16,6 +16,7 @@ from std.testing import (
 )
 
 from mtest.cli import (
+    MTEST_VERSION,
     ParseResult,
     flag_specs,
     help_text,
@@ -275,7 +276,12 @@ def test_color_modes() raises:
 
 
 def test_version_text_uses_version_constant() raises:
-    assert_equal(version_text(), "mtest 1.0.0")
+    # Deliberately composed, never a literal. Pinning the release version here
+    # would put it in a compiled artifact that every version bump has to edit,
+    # for no gain: `pixi run version-check` proves the constant matches the
+    # manifest and the recipe, and the CLI contract proves the built binary
+    # prints it. What is left worth testing is the composition itself.
+    assert_equal(version_text(), "mtest " + MTEST_VERSION)
 
 
 def _rendered_option_spellings() -> List[String]:

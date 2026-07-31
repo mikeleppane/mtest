@@ -95,12 +95,6 @@ jobs:
   # nothing expensive starts until the cheap gates are green.
   linux-compiled-oracles:
     name: Linux / compiled oracles
-    # TEMPORARY release-pipeline fast lane. Set repository variable
-    # CI_FAST_MODE=true to skip this job while iterating on the release and
-    # community-publish workflows, whose gates require a green CI run on the
-    # exact commit. REVERT THIS COMMIT once publication is proven; the cut
-    # itself must happen on a commit that ran the full matrix.
-    if: vars.CI_FAST_MODE != 'true'
     runs-on: ubuntu-24.04
     needs: linux-preflight
     # The matrix's wide tier: this is compiler work, at less volume than the
@@ -157,12 +151,6 @@ jobs:
 
   linux-test-matrix:
     name: Linux / ${{ matrix.lane }}
-    # TEMPORARY release-pipeline fast lane. Set repository variable
-    # CI_FAST_MODE=true to skip this job while iterating on the release and
-    # community-publish workflows, whose gates require a green CI run on the
-    # exact commit. REVERT THIS COMMIT once publication is proven; the cut
-    # itself must happen on a commit that ran the full matrix.
-    if: vars.CI_FAST_MODE != 'true'
     # The barrier only. `Linux / compiled oracles` is blocking and runs beside
     # this matrix, which costs runner time and no verdict: a commit whose
     # package does not compile burns every cell discovering that in parallel.
@@ -312,12 +300,6 @@ jobs:
 
   package:
     name: Linux / packaged artifact
-    # TEMPORARY release-pipeline fast lane. Set repository variable
-    # CI_FAST_MODE=true to skip this job while iterating on the release and
-    # community-publish workflows, whose gates require a green CI run on the
-    # exact commit. REVERT THIS COMMIT once publication is proven; the cut
-    # itself must happen on a commit that ran the full matrix.
-    if: vars.CI_FAST_MODE != 'true'
     runs-on: ubuntu-24.04
     # Wider than this lane's own work needs, because its solve reaches two
     # external channels. That is the one place here that can stall on something
@@ -393,12 +375,6 @@ jobs:
 
   macos-preflight:
     name: macOS arm64 / preflight
-    # TEMPORARY release-pipeline fast lane. Set repository variable
-    # CI_FAST_MODE=true to skip this job while iterating on the release and
-    # community-publish workflows, whose gates require a green CI run on the
-    # exact commit. REVERT THIS COMMIT once publication is proven; the cut
-    # itself must happen on a commit that ran the full matrix.
-    if: vars.CI_FAST_MODE != 'true'
     runs-on: macos-26
     # The Linux preflight's ceiling leaves ample room for the native and profile
     # compiles this platform-specific barrier owns.
@@ -437,12 +413,6 @@ jobs:
 
   macos-test-matrix:
     name: macOS arm64 / ${{ matrix.lane }}
-    # TEMPORARY release-pipeline fast lane. Set repository variable
-    # CI_FAST_MODE=true to skip this job while iterating on the release and
-    # community-publish workflows, whose gates require a green CI run on the
-    # exact commit. REVERT THIS COMMIT once publication is proven; the cut
-    # itself must happen on a commit that ran the full matrix.
-    if: vars.CI_FAST_MODE != 'true'
     needs: macos-preflight
     strategy:
       fail-fast: false
@@ -496,12 +466,6 @@ jobs:
 
   macos-package:
     name: macOS arm64 / packaged artifact
-    # TEMPORARY release-pipeline fast lane. Set repository variable
-    # CI_FAST_MODE=true to skip this job while iterating on the release and
-    # community-publish workflows, whose gates require a green CI run on the
-    # exact commit. REVERT THIS COMMIT once publication is proven; the cut
-    # itself must happen on a commit that ran the full matrix.
-    if: vars.CI_FAST_MODE != 'true'
     needs: macos-preflight
     runs-on: macos-26
     # The Linux package job's tier, for the same external-channel solve.
