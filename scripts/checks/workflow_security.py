@@ -108,6 +108,37 @@ def _yaml_mapping_keys(block: str, indent: int) -> list[str]:
     ]
 
 
+def _action_step_inputs(text: str, action: str) -> list[tuple[int, dict[str, str]]]:
+    """Return scalar inputs for each use of one action in a workflow."""
+    lines = text.splitlines()
+    steps: list[tuple[int, dict[str, str]]] = []
+    marker = f"uses: {action}@"
+    for index, line in enumerate(lines):
+        if marker not in line:
+            continue
+        uses_indent = len(line) - len(line.lstrip(" "))
+        step_indent = uses_indent - 2
+        input_indent = uses_indent + 2
+        end = len(lines)
+        for candidate_index in range(index + 1, len(lines)):
+            candidate = lines[candidate_index]
+            stripped = candidate.lstrip(" ")
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = len(candidate) - len(stripped)
+            if indent <= step_indent:
+                end = candidate_index
+                break
+        inputs: dict[str, str] = {}
+        pattern = re.compile(rf"^{' ' * input_indent}([A-Za-z0-9_-]+):\s*(\S+)\s*$")
+        for candidate in lines[index + 1 : end]:
+            match = pattern.fullmatch(candidate)
+            if match is not None:
+                inputs[match.group(1)] = match.group(2)
+        steps.append((index + 1, inputs))
+    return steps
+
+
 def check_workflow_inventory(repo_root: Path = REPO_ROOT) -> None:
     """Require the exact, regular-file workflow set."""
     workflow_root = repo_root / ".github" / "workflows"
@@ -346,6 +377,18 @@ def check_release_workflows(repo_root: Path = REPO_ROOT) -> None:
             raise AssertionError(f"{name} workflow name mismatch")
         if "continue-on-error:" in text:
             raise AssertionError(f"{name} must not contain continue-on-error")
+        for line_number, inputs in _action_step_inputs(
+            text,
+            "prefix-dev/setup-pixi",
+        ):
+            if inputs.get("run-install") != "false":
+                continue
+            invalid = [key for key in ("cache", "locked") if inputs.get(key) == "true"]
+            if invalid:
+                raise AssertionError(
+                    f"{name}:{line_number}: setup-pixi with run-install false "
+                    f"cannot enable {', '.join(invalid)}"
+                )
 
     def require_permissions(
         text: str,

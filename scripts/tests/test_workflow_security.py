@@ -254,6 +254,32 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_live_publication_workflows_have_closed_authority(self) -> None:
         workflow_security.check_release_workflows()
 
+    def test_setup_pixi_without_install_rejects_install_only_inputs(self) -> None:
+        invalid_inputs = ("cache: true", "locked: true")
+        good_block = "          cache: false\n          run-install: false"
+        for workflow_name in (
+            "release.yml",
+            "community-publish.yml",
+            "community-verify.yml",
+        ):
+            baseline = self._workflow(workflow_name)
+            self.assertIn(good_block, baseline)
+            for invalid_input in invalid_inputs:
+                with self.subTest(
+                    workflow=workflow_name,
+                    invalid_input=invalid_input,
+                ):
+                    mutated = baseline.replace(
+                        good_block,
+                        f"          {invalid_input}\n          run-install: false",
+                        1,
+                    )
+                    self._reject(
+                        workflow_name,
+                        mutated,
+                        "setup-pixi.*run-install",
+                    )
+
     def test_protected_environments_cannot_be_removed(self) -> None:
         self._reject(
             "release.yml",
