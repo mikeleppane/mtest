@@ -1483,7 +1483,7 @@ def build_matrix() -> list[Check]:
             "§19",
             ["version"],
             0,
-            out_has=["mtest 0.6.0"],
+            out_has=["mtest 1.0.0"],
         ),
         # Outcomes + FROZEN exit codes (§9,§10). CRASH must stay distinct from
         # FAIL (§10).
