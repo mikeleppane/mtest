@@ -13,6 +13,9 @@ build:
   number: @@MTEST_BUILD_NUMBER@@
   skip:
     - linux and aarch64
+  files:
+    - bin/mtest
+    - share/mtest/companions/assertions/src/mtest/**
   script:
     interpreter: bash
     content:
@@ -24,6 +27,8 @@ requirements:
   build:
     - mojo ==1.0.0b2
     - clang ==18.1.8
+  host:
+    - mojo-compiler ==1.0.0b2
   run:
     - mojo-compiler ==1.0.0b2
 

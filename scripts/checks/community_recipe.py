@@ -23,7 +23,9 @@ class SharedRecipeFacts:
     name: str
     version: str
     build_number: int
+    packaged_files: tuple[str, ...]
     build_requirements: tuple[str, ...]
+    host_requirements: tuple[str, ...]
     run_requirements: tuple[str, ...]
     license: str
     license_file: str
@@ -37,14 +39,10 @@ def _one(text: str, pattern: str, label: str) -> str:
     return str(matches[0])
 
 
-def _requirements(text: str, section: str) -> tuple[str, ...]:
-    requirements = _one(
-        text,
-        rf"^  {section}:\n((?:    - .+\n)+)",
-        f"{section} requirements",
-    )
+def _indented_list(text: str, key: str, label: str) -> tuple[str, ...]:
+    block = _one(text, rf"^  {key}:\n((?:    - .+\n)+)", label)
     return tuple(
-        line.removeprefix("    - ") for line in requirements.rstrip("\n").splitlines()
+        line.removeprefix("    - ") for line in block.rstrip("\n").splitlines()
     )
 
 
@@ -53,8 +51,10 @@ def _facts(text: str) -> SharedRecipeFacts:
         name=_one(text, r"^  name: ([^\n]+)$", "package name"),
         version=_one(text, r'^  version: "([^"]+)"$', "context version"),
         build_number=int(_one(text, r"^  number: ([0-9]+)$", "build number")),
-        build_requirements=_requirements(text, "build"),
-        run_requirements=_requirements(text, "run"),
+        packaged_files=_indented_list(text, "files", "packaged files"),
+        build_requirements=_indented_list(text, "build", "build requirements"),
+        host_requirements=_indented_list(text, "host", "host requirements"),
+        run_requirements=_indented_list(text, "run", "run requirements"),
         license=_one(text, r"^  license: ([^\n]+)$", "license"),
         license_file=_one(text, r"^  license_file: ([^\n]+)$", "license file"),
         homepage=_one(text, r"^  homepage: ([^\n]+)$", "homepage"),

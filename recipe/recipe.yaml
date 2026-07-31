@@ -26,6 +26,16 @@ source:
 build:
   number: 0
   script: build.sh
+  # Closed inventory of what mtest itself installs. Declaring `mojo-compiler`
+  # under `host` puts it in $PREFIX for the build, and activating it writes
+  # `share/max/firstActivation` there; without this list that marker is a new
+  # prefix file and rattler-build packages it. Both globs are rooted in paths
+  # mtest owns, so a foreign file can never enter the artifact and a file this
+  # recipe stops installing fails the packaged-inventory test rather than
+  # silently vanishing.
+  files:
+    - bin/mtest
+    - share/mtest/companions/assertions/src/mtest/**
 
 requirements:
   # Build-time only: the isolated env this script runs in. Pinned to the same
@@ -34,6 +44,16 @@ requirements:
   build:
     - mojo ==1.0.0b2
     - clang ==18.1.8
+  # Host: the target-side libraries the produced binary links against, named
+  # here as the package that owns them rather than being taken implicitly from
+  # the build environment. `mojo` above is the compiler driver that EXECUTES on
+  # the build machine; `mojo-compiler` owns `libKGENCompilerRTShared` and the
+  # runtime closure the binary carries a load command for, so the link inputs
+  # and the run dependency below now name one package at one pinned version.
+  # Both gate targets build natively, so this section changes no resolution
+  # today; it states the contract the `run` dependency has always relied on.
+  host:
+    - mojo-compiler ==1.0.0b2
   # Run-time: the installed `mtest` binary is NOT loader-clean on its own, in
   # either object format. On linux-64 `readelf -d` shows a direct ELF NEEDED on
   # `libKGENCompilerRTShared.so`; on osx-arm64 `otool -L` shows the

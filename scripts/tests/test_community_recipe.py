@@ -369,6 +369,8 @@ class CommunityRecipeDriftTests(unittest.TestCase):
             ("mtest --help >/dev/null", "mtest help >/dev/null"),
             ("mtest --no-config test_smoke.mojo", "mtest test_smoke.mojo"),
             ("    - mikeleppane", "    - someone-else"),
+            ("  maintainers:", "  recipe-maintainers:"),
+            ("    - bin/mtest", "    - bin/other"),
         )
         with tempfile.TemporaryDirectory(prefix="mtest-recipe-drift-") as raw_tmp:
             root = Path(raw_tmp)
