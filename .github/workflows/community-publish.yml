@@ -307,8 +307,11 @@ jobs:
           artifact="$(sed -n '1p' "$RUNNER_TEMP/mtest-artifacts.txt")"
           pixi run cph list "$artifact" \
             > "$RUNNER_TEMP/mtest-package-contents.txt"
-          PYTHONPATH="$GITHUB_WORKSPACE/mtest" pixi run python \
-            -m scripts.release.community \
+          # Run from the workspace root: upstream/scripts/__init__.py is a
+          # regular package, and an interpreter started inside upstream binds
+          # `scripts` to it before consulting PYTHONPATH.
+          cd "$GITHUB_WORKSPACE"
+          PYTHONPATH=mtest python3 -m scripts.release.community \
             archive-license \
             --listing "$RUNNER_TEMP/mtest-package-contents.txt" \
             --expected info/licenses/LICENSE
