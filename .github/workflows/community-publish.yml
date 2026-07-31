@@ -83,7 +83,7 @@ jobs:
             test "$WORKFLOW_RUN_CONCLUSION" = "success"
             test "$WORKFLOW_RUN_BRANCH" = "main"
             test "$WORKFLOW_RUN_EVENT" = "workflow_dispatch"
-            [[ "$WORKFLOW_RUN_PATH" == ".github/workflows/release.yml@"* ]]
+            test "$WORKFLOW_RUN_PATH" = ".github/workflows/release.yml"
             release_workflow_id="$(
               gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml" \
                 --jq .id

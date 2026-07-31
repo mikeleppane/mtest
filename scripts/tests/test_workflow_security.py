@@ -330,14 +330,15 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertEqual(community.count(ci_endpoint), 1)
         self.assertNotIn('.name == "CI"', release + community)
         self.assertEqual(release.count(".workflow_id == $workflow_id"), 2)
+        # The run object's `path` is the bare workflow file path; the `@ref`
+        # form belongs to `github.workflow_ref`, not here. An `@`-prefixed
+        # match can never be true, which silently disabled both bindings.
         self.assertEqual(
-            release.count(
-                '(.path | startswith(".github/workflows/community-publish.yml@"))'
-            ),
+            release.count('.path == ".github/workflows/community-publish.yml"'),
             2,
         )
         self.assertIn(
-            '[[ "$WORKFLOW_RUN_PATH" == ".github/workflows/release.yml@"* ]]',
+            'test "$WORKFLOW_RUN_PATH" = ".github/workflows/release.yml"',
             community,
         )
         self.assertIn(

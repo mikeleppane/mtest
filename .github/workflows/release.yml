@@ -96,7 +96,7 @@ jobs:
             --arg sha "$GITHUB_SHA" \
             --argjson workflow_id "$candidate_workflow_id" '
             .workflow_id == $workflow_id and
-            (.path | startswith(".github/workflows/community-publish.yml@")) and
+            .path == ".github/workflows/community-publish.yml" and
             .event == "workflow_dispatch" and
             .head_branch == "main" and
             .head_sha == $sha and
@@ -260,7 +260,7 @@ jobs:
             --arg sha "$VALIDATED_SHA" \
             --argjson workflow_id "$candidate_workflow_id" '
             .workflow_id == $workflow_id and
-            (.path | startswith(".github/workflows/community-publish.yml@")) and
+            .path == ".github/workflows/community-publish.yml" and
             .event == "workflow_dispatch" and
             .head_branch == "main" and
             .head_sha == $sha and

@@ -472,10 +472,7 @@ def check_release_workflows(repo_root: Path = REPO_ROOT) -> None:
             )
     if (
         release.count(".workflow_id == $workflow_id") != 2
-        or release.count(
-            '(.path | startswith(".github/workflows/community-publish.yml@"))'
-        )
-        != 2
+        or release.count('.path == ".github/workflows/community-publish.yml"') != 2
     ):
         raise AssertionError("candidate workflow identity is not revalidated exactly")
     forbidden_release_mutations = ("git push", "git tag", "git reset")
@@ -513,9 +510,7 @@ def check_release_workflows(repo_root: Path = REPO_ROOT) -> None:
     if created_false_noop not in community:
         raise AssertionError("created false release must be an explicit no-op")
     if (
-        community.count(
-            '[[ "$WORKFLOW_RUN_PATH" == ".github/workflows/release.yml@"* ]]'
-        )
+        community.count('test "$WORKFLOW_RUN_PATH" = ".github/workflows/release.yml"')
         != 1
         or community.count(
             'gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml"'
