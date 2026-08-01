@@ -401,6 +401,35 @@ class IndentedCodeTests(unittest.TestCase):
             (),
         )
 
+    def test_code_nested_deeper_than_a_list_item_is_reported(self) -> None:
+        """A list item absorbs its marker's width, not four further spaces."""
+        self.assertEqual(
+            docs_parity.indented_code_lines(
+                "- item\n\n      mtest tests/\n", "example"
+            ),
+            (3,),
+        )
+
+    def test_code_nested_deeper_than_a_container_is_reported(self) -> None:
+        """An admonition absorbs four spaces; eight is a code block inside it."""
+        self.assertEqual(
+            docs_parity.indented_code_lines(
+                '!!! note "Heads up"\n\n        mtest tests/\n', "example"
+            ),
+            (3,),
+        )
+
+    def test_an_ordered_list_marker_shifts_the_code_column_by_its_width(self) -> None:
+        """The threshold follows the marker, so `1. ` and `- ` differ."""
+        self.assertEqual(
+            docs_parity.indented_code_lines("1. item\n\n    still it\n", "example"),
+            (),
+        )
+        self.assertEqual(
+            docs_parity.indented_code_lines("1. item\n\n       code\n", "example"),
+            (3,),
+        )
+
     def test_a_site_page_carrying_one_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-docs-parity-") as raw:
             root = Path(raw)
@@ -415,6 +444,75 @@ class IndentedCodeTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(AssertionError, "indented code block"):
                 docs_parity.check_site_blocks_are_all_declared(root)
+
+    def test_a_site_page_nesting_one_under_a_list_is_rejected(self) -> None:
+        """The bypass the container rule opened: indent past the item's body."""
+        with tempfile.TemporaryDirectory(prefix="mtest-docs-parity-") as raw:
+            root = Path(raw)
+            for relative in TRACKED_FILES:
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(docs_parity.REPO_ROOT / relative, target)
+            page = root / "docs" / "ci.md"
+            page.write_text(
+                page.read_text(encoding="utf-8")
+                + "\n- Then run it:\n\n      mtest tests/ --shard hash:1/4\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(AssertionError, "indented code block"):
+                docs_parity.check_site_blocks_are_all_declared(root)
+
+
+class RawHtmlCodeTests(unittest.TestCase):
+    """The other unfenced construct that reaches a reader as code."""
+
+    def test_a_raw_pre_element_is_reported(self) -> None:
+        self.assertEqual(
+            docs_parity.raw_html_code_lines(
+                "Run this:\n\n<pre>mtest tests/</pre>\n", "example"
+            ),
+            (3,),
+        )
+
+    def test_every_refused_element_is_reported(self) -> None:
+        for element in ("pre", "code", "textarea"):
+            with self.subTest(element=element):
+                self.assertEqual(
+                    docs_parity.raw_html_code_lines(
+                        f"<{element}>mtest tests/</{element}>\n", "example"
+                    ),
+                    (1,),
+                )
+
+    def test_raw_html_inside_a_fence_is_that_block_body(self) -> None:
+        """A fenced block showing HTML is a declared mirror, not a container."""
+        self.assertEqual(
+            docs_parity.raw_html_code_lines(
+                "```html\n<pre>markup</pre>\n```\n", "example"
+            ),
+            (),
+        )
+
+    def test_a_site_page_carrying_one_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-docs-parity-") as raw:
+            root = Path(raw)
+            for relative in TRACKED_FILES:
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(docs_parity.REPO_ROOT / relative, target)
+            page = root / "docs" / "ci.md"
+            page.write_text(
+                page.read_text(encoding="utf-8")
+                + "\n<pre>pixi run mtest tests --shard hash:1/4</pre>\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(AssertionError, "raw-HTML code container"):
+                docs_parity.check_site_blocks_are_all_declared(root)
+
+    def test_no_site_page_uses_one_today(self) -> None:
+        for page in docs_parity.SITE_PAGES:
+            text = (docs_parity.REPO_ROOT / page).read_text(encoding="utf-8")
+            self.assertEqual(docs_parity.raw_html_code_lines(text, str(page)), (), page)
 
 
 class PageSweepTests(unittest.TestCase):
@@ -556,6 +654,31 @@ class SiteConfigurationTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 with self.assertRaisesRegex(AssertionError, excluded):
+                    docs_parity.check_site_configuration(root)
+
+    def test_a_configuration_that_re_includes_an_excluded_directory_is_rejected(
+        self,
+    ) -> None:
+        """`exclude_docs` is gitignore-style, so a negation puts one back.
+
+        The exclusion line stays exactly where it was, so the check that reads
+        it still finds it. One added line publishes every internal document,
+        including the tracked design document that nothing else hides.
+        """
+        for excluded in docs_parity.EXCLUDED_DOC_DIRECTORIES:
+            with (
+                self.subTest(excluded=excluded),
+                tempfile.TemporaryDirectory(prefix="mtest-docs-config-") as raw,
+            ):
+                root = Path(raw)
+                config = self._configuration(root)
+                config.write_text(
+                    config.read_text(encoding="utf-8").replace(
+                        f"  {excluded}\n", f"  {excluded}\n  !{excluded}\n", 1
+                    ),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(AssertionError, "re-includes"):
                     docs_parity.check_site_configuration(root)
 
     def test_a_build_outside_the_ignored_directory_is_rejected(self) -> None:

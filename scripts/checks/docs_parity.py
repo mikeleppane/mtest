@@ -34,14 +34,18 @@ Four further assertions stop the gate from being defeated by simply not using
 it:
 
 - every fenced block on every site page must be declared, so a block added to a
-  page without a declaration fails rather than passing unexamined;
+  page without a declaration fails rather than passing unexamined, and the two
+  ways of reaching a reader with code that carries no fence — an unfenced
+  indented block and a raw-HTML `<pre>`, `<code>` or `<textarea>` — are refused
+  outright, because neither offers anything to declare;
 - an index that names nothing — a page ordinal past the end, a README section
   that was renamed, an ordinal past the end of that section — fails rather than
   silently matching no block;
 - every tracked page under `docs/` must be a declared site page or a named
   reference document, so a new page cannot be ungated from birth; and
-- the site configuration must still exclude the internal working directories
-  and must navigate only to declared pages.
+- the site configuration must still exclude the internal working directories,
+  must not re-include one through a gitignore-style negation, and must navigate
+  only to declared pages.
 
 The last two exist because a hand-written list gates only what someone
 remembered. Inverting the question against the tracked-file inventory is the
@@ -123,6 +127,17 @@ The configuration's exclusion is therefore the only thing keeping either off a
 public site, and this module asserts it rather than trusting it.
 """
 
+NEGATION_PREFIX = "!"
+"""How a gitignore-style pattern re-includes what an earlier one excluded.
+
+`exclude_docs` is a gitignore-style list, so `plans/` followed by `!plans/`
+excludes the directory and then puts it back. Checking only that the two
+directory names appear leaves that one-line bypass open, and it reads as an
+addition rather than as a deletion in a diff. This configuration has no use for
+a re-inclusion at all, so any entry beginning with this prefix is refused
+rather than analysed for which path it re-admits.
+"""
+
 FENCE_RE = re.compile(r"^(?P<indent>[ \t]*)(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
 """One fence line, opening or closing, at any indentation.
 
@@ -146,8 +161,26 @@ content; a command inside one still has to be fenced, and the fence is found
 wherever it sits because `FENCE_RE` accepts indentation.
 """
 
+CONTAINER_BODY_INDENT = 4
+"""Leading spaces a block container gives its own body.
+
+A container absorbs exactly this much indentation and no more. Anything deeper
+is indentation the author added *inside* the body, which renders as a code
+block there exactly as it would at the top level, so the two have to be told
+apart rather than both waved through as "content".
+"""
+
 LIST_MARKER_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s")
 """A list item, whose indented continuation lines are content, not code."""
+
+RAW_HTML_CODE_RE = re.compile(r"(?i)<\s*(?:pre|code|textarea)\b")
+"""A raw-HTML element that renders as code without being a fenced block.
+
+Markdown passes raw HTML through, so `<pre>` reaches a reader as a code block
+while carrying no fence for the scanner to find and no info string to declare —
+the same hole an indented block opens, spelled differently. No site page uses
+one today, so refusing them outright costs nothing and closes the shape.
+"""
 
 H2_RE = re.compile(r"^## (?P<heading>.+?)\s*$")
 """One README H2 heading, whose text names the section owning a source block."""
@@ -392,6 +425,13 @@ def indented_code_lines(text: str, label: str) -> tuple[int, ...]:
     an admonition or a content tab. A command inside either still has to be
     fenced, and `FENCE_RE` finds that fence at whatever depth it sits.
 
+    Each of those absorbs a known amount of indentation and no more — a list
+    item as far as its own marker runs, a container `CONTAINER_BODY_INDENT` —
+    and code is measured from there rather than from column zero. Waving a line
+    through for merely sitting under a list item is how an undeclared command
+    reaches a reader: four further spaces inside a list item render as a code
+    block on the published page just as they would at the top level.
+
     Args:
         text: The document text to scan.
         label: How to name the document in a failure message.
@@ -420,17 +460,67 @@ def indented_code_lines(text: str, label: str) -> tuple[int, ...]:
             previous_blank = True
             continue
         indent = len(stripped) - len(stripped.lstrip(" "))
-        opens_container = last_content.strip().startswith(CONTAINER_OPENERS)
-        if (
-            indent >= INDENTED_CODE_INDENT
-            and previous_blank
-            and not LIST_MARKER_RE.match(last_content)
-            and not opens_container
-        ):
+        if indent >= _code_indent(last_content) and previous_blank:
             offending.append(index + 1)
         previous_blank = False
         last_content = stripped
     return tuple(offending)
+
+
+def _code_indent(opener: str) -> int:
+    """Return the indentation at which a line after `opener` renders as code.
+
+    Args:
+        opener: The last non-blank line before the one being classified, with
+            its line ending removed.
+
+    Returns:
+        The first column at which content renders as an indented code block.
+        A list item and a block container each shift that column right by the
+        body indentation they own, so a line is content while it stays inside
+        that body and code once it goes deeper.
+    """
+    marker = LIST_MARKER_RE.match(opener)
+    if marker is not None:
+        return len(marker.group(0)) + INDENTED_CODE_INDENT
+    if opener.strip().startswith(CONTAINER_OPENERS):
+        container_indent = len(opener) - len(opener.lstrip(" "))
+        return container_indent + CONTAINER_BODY_INDENT + INDENTED_CODE_INDENT
+    return INDENTED_CODE_INDENT
+
+
+def raw_html_code_lines(text: str, label: str) -> tuple[int, ...]:
+    """Return the one-based line numbers of raw-HTML code containers.
+
+    Markdown passes raw HTML straight through, so `<pre>`, `<code>` and
+    `<textarea>` reach the reader as code while the fence scanner sees nothing:
+    no fence to locate, no info string to compare, nothing to declare. That is
+    the same escape an indented block opens, in a spelling the indentation rule
+    cannot see.
+
+    Args:
+        text: The document text to scan.
+        label: How to name the document in a failure message.
+
+    Returns:
+        The one-based line number of each offending line, in document order.
+
+    Raises:
+        AssertionError: If a fence is opened and never closed. Raw HTML written
+            *inside* a fenced block is that block's content, so the fences have
+            to be located before anything can be reported.
+    """
+    lines = text.splitlines(keepends=True)
+    inside = {
+        index
+        for fence in _scan_fences(lines, label)
+        for index in range(fence.open_index, fence.close_index + 1)
+    }
+    return tuple(
+        index + 1
+        for index, raw in enumerate(lines)
+        if index not in inside and RAW_HTML_CODE_RE.search(raw)
+    )
 
 
 def readme_section_blocks(
@@ -596,15 +686,17 @@ def check_site_blocks_are_all_declared(repo_root: Path = REPO_ROOT) -> None:
     page could grow a second, undeclared copy of a command and pass. Every
     fenced block on every site page is therefore required to appear in
     `PARITY_BLOCKS`, which makes not declaring a copy a failure rather than an
-    escape, and an unfenced indented code block is refused outright because it
-    reaches the reader the same way while offering nothing to declare.
+    escape, and the two constructs that render as code without being a fence —
+    an unfenced indented block and a raw-HTML container — are refused outright
+    because each reaches the reader the same way while offering nothing to
+    declare.
 
     Args:
         repo_root: Repository root holding the site pages.
 
     Raises:
         AssertionError: If a site page holds a fenced block that no declaration
-            names, or an indented code block.
+            names, an indented code block, or a raw-HTML code container.
     """
     declared = {(block.page, block.page_index) for block in PARITY_BLOCKS}
     for page in SITE_PAGES:
@@ -629,6 +721,15 @@ def check_site_blocks_are_all_declared(repo_root: Path = REPO_ROOT) -> None:
                 + ", ".join(f"{page}:{number}" for number in indented)
                 + "; it renders as code but carries no fence to declare, so write "
                 "it as a fenced block and mirror it, or as ordinary prose"
+            )
+        raw_html = raw_html_code_lines(text, str(page))
+        if raw_html:
+            raise AssertionError(
+                "raw-HTML code container on a site page: "
+                + ", ".join(f"{page}:{number}" for number in raw_html)
+                + "; markdown passes it through to the reader as code while this "
+                "gate sees no fence and no info string, so write it as a fenced "
+                "block and mirror it"
             )
 
 
@@ -761,6 +862,13 @@ def check_site_configuration(repo_root: Path = REPO_ROOT) -> None:
             f"{MKDOCS_PATH} no longer excludes " + ", ".join(missing) + " from the "
             "built site; those directories hold internal working material and "
             "mkdocs builds from the working tree, so the site would publish it"
+        )
+    re_included = [name for name in excluded if name.startswith(NEGATION_PREFIX)]
+    if re_included:
+        raise AssertionError(
+            f"{MKDOCS_PATH} re-includes " + ", ".join(re_included) + " into the "
+            "built site; `exclude_docs` is gitignore-style, so a negation puts "
+            "back what an earlier line excluded while leaving that line in place"
         )
     declared = {path.name for path in (*SITE_PAGES, *REFERENCE_PAGES)}
     unknown = [name for name in nav if name not in declared]
