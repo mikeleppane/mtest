@@ -55,6 +55,7 @@ class WorkflowInventoryAndCodeQLTests(unittest.TestCase):
                 Path(".github/workflows/codeql.yml"),
                 Path(".github/workflows/community-publish.yml"),
                 Path(".github/workflows/community-verify.yml"),
+                Path(".github/workflows/docs.yml"),
                 Path(".github/workflows/release.yml"),
             },
         )
@@ -223,6 +224,186 @@ class WorkflowInventoryAndCodeQLTests(unittest.TestCase):
                 1,
             ),
             "action pin mismatch",
+        )
+
+
+class DocsWorkflowTests(unittest.TestCase):
+    """Fail-closed privilege, trigger, and build-entry policy for the site.
+
+    The documentation workflow is the only one in the repository that is handed
+    `pages: write` and `id-token: write`, so every mutation below is a way that
+    authority, or the pull-request lane that exercises the build before it, could
+    be lost in a diff nobody reads closely.
+    """
+
+    def _workflow(self) -> str:
+        """Return the live documentation workflow text."""
+        return (
+            workflow_security.REPO_ROOT / ".github" / "workflows" / "docs.yml"
+        ).read_text(encoding="utf-8")
+
+    def _reject(self, mutated: str, pattern: str) -> None:
+        """Require the documentation oracle to reject one mutated workflow."""
+        self.assertNotEqual(mutated, self._workflow())
+        with tempfile.TemporaryDirectory(prefix="mtest-docs-security-") as raw_tmp:
+            repo = Path(raw_tmp)
+            workflow_path = repo / ".github" / "workflows" / "docs.yml"
+            workflow_path.parent.mkdir(parents=True)
+            workflow_path.write_text(mutated, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, pattern):
+                workflow_security.check_docs_workflow(repo)
+
+    def test_live_docs_workflow_is_least_privilege(self) -> None:
+        workflow_security.check_docs_workflow()
+
+    def test_pages_actions_pin_reviewed_revisions(self) -> None:
+        self.assertEqual(
+            workflow_security.UPLOAD_PAGES_ARTIFACT_ACTION_SHA,
+            "fc324d3547104276b827a68afc52ff2a11cc49c9",
+        )
+        self.assertEqual(
+            workflow_security.DEPLOY_PAGES_ACTION_SHA,
+            "cd2ce8fcbc39b97be8ca5fce6e763baed58fa128",
+        )
+        self.assertEqual(
+            workflow_security.REVIEWED_ACTION_PINS["actions/upload-pages-artifact"],
+            {(workflow_security.UPLOAD_PAGES_ARTIFACT_ACTION_SHA, "v5.0.0")},
+        )
+        self.assertEqual(
+            workflow_security.REVIEWED_ACTION_PINS["actions/deploy-pages"],
+            {(workflow_security.DEPLOY_PAGES_ACTION_SHA, "v5.0.0")},
+        )
+        workflow = self._workflow()
+        self.assertIn(
+            "actions/upload-pages-artifact@"
+            f"{workflow_security.UPLOAD_PAGES_ARTIFACT_ACTION_SHA} # v5.0.0",
+            workflow,
+        )
+        self.assertIn(
+            f"actions/deploy-pages@{workflow_security.DEPLOY_PAGES_ACTION_SHA}"
+            " # v5.0.0",
+            workflow,
+        )
+
+    def test_pages_action_moved_off_its_reviewed_revision_is_rejected(self) -> None:
+        mutated = self._workflow().replace(
+            workflow_security.DEPLOY_PAGES_ACTION_SHA,
+            "0" * 40,
+            1,
+        )
+        with tempfile.TemporaryDirectory(prefix="mtest-docs-pin-") as raw_tmp:
+            repo = Path(raw_tmp)
+            workflow_root = repo / ".github" / "workflows"
+            workflow_root.mkdir(parents=True)
+            (workflow_root / "docs.yml").write_text(mutated, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "reviewed action pin"):
+                workflow_security.check_action_pins(repo)
+
+    def test_docs_workflow_is_in_the_governed_inventory(self) -> None:
+        self.assertIn(
+            Path(".github/workflows/docs.yml"),
+            workflow_security.WORKFLOW_PATHS,
+        )
+
+    def test_build_must_run_on_pull_requests(self) -> None:
+        self._reject(
+            self._workflow().replace("  pull_request:\n", "", 1),
+            "trigger mismatch",
+        )
+
+    def test_pull_request_trigger_cannot_be_narrowed_to_a_branch(self) -> None:
+        self._reject(
+            self._workflow().replace(
+                "  pull_request:\n",
+                "  pull_request:\n    branches: [main]\n",
+                1,
+            ),
+            "pull_request must not be narrowed",
+        )
+
+    def test_deploy_must_stay_conditioned_on_a_main_push(self) -> None:
+        workflow = self._workflow()
+        marker = (
+            "    if: github.event_name == 'push' && github.ref == 'refs/heads/main'\n"
+        )
+        self.assertIn(marker, workflow)
+        for label, mutated in {
+            "removed": workflow.replace(marker, "", 1),
+            "widened": workflow.replace(
+                marker,
+                "    if: github.event_name == 'push'\n",
+                1,
+            ),
+        }.items():
+            with self.subTest(condition=label):
+                self._reject(mutated, "deploy condition mismatch")
+
+    def test_top_level_permissions_cannot_widen(self) -> None:
+        self._reject(
+            self._workflow().replace(
+                "permissions:\n  contents: read\n",
+                "permissions:\n  contents: write\n",
+                1,
+            ),
+            "workflow permission mismatch",
+        )
+
+    def test_publication_permissions_cannot_escape_the_deploy_job(self) -> None:
+        workflow = self._workflow()
+        self._reject(
+            workflow.replace(
+                "permissions:\n  contents: read\n",
+                "permissions:\n  contents: read\n  pages: write\n",
+                1,
+            ),
+            "workflow permission mismatch",
+        )
+        self._reject(
+            workflow.replace(
+                "    timeout-minutes: 15\n",
+                "    timeout-minutes: 15\n"
+                "    permissions:\n"
+                "      contents: read\n"
+                "      id-token: write\n",
+                1,
+            ),
+            "permission override membership",
+        )
+
+    def test_continue_on_error_is_rejected(self) -> None:
+        self._reject(
+            self._workflow().replace(
+                "        run: pixi run docs-build\n",
+                "        run: pixi run docs-build\n        continue-on-error: true\n",
+                1,
+            ),
+            "continue-on-error",
+        )
+
+    def test_build_must_go_through_the_documentation_task(self) -> None:
+        self._reject(
+            self._workflow().replace(
+                "        run: pixi run docs-build",
+                "        run: uvx mkdocs build",
+                1,
+            ),
+            "build entry mismatch",
+        )
+
+    def test_uploaded_directory_must_be_the_configured_site_output(self) -> None:
+        self._reject(
+            self._workflow().replace(
+                "          path: build/site",
+                "          path: .",
+                1,
+            ),
+            "artifact path mismatch",
+        )
+
+    def test_deploy_cannot_run_without_the_build(self) -> None:
+        self._reject(
+            self._workflow().replace("    needs: build\n", "", 1),
+            "must wait for the build job",
         )
 
 

@@ -14,10 +14,10 @@ What review genuinely cannot see:
   this repository at all, so every external action must be pinned to an
   immutable commit SHA.
 - A one-line `permissions:` escalation buried in a large workflow PR is
-  exactly the kind of change line-by-line review misses, so the CodeQL and
-  release/publication workflows' job permissions are pinned exactly, and
-  `continue-on-error:` (which would let a failing security or gating step
-  report green) is forbidden outright.
+  exactly the kind of change line-by-line review misses, so the CodeQL,
+  documentation, and release/publication workflows' job permissions are pinned
+  exactly, and `continue-on-error:` (which would let a failing security or
+  gating step report green) is forbidden outright.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ WORKFLOW_PATHS = {
     Path(".github/workflows/codeql.yml"),
     Path(".github/workflows/community-publish.yml"),
     Path(".github/workflows/community-verify.yml"),
+    Path(".github/workflows/docs.yml"),
     Path(".github/workflows/release.yml"),
 }
 """Every hosted workflow tracked by the repository."""
@@ -50,6 +51,16 @@ SETUP_UV_ACTION_SHA = "c771a70e6277c0a99b617c7a806ffedaca235ff9"
 
 DOWNLOAD_ARTIFACT_ACTION_SHA = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
 
+UPLOAD_PAGES_ARTIFACT_ACTION_SHA = "fc324d3547104276b827a68afc52ff2a11cc49c9"
+"""Reviewed immutable actions/upload-pages-artifact v5.0.0 revision."""
+
+DEPLOY_PAGES_ACTION_SHA = "cd2ce8fcbc39b97be8ca5fce6e763baed58fa128"
+"""Reviewed immutable actions/deploy-pages v5.0.0 revision.
+
+This is the one action in the repository that is ever handed `pages: write` and
+`id-token: write`, so it is also the one whose revision matters most.
+"""
+
 ACTION_USE_RE = re.compile(
     r"^\s*(?:-\s*)?uses:\s*"
     r"(?P<action>[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]+)"
@@ -59,8 +70,10 @@ ACTION_USE_RE = re.compile(
 
 REVIEWED_ACTION_PINS = {
     "actions/checkout": {(CHECKOUT_ACTION_SHA, "v7.0.1")},
+    "actions/deploy-pages": {(DEPLOY_PAGES_ACTION_SHA, "v5.0.0")},
     "actions/download-artifact": {(DOWNLOAD_ARTIFACT_ACTION_SHA, "v8.0.1")},
     "actions/upload-artifact": {(UPLOAD_ARTIFACT_ACTION_SHA, "v7.0.1")},
+    "actions/upload-pages-artifact": {(UPLOAD_PAGES_ARTIFACT_ACTION_SHA, "v5.0.0")},
     "astral-sh/setup-uv": {(SETUP_UV_ACTION_SHA, "v9.0.0")},
     "github/codeql-action/analyze": {(CODEQL_ACTION_SHA, "v4.37.3")},
     "github/codeql-action/init": {(CODEQL_ACTION_SHA, "v4.37.3")},
@@ -137,6 +150,27 @@ def _action_step_inputs(text: str, action: str) -> list[tuple[int, dict[str, str
                 inputs[match.group(1)] = match.group(2)
         steps.append((index + 1, inputs))
     return steps
+
+
+def _permission_grants(block: str) -> tuple[str, ...]:
+    """Return the grants in one `permissions:` body, in order.
+
+    `_yaml_block` carries trailing comment lines along with the body it
+    returns, because a comment cannot end a YAML block. A grant list has to
+    compare equal against the grants alone, so those are dropped here rather
+    than at each call site.
+
+    Args:
+        block: The indented body under a `permissions:` header.
+
+    Returns:
+        Each `<scope>: <level>` grant, stripped, in the order written.
+    """
+    return tuple(
+        stripped
+        for line in block.splitlines()
+        if (stripped := line.strip()) and not stripped.startswith("#")
+    )
 
 
 def check_workflow_inventory(repo_root: Path = REPO_ROOT) -> None:
@@ -352,6 +386,119 @@ def check_codeql_workflow(repo_root: Path = REPO_ROOT) -> None:
     if python_category != ['"/language:python"']:
         raise AssertionError(
             f"CodeQL Python analysis category mismatch: actual={python_category}"
+        )
+
+
+def check_docs_workflow(repo_root: Path = REPO_ROOT) -> None:
+    """Pin the documentation workflow's privilege, triggers, and build entry.
+
+    This is the only workflow in the repository that is ever granted
+    `pages: write` and `id-token: write`, and the release oracle below reads
+    three named files, so without this check a publishing workflow would be
+    governed by nothing but the inventory and the action pins. What it holds:
+
+    - the top-level grant stays `contents: read`, and the deploy job is the one
+      place that widens it;
+    - the deploy job publishes only from a push to main, so a pull request from
+      a fork reaches the build and stops;
+    - the site builds on `pull_request`, because a site that no longer builds
+      must fail on the change that broke it rather than on main afterwards;
+    - the build shells out to the documentation-build task and nothing else, so
+      the pinned tool versions cannot differ between here and a local run;
+    - no `continue-on-error:`, which on the build step would turn a strict build
+      into decoration.
+
+    Args:
+        repo_root: Repository root holding `.github/workflows/docs.yml`.
+
+    Raises:
+        AssertionError: The workflow violates one of the properties above.
+        OSError: The workflow could not be read.
+    """
+    workflow_path = repo_root / ".github" / "workflows" / "docs.yml"
+    workflow = workflow_path.read_text(encoding="utf-8")
+    if not workflow.startswith("name: Docs\n"):
+        raise AssertionError("docs workflow name mismatch")
+    if "continue-on-error:" in workflow:
+        raise AssertionError("docs workflow must not contain continue-on-error")
+
+    expected_triggers = ["pull_request", "push", "workflow_dispatch"]
+    triggers = _yaml_mapping_keys(_yaml_block(workflow, "on:"), 2)
+    if triggers != expected_triggers:
+        raise AssertionError(
+            "docs trigger mismatch: the site must build on every pull request, "
+            f"expected={expected_triggers}, actual={triggers}"
+        )
+    if _yaml_block(workflow, "  pull_request:").strip():
+        raise AssertionError("docs trigger mismatch: pull_request must not be narrowed")
+    if _yaml_block(workflow, "  push:").strip() != "branches: [main]":
+        raise AssertionError("docs trigger mismatch: push must target only main")
+
+    top_level_permissions = _permission_grants(_yaml_block(workflow, "permissions:"))
+    if top_level_permissions != ("contents: read",):
+        raise AssertionError(
+            "docs workflow permission mismatch: "
+            f"expected=('contents: read',), actual={top_level_permissions}"
+        )
+
+    expected_jobs = ["build", "deploy"]
+    jobs = _yaml_mapping_keys(_yaml_block(workflow, "jobs:"), 2)
+    if jobs != expected_jobs:
+        raise AssertionError(
+            f"docs job membership mismatch: expected={expected_jobs}, actual={jobs}"
+        )
+    build_job = _yaml_block(workflow, "  build:")
+    deploy_job = _yaml_block(workflow, "  deploy:")
+
+    job_permission_headers = re.findall(r"^    permissions:$", workflow, re.MULTILINE)
+    if job_permission_headers != ["    permissions:"]:
+        raise AssertionError("docs job permission override membership changed")
+    expected_deploy_permissions = ("contents: read", "pages: write", "id-token: write")
+    deploy_permissions = _permission_grants(_yaml_block(deploy_job, "    permissions:"))
+    if deploy_permissions != expected_deploy_permissions:
+        raise AssertionError(
+            "docs deploy permission mismatch: "
+            f"expected={expected_deploy_permissions}, actual={deploy_permissions}"
+        )
+    for privilege in ("pages: write", "id-token: write"):
+        if workflow.count(privilege) != 1 or deploy_job.count(privilege) != 1:
+            raise AssertionError(
+                f"docs publication permission escaped the deploy job: {privilege}"
+            )
+
+    expected_condition = [
+        "github.event_name == 'push' && github.ref == 'refs/heads/main'"
+    ]
+    condition = re.findall(r"^    if: (.+)$", deploy_job, re.MULTILINE)
+    if condition != expected_condition:
+        raise AssertionError(
+            "docs deploy condition mismatch: the deploy job must publish only "
+            f"from a main push, expected={expected_condition}, actual={condition}"
+        )
+    if re.findall(r"^    needs: (.+)$", deploy_job, re.MULTILINE) != ["build"]:
+        raise AssertionError("docs deploy job must wait for the build job")
+    environment = _yaml_mapping_keys(_yaml_block(deploy_job, "    environment:"), 6)
+    if environment != ["name", "url"] or "      name: github-pages" not in deploy_job:
+        raise AssertionError("docs deploy job must use the github-pages environment")
+
+    expected_runs = ["pixi run docs-build"]
+    runs = re.findall(r"^\s+run: (.+)$", workflow, re.MULTILINE)
+    build_runs = re.findall(r"^\s+run: (.+)$", build_job, re.MULTILINE)
+    if runs != expected_runs or build_runs != expected_runs:
+        raise AssertionError(
+            "docs build entry mismatch: the site must be built through the "
+            f"documentation-build task alone, expected={expected_runs}, "
+            f"actual={runs}"
+        )
+
+    uploads = [
+        inputs.get("path")
+        for _, inputs in _action_step_inputs(workflow, "actions/upload-pages-artifact")
+    ]
+    if uploads != ["build/site"]:
+        raise AssertionError(
+            "docs artifact path mismatch: the uploaded directory must be the "
+            f"configured site output, actual={uploads}"
         )
 
 
@@ -586,6 +733,7 @@ def main() -> int:
         check_workflow_inventory()
         check_action_pins()
         check_codeql_workflow()
+        check_docs_workflow()
         check_release_workflows()
     except (AssertionError, OSError) as exc:
         print(f"workflow-security-check: FAIL: {exc}", file=sys.stderr)

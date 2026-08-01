@@ -365,14 +365,17 @@ harness-unit-check = "python -m scripts.tests.test_process_watchdog && python -m
 # hosted lane should say which. Note `test_python_quality` runs here while
 # `py-check` itself runs nowhere in the floor (see its comment): the version pin
 # and the fail-loudly-without-uvx policy are asserted without the tool being
-# present. `test_version` runs here while `version-check` itself runs first in
+# present. `test_build_site` sits beside it for exactly that reason: the
+# documentation-tool version pins and the same fail-loudly policy are properties
+# of the tree, provable here, while `docs-build` itself needs the tool and a
+# hosted job that supplies it. `test_version` runs here while `version-check` itself runs first in
 # the floor, for the same reason: the oracle's rejections are proved against
 # fabricated trees, not against this one. `docs_parity` DOES run here rather
 # than only in the floor: it reads documents alone, needs no compiler or built
 # binary, and the drift it catches — a documentation-site page whose command no
 # longer matches the README block it mirrors — is a policy violation of exactly
 # the kind this group exists to name.
-repo-policy-check = "python -m scripts.tests.test_version && python -m scripts.tests.test_docs_parity && python -m scripts.checks.docs_parity && python -m scripts.tests.test_layout && python -m scripts.checks.layout && python -m scripts.tests.test_workflow_security && python -m scripts.checks.workflow_security && python -m scripts.tests.test_python_quality && python -m scripts.tests.test_annotations_oracle"
+repo-policy-check = "python -m scripts.tests.test_version && python -m scripts.tests.test_docs_parity && python -m scripts.checks.docs_parity && python -m scripts.tests.test_layout && python -m scripts.checks.layout && python -m scripts.tests.test_workflow_security && python -m scripts.checks.workflow_security && python -m scripts.tests.test_python_quality && python -m scripts.tests.test_build_site && python -m scripts.tests.test_annotations_oracle"
 
 # Release tooling: the community recipe (through the `recipe-check` edge, which
 # Pixi runs first), then the attestation schema, the GitHub release-state and

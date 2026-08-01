@@ -1,0 +1,94 @@
+name: Docs
+
+# The site builds on every pull request, not only on a main push. `docs-build`
+# is deliberately outside `pixi run ci` because it needs a tool the pixi
+# environment does not pin, so this workflow is the only thing in the project
+# that ever builds the site. Building it on main alone would let a site that no
+# longer builds merge first and fail afterwards, on a commit with no pull
+# request to blame; deploying from main alone is what keeps that pull-request
+# lane free of publication authority.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege at the top; the deploy job alone widens it.
+# `scripts/checks/workflow_security.py` pins both halves of that sentence,
+# because a one-line escalation in a workflow diff is exactly what review misses.
+permissions:
+  contents: read
+
+# A Pages deployment is a repository-wide singleton, so runs queue rather than
+# cancel: a cancelled deployment can leave the published site mid-swap, and the
+# newest commit on main is the one that must win, not the fastest.
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build site
+    runs-on: ubuntu-24.04
+    # Generous against a wedged pixi install or uv fetch, never fitted to what
+    # the build costs today, so an ordinary slowdown stays a passing run.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # No later step needs the token, and it would sit in `.git/config`.
+          persist-credentials: false
+
+      - name: Set up pixi
+        uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f # v0.10.0
+        with:
+          # Install exactly what pixi.lock pins; fail if the lock is stale.
+          locked: true
+          cache: true
+
+      # uv is pinned exactly as the Python quality job pins it, and for the same
+      # reason: uv resolves the pinned documentation tool and provisions the
+      # interpreter it runs under, so an unpinned uv could move the published
+      # site with no line changing in this repository. Its download cache is off
+      # because the versions it fetches are already determined.
+      - name: Set up uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.17"
+          enable-cache: false
+
+      # The task, never the underlying command. scripts/docs/build_site.py owns
+      # the pinned documentation-tool versions, the strict flag, and the output
+      # location; re-spelling that invocation here would let what CI publishes
+      # drift away from what a contributor can reproduce locally.
+      - name: Build the documentation site
+        run: pixi run docs-build
+
+      # `build/site` is the output location mkdocs.yml configures. The upload
+      # runs on pull requests too: an artifact that cannot be packed is a
+      # failure worth learning about before the merge, not during a deployment.
+      - name: Upload the site
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: build/site
+
+  deploy:
+    name: deploy to Pages
+    needs: build
+    # Publication authority is confined to a main push. A pull request from a
+    # fork reaches the build job and stops there.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # The only widening in this workflow, and the only job that can publish.
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy the uploaded site
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
