@@ -38,9 +38,13 @@ test-only subprocess actors under `tests/fixtures/exec/`.
   and a hermetic build come first.
 - Toolchain flakiness is expected. Plan for it with build-not-run, cache
   quarantine, and crash-class retries.
-- The README is the front door. Every command and its output is executed
-  against the built binary before commit, the CLI section matches `--help`
-  exactly, and the architecture section carries a mermaid layering diagram.
+- The README is the front door. Two parts of it are executed against the built
+  binary: its command-line listing, which `readme-help-check` compares with
+  `--help` output, and its assertion example, which is run and matched against
+  its documented outcome. Everything else — the install sequence, the captured
+  run transcripts, the workflows to paste — is reviewed rather than executed,
+  so write it as something a reader can follow and verify it by following it.
+  The architecture section carries a mermaid layering diagram.
   State limits as plain facts, never as roadmap, progress, or planning
   narrative, and never let something the build cannot do appear as if it can.
   Its feature and limitation bullets lead with a bolded label on purpose, for
@@ -213,10 +217,15 @@ pixi run fmt-check         # format both languages, then reject any tree diff
 pixi run py-fmt            # ruff's safe lint fixes, then format Python in place
 pixi run py-check          # ruff format/lint and mypy --strict over scripts/ and
                            #   tests/fixtures/exec/ (needs `uv`; see below)
-pixi run version-check     # manifest, CLI, and shipped-version identity
+pixi run docs-build        # build the documentation site with pinned mkdocs
+                           #   (needs `uv`; not in `pixi run ci`; see below)
+pixi run version-check     # manifest, CLI, and shipped-version identity; every
+                           #   public transcript; every restatement of the Mojo
+                           #   pin, swept over reader-facing documentation
 pixi run harness-unit-check     # harness self-tests: runner, watchdog, comparators,
                                 #   and the two memory-lane oracles (no tools needed)
-pixi run repo-policy-check      # layout, workflow security, tool pins, annotations
+pixi run repo-policy-check      # layout, documentation-site parity, workflow and
+                                #   published-action security, tool pins, annotations
 pixi run release-tooling-check  # attestations, release, publication, public verify
 pixi run harness-check     # the aggregate of the three groups above
 pixi run coverage-capability  # tripwire: the pinned toolchain must have no coverage
@@ -331,10 +340,13 @@ Hosted CI never invokes `pixi run ci`. It gives each lane its own matrix cell,
 and `pixi.toml` plus `.github/workflows/ci.yml` are the only sources of truth
 for that topology: a tampered task graph or matrix row is visible in the PR
 diff, so nothing mirrors it in Python. `scripts/checks/workflow_security.py`
-instead pins the properties a diff cannot show, namely that every external
-action resolves to a reviewed commit SHA and that the CodeQL and
-release/publication workflows keep their reviewed job permissions and forbid
-`continue-on-error:`.
+instead pins the properties a diff cannot show: every external action resolves
+to a reviewed commit SHA; the CodeQL, documentation, and release/publication
+workflows keep their reviewed job permissions and forbid `continue-on-error:`;
+and the composite action this repository publishes runs exactly the reviewed
+invocation, in bash, with no expression substituted into its script text. That
+last one is the only file here that executes inside someone else's job under
+someone else's token, and it appears in no workflow diff at all.
 
 Hosted CI runs the same logical floor as two platform-local chains:
 
@@ -401,6 +413,14 @@ Hosted CI runs the same logical floor as two platform-local chains:
   leaves a permanently pending context in its place.
 - `native-check` depends on `postfork-check`, so the native gate alone cannot
   skip the child call-graph audit.
+- `.github/workflows/docs.yml` is a lane of its own, in neither platform
+  matrix. It builds the documentation site on every pull request and deploys it
+  to Pages only from a push to main, and it is the only workflow ever granted
+  `pages: write` and `id-token: write`. It is also the only place the site is
+  ever built, because `docs-build` runs mkdocs through `uv`, which the pixi
+  environment does not pin, so the job that supplies the tool is the job that
+  may run the task. Neither of its jobs is among the 20 required contexts named
+  above.
 
 ### Cross-compiling before commit
 
@@ -528,6 +548,7 @@ Scope vocabulary (authoritative; keep in sync as modules emerge):
 | `bench` | `benchmarks/` |
 | `docs` | docstrings, `docs/` |
 | `build` | packaging |
+| `release` | release and publication tooling: `scripts/release/`, the version and shipped-claim gates, and the workflows that drive them |
 | `ci` | `.github/workflows/` |
 | `skills` | `.agents/skills/` |
 
