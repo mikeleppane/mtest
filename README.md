@@ -199,8 +199,9 @@ same way this repository pins its own workflows, and yours should be too: a tag
 can be moved onto different code, a commit SHA cannot.
 
 To spread one suite across a matrix, give each cell a shard and a distinct
-report name. The union of every shard's selection is exactly the unsharded
-selection, and no test runs twice:
+report name, using the `hash:M/N` syntax described under
+[Sharding a CI matrix](#sharding-a-ci-matrix). The union of every shard's
+selection is exactly the unsharded selection, and no test runs twice:
 
 ```yaml
     strategy:
