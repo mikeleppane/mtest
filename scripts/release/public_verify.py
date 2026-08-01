@@ -283,7 +283,7 @@ def verify_installed_package(
         (str(mtest), "--help"),
         environment,
         returncode=0,
-        marker="Usage:",
+        marker="usage: mtest",
     )
     for fixture, returncode, marker in (
         (passing, 0, "PASS"),
