@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 import unittest
 
@@ -19,6 +20,23 @@ from scripts.checks import version
 
 
 GATED_FILES = (*version.TRANSCRIPT_SITES, Path("pixi.toml"))
+DECLARED_FILES = (*version.TRANSCRIPT_SITES, *version.TRANSCRIPT_EXEMPT)
+
+
+def _clone_file(root: Path, relative: Path) -> Path:
+    """Copy one repository file into a temporary root, creating its parents.
+
+    Args:
+        root: Directory standing in for the repository root.
+        relative: Repository-relative path to copy.
+
+    Returns:
+        The path of the copy.
+    """
+    target = root / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(version.REPO_ROOT / relative, target)
+    return target
 
 
 class TranscriptGateTests(unittest.TestCase):
@@ -85,6 +103,19 @@ class TranscriptGateTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "mtest-run.svg"):
                 version.check_transcript_sites(root)
 
+    def test_a_vanished_site_is_reported_not_crashed(self) -> None:
+        """A deleted or renamed site must fail the gate, not raise OSError.
+
+        `main()` catches `AssertionError` alone, so an unguarded `read_text`
+        would end the run in a traceback instead of `version-check: FAIL`.
+        """
+        with tempfile.TemporaryDirectory(prefix="mtest-version-") as raw:
+            root = Path(raw)
+            self._clone(root)
+            (root / "docs" / "cli-contract.md").unlink()
+            with self.assertRaisesRegex(AssertionError, "cannot read"):
+                version.check_transcript_sites(root)
+
     def test_the_trailing_guard_lengthens_a_malformed_match(self) -> None:
         """The guard forbids a prefix match; it does not suppress the match.
 
@@ -107,6 +138,185 @@ class TranscriptGateTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(AssertionError, r"1\.0\.01"):
                 version.check_transcript_sites(root)
+
+
+class TranscriptSweepTests(unittest.TestCase):
+    """The sweep that stops an undeclared surface from being ungated."""
+
+    def _repository(self, root: Path) -> None:
+        """Build a temporary git repository holding every declared file.
+
+        Args:
+            root: Empty directory to initialize as a repository.
+        """
+        subprocess.run(["git", "-C", str(root), "init", "-q"], check=True)
+        for relative in DECLARED_FILES:
+            _clone_file(root, relative)
+        subprocess.run(
+            ["git", "-C", str(root), "add", "--", *(str(p) for p in DECLARED_FILES)],
+            check=True,
+        )
+
+    def _track(self, root: Path, relative: str, text: str) -> None:
+        """Write one extra file into the temporary repository and track it.
+
+        Args:
+            root: The temporary repository root.
+            relative: Repository-relative path of the new file.
+            text: Its contents.
+        """
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        subprocess.run(["git", "-C", str(root), "add", "--", relative], check=True)
+
+    def test_repository_has_no_undeclared_transcript(self) -> None:
+        version.check_no_undeclared_transcripts()
+
+    def test_sites_and_exemptions_do_not_overlap(self) -> None:
+        self.assertEqual(
+            set(version.TRANSCRIPT_SITES) & set(version.TRANSCRIPT_EXEMPT), set()
+        )
+
+    def test_a_new_documentation_page_with_a_transcript_is_rejected(self) -> None:
+        """The case the hand-written site list cannot catch on its own."""
+        with tempfile.TemporaryDirectory(prefix="mtest-sweep-") as raw:
+            root = Path(raw)
+            self._repository(root)
+            self._track(
+                root,
+                "docs/getting-started.md",
+                f"# Getting started\n\n```\nmtest {version.EXPECTED_VERSION}\n```\n",
+            )
+            with self.assertRaisesRegex(AssertionError, "docs/getting-started.md"):
+                version.check_no_undeclared_transcripts(root)
+
+    def test_an_undeclared_page_is_rejected_even_at_the_right_version(self) -> None:
+        """Being current is not the same as being gated; both sweeps must fire."""
+        with tempfile.TemporaryDirectory(prefix="mtest-sweep-") as raw:
+            root = Path(raw)
+            self._repository(root)
+            self._track(root, "docs/tour.md", f"mtest {version.EXPECTED_VERSION}\n")
+            version.check_transcript_sites(root)
+            with self.assertRaisesRegex(AssertionError, "docs/tour.md"):
+                version.check_no_undeclared_transcripts(root)
+
+    def test_an_untracked_file_is_not_a_surface(self) -> None:
+        """Scratch files are not published, and must not turn the gate red."""
+        with tempfile.TemporaryDirectory(prefix="mtest-sweep-") as raw:
+            root = Path(raw)
+            self._repository(root)
+            (root / "scratch.md").write_text(
+                f"mtest {version.EXPECTED_VERSION}\n", encoding="utf-8"
+            )
+            version.check_no_undeclared_transcripts(root)
+
+    def test_an_exemption_that_stopped_matching_is_rejected(self) -> None:
+        """A standing exemption for a file that no longer needs one is a hole."""
+        with tempfile.TemporaryDirectory(prefix="mtest-sweep-") as raw:
+            root = Path(raw)
+            self._repository(root)
+            exempt = version.TRANSCRIPT_EXEMPT[-1]
+            (root / exempt).write_text("nothing here\n", encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, str(exempt)):
+                version.check_no_undeclared_transcripts(root)
+
+    def test_a_tree_without_git_fails_closed(self) -> None:
+        """No inventory means no verdict, so the sweep refuses rather than pass."""
+        with (
+            tempfile.TemporaryDirectory(prefix="mtest-sweep-") as raw,
+            self.assertRaisesRegex(AssertionError, "cannot list tracked files"),
+        ):
+            version.check_no_undeclared_transcripts(Path(raw))
+
+
+class MojoPinGateTests(unittest.TestCase):
+    """Every restatement of the toolchain pin against the one manifest."""
+
+    def _clone(self, root: Path) -> None:
+        """Copy the pin sites and the pixi manifest into a temporary root.
+
+        Args:
+            root: Empty directory standing in for the repository root.
+        """
+        for relative in (*version.MOJO_PIN_SITES, Path("pixi.toml")):
+            _clone_file(root, relative)
+
+    def test_repository_pin_claims_match_the_manifest(self) -> None:
+        version.check_mojo_pin_sites()
+
+    def test_every_pin_site_states_at_least_one_claim(self) -> None:
+        pinned = version._manifest_mojo_pin(version.REPO_ROOT / "pixi.toml")
+        for relative in version.MOJO_PIN_SITES:
+            path = version.REPO_ROOT / relative
+            self.assertTrue(path.is_file(), path)
+            claims = version.MOJO_PIN_CLAIM_RE.findall(path.read_text(encoding="utf-8"))
+            self.assertNotEqual(claims, [], path)
+            self.assertEqual(set(claims), {pinned}, path)
+
+    def test_a_stale_claim_in_any_site_is_rejected(self) -> None:
+        for relative in version.MOJO_PIN_SITES:
+            with (
+                self.subTest(site=str(relative)),
+                tempfile.TemporaryDirectory(prefix="mtest-pin-") as raw,
+            ):
+                root = Path(raw)
+                self._clone(root)
+                site = root / relative
+                text = site.read_text(encoding="utf-8")
+                # Rewrite the first claim itself, not the first occurrence of
+                # the version string: in AGENTS.md that is prose about how the
+                # pinned toolchain behaves, which is deliberately not a claim.
+                match = version.MOJO_PIN_CLAIM_RE.search(text)
+                if match is None:
+                    self.fail(f"{relative} states no toolchain claim to mutate")
+                start, end = match.span(1)
+                site.write_text(text[:start] + "0.0.0b0" + text[end:], encoding="utf-8")
+                with self.assertRaisesRegex(AssertionError, r"0\.0\.0b0"):
+                    version.check_mojo_pin_sites(root)
+
+    def test_a_manifest_bump_that_forgets_the_recipes_is_rejected(self) -> None:
+        """The shipped case: the package would request the old compiler."""
+        with tempfile.TemporaryDirectory(prefix="mtest-pin-") as raw:
+            root = Path(raw)
+            self._clone(root)
+            pixi = root / "pixi.toml"
+            pinned = version._manifest_mojo_pin(pixi)
+            pixi.write_text(
+                pixi.read_text(encoding="utf-8").replace(
+                    f'mojo = "=={pinned}', 'mojo = "==9.9.9b9', 1
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(AssertionError, "recipe/recipe.yaml"):
+                version.check_mojo_pin_sites(root)
+
+    def test_a_site_that_states_no_toolchain_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-pin-") as raw:
+            root = Path(raw)
+            self._clone(root)
+            (root / "CONTRIBUTING.md").write_text("nothing here\n", encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "CONTRIBUTING.md"):
+                version.check_mojo_pin_sites(root)
+
+    def test_a_vanished_site_is_reported_not_crashed(self) -> None:
+        """`main()` catches AssertionError only, so a deleted file must be one."""
+        with tempfile.TemporaryDirectory(prefix="mtest-pin-") as raw:
+            root = Path(raw)
+            self._clone(root)
+            (root / "CHANGELOG.md").unlink()
+            with self.assertRaisesRegex(AssertionError, "cannot read"):
+                version.check_mojo_pin_sites(root)
+
+    def test_narration_about_the_pinned_toolchain_is_not_a_claim(self) -> None:
+        """Prose about behavior at a version must not become a version site."""
+        self.assertEqual(
+            version.MOJO_PIN_CLAIM_RE.findall(
+                "because 1.0.0b2 polymorphism is static, and `mojo package` "
+                "does not exist in 1.0.0b2"
+            ),
+            [],
+        )
 
 
 class SupportMatrixGateTests(unittest.TestCase):

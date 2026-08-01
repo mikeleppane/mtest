@@ -45,10 +45,15 @@ mojo-version = "mojo --version"
 # ships. Also proves every rendered transcript in `README.md`,
 # `docs/cli-contract.md`, and the two banner SVGs matches the release, and that
 # a site rendering none at all fails too, because a restructure that dropped the
-# transcripts would otherwise pass vacuously. Finally checks the README support
-# matrix names the Mojo toolchain this manifest actually pins. Runs first
-# because drift here means every later gate is validating a lie about which
-# release it covers.
+# transcripts would otherwise pass vacuously. Sweeps every tracked file for a
+# rendered version so a new page carrying one cannot be ungated from birth: an
+# undeclared match fails until it is named a site or an explicit exemption.
+# Finally holds every restatement of the Mojo pin -- both conda recipes, the
+# recipe build script, and the prose in the README, the contract, the changelog,
+# the contributing guide, and the agent guide -- against the one pin above, so a
+# toolchain bump cannot leave the shipped package asking for the old compiler.
+# Runs first because drift here means every later gate is validating a lie about
+# which release it covers.
 version-check = "python -m scripts.checks.version"
 
 # The write side of `version-check`: rewrite the release version across all nine

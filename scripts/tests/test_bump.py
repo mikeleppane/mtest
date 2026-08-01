@@ -50,8 +50,16 @@ class BumpSiteTests(unittest.TestCase):
     def test_every_site_holds_the_release_version(self) -> None:
         self.assertEqual(bump.current_version(), version.EXPECTED_VERSION)
 
-    def test_writer_and_gate_agree_on_the_transcript_set(self) -> None:
-        """Every gated transcript site is written, with the gate's own pattern."""
+    def test_each_gated_site_is_written_with_the_gates_own_pattern(self) -> None:
+        """The writer reuses the gate's pattern object rather than a copy of it.
+
+        This holds by construction while `bump.SITES` is built from
+        `TRANSCRIPT_SITES`, and it exists to fail the day someone reintroduces a
+        local pattern there. The direction that can catch a real divergence
+        today is `test_sites_name_the_nine_files_that_carry_the_release`, which
+        pins the writer's list against literal paths rather than against the
+        gate.
+        """
         written = {
             site.path.relative_to(bump.REPO_ROOT): site.pattern for site in bump.SITES
         }
