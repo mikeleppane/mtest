@@ -11,12 +11,24 @@ inputs:
     description: >-
       Additional mtest flags, appended verbatim. Every mtest flag is reachable
       here; none is promoted to its own input, so this action cannot drift from
-      the command-line contract.
+      the command-line contract. Both inputs reach the shell as environment
+      variables and are split on whitespace, so a value containing spaces
+      cannot be held together by quoting it here.
     required: false
     default: ""
 
 runs:
   using: composite
   steps:
+    # The inputs are passed as environment variables and referenced as shell
+    # variables, never interpolated into the script text. GitHub substitutes an
+    # expression before bash parses the line, so an input taken from a
+    # pull-request title or a branch name would otherwise be executed as shell
+    # code in the consumer's job, under the consumer's token. Unquoted
+    # expansion is deliberate: it keeps the documented word-splitting that lets
+    # `args` carry several flags.
     - shell: bash
-      run: pixi run mtest ${{ inputs.paths }} ${{ inputs.args }}
+      env:
+        MTEST_PATHS: ${{ inputs.paths }}
+        MTEST_ARGS: ${{ inputs.args }}
+      run: pixi run mtest $MTEST_PATHS $MTEST_ARGS
