@@ -21,8 +21,9 @@ What review genuinely cannot see:
 - The composite action this repository publishes runs in someone else's job,
   under someone else's token, and appears in no workflow diff here at all. It
   is reviewed on the same terms as anything else that runs in a job: what its
-  steps actually execute, in which shell, with which expressions substituted
-  into the script text, and with no way to report green after a failing run.
+  steps actually execute, in which shell, which environment names they bind,
+  with which expressions substituted into the script text, and with no way to
+  report green after a failing run.
 """
 
 from __future__ import annotations
@@ -68,6 +69,24 @@ an expression on a `run:` line is a command-injection sink: a consumer writing
 the inputs through `env:` and expanding them as shell variables keeps the
 documented word-splitting while leaving nothing for the substitution to inject
 into, and pinning these two lines is what stops the sink from coming back.
+"""
+
+PUBLISHED_ACTION_ENV_KEYS = ("MTEST_PATHS", "MTEST_ARGS")
+"""The only environment keys the composite may bind, in order.
+
+Constraining what an `env:` line may *substitute* leaves what it may *name*
+open, and the name alone is enough to run code. GitHub executes a
+`shell: bash` step as `bash --noprofile --norc -eo pipefail`, and `--norc` does
+not suppress `BASH_ENV`: a non-interactive bash sources whatever that variable
+names before it reads the script. So a static, expression-free
+`BASH_ENV: ./hook.sh` would execute arbitrary code in the consumer's job ahead
+of the reviewed command while satisfying every other rule here, and `PATH`,
+`LD_PRELOAD` and `SHELLOPTS` each reach the same place by a different route.
+
+This pins the whole key set rather than rejecting the names known to be
+dangerous today. An allow-list of dangerous names is a race against every
+future runner image and shell release, and losing it is silent; an exact key
+set fails closed on a name nobody here has read, whatever it turns out to do.
 """
 
 CREDENTIAL_REFERENCE_RE = re.compile(
@@ -172,6 +191,34 @@ def _yaml_mapping_keys(block: str, indent: int) -> list[str]:
         for line in block.splitlines()
         if (match := pattern.match(line)) is not None
     ]
+
+
+def _env_keys(block: str) -> list[str]:
+    """Return every key bound by every `env:` mapping in one block, in order.
+
+    Args:
+        block: The YAML body to scan, at whatever indentation it sits.
+
+    Returns:
+        One entry per key under every `env:` header found, in document order.
+        A line the scanner cannot read as `KEY: value` yields the whole line,
+        so an unreadable binding is rejected by the caller's comparison rather
+        than dropped from it.
+    """
+    lines = block.splitlines()
+    keys: list[str] = []
+    for index, line in enumerate(lines):
+        if line.strip() != "env:":
+            continue
+        header_indent = len(line) - len(line.lstrip(" "))
+        for candidate in lines[index + 1 :]:
+            body = candidate.lstrip(" ")
+            if not body or body.startswith("#"):
+                continue
+            if len(candidate) - len(body) <= header_indent:
+                break
+            keys.append(body.split(":", 1)[0].strip())
+    return keys
 
 
 def _action_step_inputs(text: str, action: str) -> list[tuple[int, dict[str, str]]]:
@@ -600,6 +647,11 @@ def check_published_action(repo_root: Path = REPO_ROOT) -> None:
     - `${{ }}` expressions appear only on `PUBLISHED_ACTION_EXPRESSION_LINES`.
       An expression is substituted into the script text before bash sees it, so
       one on a `run:` line executes whatever a consumer passed in;
+    - the `env:` keys are exactly `PUBLISHED_ACTION_ENV_KEYS`. Pinning what a
+      binding may substitute leaves what it may name unconstrained, and the
+      name alone runs code: bash reads `BASH_ENV` even under `--norc`, so a
+      static binding that no expression rule can object to would execute ahead
+      of the reviewed command in the consumer's job;
     - no `continue-on-error:`, no step-level `if:`, and no `|| true`, each of
       which would let a failing test run report green in a consumer's workflow —
       the exact outcome the product exists to prevent;
@@ -683,6 +735,14 @@ def check_published_action(repo_root: Path = REPO_ROOT) -> None:
             "bash parses it, so the published action may carry one only on the "
             f"reviewed environment lines: expected="
             f"{list(PUBLISHED_ACTION_EXPRESSION_LINES)}, actual={expressions}"
+        )
+    env_keys = _env_keys(runs_block)
+    if env_keys != list(PUBLISHED_ACTION_ENV_KEYS):
+        raise AssertionError(
+            "the published action may bind only the reviewed environment "
+            "keys: a name bash acts on before it reads the script, such as "
+            "BASH_ENV, runs code without substituting anything, so expected="
+            f"{list(PUBLISHED_ACTION_ENV_KEYS)}, actual={env_keys}"
         )
 
     for line_number, line in enumerate(action.splitlines(), start=1):

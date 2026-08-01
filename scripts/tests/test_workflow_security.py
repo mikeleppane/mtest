@@ -539,6 +539,51 @@ class PublishedActionTests(unittest.TestCase):
             "reviewed environment lines",
         )
 
+    def test_an_unreviewed_environment_key_is_rejected(self) -> None:
+        """A key can run code without substituting anything into the script.
+
+        `shell: bash` runs as `bash --noprofile --norc -eo pipefail`, and
+        `--norc` does not suppress `BASH_ENV`: a non-interactive bash sources
+        whatever it names before reading the script. Each binding below is
+        static, so the expression rule sees nothing to object to, the reviewed
+        command is untouched, and the step still fails the consumer's job on a
+        failing run — every existing rule passes while the consumer executes
+        the attacker's file first.
+        """
+        for label, binding in {
+            "BASH_ENV": "        BASH_ENV: ./hook.sh\n",
+            "LD_PRELOAD": "        LD_PRELOAD: ./evil.so\n",
+        }.items():
+            with self.subTest(key=label):
+                self._reject(
+                    self._action().replace("      env:\n", f"      env:\n{binding}", 1),
+                    "only the reviewed environment keys",
+                )
+
+    def test_an_environment_block_at_another_depth_is_rejected(self) -> None:
+        """The rule reads every `env:` under `runs:`, not only the reviewed one.
+
+        Anchoring on the step's own indentation would leave a binding written
+        at any other depth unread, and unread is indistinguishable from absent.
+        """
+        self._reject(
+            self._action().replace(
+                "  steps:\n",
+                "  steps:\n    env:\n      BASH_ENV: ./hook.sh\n",
+                1,
+            ),
+            "only the reviewed environment keys",
+        )
+
+    def test_the_reviewed_environment_keys_are_the_two_inputs(self) -> None:
+        """The rule is an exact set, so it cannot be satisfied vacuously."""
+        self.assertEqual(
+            workflow_security.PUBLISHED_ACTION_ENV_KEYS,
+            ("MTEST_PATHS", "MTEST_ARGS"),
+        )
+        for key in workflow_security.PUBLISHED_ACTION_ENV_KEYS:
+            self.assertIn(f"        {key}: ", self._action())
+
     def test_a_step_in_another_shell_is_rejected(self) -> None:
         self._reject(
             self._action().replace("    - shell: bash\n", "    - shell: pwsh\n", 1),
