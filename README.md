@@ -97,18 +97,24 @@ so the package declares `mojo-compiler ==1.0.0b2` as its sole conda run
 dependency. The native TOML parser is compiled into the shipped binary from
 the pinned vendored source.
 
-The package is not published to a public channel. `package-build` produces
-it into a local channel; `package-check` is a verifier that installs the
-artifact into a fresh scratch environment (not your own) and runs it:
+mtest is published to
+[modular-community](https://prefix.dev/channels/modular-community/packages/mtest)
+for linux-64 and osx-arm64. In a Pixi workspace:
 
 ```console
-$ pixi run package-build   # rattler-build -> build/conda-channel/*.conda
-$ pixi run package-check   # verify: install into a scratch env, run the binary
+$ pixi workspace channel add https://conda.modular.com/max/
+$ pixi workspace channel add https://repo.prefix.dev/modular-community
+$ pixi add mtest
+$ pixi run mtest --version
+mtest 1.0.0
 ```
 
-To use the package in an environment of your own, install `mtest` from
-`build/conda-channel` alongside the Modular and conda-forge channels, so
-the declared Mojo run dependency resolves.
+Three channels have to resolve, and they are the same three the release
+verifier installs from: `https://conda.modular.com/max/` for the pinned
+`mojo-compiler` run dependency, `https://repo.prefix.dev/modular-community`
+for mtest itself, and `conda-forge` — which a Pixi workspace already carries
+by default — for everything underneath. A workspace missing any one of them
+fails to solve.
 
 linux-64 and osx-arm64 are both gated: each has its own blocking CI job that
 builds the package, installs the exact artifact it just built into a fresh
@@ -119,6 +125,82 @@ successes.
 
 To run mtest straight from a checkout instead, see
 [Developing](#developing).
+
+## Your first test
+
+A test file is an ordinary Mojo program: `test_*` functions plus a `main()`
+that hands them to the standard library's `TestSuite`. The import is
+`std.testing` — a bare `from testing import ...` does not resolve on this
+toolchain. Save this as `tests/test_math.mojo`:
+
+```mojo
+"""Arithmetic examples for a first mtest run."""
+
+from std.testing import assert_equal, TestSuite
+
+
+def test_addition() raises:
+    assert_equal(2 + 2, 4)
+
+
+def test_multiplication() raises:
+    assert_equal(3 * 7, 21)
+
+
+def main() raises:
+    TestSuite.discover_tests[__functions_in_module()]().run()
+```
+
+`mtest` builds each test file and runs the resulting binary, so `mojo` has to
+be reachable from the workspace — which it is, because `pixi add mtest` pulled
+in the pinned `mojo-compiler` as a run dependency. `run` is the default
+subcommand, so `mtest tests/` means `mtest run tests/`:
+
+```console
+$ pixi run mtest tests/
+mtest 1.0.0 (mojo)
+root: /tmp/mtest-quickstart   selected: 1 files   excluded: 0
+
+PASS           tests/test_math.mojo            0.03s
+
+===== 2 passed, 0 failed, 0 skipped, builds: 1, cached: 0 (0 excluded, 0 not run) in 1.3s =====
+$ echo $?
+0
+```
+
+The summary counts individual tests, not files: two `test_*` functions in one
+file report as two passes and one build. `builds`/`cached` is the build cache —
+this store was cold, so the file was compiled.
+
+Change that import to a bare `from testing import ...` and the file no longer
+compiles. A file that does not compile is reported as a distinct outcome, not
+as a failure, and the run exits non-zero:
+
+```console
+$ pixi run mtest tests/
+mtest 1.0.0 (mojo)
+root: /tmp/mtest-quickstart   selected: 1 files   excluded: 0
+
+COMPILE-ERROR  tests/test_math.mojo            0.00s
+
+--- COMPILE-ERROR tests/test_math.mojo — mojo build said: ---
+    | /tmp/mtest-quickstart/tests/test_math.mojo:3:6: error: unable to locate module 'testing'
+    | from testing import assert_equal, TestSuite
+    |      ^
+    | mojo: error: failed to parse the provided Mojo source module
+reproduce: mojo build tests/test_math.mojo -o build/bin/tests_stest_umath
+
+
+===== 0 passed, 0 failed, 0 skipped, 1 compile error, builds: 1, cached: 0 (0 excluded, 0 not run) in 1.0s =====
+$ echo $?
+1
+```
+
+The `reproduce:` line is the exact `mojo build` command mtest ran, so a compile
+error is reproducible outside the runner without reconstructing the invocation.
+
+Everything else — selection, retries, timeouts, sharding, the machine
+reporters, and `mtest.toml` — is under [Usage](#usage) below.
 
 ## Assertion diagnostics
 
@@ -1463,6 +1545,19 @@ regenerates the protocol transcripts so the diff is the changelog.
 $ pixi install
 $ pixi run build-bin
 ```
+
+To build and verify the conda package locally, without touching a public
+channel:
+
+```console
+$ pixi run package-build   # rattler-build -> build/conda-channel/*.conda
+$ pixi run package-check   # verify: install into a scratch env, run the binary
+```
+
+`package-check` installs the exact artifact `package-build` just produced into
+a fresh scratch environment — never your own — and runs it, including a
+known-failing fixture, so the built package is proven to report failures
+truthfully.
 
 The contributor workflow, from a focused check to the full local gate:
 
