@@ -47,8 +47,11 @@ release responses.
 
 ## Release procedure
 
-1. Merge the version and contract changes to `main`. This automatically starts
-   `CI` for the exact resulting `main` push.
+1. Merge the version, contract, and `CHANGELOG.md` changes to `main`. The
+   changelog entry names the release version, its date, the Mojo pin, the
+   supported platforms, and — once step 9 passes — where it is published. A
+   release without an entry is not ready to cut. This merge automatically
+   starts `CI` for the exact resulting `main` push.
 2. Without waiting for `CI`, run **Community Publish** from `main` with mode
    `dry-run`, no tag, and build number `0`. Both supported platform builds and
    the linux-aarch64 selector proof must pass. Record the workflow run ID.
@@ -72,8 +75,10 @@ release responses.
    only from the public Modular, modular-community, and conda-forge channels
    on Linux and macOS and exercises the installed runner and assertion
    companion.
-10. Only after public verification passes, update README installation text and
-   release notes to say the package is publicly available.
+10. Only after public verification passes, fill in the release's **Published**
+   subsection in `CHANGELOG.md` with the channel, build number, and artifact
+   names, and confirm the README's Installation section and the release notes
+   say the package is publicly available.
 
 ## Recovery
 
