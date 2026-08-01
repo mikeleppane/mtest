@@ -8,10 +8,13 @@ environment the product builds in untouched. That is the same arrangement
 `scripts/checks/python_quality.py` uses for ruff and mypy, and it is here for
 the same reason.
 
-The versions are exact so the published site is a property of the tree rather
-than of the day. mkdocs and its theme both render markup and emit HTML, so a
-floating version can change every page in the site on its own release schedule,
-with no diff in this repository to explain it.
+The versions are exact because mkdocs and its theme both render markup and emit
+HTML, so a floating version can change every page in the site on its own
+release schedule with no diff in this repository to explain it. What that buys
+is the same renderer, not the same bytes: their transitive dependencies resolve
+to whatever uv finds on the day, and the `uv` doing the resolving is whatever
+is on PATH — the hosted job pins that one itself, a local run does not. Read a
+rebuilt page as produced by the reviewed renderer, not as reproducible.
 
 The cost is the same prerequisite `pixi run py-check` already has: `uv` on
 PATH. This module fails loudly and names the remedy when `uvx` is absent rather

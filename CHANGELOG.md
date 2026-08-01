@@ -14,7 +14,27 @@ matrix under [Installation](README.md#installation).
 
 ## Unreleased
 
-Nothing yet.
+### Added
+
+- A composite GitHub Action at the repository root. `uses: mikeleppane/mtest@v1`
+  with `paths` and `args` replaces writing the invocation out; `args` is
+  appended verbatim, so every flag stays reachable and none is promoted to an
+  input of its own. The action runs mtest and nothing else — the calling
+  workflow still installs the locked environment. `v1` is a major-version
+  alias; pin a commit instead to adopt each release deliberately.
+- A documentation site under `docs/`, built with mkdocs and published to
+  GitHub Pages at <https://mikeleppane.github.io/mtest/>. It carries a landing
+  page, a getting-started path, and a continuous-integration page, and
+  navigates to the command-line contract, the JSON event stream, and the
+  release runbook. The README stays the reference; the site's commands and
+  outputs are mirrored from it rather than retyped.
+
+### Changed
+
+- The README now opens with installation and a first passing run before the
+  rationale, and states the ten-error/ten-warning per-step cap that GitHub
+  applies to inline annotations where the flag is introduced rather than only
+  under its limitations.
 
 ## 1.0.0 — 2026-07-31
 
