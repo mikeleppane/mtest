@@ -427,10 +427,18 @@ def indented_code_lines(text: str, label: str) -> tuple[int, ...]:
 
     Each of those absorbs a known amount of indentation and no more — a list
     item as far as its own marker runs, a container `CONTAINER_BODY_INDENT` —
-    and code is measured from there rather than from column zero. Waving a line
-    through for merely sitting under a list item is how an undeclared command
-    reaches a reader: four further spaces inside a list item render as a code
-    block on the published page just as they would at the top level.
+    which fixes a body column, and code is measured from that column rather
+    than from column zero. The column belongs to the opener, not to the line
+    before, so it survives the blank lines *inside* the body: a container's
+    second and later paragraphs are content on exactly the terms its first one
+    is. It is surrendered only when content appears to the left of it, which is
+    where that body ended.
+
+    Waving a line through for merely sitting under an opener is how an
+    undeclared command reaches a reader, so the column is a floor and not an
+    amnesty: four further spaces inside a list item or a container render as a
+    code block on the published page just as they would at the top level, and
+    are reported there too.
 
     Args:
         text: The document text to scan.
@@ -443,50 +451,63 @@ def indented_code_lines(text: str, label: str) -> tuple[int, ...]:
         AssertionError: If a fence is opened and never closed.
     """
     lines = text.splitlines(keepends=True)
+    fences = _scan_fences(lines, label)
     inside = {
         index
-        for fence in _scan_fences(lines, label)
+        for fence in fences
         for index in range(fence.open_index, fence.close_index + 1)
     }
+    opener_indents = {fence.open_index: len(fence.indent) for fence in fences}
     offending: list[int] = []
     previous_blank = True
-    last_content = ""
+    body_indent = 0
     for index, raw in enumerate(lines):
         stripped = raw.rstrip("\r\n")
         if index in inside:
+            # A fenced block's own lines are declared code and say nothing
+            # about the surrounding body, but where its opening fence sits
+            # does: a fence to the left of the current column closes the body
+            # it was tracking, and skipping the whole block would carry a
+            # stale column past the end of the container it came from.
+            if index in opener_indents:
+                body_indent = min(body_indent, opener_indents[index])
             previous_blank = False
             continue
         if not stripped.strip():
             previous_blank = True
             continue
         indent = len(stripped) - len(stripped.lstrip(" "))
-        if indent >= _code_indent(last_content) and previous_blank:
+        if previous_blank and indent >= body_indent + INDENTED_CODE_INDENT:
             offending.append(index + 1)
+        body_indent = _body_indent(stripped, body_indent)
         previous_blank = False
-        last_content = stripped
     return tuple(offending)
 
 
-def _code_indent(opener: str) -> int:
-    """Return the indentation at which a line after `opener` renders as code.
+def _body_indent(line: str, current: int) -> int:
+    """Return the body column in force after one content line.
 
     Args:
-        opener: The last non-blank line before the one being classified, with
-            its line ending removed.
+        line: A non-blank line outside every fence, with its line ending
+            removed.
+        current: The body column in force before this line.
 
     Returns:
-        The first column at which content renders as an indented code block.
-        A list item and a block container each shift that column right by the
-        body indentation they own, so a line is content while it stays inside
-        that body and code once it goes deeper.
+        The column at which the enclosing body's content starts, so that
+        `INDENTED_CODE_INDENT` beyond it renders as a code block. A list item
+        and a block container each open a body and shift the column right by
+        what they absorb. Any other line keeps the column while it stays
+        inside that body, and gives it up for its own indentation when it sits
+        to the left of it, because content there is no longer in the body the
+        opener started.
     """
-    marker = LIST_MARKER_RE.match(opener)
+    marker = LIST_MARKER_RE.match(line)
     if marker is not None:
-        return len(marker.group(0)) + INDENTED_CODE_INDENT
-    if opener.strip().startswith(CONTAINER_OPENERS):
-        container_indent = len(opener) - len(opener.lstrip(" "))
-        return container_indent + CONTAINER_BODY_INDENT + INDENTED_CODE_INDENT
-    return INDENTED_CODE_INDENT
+        return len(marker.group(0))
+    indent = len(line) - len(line.lstrip(" "))
+    if line.strip().startswith(CONTAINER_OPENERS):
+        return indent + CONTAINER_BODY_INDENT
+    return min(current, indent)
 
 
 def raw_html_code_lines(text: str, label: str) -> tuple[int, ...]:

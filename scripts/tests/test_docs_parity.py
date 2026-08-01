@@ -393,6 +393,79 @@ class IndentedCodeTests(unittest.TestCase):
             (),
         )
 
+    def test_a_second_paragraph_in_an_admonition_is_not_code(self) -> None:
+        """The body column belongs to the opener, not to the line before it.
+
+        Measuring from the previous content line loses the container at the
+        first blank line inside it, so a two-paragraph tip reported its second
+        paragraph as code and told the author to fence prose.
+        """
+        self.assertEqual(
+            docs_parity.indented_code_lines(
+                "!!! note\n\n    First paragraph\n\n    Second paragraph\n",
+                "example",
+            ),
+            (),
+        )
+
+    def test_a_second_paragraph_in_a_list_item_is_not_code(self) -> None:
+        """A list item's body survives the blank line the same way."""
+        self.assertEqual(
+            docs_parity.indented_code_lines(
+                "- item\n\n    first paragraph\n\n    second paragraph\n",
+                "example",
+            ),
+            (),
+        )
+
+    def test_code_after_a_container_paragraph_is_still_reported(self) -> None:
+        """Carrying the body column forward must not amnesty what sits past it.
+
+        Eight spaces render as a code block inside a four-space container body
+        wherever in that body they appear, so a later paragraph is not a place
+        an undeclared command can hide.
+        """
+        self.assertEqual(
+            docs_parity.indented_code_lines(
+                "!!! note\n\n    First paragraph\n\n        mtest tests/\n",
+                "example",
+            ),
+            (5,),
+        )
+
+    def test_the_body_column_is_given_up_when_content_dedents(self) -> None:
+        """A container's column must not outlive the container itself."""
+        self.assertEqual(
+            docs_parity.indented_code_lines(
+                "!!! note\n\n    body\n\nBack at the top level\n\n    mtest tests/\n",
+                "example",
+            ),
+            (7,),
+        )
+
+    def test_a_fence_ends_the_body_it_dedents_out_of(self) -> None:
+        """A fenced block is skipped, but where its opener sits still counts.
+
+        The first fence sits inside the tip and leaves its column standing;
+        the second is at the top level, so what follows is measured from there
+        rather than from a column the container no longer owns.
+        """
+        self.assertEqual(
+            docs_parity.indented_code_lines(
+                "!!! note\n\n    ```console\n    $ x\n    ```\n\n    Still the tip\n",
+                "example",
+            ),
+            (),
+        )
+        self.assertEqual(
+            docs_parity.indented_code_lines(
+                "!!! note\n\n    ```console\n    $ x\n    ```\n\n"
+                "```console\n$ y\n```\n\n    mtest tests/\n",
+                "example",
+            ),
+            (11,),
+        )
+
     def test_indented_lines_inside_a_fence_are_the_block_body(self) -> None:
         self.assertEqual(
             docs_parity.indented_code_lines(
