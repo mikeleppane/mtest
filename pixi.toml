@@ -140,6 +140,16 @@ py-fmt = "python -m scripts.checks.python_quality --fix"
 # why the versions are pinned exactly.
 py-check = "python -m scripts.checks.python_quality"
 
+# Build the documentation site. mkdocs runs through `uvx` at a version pinned
+# in scripts/docs/build_site.py, for the same reason ruff and mypy do: it keeps
+# a documentation tool out of the environment the product compiles in, and a
+# floating version cannot change the published site on its next release. Needs
+# `uv` on PATH and fails loudly rather than skipping when `uvx` is absent, which
+# is why it is not part of `pixi run ci`. The build is `--strict`, so a broken
+# internal link fails it instead of publishing quietly, and `mkdocs.yml` owns
+# the output location (build/site, which .gitignore already covers).
+docs-build = "python -m scripts.docs.build_site"
+
 # Rewrite every real Mojo file in its own invocation. Mojo 1.0.0b2 can stall
 # when one formatter invocation spans several paths. `find -P` does not traverse
 # symlinks; the C-locale sort fixes ordering.
