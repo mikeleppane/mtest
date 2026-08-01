@@ -20,7 +20,9 @@ What review genuinely cannot see:
   gating step report green) is forbidden outright.
 - The composite action this repository publishes runs in someone else's job,
   under someone else's token, and appears in no workflow diff here at all. It
-  is reviewed on the same terms as anything else that runs in a job.
+  is reviewed on the same terms as anything else that runs in a job: what its
+  steps actually execute, in which shell, with which expressions substituted
+  into the script text, and with no way to report green after a failing run.
 """
 
 from __future__ import annotations
@@ -43,6 +45,51 @@ WORKFLOW_PATHS = {
 
 PUBLISHED_ACTION_PATH = Path("action.yml")
 """The composite action this repository publishes, consumed as `@v1`."""
+
+PUBLISHED_ACTION_RUNS = ("pixi run mtest $MTEST_PATHS $MTEST_ARGS",)
+"""The exact shell command the published action is allowed to run, in order.
+
+Pinning the text rather than a shape is what makes the review real. The
+composite runs in a consumer's job under a consumer's token, so "it invokes
+mtest somehow" is not a property anyone can act on; `curl ... | bash` satisfies
+it. One entry also pins the step count, because a second `run:` step would have
+to appear here to pass.
+"""
+
+PUBLISHED_ACTION_EXPRESSION_LINES = (
+    "        MTEST_PATHS: ${{ inputs.paths }}",
+    "        MTEST_ARGS: ${{ inputs.args }}",
+)
+"""The only lines of the composite that may carry a `${{ }}` expression.
+
+GitHub substitutes an expression into the script text before bash parses it, so
+an expression on a `run:` line is a command-injection sink: a consumer writing
+`args: ${{ github.event.pull_request.title }}` would execute the title. Passing
+the inputs through `env:` and expanding them as shell variables keeps the
+documented word-splitting while leaving nothing for the substitution to inject
+into, and pinning these two lines is what stops the sink from coming back.
+"""
+
+CREDENTIAL_REFERENCE_RE = re.compile(
+    r"\bsecrets\s*(?:\.|\[)|\bgithub\s*(?:\.\s*token\b|\[\s*['\"]token['\"]\s*\])"
+)
+"""Any reference to the caller's credentials, in either GitHub expression form.
+
+`secrets.NAME` and `secrets['NAME']` name the same value, as do `github.token`
+and `github['token']`; a substring test for the dotted spelling alone rejects
+the obvious write and accepts the bracket one beside it.
+"""
+
+STEP_CONDITION_RE = re.compile(r"(?m)^\s*(?:-\s*)?if:")
+"""A step-level condition, which can turn a failing test run into a skipped one.
+
+A skipped step is a green step. In a published test runner that is the exact
+outcome the product exists to prevent, so the composite carries no condition at
+all rather than a reviewed one.
+"""
+
+ALWAYS_SUCCEED_RE = re.compile(r"\|\|\s*true\b")
+"""A trailing `|| true`, which discards the runner's exit code."""
 
 CHECKOUT_ACTION_SHA = "3d3c42e5aac5ba805825da76410c181273ba90b1"
 SETUP_PIXI_ACTION_SHA = "a09b6247153796b190642a2b53fac4241043cf6f"
@@ -411,6 +458,11 @@ def check_docs_workflow(repo_root: Path = REPO_ROOT) -> None:
       must fail on the change that broke it rather than on main afterwards;
     - the build shells out to the documentation-build task and nothing else, so
       the pinned tool versions cannot differ between here and a local run;
+    - the deploy job carries exactly one reviewed `actions/deploy-pages` step
+      and no step-level condition. Requiring the upload alone leaves a green
+      `deploy` job that publishes nothing: swap the deploy step for another
+      reviewed action, or condition it away, and every other assertion here
+      still passes while the site silently stops being updated;
     - no `continue-on-error:`, which on the build step would turn a strict build
       into decoration.
 
@@ -507,6 +559,22 @@ def check_docs_workflow(repo_root: Path = REPO_ROOT) -> None:
             f"configured site output, actual={uploads}"
         )
 
+    expected_deploy = [f"actions/deploy-pages@{DEPLOY_PAGES_ACTION_SHA} # v5.0.0"]
+    deploys = re.findall(
+        r"^\s+uses: (actions/deploy-pages@.+)$", deploy_job, re.MULTILINE
+    )
+    if deploys != expected_deploy or workflow.count("actions/deploy-pages@") != 1:
+        raise AssertionError(
+            "docs deploy step mismatch: the deploy job must publish through "
+            "exactly one reviewed deploy-pages step, or it is a green job that "
+            f"publishes nothing, expected={expected_deploy}, actual={deploys}"
+        )
+    if re.search(r"^        if:", deploy_job, re.MULTILINE):
+        raise AssertionError(
+            "docs deploy step mismatch: a step-level condition can skip the "
+            "publication while the deploy job still reports success"
+        )
+
 
 def check_published_action(repo_root: Path = REPO_ROOT) -> None:
     """Review the composite action this repository publishes to consumers.
@@ -522,10 +590,21 @@ def check_published_action(repo_root: Path = REPO_ROOT) -> None:
     - `runs.using: composite`, so the action stays a wrapper around shell steps
       this repository can read rather than a JavaScript or container entry point
       whose behaviour lives in a built artifact;
-    - no `continue-on-error:`, which would let a failing test run report green
-      in a consumer's workflow — the exact outcome the product exists to
-      prevent;
-    - no `secrets.` and no `github.token` reference;
+    - the `run:` lines are exactly `PUBLISHED_ACTION_RUNS`, so what the action
+      executes is reviewed rather than merely constrained. Checking the shape
+      of a composite while never reading its command accepts
+      `curl ... | bash` as readily as the real invocation, which is the highest
+      -risk surface in the repository governed by the weakest rule;
+    - every step declares `shell: bash`, so the command above is parsed by the
+      shell it was written for rather than by whatever a runner defaults to;
+    - `${{ }}` expressions appear only on `PUBLISHED_ACTION_EXPRESSION_LINES`.
+      An expression is substituted into the script text before bash sees it, so
+      one on a `run:` line executes whatever a consumer passed in;
+    - no `continue-on-error:`, no step-level `if:`, and no `|| true`, each of
+      which would let a failing test run report green in a consumer's workflow —
+      the exact outcome the product exists to prevent;
+    - no reference to the caller's credentials, in either the dotted or the
+      bracket expression form;
     - any `uses:` inside it pinned to a 40-hex commit SHA carrying a trailing
       version comment and present in `REVIEWED_ACTION_PINS`, exactly as
       `check_action_pins` requires of the workflows. A relative `./` reference
@@ -553,24 +632,58 @@ def check_published_action(repo_root: Path = REPO_ROOT) -> None:
     """
     action_path = repo_root / PUBLISHED_ACTION_PATH
     action = action_path.read_text(encoding="utf-8")
+    runs_block = _yaml_block(action, "runs:")
 
-    using = re.findall(r"^  using: (.+)$", _yaml_block(action, "runs:"), re.MULTILINE)
+    using = re.findall(r"^  using: (.+)$", runs_block, re.MULTILINE)
     if using != ["composite"]:
         raise AssertionError(
             "the published action must be a composite action: "
             f"expected=['composite'], actual={using}"
+        )
+
+    # Ordered most specific first, so a mutation is diagnosed by the rule that
+    # names what is wrong with it rather than by whichever rule it also trips.
+    credential = CREDENTIAL_REFERENCE_RE.search(action)
+    if credential is not None:
+        raise AssertionError(
+            "the published action must contain no credential reference: "
+            f"{credential.group(0)!r}"
         )
     if "continue-on-error:" in action:
         raise AssertionError(
             "the published action must not contain continue-on-error: a step "
             "that fails must fail the consumer's job"
         )
-    for credential in ("secrets.", "github.token"):
-        if credential in action:
-            raise AssertionError(
-                "the published action must contain no credential reference: "
-                f"{credential}"
-            )
+    if STEP_CONDITION_RE.search(runs_block):
+        raise AssertionError(
+            "the published action must not condition a step: a skipped test "
+            "run reports green in the consumer's workflow"
+        )
+    if ALWAYS_SUCCEED_RE.search(action):
+        raise AssertionError(
+            "the published action must not discard an exit code with `|| true`"
+        )
+
+    commands = re.findall(r"^\s+run: (.+)$", runs_block, re.MULTILINE)
+    if commands != list(PUBLISHED_ACTION_RUNS):
+        raise AssertionError(
+            "the published action must run exactly the reviewed invocation: "
+            f"expected={list(PUBLISHED_ACTION_RUNS)}, actual={commands}"
+        )
+    shells = re.findall(r"^\s+(?:-\s+)?shell: (.+)$", runs_block, re.MULTILINE)
+    if shells != ["bash"] * len(PUBLISHED_ACTION_RUNS):
+        raise AssertionError(
+            "every step of the published action must declare shell bash: "
+            f"expected={['bash'] * len(PUBLISHED_ACTION_RUNS)}, actual={shells}"
+        )
+    expressions = [line for line in runs_block.splitlines() if "${{" in line]
+    if expressions != list(PUBLISHED_ACTION_EXPRESSION_LINES):
+        raise AssertionError(
+            "a GitHub expression is substituted into the script text before "
+            "bash parses it, so the published action may carry one only on the "
+            f"reviewed environment lines: expected="
+            f"{list(PUBLISHED_ACTION_EXPRESSION_LINES)}, actual={expressions}"
+        )
 
     for line_number, line in enumerate(action.splitlines(), start=1):
         if not re.match(r"^\s*(?:-\s*)?uses:", line):

