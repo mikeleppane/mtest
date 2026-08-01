@@ -22,7 +22,7 @@ dropped the transcripts would otherwise pass this gate vacuously. The gate
 deliberately does not count literals; a count would have to be revised by every
 content commit while proving nothing about the version.
 
-Naming those four is not enough on its own, because the list is hand-written
+Naming those six is not enough on its own, because the list is hand-written
 and a documentation page added tomorrow would be ungated from birth. So the
 gate also sweeps every tracked file for a rendered literal and fails on any it
 was not told about, forcing each new surface to be declared a site or an

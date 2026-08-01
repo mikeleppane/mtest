@@ -2,10 +2,11 @@
 """Mutation tests for the documentation-site parity gate.
 
 Each test builds a temporary tree holding the README and the site pages,
-corrupts exactly one thing, and asserts the gate rejects it. The four
-corruptions are the four ways a mirrored block stops being a mirror: a byte
-inside one drifts, a page grows an undeclared block, the README section a
-declaration names is renamed, and an ordinal stops resolving to a block. A
+corrupts exactly one thing, and asserts the gate rejects it. The corruptions
+are the ways the site stops being a navigator and becomes a second, ungated
+home for commands: a byte inside a mirror drifts, a page grows an undeclared
+block, a declaration stops resolving, a page appears that nothing declares, and
+the site configuration stops excluding the internal working directories. A
 checker that has quietly stopped rejecting any of them would leave the site
 free to publish commands this repository never runs.
 
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -42,6 +44,40 @@ class RepositoryParityTests(unittest.TestCase):
             ),
         )
 
+    def test_reference_pages_are_the_three_documents_the_site_navigates_to(
+        self,
+    ) -> None:
+        self.assertEqual(
+            docs_parity.REFERENCE_PAGES,
+            (
+                Path("docs/cli-contract.md"),
+                Path("docs/json-stream.md"),
+                Path("docs/releasing.md"),
+            ),
+        )
+
+    def test_each_page_declares_the_blocks_it_actually_shows(self) -> None:
+        """The content floor, pinned here rather than inside the gate.
+
+        `check_declarations` can only prove the table is self-consistent: a
+        page emptied of both its blocks and its declarations satisfies it.
+        Counting the declarations per page from outside the module is what
+        makes that deletion a red gate, the same way the bump and version
+        inventories are pinned against literals rather than against the code
+        that produces them.
+        """
+        counted: dict[Path, int] = {}
+        for block in docs_parity.PARITY_BLOCKS:
+            counted[block.page] = counted.get(block.page, 0) + 1
+        self.assertEqual(
+            counted,
+            {
+                Path("docs/index.md"): 1,
+                Path("docs/getting-started.md"): 3,
+                Path("docs/ci.md"): 2,
+            },
+        )
+
     def test_declarations_are_well_formed(self) -> None:
         docs_parity.check_declarations()
 
@@ -50,6 +86,32 @@ class RepositoryParityTests(unittest.TestCase):
 
     def test_no_site_page_holds_an_undeclared_block(self) -> None:
         docs_parity.check_site_blocks_are_all_declared()
+
+    def test_every_tracked_documentation_page_is_declared(self) -> None:
+        docs_parity.check_no_undeclared_pages()
+
+    def test_the_site_configuration_excludes_the_internal_directories(self) -> None:
+        docs_parity.check_site_configuration()
+
+    def test_the_tracked_internal_design_document_is_still_excluded(self) -> None:
+        """`.gitignore` came after this file, so only the site config hides it.
+
+        git ignores what is not already tracked, and this document was tracked
+        before `docs/superpowers/` was ignored. It is therefore present in a
+        clean checkout, and the configuration's exclusion is the only thing
+        between it and a published page.
+        """
+        internal = Path(
+            "docs/superpowers/specs/2026-07-23-test-confidence-hardening-design.md"
+        )
+        self.assertTrue((docs_parity.REPO_ROOT / internal).is_file(), internal)
+        self.assertTrue(
+            any(
+                str(internal).startswith(f"docs/{excluded}")
+                for excluded in docs_parity.EXCLUDED_DOC_DIRECTORIES
+            ),
+            internal,
+        )
 
     def test_every_site_page_that_renders_a_version_is_gated_as_one(self) -> None:
         """A mirrored transcript is still a public version surface.
@@ -267,6 +329,285 @@ class FenceScannerTests(unittest.TestCase):
         """Two sections with one name make an ordinal ambiguous."""
         with self.assertRaisesRegex(AssertionError, "found 2"):
             docs_parity.readme_section_blocks("## One\n\n## One\n", "One", "example")
+
+    def test_an_indented_fence_inside_an_admonition_is_seen(self) -> None:
+        """Material's tips indent their fences four spaces; they still render."""
+        blocks = docs_parity.fenced_blocks(
+            '!!! tip "Try it"\n\n    ```console\n    $ mtest tests/\n    ```\n',
+            "example",
+        )
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0].info, "console")
+
+    def test_an_indented_block_is_compared_without_its_container_indent(self) -> None:
+        """The renderer removes that indentation, so the comparison does too."""
+        blocks = docs_parity.fenced_blocks(
+            '=== "Pixi"\n\n    ```console\n    $ mtest tests/\n    ```\n', "example"
+        )
+        self.assertEqual(blocks[0].body, "$ mtest tests/\n")
+
+    def test_both_scanners_agree_about_a_fence_line_inside_a_block(self) -> None:
+        """One scanner serves both readers, so section bounds cannot diverge.
+
+        A body line spelling an opening fence used to close the block for the
+        section splitter while leaving it open for the block reader, which
+        would put the two under different fence states from that line onward.
+        """
+        readme = (
+            "## One\n\n````markdown\n```console\n$ one\n```\n````\n\n"
+            "## Two\n\n```yaml\nk: v\n```\n"
+        )
+        section = docs_parity.readme_section_blocks(readme, "One", "example")
+        whole = docs_parity.fenced_blocks(readme, "example")
+        self.assertEqual(len(section), 1)
+        self.assertEqual(len(whole), 2)
+        self.assertEqual(section[0].body, whole[0].body)
+
+
+class IndentedCodeTests(unittest.TestCase):
+    """The unfenced construct that renders as code and declares nothing."""
+
+    def test_an_indented_code_block_is_reported(self) -> None:
+        self.assertEqual(
+            docs_parity.indented_code_lines(
+                "Run this:\n\n    mtest tests/\n", "example"
+            ),
+            (3,),
+        )
+
+    def test_a_list_continuation_is_not_code(self) -> None:
+        """Indented prose under a list item is content, and stays legal."""
+        self.assertEqual(
+            docs_parity.indented_code_lines(
+                "- item\n\n    still the item\n", "example"
+            ),
+            (),
+        )
+
+    def test_an_admonition_body_is_not_code(self) -> None:
+        """A container indents everything it holds; that is not a code block."""
+        self.assertEqual(
+            docs_parity.indented_code_lines(
+                '!!! note "Heads up"\n\n    Ordinary prose in a tip.\n', "example"
+            ),
+            (),
+        )
+
+    def test_indented_lines_inside_a_fence_are_the_block_body(self) -> None:
+        self.assertEqual(
+            docs_parity.indented_code_lines(
+                "```yaml\n\n    strategy:\n      matrix: [1]\n```\n", "example"
+            ),
+            (),
+        )
+
+    def test_a_site_page_carrying_one_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-docs-parity-") as raw:
+            root = Path(raw)
+            for relative in TRACKED_FILES:
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(docs_parity.REPO_ROOT / relative, target)
+            page = root / "docs" / "ci.md"
+            page.write_text(
+                page.read_text(encoding="utf-8") + "\nRun this:\n\n    mtest tests/\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(AssertionError, "indented code block"):
+                docs_parity.check_site_blocks_are_all_declared(root)
+
+
+class PageSweepTests(unittest.TestCase):
+    """The inverse sweep that stops a new page from being ungated from birth."""
+
+    def _repository(self, root: Path) -> None:
+        """Build a temporary git repository holding every declared document.
+
+        Args:
+            root: Empty directory to initialize as a repository.
+        """
+        subprocess.run(["git", "-C", str(root), "init", "-q"], check=True)
+        tracked = (
+            docs_parity.README_PATH,
+            docs_parity.MKDOCS_PATH,
+            *docs_parity.SITE_PAGES,
+            *docs_parity.REFERENCE_PAGES,
+        )
+        for relative in tracked:
+            target = root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(docs_parity.REPO_ROOT / relative, target)
+        subprocess.run(
+            ["git", "-C", str(root), "add", "--", *(str(p) for p in tracked)],
+            check=True,
+        )
+
+    def _track(self, root: Path, relative: str, text: str) -> None:
+        """Write one extra document into the temporary repository and track it.
+
+        Args:
+            root: The temporary repository root.
+            relative: Repository-relative path of the new document.
+            text: Its contents.
+        """
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        subprocess.run(["git", "-C", str(root), "add", "--", relative], check=True)
+
+    def test_a_clean_repository_passes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-docs-sweep-") as raw:
+            root = Path(raw)
+            self._repository(root)
+            docs_parity.check_no_undeclared_pages(root)
+
+    def test_a_new_page_declaring_nothing_is_rejected(self) -> None:
+        """The hole a hand-written page list cannot close on its own.
+
+        The page declares no parity block, so every comparison skips it; it
+        renders no version literal, so the version sweep skips it too. Only
+        this sweep sees it.
+        """
+        with tempfile.TemporaryDirectory(prefix="mtest-docs-sweep-") as raw:
+            root = Path(raw)
+            self._repository(root)
+            self._track(
+                root,
+                "docs/tutorial.md",
+                "# Tutorial\n\n```console\n$ mtest tests --shard hash:1/4\n```\n",
+            )
+            with self.assertRaisesRegex(AssertionError, "docs/tutorial.md"):
+                docs_parity.check_no_undeclared_pages(root)
+
+    def test_an_untracked_draft_is_not_a_page(self) -> None:
+        """Scratch files are not published, and must not turn the gate red."""
+        with tempfile.TemporaryDirectory(prefix="mtest-docs-sweep-") as raw:
+            root = Path(raw)
+            self._repository(root)
+            (root / "docs" / "draft.md").write_text("# Draft\n", encoding="utf-8")
+            docs_parity.check_no_undeclared_pages(root)
+
+    def test_a_declared_page_that_stopped_being_tracked_is_rejected(self) -> None:
+        """A site page missing from the index would publish nothing at all."""
+        with tempfile.TemporaryDirectory(prefix="mtest-docs-sweep-") as raw:
+            root = Path(raw)
+            self._repository(root)
+            subprocess.run(
+                ["git", "-C", str(root), "rm", "-q", "--cached", "docs/ci.md"],
+                check=True,
+            )
+            with self.assertRaisesRegex(AssertionError, "docs/ci.md"):
+                docs_parity.check_no_undeclared_pages(root)
+
+    def test_a_tracked_page_in_an_unexcluded_subdirectory_is_rejected(self) -> None:
+        """A subdirectory the configuration does not exclude would be published."""
+        with tempfile.TemporaryDirectory(prefix="mtest-docs-sweep-") as raw:
+            root = Path(raw)
+            self._repository(root)
+            self._track(root, "docs/internal/design.md", "# Internal\n")
+            with self.assertRaisesRegex(AssertionError, "docs/internal/design.md"):
+                docs_parity.check_no_undeclared_pages(root)
+
+    def test_a_page_under_an_excluded_directory_is_accepted(self) -> None:
+        """The tracked internal document must not red the gate it is hidden by."""
+        with tempfile.TemporaryDirectory(prefix="mtest-docs-sweep-") as raw:
+            root = Path(raw)
+            self._repository(root)
+            self._track(root, "docs/superpowers/specs/design.md", "# Internal\n")
+            docs_parity.check_no_undeclared_pages(root)
+
+    def test_a_tree_without_git_fails_closed(self) -> None:
+        """No inventory means no verdict, so the sweep refuses rather than pass."""
+        with (
+            tempfile.TemporaryDirectory(prefix="mtest-docs-sweep-") as raw,
+            self.assertRaisesRegex(AssertionError, "cannot list tracked files"),
+        ):
+            docs_parity.check_no_undeclared_pages(Path(raw))
+
+
+class SiteConfigurationTests(unittest.TestCase):
+    """The two lines standing between internal documents and a public site."""
+
+    def _configuration(self, root: Path) -> Path:
+        """Copy the site configuration into a temporary root.
+
+        Args:
+            root: Directory standing in for the repository root.
+
+        Returns:
+            The path of the copy.
+        """
+        target = root / docs_parity.MKDOCS_PATH
+        shutil.copyfile(docs_parity.REPO_ROOT / docs_parity.MKDOCS_PATH, target)
+        return target
+
+    def test_a_configuration_that_stopped_excluding_plans_is_rejected(self) -> None:
+        for excluded in docs_parity.EXCLUDED_DOC_DIRECTORIES:
+            with (
+                self.subTest(excluded=excluded),
+                tempfile.TemporaryDirectory(prefix="mtest-docs-config-") as raw,
+            ):
+                root = Path(raw)
+                config = self._configuration(root)
+                config.write_text(
+                    config.read_text(encoding="utf-8").replace(
+                        f"  {excluded}\n", "", 1
+                    ),
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(AssertionError, excluded):
+                    docs_parity.check_site_configuration(root)
+
+    def test_a_build_outside_the_ignored_directory_is_rejected(self) -> None:
+        """Mkdocs' default output directory is not ignored, so it reds the tree."""
+        with tempfile.TemporaryDirectory(prefix="mtest-docs-config-") as raw:
+            root = Path(raw)
+            config = self._configuration(root)
+            config.write_text(
+                config.read_text(encoding="utf-8").replace(
+                    "site_dir: build/site", "site_dir: site", 1
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(AssertionError, "must build into build/"):
+                docs_parity.check_site_configuration(root)
+
+    def test_navigating_to_an_undeclared_page_is_rejected(self) -> None:
+        """Adding a page to the nav is how it reaches a reader."""
+        with tempfile.TemporaryDirectory(prefix="mtest-docs-config-") as raw:
+            root = Path(raw)
+            config = self._configuration(root)
+            config.write_text(
+                config.read_text(encoding="utf-8").replace(
+                    "  - Home: index.md",
+                    "  - Home: index.md\n  - Tutorial: tutorial.md",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(AssertionError, "tutorial.md"):
+                docs_parity.check_site_configuration(root)
+
+    def test_a_site_page_dropped_from_the_navigation_is_rejected(self) -> None:
+        """A page nothing navigates to is a page nobody reviews."""
+        with tempfile.TemporaryDirectory(prefix="mtest-docs-config-") as raw:
+            root = Path(raw)
+            config = self._configuration(root)
+            config.write_text(
+                config.read_text(encoding="utf-8").replace(
+                    "  - Continuous integration: ci.md\n", "", 1
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(AssertionError, "ci.md"):
+                docs_parity.check_site_configuration(root)
+
+    def test_a_vanished_configuration_is_reported_not_crashed(self) -> None:
+        with (
+            tempfile.TemporaryDirectory(prefix="mtest-docs-config-") as raw,
+            self.assertRaisesRegex(AssertionError, "cannot read"),
+        ):
+            docs_parity.check_site_configuration(Path(raw))
 
 
 if __name__ == "__main__":

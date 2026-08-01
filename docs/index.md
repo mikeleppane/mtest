@@ -41,7 +41,10 @@ supports.
 Everything else stays in the
 [README](https://github.com/mikeleppane/mtest#readme): selection, retries,
 timeouts, sharding, the build cache, assertion diagnostics, and the complete
-command-line listing. That document is the front door on purpose — every
-command and output in it is executed against the built binary before it is
-committed, and the few this site needs are mirrored from it byte for byte
-rather than retyped.
+command-line listing. That document is the front door on purpose, and the few
+commands and outputs this site needs are mirrored from it byte for byte rather
+than retyped: a gate compares each mirror to its source on every run, so a page
+here cannot quietly disagree with the README. Two parts of the README are
+checked against a real binary as well — the command-line listing is compared
+with the built binary's own help output, and the assertion example is executed
+and matched against its documented outcome.
