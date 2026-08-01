@@ -23,7 +23,7 @@ class BumpSiteTests(unittest.TestCase):
         """Return every bump site as a repository-relative path, in order."""
         return tuple(site.path.relative_to(bump.REPO_ROOT) for site in bump.SITES)
 
-    def test_sites_name_the_nine_files_that_carry_the_release(self) -> None:
+    def test_sites_name_the_eleven_files_that_carry_the_release(self) -> None:
         self.assertEqual(
             self._relative_paths(),
             (
@@ -34,6 +34,8 @@ class BumpSiteTests(unittest.TestCase):
                 Path("scripts/qa/contract.py"),
                 Path("README.md"),
                 Path("docs/cli-contract.md"),
+                Path("docs/index.md"),
+                Path("docs/getting-started.md"),
                 Path("docs/assets/mtest-run.svg"),
                 Path("docs/assets/mtest-flaky.svg"),
             ),
@@ -56,9 +58,9 @@ class BumpSiteTests(unittest.TestCase):
         This holds by construction while `bump.SITES` is built from
         `TRANSCRIPT_SITES`, and it exists to fail the day someone reintroduces a
         local pattern there. The direction that can catch a real divergence
-        today is `test_sites_name_the_nine_files_that_carry_the_release`, which
-        pins the writer's list against literal paths rather than against the
-        gate.
+        today is `test_sites_name_the_eleven_files_that_carry_the_release`,
+        which pins the writer's list against literal paths rather than against
+        the gate.
         """
         written = {
             site.path.relative_to(bump.REPO_ROOT): site.pattern for site in bump.SITES

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Rewrite every version literal in one edit so the gates cannot disagree.
 
-Nine files carry the release version, in four syntaxes plus rendered CLI
+Eleven files carry the release version, in four syntaxes plus rendered CLI
 transcripts in prose and SVG. Every one of them is now gated: `version-check`
 holds the three manifests against its own `EXPECTED_VERSION` pin and holds the
-four public transcripts against the same value, and `scripts/qa/contract.py`
-fails at the contract gate. Bumping by hand still means nine edits across four
-syntaxes, which is what this tool exists to collapse into one.
+six public transcripts against the same value, and `scripts/qa/contract.py`
+fails at the contract gate. Bumping by hand still means eleven edits across
+four syntaxes, which is what this tool exists to collapse into one.
 
-The four transcript sites and the pattern that finds a literal inside them are
+The six transcript sites and the pattern that finds a literal inside them are
 defined once, by `scripts/checks/version.py`, and imported here. Writing a site
 and enforcing it are different guarantees, and a writer that carried its own
 list could quietly stop overlapping the checker's.
@@ -91,11 +91,16 @@ SITES = (
         REPO_ROOT / "scripts" / "qa" / "contract.py",
         re.compile(r'out_has=\["mtest ([^"]*)"\]'),
     ),
-    # The four public transcript surfaces: the README's committed CLI output,
-    # the CLI contract document the qa gate renders against, and the two README
-    # banners, whose text sits inside the SVG where no reader of the rendered
-    # page can tell it is not live output. Taken from the gate that enforces
-    # them, so writer and checker cannot come to mean different sets.
+    # The six public transcript surfaces: the README's committed CLI output,
+    # the CLI contract document the qa gate renders against, the two
+    # documentation-site pages that mirror README blocks byte for byte, and the
+    # two README banners, whose text sits inside the SVG where no reader of the
+    # rendered page can tell it is not live output. Taken from the gate that
+    # enforces them, so writer and checker cannot come to mean different sets.
+    #
+    # The site pages have to move with the README rather than after it: their
+    # blocks are compared byte for byte by the docs-parity gate, so rewriting
+    # one side alone would red that gate as well as this one.
     *(Site(REPO_ROOT / relative, TRANSCRIPT_RE) for relative in TRANSCRIPT_SITES),
 )
 

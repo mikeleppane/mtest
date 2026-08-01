@@ -59,6 +59,8 @@ class TranscriptGateTests(unittest.TestCase):
             (
                 Path("README.md"),
                 Path("docs/cli-contract.md"),
+                Path("docs/index.md"),
+                Path("docs/getting-started.md"),
                 Path("docs/assets/mtest-run.svg"),
                 Path("docs/assets/mtest-flaky.svg"),
             ),
@@ -179,16 +181,23 @@ class TranscriptSweepTests(unittest.TestCase):
         )
 
     def test_a_new_documentation_page_with_a_transcript_is_rejected(self) -> None:
-        """The case the hand-written site list cannot catch on its own."""
+        """The case the hand-written site list cannot catch on its own.
+
+        The page name is deliberately one no site uses. An earlier version of
+        this test fabricated `docs/getting-started.md`, which the site later
+        added for real: the sweep then correctly accepted it as a declared site
+        and this test failed for a reason that had nothing to do with the
+        property under test.
+        """
         with tempfile.TemporaryDirectory(prefix="mtest-sweep-") as raw:
             root = Path(raw)
             self._repository(root)
             self._track(
                 root,
-                "docs/getting-started.md",
-                f"# Getting started\n\n```\nmtest {version.EXPECTED_VERSION}\n```\n",
+                "docs/quickstart.md",
+                f"# Quickstart\n\n```\nmtest {version.EXPECTED_VERSION}\n```\n",
             )
-            with self.assertRaisesRegex(AssertionError, "docs/getting-started.md"):
+            with self.assertRaisesRegex(AssertionError, "docs/quickstart.md"):
                 version.check_no_undeclared_transcripts(root)
 
     def test_an_undeclared_page_is_rejected_even_at_the_right_version(self) -> None:

@@ -9,12 +9,13 @@ built conda package. Nothing else keeps the three in sync; this script is that
 gate: parse all three, assert they are byte-identical, and assert the agreed
 value is the version this repo is currently shipping.
 
-Four further surfaces state a version to a reader rather than to a tool, and
-they were gated by nothing until this script took them on: `README.md` and
-`docs/cli-contract.md` carry captured CLI transcripts, and the two banner SVGs
-under `docs/assets/` carry the same text inside the image, where nobody reading
-the rendered page can tell the output is not live. Until this gate covered them
-a stale literal in any of the four shipped to the repository page unnoticed.
+Six further surfaces state a version to a reader rather than to a tool, and
+they were gated by nothing until this script took them on: `README.md`,
+`docs/cli-contract.md` and two documentation-site pages carry captured CLI
+transcripts, and the two banner SVGs under `docs/assets/` carry the same text
+inside the image, where nobody reading the rendered page can tell the output is
+not live. Until this gate covered them a stale literal in any of the six
+shipped to the repository page unnoticed.
 Each site is checked twice over: every literal it renders must equal the
 release, and it must still render at least one, because a restructure that
 dropped the transcripts would otherwise pass this gate vacuously. The gate
@@ -65,16 +66,26 @@ RECIPE_VERSION_RE = re.compile(r'(?m)^\s*version:\s*"([^"]*)"')
 TRANSCRIPT_SITES = (
     Path("README.md"),
     Path("docs/cli-contract.md"),
+    Path("docs/index.md"),
+    Path("docs/getting-started.md"),
     Path("docs/assets/mtest-run.svg"),
     Path("docs/assets/mtest-flaky.svg"),
 )
 """Every public surface that renders `mtest <version>` for a reader.
 
-The two Markdown files carry captured CLI transcripts; the two SVGs carry the
+The four Markdown files carry captured CLI transcripts; the two SVGs carry the
 same text inside the README banners, where no reader of the rendered page can
-tell the output is not live. `scripts/release/bump.py` writes exactly this set,
-importing it from here so the writer and this gate cannot disagree about what a
-site is. Files that pin a deliberately arbitrary version are NOT sites:
+tell the output is not live. Two of the Markdown files are documentation-site
+pages, and their transcripts are not retyped copies: the docs-parity gate holds
+each of them byte-identical to the README block it mirrors. That gate proves a
+page still says what the README says; this one proves what they both say is the
+version being shipped. `docs/ci.md` is a site page too and is deliberately
+absent, because its two mirrored workflows render no version literal, and a
+listed site that renders none fails this gate.
+
+`scripts/release/bump.py` writes exactly this set, importing it from here so
+the writer and this gate cannot disagree about what a site is. Files that pin a
+deliberately arbitrary version are NOT sites:
 `scripts/fixtures/json_stream/*.ndjson`, the report unit tests, and the
 `stream_header` docstring all inject their version explicitly and must not move
 with the release.
