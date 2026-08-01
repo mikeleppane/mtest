@@ -126,6 +126,22 @@ successes.
 To run mtest straight from a checkout instead, see
 [Developing](#developing).
 
+### Supported toolchains
+
+| mtest | Mojo | Platforms | Status |
+|-------|------|-----------|--------|
+| 1.0.x | `1.0.0b2` | linux-64, osx-arm64 | Supported |
+
+**Supported** means this repository builds, gates, and publishes that
+combination: the pinned toolchain is what the protocol snapshots were captured
+against, what both blocking packaged-artifact jobs install, and what the conda
+package declares as its run dependency. There is no compatibility range, and
+that is a deliberate design position rather than an unfinished one. mtest links
+the Mojo runtime and parses the exact report `TestSuite` prints, so a build
+serves one toolchain; accepting a report the runner does not fully understand
+is how a runner produces a false green, and this one exits 3 on protocol drift
+instead.
+
 ## Your first test
 
 A test file is an ordinary Mojo program: `test_*` functions plus a `main()`
