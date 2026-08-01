@@ -580,11 +580,91 @@ $ echo $?
 
 The union of every shard's listing is exactly the unsharded listing, and no
 node id appears twice. Gate files are never sharded: every gate runs on
-every shard. A typical CI matrix cell looks like:
+every shard. A complete matrix cell, with the report upload, is under
+[Run it in CI](#run-it-in-ci).
 
-```sh
-mtest tests --shard "hash:${SHARD}/4" --junit-xml report.xml --gh-annotations auto
+### Run it in CI
+
+Add `mtest` to your workspace as above, commit the resulting `pixi.toml` and
+`pixi.lock`, then paste this workflow. It installs the locked environment,
+runs the suite with GitHub annotations and a JUnit report, and keeps the
+report as an artifact even when the run fails:
+
+```yaml
+name: Tests
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f # v0.10.0
+        with:
+          locked: true
+
+      - run: >-
+          pixi run mtest tests
+          --gh-annotations auto
+          --junit-xml build/test-results.xml
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: test-results
+          path: build/test-results.xml
 ```
+
+`--gh-annotations auto` turns each failure into an inline annotation when the
+run is on GitHub Actions and does nothing anywhere else, so the same command
+works locally. `--junit-xml` is written even when tests fail, which is why the
+upload step carries `if: always()`.
+
+Each action is pinned to a commit SHA with its tag in a trailing comment, the
+same way this repository pins its own workflows, and yours should be too: a tag
+can be moved onto different code, a commit SHA cannot.
+
+To spread one suite across a matrix, give each cell a shard and a distinct
+report name. The union of every shard's selection is exactly the unsharded
+selection, and no test runs twice:
+
+```yaml
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      # ... checkout and setup-pixi as above ...
+      - run: >-
+          pixi run mtest tests
+          --shard "hash:${{ matrix.shard }}/4"
+          --gh-annotations auto
+          --junit-xml "build/test-results-${{ matrix.shard }}.xml"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: test-results-${{ matrix.shard }}
+          path: build/test-results-${{ matrix.shard }}.xml
+```
+
+**Do not cache `.mtest-cache/` between runners.** The build cache's key frames
+the compiler, the toolchain libraries, the environment, the invocation root,
+the build arguments, the include-root contents, and each file's own bytes — and
+nothing about the host CPU. On one machine that is exactly right. Across hosted
+runners it is not: a binary compiled where a wider instruction set was
+available, restored onto a runner without it, is a valid cache hit that dies
+with `signal 4` the moment it executes. The store is per-checkout by design and
+there is no spelling that moves it. Cache pixi's own package downloads instead,
+which `setup-pixi` already does.
 
 ### Machine reporters
 
