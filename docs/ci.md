@@ -44,10 +44,13 @@ jobs:
           path: build/test-results.xml
 ```
 
-Annotations are requested in the mode that turns each failure into an inline
-annotation on GitHub Actions and does nothing anywhere else, so the same
-invocation is the one to run locally. The report is written whether or not
-tests failed, which is why the upload step is unconditional.
+Annotations are requested in the mode that emits them on GitHub Actions and
+does nothing anywhere else, so the same invocation is the one to run locally.
+GitHub allows ten error and ten warning annotations per step, so a run with
+more failures than that renders the first nine of each and one
+`... and N more errors` line in place of the rest; the summary, the JUnit
+report, and the exit code still count every failure. The report is written
+whether or not tests failed, which is why the upload step is unconditional.
 
 Each action above is pinned to a commit rather than to a tag, the same way this
 repository pins its own workflows, and yours should be too: a tag can be moved
@@ -96,7 +99,9 @@ invokes the runner.
 ```
 
 The second input is appended to the command verbatim, so every flag the runner
-accepts stays reachable without the action growing an input of its own. The
+accepts stays reachable without the action growing an input of its own. Both
+inputs reach the runner through the environment and are split on whitespace, so
+a value containing a space cannot be held together by quoting it here. The
 major-version tag floats onto each 1.x release; reference a commit instead if
 you would rather adopt each release deliberately.
 

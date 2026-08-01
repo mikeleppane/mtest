@@ -15,6 +15,12 @@ each file; mtest owns everything between files: finding them, building each
 one, executing the binary under supervision, selecting and aggregating tests
 across files, and reporting results the way CI expects.
 
+This file is the reference. A short documentation site at
+<https://mikeleppane.github.io/mtest/> carries the install path, a
+five-minute first run, the continuous-integration recipes, and the
+[command-line contract](docs/cli-contract.md); it is built from `docs/` on
+every pull request and published from `main`.
+
 ![A real mtest run: two passing files and one failing file, with the per-test assertion detail and a copy-pasteable reproduce line](docs/assets/mtest-run.svg)
 
 ## Installation
@@ -30,15 +36,20 @@ the pinned vendored source.
 
 mtest is published to
 [modular-community](https://prefix.dev/channels/modular-community/packages/mtest)
-for linux-64 and osx-arm64. In a Pixi workspace:
+for linux-64 and osx-arm64. From an empty directory:
 
 ```console
+$ pixi init .
 $ pixi workspace channel add https://conda.modular.com/max/
 $ pixi workspace channel add https://repo.prefix.dev/modular-community
 $ pixi add mtest
 $ pixi run mtest --version
 mtest 1.0.0
 ```
+
+Skip the first command in a workspace that already exists. It is there because
+every command after it edits a `pixi.toml`, and `pixi workspace channel add`
+fails outright when there is none.
 
 Three channels have to resolve, and they are the same three the release
 verifier installs from: `https://conda.modular.com/max/` for the pinned
@@ -189,10 +200,13 @@ jobs:
           path: build/test-results.xml
 ```
 
-`--gh-annotations auto` turns each failure into an inline annotation when the
-run is on GitHub Actions and does nothing anywhere else, so the same command
-works locally. `--junit-xml` is written even when tests fail, which is why the
-upload step carries `if: always()`.
+`--gh-annotations auto` emits inline annotations when the run is on GitHub
+Actions and does nothing anywhere else, so the same command works locally.
+GitHub allows ten error and ten warning annotations per step, so a run with
+more failures than that renders the first nine of each and one
+`... and N more errors` line in place of the rest; the summary, the JUnit
+report, and the exit code still count every failure. `--junit-xml` is written
+even when tests fail, which is why the upload step carries `if: always()`.
 
 Each action is pinned to a commit SHA with its tag in a trailing comment, the
 same way this repository pins its own workflows, and yours should be too: a tag
@@ -235,9 +249,11 @@ installs the locked Pixi environment as above:
 ```
 
 `args` is appended to the command verbatim, so every flag stays reachable
-without the action growing an input for it. `v1` is a floating tag that follows
-each 1.x release; pin it to a commit SHA if you would rather adopt each release
-deliberately.
+without the action growing an input for it. Both inputs reach the runner
+through the environment and are split on whitespace, so a value containing a
+space cannot be held together by quoting it here. `v1` is a floating tag that
+follows each 1.x release; pin it to a commit SHA if you would rather adopt each
+release deliberately.
 
 **Do not cache `.mtest-cache/` between runners.** The build cache's key frames
 the compiler, the toolchain libraries, the environment, the invocation root,

@@ -9,15 +9,20 @@ and the report format inside each file; mtest owns everything between files.
 ## Install
 
 The package is published to the modular-community channel, built from source
-for linux-64 and osx-arm64. In a Pixi workspace:
+for linux-64 and osx-arm64. From an empty directory:
 
 ```console
+$ pixi init .
 $ pixi workspace channel add https://conda.modular.com/max/
 $ pixi workspace channel add https://repo.prefix.dev/modular-community
 $ pixi add mtest
 $ pixi run mtest --version
 mtest 1.0.0
 ```
+
+Skip the first command in a workspace that already exists. It is there because
+every command after it edits a `pixi.toml`, and `pixi workspace channel add`
+fails outright when there is none.
 
 Three channels have to resolve for that to solve, and the package declares the
 pinned Mojo compiler as its run dependency. The
