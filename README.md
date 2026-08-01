@@ -15,7 +15,255 @@ each file; mtest owns everything between files: finding them, building each
 one, executing the binary under supervision, selecting and aggregating tests
 across files, and reporting results the way CI expects.
 
+This file is the reference. A short documentation site at
+<https://mikeleppane.github.io/mtest/> carries the install path, a
+five-minute first run, the continuous-integration recipes, and the
+[command-line contract](docs/cli-contract.md); it is built from `docs/` on
+every pull request and published from `main`.
+
 ![A real mtest run: two passing files and one failing file, with the per-test assertion detail and a copy-pasteable reproduce line](docs/assets/mtest-run.svg)
+
+## Installation
+
+mtest ships as a conda package built **from source** by
+[rattler-build](https://prefix-dev.github.io/rattler-build/) from
+[`recipe/recipe.yaml`](recipe/recipe.yaml), inside an isolated build
+environment pinned to the same toolchain this repo builds against
+(`mojo ==1.0.0b2`, `clang ==18.1.8`). The binary links against the Mojo runtime,
+so the package declares `mojo-compiler ==1.0.0b2` as its sole conda run
+dependency. The native TOML parser is compiled into the shipped binary from
+the pinned vendored source.
+
+mtest is published to
+[modular-community](https://prefix.dev/channels/modular-community/packages/mtest)
+for linux-64 and osx-arm64. From an empty directory:
+
+```console
+$ pixi init .
+$ pixi workspace channel add https://conda.modular.com/max/
+$ pixi workspace channel add https://repo.prefix.dev/modular-community
+$ pixi add mtest
+$ pixi run mtest --version
+mtest 1.0.0
+```
+
+Skip the first command in a workspace that already exists. It is there because
+every command after it edits a `pixi.toml`, and `pixi workspace channel add`
+fails outright when there is none.
+
+Three channels have to resolve, and they are the same three the release
+verifier installs from: `https://conda.modular.com/max/` for the pinned
+`mojo-compiler` run dependency, `https://repo.prefix.dev/modular-community`
+for mtest itself, and `conda-forge` — which a Pixi workspace already carries
+by default — for everything underneath. A workspace missing any one of them
+fails to solve.
+
+linux-64 and osx-arm64 are both gated: each has its own blocking CI job that
+builds the package, installs the exact artifact it just built into a fresh
+environment carrying only the declared run dependencies, and exercises the
+installed binary. That includes running a known-failing fixture through it, so
+the installed package is proven to report failures truthfully, not just
+successes.
+
+To run mtest straight from a checkout instead, see
+[Developing](#developing).
+
+### Supported toolchains
+
+| mtest | Mojo | Platforms | Status |
+|-------|------|-----------|--------|
+| 1.0.x | `1.0.0b2` | linux-64, osx-arm64 | Supported |
+
+**Supported** means this repository builds, gates, and publishes that
+combination: the pinned toolchain is what the protocol snapshots were captured
+against, what both blocking packaged-artifact jobs install, and what the conda
+package declares as its run dependency. There is no compatibility range, and
+that is a deliberate design position rather than an unfinished one. mtest links
+the Mojo runtime and parses the exact report `TestSuite` prints, so a build
+serves one toolchain; accepting a report the runner does not fully understand
+is how a runner produces a false green, and this one exits 3 on protocol drift
+instead.
+
+## Your first test
+
+A test file is an ordinary Mojo program: `test_*` functions plus a `main()`
+that hands them to the standard library's `TestSuite`. The import is
+`std.testing` — a bare `from testing import ...` does not resolve on this
+toolchain. Save this as `tests/test_math.mojo`:
+
+```mojo
+"""Arithmetic examples for a first mtest run."""
+
+from std.testing import assert_equal, TestSuite
+
+
+def test_addition() raises:
+    assert_equal(2 + 2, 4)
+
+
+def test_multiplication() raises:
+    assert_equal(3 * 7, 21)
+
+
+def main() raises:
+    TestSuite.discover_tests[__functions_in_module()]().run()
+```
+
+`mtest` builds each test file and runs the resulting binary, so `mojo` has to
+be reachable from the workspace — which it is, because `pixi add mtest` pulled
+in the pinned `mojo-compiler` as a run dependency. `run` is the default
+subcommand, so `mtest tests/` means `mtest run tests/`:
+
+```console
+$ pixi run mtest tests/
+mtest 1.0.0 (mojo)
+root: /tmp/mtest-quickstart   selected: 1 files   excluded: 0
+
+PASS           tests/test_math.mojo            0.03s
+
+===== 2 passed, 0 failed, 0 skipped, builds: 1, cached: 0 (0 excluded, 0 not run) in 1.3s =====
+$ echo $?
+0
+```
+
+The summary counts individual tests, not files: two `test_*` functions in one
+file report as two passes and one build. `builds`/`cached` is the build cache —
+this store was cold, so the file was compiled.
+
+Change that import to a bare `from testing import ...` and the file no longer
+compiles. A file that does not compile is reported as a distinct outcome, not
+as a failure, and the run exits non-zero:
+
+```console
+$ pixi run mtest tests/
+mtest 1.0.0 (mojo)
+root: /tmp/mtest-quickstart   selected: 1 files   excluded: 0
+
+COMPILE-ERROR  tests/test_math.mojo            0.00s
+
+--- COMPILE-ERROR tests/test_math.mojo — mojo build said: ---
+    | /tmp/mtest-quickstart/tests/test_math.mojo:3:6: error: unable to locate module 'testing'
+    | from testing import assert_equal, TestSuite
+    |      ^
+    | mojo: error: failed to parse the provided Mojo source module
+reproduce: mojo build tests/test_math.mojo -o build/bin/tests_stest_umath
+
+
+===== 0 passed, 0 failed, 0 skipped, 1 compile error, builds: 1, cached: 0 (0 excluded, 0 not run) in 1.0s =====
+$ echo $?
+1
+```
+
+The `reproduce:` line is the exact `mojo build` command mtest ran, so a compile
+error is reproducible outside the runner without reconstructing the invocation.
+
+Everything else — selection, retries, timeouts, sharding, the machine
+reporters, and `mtest.toml` — is under [Usage](#usage) below.
+
+## Run it in CI
+
+Add `mtest` to your workspace as above, commit the resulting `pixi.toml` and
+`pixi.lock`, then paste this workflow. It installs the locked environment,
+runs the suite with GitHub annotations and a JUnit report, and keeps the
+report as an artifact even when the run fails:
+
+```yaml
+name: Tests
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f # v0.10.0
+        with:
+          locked: true
+
+      - run: >-
+          pixi run mtest tests
+          --gh-annotations auto
+          --junit-xml build/test-results.xml
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: test-results
+          path: build/test-results.xml
+```
+
+`--gh-annotations auto` emits inline annotations when the run is on GitHub
+Actions and does nothing anywhere else, so the same command works locally.
+GitHub allows ten error and ten warning annotations per step, so a run with
+more failures than that renders the first nine of each and one
+`... and N more errors` line in place of the rest; the summary, the JUnit
+report, and the exit code still count every failure. `--junit-xml` is written
+even when tests fail, which is why the upload step carries `if: always()`.
+
+Each action is pinned to a commit SHA with its tag in a trailing comment, the
+same way this repository pins its own workflows, and yours should be too: a tag
+can be moved onto different code, a commit SHA cannot.
+
+To spread one suite across a matrix, give each cell a shard and a distinct
+report name, using the `hash:M/N` syntax described under
+[Sharding a CI matrix](#sharding-a-ci-matrix). The union of every shard's
+selection is exactly the unsharded selection, and no test runs twice:
+
+```yaml
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      # ... checkout and setup-pixi as above ...
+      - run: >-
+          pixi run mtest tests
+          --shard "hash:${{ matrix.shard }}/4"
+          --gh-annotations auto
+          --junit-xml "build/test-results-${{ matrix.shard }}.xml"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: test-results-${{ matrix.shard }}
+          path: build/test-results-${{ matrix.shard }}.xml
+```
+
+The same run is available as a composite action, if you would rather not
+repeat the invocation. It runs mtest and nothing else — your workflow still
+installs the locked Pixi environment as above:
+
+```yaml
+      - uses: mikeleppane/mtest@v1
+        with:
+          paths: tests
+          args: --gh-annotations auto --junit-xml build/test-results.xml
+```
+
+`args` is appended to the command verbatim, so every flag stays reachable
+without the action growing an input for it. Both inputs reach the runner
+through the environment and are split on whitespace, so a value containing a
+space cannot be held together by quoting it here. `v1` is a floating tag that
+follows each 1.x release; pin it to a commit SHA if you would rather adopt each
+release deliberately.
+
+**Do not cache `.mtest-cache/` between runners.** The build cache's key frames
+the compiler, the toolchain libraries, the environment, the invocation root,
+the build arguments, the include-root contents, and each file's own bytes — and
+nothing about the host CPU. On one machine that is exactly right. Across hosted
+runners it is not: a binary compiled where a wider instruction set was
+available, restored onto a runner without it, is a valid cache hit that dies
+with `signal 4` the moment it executes. The store is per-checkout by design and
+there is no spelling that moves it. Cache pixi's own package downloads instead,
+which `setup-pixi` already does.
 
 ## Why
 
@@ -85,155 +333,6 @@ with one binary. What it does differently:
 - Gate files (`--gate`), precompiled package dependencies (`--precompile`),
   a slowest-files list (`--durations`), quiet and verbose modes, and color
   control (`--color`, `NO_COLOR`).
-
-## Installation
-
-mtest ships as a conda package built **from source** by
-[rattler-build](https://prefix-dev.github.io/rattler-build/) from
-[`recipe/recipe.yaml`](recipe/recipe.yaml), inside an isolated build
-environment pinned to the same toolchain this repo builds against
-(`mojo ==1.0.0b2`, `clang ==18.1.8`). The binary links against the Mojo runtime,
-so the package declares `mojo-compiler ==1.0.0b2` as its sole conda run
-dependency. The native TOML parser is compiled into the shipped binary from
-the pinned vendored source.
-
-The package is not published to a public channel. `package-build` produces
-it into a local channel; `package-check` is a verifier that installs the
-artifact into a fresh scratch environment (not your own) and runs it:
-
-```console
-$ pixi run package-build   # rattler-build -> build/conda-channel/*.conda
-$ pixi run package-check   # verify: install into a scratch env, run the binary
-```
-
-To use the package in an environment of your own, install `mtest` from
-`build/conda-channel` alongside the Modular and conda-forge channels, so
-the declared Mojo run dependency resolves.
-
-linux-64 and osx-arm64 are both gated: each has its own blocking CI job that
-builds the package, installs the exact artifact it just built into a fresh
-environment carrying only the declared run dependencies, and exercises the
-installed binary. That includes running a known-failing fixture through it, so
-the installed package is proven to report failures truthfully, not just
-successes.
-
-To run mtest straight from a checkout instead, see
-[Developing](#developing).
-
-## Assertion diagnostics
-
-The package includes an optional source-only
-`mtest.assertions.assert_equal`. It still raises an ordinary error inside
-`TestSuite`; the runner, report format, and exit code do not change. Add the
-installed source root to both the test compiler and mtest:
-
-```mojo
-"""Executable example for the optional source-only assertion companion."""
-
-import mtest.assertions as assertions
-import std.testing as testing
-from std.testing import TestSuite
-
-
-def test_standard_assertion_still_coexists() raises:
-    testing.assert_equal(2 + 2, 4)
-
-
-def test_text_difference_has_scalar_and_context() raises:
-    assertions.assert_equal(
-        "alpha\nbeta\ngamma",
-        "alpha\nBETa\ngamma",
-        msg="configuration text changed",
-    )
-
-
-def main() raises:
-    TestSuite.discover_tests[__functions_in_module()]().run()
-```
-
-```console
-$ mtest --no-config --no-cache --show-output failures \
-    -I <PREFIX>/share/mtest/companions/assertions/src \
-    companions/assertions/examples
-mtest 1.0.0 (mojo)
-root: <REPO>   selected: 1 files   excluded: 0
-
-FAIL           companions/assertions/examples/test_diagnostics.mojo  <TIME>
-
---- FAIL companions/assertions/examples/test_diagnostics.mojo::test_text_difference_has_scalar_and_context ---
-    | At companions/assertions/examples/test_diagnostics.mojo:13:28: text differs at scalar 6
-    |   actual: U+0062 'b'
-    |   expected: U+0042 'B'
-    |   actual line 1: alpha\n
-    |   actual line 2: beta\n
-    |   actual line 3: gamma
-    |   expected line 1: alpha\n
-    |   expected line 2: BETa\n
-    |   expected line 3: gamma
-    |   reason: configuration text changed
-reproduce: mtest -I <PREFIX>/share/mtest/companions/assertions/src companions/assertions/examples/test_diagnostics.mojo::test_text_difference_has_scalar_and_context
-
---- FAIL companions/assertions/examples/test_diagnostics.mojo (exit 1) — captured output (file-scoped; TestSuite does not attribute output to individual tests) ---
-    | Unhandled exception caught during execution:
-    | Running 2 tests for <REPO>/companions/assertions/examples/test_diagnostics.mojo
-    |     PASS [ <TIME> ] test_standard_assertion_still_coexists
-    |     FAIL [ <TIME> ] test_text_difference_has_scalar_and_context
-    |       At <REPO>/companions/assertions/examples/test_diagnostics.mojo:13:28: text differs at scalar 6
-    |         actual: U+0062 'b'
-    |         expected: U+0042 'B'
-    |         actual line 1: alpha\n
-    |         actual line 2: beta\n
-    |         actual line 3: gamma
-    |         expected line 1: alpha\n
-    |         expected line 2: BETa\n
-    |         expected line 3: gamma
-    |         reason: configuration text changed
-    | --------
-    | Summary [ <TIME> ] 2 tests run: 1 passed , 1 failed , 0 skipped
-    | Test suite' <REPO>/companions/assertions/examples/test_diagnostics.mojo 'failed!
-    |
---- captured stderr ---
-
-
-===== 1 passed, 1 failed, 0 skipped, builds: 1, cached: 0 (0 excluded, 0 not run) in <TIME> =====
-```
-
-That output was captured from the installed `.conda` artifact. The companion
-specializes only top-level `String`, `List[T]`, and `Dict[String, V]`; nested
-containers and custom values are displayed opaquely. List details show at most
-eight entries per side, and dictionary details show at most eight entries in
-each of the missing, unexpected, and changed categories. Their `omitted by
-entry limit` counts describe that eight-entry selection. Dictionary keys whose
-escaped display would exceed 1024 bytes are omitted from structural rows and
-counted separately by `omitted by key display limit`; category totals and
-displayable short-key details remain. Structural key and category order is
-deterministic; opaque values retain their own `Writable` formatting, including
-any ordering it chooses.
-
-Finalized opaque-value projections are at most 1024 bytes, text context is at
-most 4096 bytes, and a complete assertion body is at most 16384 bytes. Text
-context shows the differing line and at most two lines on either side;
-`... [cropped]` marks omitted whole lines outside that window. A bare leading
-`... ` marks bytes cropped from the start of a retained long line. Each byte
-cap includes a complete `... [truncated]` marker at the point where that
-projection or body omitted bytes; later detail can follow a per-operand marker.
-Equality is exact; a passing assertion formats nothing, while a failing
-assertion formats each displayed operand once. These limits bound bytes
-finalized and emitted by the companion, not private work performed inside
-user-defined equality or formatting code. A present reason retains bounded
-space at the end even when mismatch detail is truncated.
-
-`<PREFIX>/share/mtest/companions/assertions/src` is one complete source package named
-`mtest`, not an extension merged into another `mtest` package. Put it before
-any other include root that provides `mtest`. The runner never injects this
-path automatically, and Mojo does not merge it with the runner-private
-precompiled package. Source-file permissions follow the environment's prefix
-policy; shared-prefix installs may therefore be group-writable but are never
-accepted as world-writable by the package verifier.
-
-Only `mtest.assertions.assert_equal` is supported. The shipped underscore
-modules are source implementation details, even though Mojo can import an
-explicit source-module path.
 
 ## Usage
 
@@ -482,11 +581,8 @@ $ echo $?
 
 The union of every shard's listing is exactly the unsharded listing, and no
 node id appears twice. Gate files are never sharded: every gate runs on
-every shard. A typical CI matrix cell looks like:
-
-```sh
-mtest tests --shard "hash:${SHARD}/4" --junit-xml report.xml --gh-annotations auto
-```
+every shard. A complete matrix cell, with the report upload, is under
+[Run it in CI](#run-it-in-ci).
 
 ### Machine reporters
 
@@ -831,6 +927,121 @@ malformed selected config is a `FAIL`ed check and exit `1`, not the usage error
 `run` and `config show` raise, because a diagnostic tool that refuses to
 diagnose is useless. Its exit domain is `{0, 1, 2, 4}`, and `WARN` never fails
 the command.
+
+## Assertion diagnostics
+
+The package includes an optional source-only
+`mtest.assertions.assert_equal`. It still raises an ordinary error inside
+`TestSuite`; the runner, report format, and exit code do not change. Add the
+installed source root to both the test compiler and mtest:
+
+```mojo
+"""Executable example for the optional source-only assertion companion."""
+
+import mtest.assertions as assertions
+import std.testing as testing
+from std.testing import TestSuite
+
+
+def test_standard_assertion_still_coexists() raises:
+    testing.assert_equal(2 + 2, 4)
+
+
+def test_text_difference_has_scalar_and_context() raises:
+    assertions.assert_equal(
+        "alpha\nbeta\ngamma",
+        "alpha\nBETa\ngamma",
+        msg="configuration text changed",
+    )
+
+
+def main() raises:
+    TestSuite.discover_tests[__functions_in_module()]().run()
+```
+
+```console
+$ mtest --no-config --no-cache --show-output failures \
+    -I <PREFIX>/share/mtest/companions/assertions/src \
+    companions/assertions/examples
+mtest 1.0.0 (mojo)
+root: <REPO>   selected: 1 files   excluded: 0
+
+FAIL           companions/assertions/examples/test_diagnostics.mojo  <TIME>
+
+--- FAIL companions/assertions/examples/test_diagnostics.mojo::test_text_difference_has_scalar_and_context ---
+    | At companions/assertions/examples/test_diagnostics.mojo:13:28: text differs at scalar 6
+    |   actual: U+0062 'b'
+    |   expected: U+0042 'B'
+    |   actual line 1: alpha\n
+    |   actual line 2: beta\n
+    |   actual line 3: gamma
+    |   expected line 1: alpha\n
+    |   expected line 2: BETa\n
+    |   expected line 3: gamma
+    |   reason: configuration text changed
+reproduce: mtest -I <PREFIX>/share/mtest/companions/assertions/src companions/assertions/examples/test_diagnostics.mojo::test_text_difference_has_scalar_and_context
+
+--- FAIL companions/assertions/examples/test_diagnostics.mojo (exit 1) — captured output (file-scoped; TestSuite does not attribute output to individual tests) ---
+    | Unhandled exception caught during execution:
+    | Running 2 tests for <REPO>/companions/assertions/examples/test_diagnostics.mojo
+    |     PASS [ <TIME> ] test_standard_assertion_still_coexists
+    |     FAIL [ <TIME> ] test_text_difference_has_scalar_and_context
+    |       At <REPO>/companions/assertions/examples/test_diagnostics.mojo:13:28: text differs at scalar 6
+    |         actual: U+0062 'b'
+    |         expected: U+0042 'B'
+    |         actual line 1: alpha\n
+    |         actual line 2: beta\n
+    |         actual line 3: gamma
+    |         expected line 1: alpha\n
+    |         expected line 2: BETa\n
+    |         expected line 3: gamma
+    |         reason: configuration text changed
+    | --------
+    | Summary [ <TIME> ] 2 tests run: 1 passed , 1 failed , 0 skipped
+    | Test suite' <REPO>/companions/assertions/examples/test_diagnostics.mojo 'failed!
+    |
+--- captured stderr ---
+
+
+===== 1 passed, 1 failed, 0 skipped, builds: 1, cached: 0 (0 excluded, 0 not run) in <TIME> =====
+```
+
+That output was captured from the installed `.conda` artifact. The companion
+specializes only top-level `String`, `List[T]`, and `Dict[String, V]`; nested
+containers and custom values are displayed opaquely. List details show at most
+eight entries per side, and dictionary details show at most eight entries in
+each of the missing, unexpected, and changed categories. Their `omitted by
+entry limit` counts describe that eight-entry selection. Dictionary keys whose
+escaped display would exceed 1024 bytes are omitted from structural rows and
+counted separately by `omitted by key display limit`; category totals and
+displayable short-key details remain. Structural key and category order is
+deterministic; opaque values retain their own `Writable` formatting, including
+any ordering it chooses.
+
+Finalized opaque-value projections are at most 1024 bytes, text context is at
+most 4096 bytes, and a complete assertion body is at most 16384 bytes. Text
+context shows the differing line and at most two lines on either side;
+`... [cropped]` marks omitted whole lines outside that window. A bare leading
+`... ` marks bytes cropped from the start of a retained long line. Each byte
+cap includes a complete `... [truncated]` marker at the point where that
+projection or body omitted bytes; later detail can follow a per-operand marker.
+Equality is exact; a passing assertion formats nothing, while a failing
+assertion formats each displayed operand once. These limits bound bytes
+finalized and emitted by the companion, not private work performed inside
+user-defined equality or formatting code. A present reason retains bounded
+space at the end even when mismatch detail is truncated.
+
+`<PREFIX>/share/mtest/companions/assertions/src` is one complete source package named
+`mtest`, not an extension merged into another `mtest` package. Put it before
+any other include root that provides `mtest`. The runner never injects this
+path automatically, and Mojo does not merge it with the runner-private
+precompiled package. Source-file permissions follow the environment's prefix
+policy; shared-prefix installs may therefore be group-writable but are never
+accepted as world-writable by the package verifier.
+
+Only `mtest.assertions.assert_equal` is supported. The shipped underscore
+modules are source implementation details, even though Mojo can import an
+explicit source-module path.
 
 ## Build cache
 
@@ -1457,12 +1668,26 @@ modular-community publication procedure.
 
 Requires [pixi](https://pixi.sh). The toolchain (Mojo `1.0.0b2`) and all
 tasks are pinned in [pixi.toml](pixi.toml); re-pinning on a Modular release
-regenerates the protocol transcripts so the diff is the changelog.
+regenerates the protocol transcripts. See [CHANGELOG.md](CHANGELOG.md) for
+release-to-release changes.
 
 ```console
 $ pixi install
 $ pixi run build-bin
 ```
+
+To build and verify the conda package locally, without touching a public
+channel:
+
+```console
+$ pixi run package-build   # rattler-build -> build/conda-channel/*.conda
+$ pixi run package-check   # verify: install into a scratch env, run the binary
+```
+
+`package-check` installs the exact artifact `package-build` just produced into
+a fresh scratch environment — never your own — and runs it, including a
+known-failing fixture, so the built package is proven to report failures
+truthfully.
 
 The contributor workflow, from a focused check to the full local gate:
 

@@ -40,19 +40,35 @@ check-jsonschema = "==0.37.4"
 # and the exact build is stamped into the log beside the transcript headers.
 mojo-version = "mojo --version"
 
-# Assert MTEST_VERSION (src/mtest/cli/parser.mojo) and this manifest's `version`
-# agree with each other and with the version this repo ships. Runs first because
-# drift here means every later gate is validating a lie about which release it
-# covers.
+# Assert MTEST_VERSION (src/mtest/cli/parser.mojo), this manifest's `version`,
+# and the conda recipe's agree with each other and with the version this repo
+# ships. Also proves every rendered transcript in the six public surfaces --
+# `README.md`, `docs/cli-contract.md`, the two documentation-site pages that
+# mirror README blocks (`docs/index.md` and `docs/getting-started.md`), and the
+# two banner SVGs -- matches the release, and that a site rendering none at all
+# fails too, because a restructure that dropped the transcripts would otherwise
+# pass vacuously. Sweeps every tracked file for a rendered version so a new page
+# carrying one cannot be ungated from birth: an undeclared match fails until it
+# is named a site or an explicit exemption. Holds every restatement of the Mojo
+# pin -- both conda recipes, the recipe build script, and the prose in the
+# README, the contract, the changelog, the contributing guide, and the agent
+# guide -- against the one pin above, so a toolchain bump cannot leave the
+# shipped package asking for the old compiler, and sweeps every reader-facing
+# Markdown document at the root and under `docs/` for a claim that disagrees
+# with it. Runs first because drift here means every later gate is validating a
+# lie about which release it covers.
 version-check = "python -m scripts.checks.version"
 
-# The write side of `version-check`: rewrite the release version across all nine
-# files that carry it in one edit, e.g. `pixi run bump 1.1.0`. Only three are
-# gated by `version-check` itself; the rest fail at other gates or, for the
-# README, `docs/cli-contract.md`, and the banner SVGs, at none. Not wired into
-# `pixi run ci`; this is the first step of cutting a release, and `version-check`
-# is what proves it landed. Refuses to touch a tree whose sites already
-# disagree, so drift gets repaired rather than buried under a bump.
+# The write side of `version-check`: rewrite the release version across all
+# eleven files that carry it in one edit, e.g. `pixi run bump 1.1.0`. Every one
+# of the eleven is gated — `version-check` holds the three manifests, its own
+# pin, and the six public transcript surfaces against that pin, and
+# `scripts/qa/contract.py` fails at the contract gate — and the six transcript
+# sites are defined once by
+# `version-check` itself and imported here, so writer and checker cannot drift.
+# Not wired into `pixi run ci`; this is the first step of cutting a release, and
+# `version-check` is what proves it landed. Refuses to touch a tree whose sites
+# already disagree, so drift gets repaired rather than buried under a bump.
 bump = "python -m scripts.release.bump"
 
 # Precompile the vendored TOML parser and src/mtest into build/toml.mojoc and
@@ -127,6 +143,16 @@ py-fmt = "python -m scripts.checks.python_quality --fix"
 # `uvx` is absent instead of skipping. See scripts/checks/python_quality.py for
 # why the versions are pinned exactly.
 py-check = "python -m scripts.checks.python_quality"
+
+# Build the documentation site. mkdocs runs through `uvx` at a version pinned
+# in scripts/docs/build_site.py, for the same reason ruff and mypy do: it keeps
+# a documentation tool out of the environment the product compiles in, and a
+# floating version cannot change the published site on its next release. Needs
+# `uv` on PATH and fails loudly rather than skipping when `uvx` is absent, which
+# is why it is not part of `pixi run ci`. The build is `--strict`, so a broken
+# internal link fails it instead of publishing quietly, and `mkdocs.yml` owns
+# the output location (build/site, which .gitignore already covers).
+docs-build = "python -m scripts.docs.build_site"
 
 # Rewrite every real Mojo file in its own invocation. Mojo 1.0.0b2 can stall
 # when one formatter invocation spans several paths. `find -P` does not traverse
@@ -331,29 +357,41 @@ recipe-check = "python -m scripts.tests.test_community_recipe && python -m scrip
 # full instrumented lane on Linux to learn a docstring was reworded in one copy.
 harness-unit-check = "python -m scripts.tests.test_process_watchdog && python -m scripts.tests.test_dogfood && python -m scripts.tests.test_package_consumption && python -m scripts.tests.test_selfhost && python -m scripts.tests.test_e2e && python -m scripts.tests.test_e2e_json && python -m scripts.tests.test_contract && python -m scripts.tests.test_transcript_compare && python -m scripts.tests.test_readme_help && python -m scripts.tests.test_coverage_capability && python -m scripts.tests.test_abi_probe && python -m scripts.tests.test_asan && python -m scripts.tests.test_valgrind && python -m scripts.tests.test_native_format && python -m scripts.tests.test_build_profiles"
 
-# Repository policy: does this tree still obey its own rules? The layout and
-# invocation-policy oracle, the hosted-workflow security oracle, the
-# Python-quality runner's pinning and failure policy, and the GitHub-annotation
-# tail oracle, each preceded by the mutation tests that prove it still rejects a
-# broken input, because a checker that has quietly stopped rejecting anything is
-# worse than no checker. Separate from `harness-unit-check` because that group
-# is red when the harness broke and this one is red when a change violated a
-# policy the harness enforces fine, and a hosted lane should say which. Note
-# `test_python_quality` runs here while `py-check` itself runs nowhere in the
-# floor (see its comment): the version pin and the fail-loudly-without-uvx
-# policy are asserted without the tool being present.
-repo-policy-check = "python -m scripts.tests.test_layout && python -m scripts.checks.layout && python -m scripts.tests.test_workflow_security && python -m scripts.checks.workflow_security && python -m scripts.tests.test_python_quality && python -m scripts.tests.test_annotations_oracle"
+# Repository policy: does this tree still obey its own rules? The public-version
+# oracle, the documentation-site parity oracle, the layout and invocation-policy
+# oracle, the hosted-workflow security
+# oracle, the Python-quality runner's pinning and failure policy, and the
+# GitHub-annotation tail oracle, each preceded by the mutation tests that prove
+# it still rejects a broken input, because a checker that has quietly stopped
+# rejecting anything is worse than no checker. Separate from
+# `harness-unit-check` because that group is red when the harness broke and this
+# one is red when a change violated a policy the harness enforces fine, and a
+# hosted lane should say which. Note `test_python_quality` runs here while
+# `py-check` itself runs nowhere in the floor (see its comment): the version pin
+# and the fail-loudly-without-uvx policy are asserted without the tool being
+# present. `test_build_site` sits beside it for exactly that reason: the
+# documentation-tool version pins and the same fail-loudly policy are properties
+# of the tree, provable here, while `docs-build` itself needs the tool and a
+# hosted job that supplies it. `test_version` runs here while `version-check` itself runs first in
+# the floor, for the same reason: the oracle's rejections are proved against
+# fabricated trees, not against this one. `docs_parity` DOES run here rather
+# than only in the floor: it reads documents alone, needs no compiler or built
+# binary, and the drift it catches — a documentation-site page whose command no
+# longer matches the README block it mirrors — is a policy violation of exactly
+# the kind this group exists to name.
+repo-policy-check = "python -m scripts.tests.test_version && python -m scripts.tests.test_docs_parity && python -m scripts.checks.docs_parity && python -m scripts.tests.test_layout && python -m scripts.checks.layout && python -m scripts.tests.test_workflow_security && python -m scripts.checks.workflow_security && python -m scripts.tests.test_python_quality && python -m scripts.tests.test_build_site && python -m scripts.tests.test_annotations_oracle"
 
 # Release tooling: the community recipe (through the `recipe-check` edge, which
 # Pixi runs first), then the attestation schema, the GitHub release-state and
-# tag-dereference driver, the community channel/PR/credential driver, and
-# public-channel verification. All four suites drive the release drivers over
-# fabricated state in temporary directories; none reaches a network or a real
-# channel, and the genuine publication path is gated by the release workflows.
-# Separate because these fail for release-process reasons (an attestation field,
-# a tag form, a fork's branch state) that say nothing about the harness or about
-# policy.
-release-tooling-check = { cmd = "python -m scripts.tests.test_release_attestations && python -m scripts.tests.test_github_release && python -m scripts.tests.test_community_publication && python -m scripts.tests.test_public_verify", depends-on = [
+# tag-dereference driver, the community channel/PR/credential driver,
+# public-channel verification, and the version-bump writer. All five suites
+# drive the release drivers over fabricated state in temporary directories or
+# read-only against this tree; none reaches a network or a real channel, and the
+# genuine publication path is gated by the release workflows. Separate because
+# these fail for release-process reasons (an attestation field, a tag form, a
+# fork's branch state, a bump site the gate does not cover) that say nothing
+# about the harness or about policy.
+release-tooling-check = { cmd = "python -m scripts.tests.test_release_attestations && python -m scripts.tests.test_github_release && python -m scripts.tests.test_community_publication && python -m scripts.tests.test_public_verify && python -m scripts.tests.test_bump", depends-on = [
     "recipe-check",
 ] }
 

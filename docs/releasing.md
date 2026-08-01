@@ -27,6 +27,15 @@ Never delete or move a published tag to recover from a failed run.
 6. Keep the normal-account fork
    `mikeleppane/modular-community` synchronized enough for GitHub to recognize
    it as a fork of `modular/modular-community`.
+7. Under **Settings → Pages**, set the build source to **GitHub Actions**. The
+   `Docs` workflow's deploy job cannot publish until Pages is enabled that way.
+8. Create the floating `v1` tag on the merge that first ships `action.yml`:
+   `git tag v1 <merge commit>` then `git push origin v1`. Do this once, at that
+   merge, and not at a release. `v1` is a major-version alias rather than a
+   release tag — the release procedure below only ever *moves* it, so nothing
+   there brings it into existence, and until it exists `mikeleppane/mtest@v1`
+   does not resolve and every workflow copied from the README or the
+   documentation site fails with `Unable to resolve action`.
 
 Do not create the fork token until the first exact-main dry run succeeds. When
 it is needed, create an expiring fine-grained personal access token owned by
@@ -47,8 +56,11 @@ release responses.
 
 ## Release procedure
 
-1. Merge the version and contract changes to `main`. This automatically starts
-   `CI` for the exact resulting `main` push.
+1. Merge the version, contract, and `CHANGELOG.md` changes to `main`. The
+   changelog entry names the release version, its date, the Mojo pin, the
+   supported platforms, and — once step 10 passes — where it is published. A
+   release without an entry is not ready to cut. This merge automatically
+   starts `CI` for the exact resulting `main` push.
 2. Without waiting for `CI`, run **Community Publish** from `main` with mode
    `dry-run`, no tag, and build number `0`. Both supported platform builds and
    the linux-aarch64 selector proof must pass. Record the workflow run ID.
@@ -59,21 +71,37 @@ release responses.
 5. Run **Release** from `main`, entering the stable version without `v` and the
    dry-run ID. Approve the `github-release` environment after checking the
    displayed commit and version.
-6. The successful new release triggers **Community Publish** in `prepare`
+6. Move the floating `v1` tag onto the released commit and force-push it:
+   `git tag -f v1 <released commit>` then `git push --force origin v1`. This
+   step moves the alias created in the one-time setup above; it never creates
+   one, so a repository where that step was skipped has no `v1` for this
+   command to move. It is deliberate and moves nothing the rule above
+   protects: the release tag stays exactly where it is, and `v1` is not a
+   release tag but a major-version alias. A floating major tag is the
+   convention
+   consumers of GitHub Actions expect, and it is the only reason the published
+   composite action resolves at `mikeleppane/mtest@v1`. Skip this step and
+   every adopter of the action stays on the previous 1.x release without being
+   told; delete the tag and their workflows fail to resolve it at all. Stop
+   moving it at 2.0.0 and start a `v2` alias instead, since the tag promises
+   the major version it names.
+7. The successful new release triggers **Community Publish** in `prepare`
    mode. Approve the `community-publish` environment. The workflow rechecks
    the upstream tip, public channels, recipe digest, fork identity, and token
    expiration before it prepares the fork branch.
-7. Open the compare URL in the workflow summary. Disable **Allow edits from
+8. Open the compare URL in the workflow summary. Disable **Allow edits from
    maintainers**, use the generated title and validation facts, and open the
    pull request against `modular/modular-community`.
-8. Wait for the upstream `OK to test` label, CI, review, merge, and channel
+9. Wait for the upstream `OK to test` label, CI, review, merge, and channel
    build.
-9. Run **Community Verify** with the release tag and build number. It installs
+10. Run **Community Verify** with the release tag and build number. It installs
    only from the public Modular, modular-community, and conda-forge channels
    on Linux and macOS and exercises the installed runner and assertion
    companion.
-10. Only after public verification passes, update README installation text and
-   release notes to say the package is publicly available.
+11. Only after public verification passes, fill in the release's **Published**
+   subsection in `CHANGELOG.md` with the channel, build number, and artifact
+   names, and confirm the README's Installation section and the release notes
+   say the package is publicly available.
 
 ## Recovery
 

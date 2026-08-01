@@ -43,7 +43,11 @@ class FakeRunner:
             if command[1:] == ("--version",):
                 return CommandResult(0, "mtest 1.0.0\n", "")
             if command[1:] == ("--help",):
-                return CommandResult(0, "Usage: mtest [OPTIONS]\n", "")
+                # Lowercase, matching the real `usage: mtest ...` line
+                # `help_text()` emits (src/mtest/cli/parser.mojo) and the same
+                # substring `scripts/build/package_consumption.py`'s own fake
+                # already asserts against.
+                return CommandResult(0, "usage: mtest\n", "")
             fixture = Path(command[-1]).name
             if fixture == "test_passing.mojo":
                 return CommandResult(0, "PASS\n", "")

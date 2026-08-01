@@ -1,13 +1,37 @@
 # mtest command-line contract
 
-**Status: DRAFT.** This document specifies the v1 command-line interface of
-`mtest`. It is the public API of the tool. Until the v1.0 release it may change;
-at v1.0 the surfaces marked **FROZEN** below are frozen and any later change to
-them requires a major version bump. Each subcommand's exit domain and
-precedence are already frozen. The enumerated usage-error triggers grow only
-when a newly served surface adds an argv syntax or applicability error.
-Everything above describes the full v1 target; for what the *current build*
-actually implements today, see
+**Status: FROZEN for the 1.x series.** This document specifies the v1
+command-line interface of `mtest`. It is the public API of the tool, frozen as
+of the 1.0.0 release.
+
+The amendment rule, so the freeze means something concrete. §20 sorts every
+surface into three tiers and they carry different promises:
+
+- **FROZEN** surfaces — the subcommands, flag names and semantics, exit codes,
+  the node-id grammar, `mtest.toml` key names and semantics, the JUnit mapping,
+  the annotation shapes, the `--json` event stream, the `collect` format, and
+  the test-module contract — do not change, are not removed, and are not added
+  to within 1.x. The one exception is the one §20 states itself: the `--json`
+  stream grows additively at schema `version` 1, gaining event kinds and fields,
+  while a removal or a meaning change bumps the header version.
+- **STABLE-INTENT** surfaces carry a weaker promise on purpose. Default values —
+  timeouts, `auto` worker sizing — may be tuned in a minor release, and the
+  `.mtest-cache/lastrun` format changes only by taking a new format version.
+  Tuning a default is not a semantics change to the flag that reads it.
+- **INFORMAL** surfaces — console text layout and colors, and the human-facing
+  `config show` output — carry no compatibility promise at all. Read the
+  `--json` event stream rather than the console rendering if you need stability.
+
+New command-line grammar is a major version. The subcommand set and the flag
+inventory are frozen above, and §21 lists what the next major version is
+reserved to add; none of it can land in a 1.x release whatever its size.
+
+The rule binds the interface, not the prose: sharpening this document's
+description of a surface that does not itself move is not an amendment.
+
+Each subcommand's exit domain and precedence are frozen. The enumerated
+usage-error triggers grow only when a newly served surface adds an argv syntax
+or applicability error. For what the *current build* implements today, see
 [§24, Availability status (this build)](#24-availability-status-this-build).
 
 `mtest` is an orchestrator layered on top of Mojo's standard-library
@@ -1310,14 +1334,14 @@ file's result line carries an informal `SERIAL` marker (§15.1).
 
 ## 20. Stability tiers
 
-- **FROZEN at v1.0** — subcommands; flag names and semantics; exit codes; the
-  node-id grammar; `mtest.toml` key names and semantics (§25);
-  `--lf`/`--last-failed` and `--ff`/`--failed-first` semantics (§26); the JUnit
-  mapping; the annotation shapes; the `--json` event stream schema (§15.4;
-  normatively `docs/json-stream.md`) — its framing, header, event and field
-  names, and token vocabularies, frozen at stream `version` 1 and growing only
-  additively (new fields and kinds; a removal or a meaning-change bumps the
-  header version); the `collect` format; the test-module contract.
+- **FROZEN at v1.0, and frozen now** — subcommands; flag names and semantics;
+  exit codes; the node-id grammar; `mtest.toml` key names and semantics (§25);
+  `--lf`/`--last-failed` and `--ff`/`--failed-first` semantics (§26);
+  the JUnit mapping; the annotation shapes; the `--json` event stream schema
+  (§15.4; normatively `docs/json-stream.md`) — its framing, header, event and
+  field names, and token vocabularies, frozen at stream `version` 1 and
+  growing only additively (new fields and kinds; a removal or a meaning-change
+  bumps the header version); the `collect` format; the test-module contract.
 - **STABLE-INTENT** — default values (timeouts, `auto` worker sizing) may be
   tuned in minor versions; the self-versioned `.mtest-cache/lastrun` format
   (§26), whose incompatible changes require a new format version.
@@ -1329,9 +1353,10 @@ file's result line carries an informal `SERIAL` marker (§15.1).
 
 ## 21. Reserved (documented as reserved, not in v1)
 
-The following are out of scope for v1 and reserved for a later major version
-(vNext); each is either unrecognized by the parser, or recognized-but-refused
-as noted:
+The following are out of scope for v1 and reserved for the next major version.
+Under the amendment rule at the top of this document, none of them can land in
+a 1.x release: adding one is what a major version is for. Each is either
+unrecognized by the parser, or recognized-but-refused as noted:
 
 `--root`; boolean `-k` expressions; `--pattern`; a **per-test** granularity for
 `--durations` (the slowest individual *tests*, not just files — blocked on the

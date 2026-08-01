@@ -1,0 +1,29 @@
+site_name: mtest
+site_description: A pytest-like test runner for Mojo
+repo_url: https://github.com/mikeleppane/mtest
+docs_dir: docs
+
+# Build into build/, which .gitignore already ignores. mkdocs' default `site/`
+# is not ignored, so a local build would otherwise leave an untracked directory
+# at the repository root and red fmt-check's `git diff --exit-code`.
+site_dir: build/site
+
+# docs/plans/ and docs/superpowers/ are gitignored working material. mkdocs
+# builds from the working tree rather than the index, so without these two
+# lines a local build publishes unpublished internal documents.
+exclude_docs: |
+  plans/
+  superpowers/
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Continuous integration: ci.md
+  - Reference:
+      - Command-line contract: cli-contract.md
+      - JSON event stream: json-stream.md
+  - Maintainers:
+      - Releasing: releasing.md
+
+theme:
+  name: material

@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
 """Rewrite every version literal in one edit so the gates cannot disagree.
 
-Nine files carry the release version, in four syntaxes plus rendered CLI
-transcripts in prose and SVG. Only three of them are covered by
-`scripts/checks/version.py`; `scripts/qa/contract.py` fails at a different
-gate, and the transcripts in `README.md`, `docs/cli-contract.md`, and the two
-banner SVGs are gated by nothing at all. Bumping by hand means nine edits, and
-the ones that go unnoticed are exactly the ones no gate is watching.
+Eleven files carry the release version, in four syntaxes plus rendered CLI
+transcripts in prose and SVG. Every one of them is now gated: `version-check`
+holds the three manifests against its own `EXPECTED_VERSION` pin and holds the
+six public transcripts against the same value, and `scripts/qa/contract.py`
+fails at the contract gate. Bumping by hand still means eleven edits across
+four syntaxes, which is what this tool exists to collapse into one.
+
+The six transcript sites and the pattern that finds a literal inside them are
+defined once, by `scripts/checks/version.py`, and imported here. Writing a site
+and enforcing it are different guarantees, and a writer that carried its own
+list could quietly stop overlapping the checker's.
 
 The site list derives from what the 1.0.0 bump changed, not from a search over
 likely file types: such a search is what misses the SVGs. That bump also
 touched `tests/unit/test_cli_parse.mojo`, which no longer belongs here because
 it composes the string from `MTEST_VERSION` instead of pinning a literal.
 Files that pin a deliberately arbitrary version are excluded for the same
-reason; see `TRANSCRIPT_RE`.
+reason; see `TRANSCRIPT_SITES`.
 
 Rewriting `EXPECTED_VERSION` from here is deliberate, not an oversight. That
 pin exists so a coordinated hand-edit of the other files cannot reach main
@@ -33,6 +38,8 @@ import re
 import shutil
 import sys
 
+from scripts.checks.version import TRANSCRIPT_RE, TRANSCRIPT_SITES
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -40,14 +47,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # tool cannot mint a version the release workflow would turn away: no leading
 # `v`, no pre-release suffix, no zero-padded component.
 VERSION_RE = re.compile(r"(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2}\Z")
-
-# Every rendered `mtest <version>` the repository commits, in prose and in SVG.
-# The trailing guard stops `1.0.0` from matching inside `1.0.01`. Fixtures that
-# pin a deliberately arbitrary version (`scripts/fixtures/json_stream/*.ndjson`,
-# the report unit tests, and the `stream_header` docstring, all still on 0.6.0)
-# are NOT sites: they inject their version explicitly and must not move with the
-# release.
-TRANSCRIPT_RE = re.compile(r"mtest (\d+\.\d+\.\d+)(?![\d.])")
 
 
 @dataclass(frozen=True)
@@ -92,28 +91,17 @@ SITES = (
         REPO_ROOT / "scripts" / "qa" / "contract.py",
         re.compile(r'out_has=\["mtest ([^"]*)"\]'),
     ),
-    # The CLI contract document, whose transcripts are the spec the qa gate
-    # renders against.
-    Site(
-        REPO_ROOT / "docs" / "cli-contract.md",
-        TRANSCRIPT_RE,
-    ),
-    # Committed CLI transcripts. Ungated, so a stale one ships unnoticed into
-    # the first thing anyone reads on the repository page.
-    Site(
-        REPO_ROOT / "README.md",
-        TRANSCRIPT_RE,
-    ),
-    # The two README banners. Text inside SVG, so no reader of the rendered
-    # page can tell these are not live output.
-    Site(
-        REPO_ROOT / "docs" / "assets" / "mtest-run.svg",
-        TRANSCRIPT_RE,
-    ),
-    Site(
-        REPO_ROOT / "docs" / "assets" / "mtest-flaky.svg",
-        TRANSCRIPT_RE,
-    ),
+    # The six public transcript surfaces: the README's committed CLI output,
+    # the CLI contract document the qa gate renders against, the two
+    # documentation-site pages that mirror README blocks byte for byte, and the
+    # two README banners, whose text sits inside the SVG where no reader of the
+    # rendered page can tell it is not live output. Taken from the gate that
+    # enforces them, so writer and checker cannot come to mean different sets.
+    #
+    # The site pages have to move with the README rather than after it: their
+    # blocks are compared byte for byte by the docs-parity gate, so rewriting
+    # one side alone would red that gate as well as this one.
+    *(Site(REPO_ROOT / relative, TRANSCRIPT_RE) for relative in TRANSCRIPT_SITES),
 )
 
 

