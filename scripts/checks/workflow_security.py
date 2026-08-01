@@ -18,6 +18,9 @@ What review genuinely cannot see:
   documentation, and release/publication workflows' job permissions are pinned
   exactly, and `continue-on-error:` (which would let a failing security or
   gating step report green) is forbidden outright.
+- The composite action this repository publishes runs in someone else's job,
+  under someone else's token, and appears in no workflow diff here at all. It
+  is reviewed on the same terms as anything else that runs in a job.
 """
 
 from __future__ import annotations
@@ -37,6 +40,9 @@ WORKFLOW_PATHS = {
     Path(".github/workflows/release.yml"),
 }
 """Every hosted workflow tracked by the repository."""
+
+PUBLISHED_ACTION_PATH = Path("action.yml")
+"""The composite action this repository publishes, consumed as `@v1`."""
 
 CHECKOUT_ACTION_SHA = "3d3c42e5aac5ba805825da76410c181273ba90b1"
 SETUP_PIXI_ACTION_SHA = "a09b6247153796b190642a2b53fac4241043cf6f"
@@ -502,6 +508,87 @@ def check_docs_workflow(repo_root: Path = REPO_ROOT) -> None:
         )
 
 
+def check_published_action(repo_root: Path = REPO_ROOT) -> None:
+    """Review the composite action this repository publishes to consumers.
+
+    Every other oracle here governs an action this repository *consumes*. The
+    root `action.yml` is the one it *publishes*: a consumer adopts it by writing
+    a single `uses:` line and inherits whatever it does, in their job, with
+    their token. Nothing else in the tree looks at it, so it is reviewed here on
+    the same terms as anything else that runs in a job.
+
+    What this holds:
+
+    - `runs.using: composite`, so the action stays a wrapper around shell steps
+      this repository can read rather than a JavaScript or container entry point
+      whose behaviour lives in a built artifact;
+    - no `continue-on-error:`, which would let a failing test run report green
+      in a consumer's workflow — the exact outcome the product exists to
+      prevent;
+    - no `secrets.` and no `github.token` reference;
+    - any `uses:` inside it pinned to a 40-hex commit SHA carrying a trailing
+      version comment and present in `REVIEWED_ACTION_PINS`, exactly as
+      `check_action_pins` requires of the workflows. A relative `./` reference
+      is rejected rather than skipped as it is there: inside a published
+      composite action `./` resolves against the *consumer's* checkout, which
+      is a path this repository cannot review at all. Today the action
+      references nothing, and this rule is what keeps that a decision instead
+      of an accident.
+
+    There is deliberately no `permissions:` assertion, and a reader who expects
+    one should not conclude the review is incomplete. A composite action cannot
+    declare a `permissions:` block; it runs inside the calling job and inherits
+    that job's token whatever the caller granted. The reviewable property is
+    therefore not which permissions the action requests but whether it touches
+    the caller's credentials at all, which is what the two credential rules
+    above assert.
+
+    Args:
+        repo_root: Repository root holding the published `action.yml`.
+
+    Raises:
+        AssertionError: The action violates one of the properties above.
+        OSError: The action could not be read. A published action that has been
+            deleted or renamed is a gate failure, not a silent pass.
+    """
+    action_path = repo_root / PUBLISHED_ACTION_PATH
+    action = action_path.read_text(encoding="utf-8")
+
+    using = re.findall(r"^  using: (.+)$", _yaml_block(action, "runs:"), re.MULTILINE)
+    if using != ["composite"]:
+        raise AssertionError(
+            "the published action must be a composite action: "
+            f"expected=['composite'], actual={using}"
+        )
+    if "continue-on-error:" in action:
+        raise AssertionError(
+            "the published action must not contain continue-on-error: a step "
+            "that fails must fail the consumer's job"
+        )
+    for credential in ("secrets.", "github.token"):
+        if credential in action:
+            raise AssertionError(
+                "the published action must contain no credential reference: "
+                f"{credential}"
+            )
+
+    for line_number, line in enumerate(action.splitlines(), start=1):
+        if not re.match(r"^\s*(?:-\s*)?uses:", line):
+            continue
+        match = ACTION_USE_RE.fullmatch(line)
+        if match is None:
+            raise AssertionError(
+                "published action pin must use a full commit SHA and version "
+                f"comment: {PUBLISHED_ACTION_PATH}:{line_number}: {line.strip()}"
+            )
+        pin = (match.group("sha"), match.group("version"))
+        if pin not in REVIEWED_ACTION_PINS.get(match.group("action"), set()):
+            raise AssertionError(
+                "reviewed action pin mismatch: "
+                f"{PUBLISHED_ACTION_PATH}:{line_number}: {line.strip()}"
+            )
+
+
 def check_release_workflows(repo_root: Path = REPO_ROOT) -> None:
     """Pin publication authority, evidence, platform, and no-op boundaries."""
     workflow_root = repo_root / ".github" / "workflows"
@@ -734,6 +821,7 @@ def main() -> int:
         check_action_pins()
         check_codeql_workflow()
         check_docs_workflow()
+        check_published_action()
         check_release_workflows()
     except (AssertionError, OSError) as exc:
         print(f"workflow-security-check: FAIL: {exc}", file=sys.stderr)

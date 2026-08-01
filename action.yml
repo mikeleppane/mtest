@@ -1,0 +1,22 @@
+name: mtest
+description: Run a Mojo test suite with mtest
+author: mikeleppane
+
+inputs:
+  paths:
+    description: Test paths to run. Defaults to the tests directory.
+    required: false
+    default: tests
+  args:
+    description: >-
+      Additional mtest flags, appended verbatim. Every mtest flag is reachable
+      here; none is promoted to its own input, so this action cannot drift from
+      the command-line contract.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: pixi run mtest ${{ inputs.paths }} ${{ inputs.args }}

@@ -222,9 +222,11 @@ PARITY_BLOCKS = (
     ParityBlock(Path("docs/getting-started.md"), 0, "Your first test", 0),
     ParityBlock(Path("docs/getting-started.md"), 1, "Your first test", 1),
     ParityBlock(Path("docs/getting-started.md"), 2, "Your first test", 2),
-    # The workflow to paste, and the sharded variant of it.
+    # The workflow to paste, the sharded variant of it, and the composite
+    # action that replaces the invocation step in either.
     ParityBlock(Path("docs/ci.md"), 0, "Run it in CI", 0),
     ParityBlock(Path("docs/ci.md"), 1, "Run it in CI", 1),
+    ParityBlock(Path("docs/ci.md"), 2, "Run it in CI", 2),
 )
 """Every mirrored block, paired with the README block that owns it.
 

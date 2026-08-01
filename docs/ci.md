@@ -81,6 +81,25 @@ test runs twice:
           path: build/test-results-${{ matrix.shard }}.xml
 ```
 
+## Running it as an action
+
+The same run is available as a composite action, if you would rather not repeat
+the invocation. It runs mtest and nothing else: the workflow above still
+installs the locked environment, and the action replaces only the step that
+invokes the runner.
+
+```yaml
+      - uses: mikeleppane/mtest@v1
+        with:
+          paths: tests
+          args: --gh-annotations auto --junit-xml build/test-results.xml
+```
+
+The second input is appended to the command verbatim, so every flag the runner
+accepts stays reachable without the action growing an input of its own. The
+major-version tag floats onto each 1.x release; reference a commit instead if
+you would rather adopt each release deliberately.
+
 ## One thing not to do
 
 Do not restore the build cache between hosted runners. The failure it produces

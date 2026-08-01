@@ -74,7 +74,7 @@ class RepositoryParityTests(unittest.TestCase):
             {
                 Path("docs/index.md"): 1,
                 Path("docs/getting-started.md"): 3,
-                Path("docs/ci.md"): 2,
+                Path("docs/ci.md"): 3,
             },
         )
 
@@ -233,10 +233,10 @@ class ParityMutationTests(unittest.TestCase):
             root = Path(raw)
             readme = root / docs_parity.README_PATH
             text = readme.read_text(encoding="utf-8")
-            start = text.index("```yaml\n    strategy:")
-            end = text.index("```\n", text.index("path: build/test-results-"))
+            start = text.index("```yaml\n      - uses: mikeleppane/mtest@v1")
+            end = text.index("```\n", text.index("args: --gh-annotations auto"))
             readme.write_text(text[:start] + text[end + 4 :], encoding="utf-8")
-            with self.assertRaisesRegex(AssertionError, r"holds only 1 blocks"):
+            with self.assertRaisesRegex(AssertionError, r"holds only 2 blocks"):
                 docs_parity.check_parity_blocks(root)
 
     def test_a_page_index_that_no_longer_exists_is_rejected(self) -> None:

@@ -223,6 +223,22 @@ selection is exactly the unsharded selection, and no test runs twice:
           path: build/test-results-${{ matrix.shard }}.xml
 ```
 
+The same run is available as a composite action, if you would rather not
+repeat the invocation. It runs mtest and nothing else — your workflow still
+installs the locked Pixi environment as above:
+
+```yaml
+      - uses: mikeleppane/mtest@v1
+        with:
+          paths: tests
+          args: --gh-annotations auto --junit-xml build/test-results.xml
+```
+
+`args` is appended to the command verbatim, so every flag stays reachable
+without the action growing an input for it. `v1` is a floating tag that follows
+each 1.x release; pin it to a commit SHA if you would rather adopt each release
+deliberately.
+
 **Do not cache `.mtest-cache/` between runners.** The build cache's key frames
 the compiler, the toolchain libraries, the environment, the invocation root,
 the build arguments, the include-root contents, and each file's own bytes — and

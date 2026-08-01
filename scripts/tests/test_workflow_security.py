@@ -407,6 +407,153 @@ class DocsWorkflowTests(unittest.TestCase):
         )
 
 
+class PublishedActionTests(unittest.TestCase):
+    """Fail-closed policy for the composite action this repository publishes.
+
+    Every other check in this module governs an action the repository
+    *consumes*. This one governs the one it *publishes*, which is the surface a
+    consumer trusts by writing a single `uses:` line, and which no review of a
+    workflow diff would ever look at.
+    """
+
+    def _action(self) -> str:
+        """Return the live published action definition."""
+        return (
+            workflow_security.REPO_ROOT / workflow_security.PUBLISHED_ACTION_PATH
+        ).read_text(encoding="utf-8")
+
+    def _reject(self, mutated: str, pattern: str) -> None:
+        """Require the published-action oracle to reject one mutated definition."""
+        self.assertNotEqual(mutated, self._action())
+        with tempfile.TemporaryDirectory(prefix="mtest-published-action-") as raw_tmp:
+            repo = Path(raw_tmp)
+            (repo / workflow_security.PUBLISHED_ACTION_PATH).write_text(
+                mutated,
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(AssertionError, pattern):
+                workflow_security.check_published_action(repo)
+
+    def test_live_published_action_is_reviewable(self) -> None:
+        workflow_security.check_published_action()
+
+    def test_published_action_is_a_thin_pass_through(self) -> None:
+        action = self._action()
+        self.assertIn("  paths:\n", action)
+        self.assertIn("  args:\n", action)
+        self.assertIn(
+            "      run: pixi run mtest ${{ inputs.paths }} ${{ inputs.args }}\n",
+            action,
+        )
+        for absent in ("uses:", "prefix-dev/setup-pixi", "cache", "--junit-xml"):
+            self.assertNotIn(absent, action)
+
+    def test_missing_published_action_is_rejected(self) -> None:
+        with (
+            tempfile.TemporaryDirectory(prefix="mtest-published-action-") as raw_tmp,
+            self.assertRaises(OSError),
+        ):
+            workflow_security.check_published_action(Path(raw_tmp))
+
+    def test_non_composite_action_is_rejected(self) -> None:
+        self._reject(
+            self._action().replace("  using: composite\n", "  using: node24\n", 1),
+            "must be a composite action",
+        )
+
+    def test_secret_reference_is_rejected(self) -> None:
+        self._reject(
+            self._action().replace(
+                "      run: pixi run mtest",
+                "      env:\n"
+                "        TOKEN: ${{ secrets.PUBLISH_TOKEN }}\n"
+                "      run: pixi run mtest",
+                1,
+            ),
+            "credential reference",
+        )
+
+    def test_caller_token_reference_is_rejected(self) -> None:
+        self._reject(
+            self._action().replace(
+                "      run: pixi run mtest",
+                "      env:\n"
+                "        TOKEN: ${{ github.token }}\n"
+                "      run: pixi run mtest",
+                1,
+            ),
+            "credential reference",
+        )
+
+    def test_continue_on_error_is_rejected(self) -> None:
+        self._reject(
+            self._action().replace(
+                "    - shell: bash\n",
+                "    - shell: bash\n      continue-on-error: true\n",
+                1,
+            ),
+            "continue-on-error",
+        )
+
+    def test_action_referenced_by_tag_is_rejected(self) -> None:
+        self._reject(
+            self._action().replace(
+                "    - shell: bash\n",
+                "    - uses: actions/checkout@v7\n    - shell: bash\n",
+                1,
+            ),
+            "action pin must use a full commit SHA",
+        )
+
+    def test_action_referenced_without_a_version_comment_is_rejected(self) -> None:
+        self._reject(
+            self._action().replace(
+                "    - shell: bash\n",
+                "    - uses: actions/checkout@"
+                f"{workflow_security.CHECKOUT_ACTION_SHA}\n"
+                "    - shell: bash\n",
+                1,
+            ),
+            "action pin must use a full commit SHA",
+        )
+
+    def test_local_action_reference_is_rejected(self) -> None:
+        self._reject(
+            self._action().replace(
+                "    - shell: bash\n",
+                "    - uses: ./.github/actions/setup\n    - shell: bash\n",
+                1,
+            ),
+            "action pin must use a full commit SHA",
+        )
+
+    def test_unreviewed_full_sha_is_rejected(self) -> None:
+        self._reject(
+            self._action().replace(
+                "    - shell: bash\n",
+                f"    - uses: actions/checkout@{'0' * 40} # v7.0.1\n"
+                "    - shell: bash\n",
+                1,
+            ),
+            "reviewed action pin mismatch",
+        )
+
+    def test_reviewed_pin_is_accepted_so_the_rule_is_not_vacuous(self) -> None:
+        mutated = self._action().replace(
+            "    - shell: bash\n",
+            f"    - uses: actions/checkout@{workflow_security.CHECKOUT_ACTION_SHA}"
+            " # v7.0.1\n    - shell: bash\n",
+            1,
+        )
+        with tempfile.TemporaryDirectory(prefix="mtest-published-action-") as raw_tmp:
+            repo = Path(raw_tmp)
+            (repo / workflow_security.PUBLISHED_ACTION_PATH).write_text(
+                mutated,
+                encoding="utf-8",
+            )
+            workflow_security.check_published_action(repo)
+
+
 class ReleaseWorkflowTests(unittest.TestCase):
     """Fail-closed publication workflow authority and evidence boundaries."""
 
