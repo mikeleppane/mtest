@@ -38,6 +38,15 @@ against the manifest before, so a toolchain bump that stopped at the manifest
 left the published package asking for a compiler this repository no longer
 builds against.
 
+That list is hand-written too, so it is inverted the same way, over the
+documents a reader acts on: every tracked Markdown file at the repository root
+and under `docs/`, minus the internal working directories, must either state
+the pinned toolchain or state none. A documentation page added tomorrow saying
+`This release requires Mojo 1.0.0b1` is caught by that sweep whether or not
+anyone remembered to list it. The sweep stops at reader-facing documentation
+deliberately, and `check_no_stale_mojo_pin_claims` records why going wider
+would cost more than it buys.
+
 Wired into `pixi run ci`, so an edit to any one of these files that forgets the
 others fails loudly instead of shipping a mislabeled artifact or a false public
 claim.
@@ -140,11 +149,16 @@ rule that pretends they cannot occur. Three kinds:
   rather than skipped by some rule about the checker's own directory, because a
   rule wide enough to cover this file would also cover any future public
   surface written beside it.
-- Fixtures and unit tests that pin a deliberately arbitrary version
+- Fixtures and unit tests that pin a version on purpose
   (`scripts/fixtures/json_stream/*.ndjson`, the report tests, the
-  `stream_header` docstring, the harness suites). They assert against a version
-  chosen to be *not* the release, and `bump` must leave them alone; rewriting
-  them would erase the very difference they test.
+  `stream_header` docstring, the harness suites). Most assert against a version
+  chosen to be *not* the release, so that they would keep testing the same
+  difference after a bump. Some deliberately pin the release itself:
+  `scripts/tests/test_public_verify.py` drives the public verifier over
+  fabricated channel state and has to name the version that verifier would be
+  asked about. Either way `bump` must leave them alone — the first because
+  rewriting it would erase the difference it tests, the second because the
+  literal is test input rather than a claim made to a reader.
 - `scripts/qa/contract.py`, the one file `bump` does rewrite that is not a
   public surface. Its `out_has=["mtest 1.0.0"]` is an assertion about what the
   binary prints, not a transcript shown to a reader, so it carries its own
@@ -174,13 +188,42 @@ compared either against `pixi.toml` before: `check_recipe_drift` holds the two
 recipes against *each other*, which says nothing when both are stale together.
 The rest are published claims a reader acts on when setting up a toolchain.
 
-Two restatements live in code and are gated against the live toolchain instead,
-so they are not listed here: `scripts/checks/coverage_capability.py` asserts its
-own `PINNED_MOJO_VERSION` appears in this manifest's spec, and
-`src/mtest/cli/doctor.mojo` compares `_PINNED_MOJO_IDENTITY` against what the
-installed compiler actually reports. Passing mentions in build-script comments
-are narration about how the pinned toolchain behaves, not claims about what
-this release requires, and are deliberately out of scope.
+`recipe/build.sh` is listed because its comment restates the isolated build
+environment the recipe itself declares, and that environment ships. The
+boundary is therefore what the package carries, not the file type: the sibling
+comments in `scripts/build/production_build.sh` and
+`scripts/build/mojo_package.sh` say the same kind of thing about the same
+toolchain and are deliberately not listed, because nothing a consumer installs
+depends on them.
+
+Four restatements live in code and a bumper has to find each one; they are not
+listed here because a string comparison against this manifest is the weakest
+check available for any of them:
+
+- `scripts/checks/coverage_capability.py` asserts its own
+  `PINNED_MOJO_VERSION` appears in this manifest's spec, so it gates itself.
+- `src/mtest/cli/doctor.mojo` compares `_PINNED_MOJO_IDENTITY` against what the
+  installed compiler actually reports, including the revision hash this
+  manifest does not carry.
+- `scripts/build/package_consumption.py` globs
+  `mojo-compiler-1.0.0b2-*.json` in the installed environment's `conda-meta` to
+  prove the solve pulled the declared run dependency. A stale glob fails that
+  gate as a missing run dependency, which indicts the recipe rather than the
+  glob, so this is the restatement most likely to waste a bump's afternoon.
+- `scripts/e2e/scenarios/doctor.py` asserts the exact `expected Mojo 1.0.0b2
+  (2cf4d08a)` text the `doctor` subcommand prints, which is a claim about the
+  CLI's output rather than about the manifest.
+"""
+
+MOJO_PIN_DOC_DIRECTORY = "docs"
+"""The one subdirectory of published documentation the pin sweep descends into."""
+
+MOJO_PIN_INTERNAL_DIRECTORIES = ("docs/plans/", "docs/superpowers/")
+"""Working directories the sweep skips, excluded from the site for the same reason.
+
+`scripts/checks/docs_parity.py` refuses to let the site configuration publish
+either, so a claim inside one reaches no reader. Named here rather than derived
+from that module so a change to one is a visible change to the other.
 """
 
 MOJO_PIN_CLAIM_RE = re.compile(
@@ -429,6 +472,92 @@ def check_mojo_pin_sites(repo_root: Path = REPO_ROOT) -> None:
                 )
 
 
+def swept_documentation(repo_root: Path = REPO_ROOT) -> list[Path]:
+    """Return the reader-facing documents the toolchain-pin sweep covers.
+
+    Args:
+        repo_root: Repository root to enumerate.
+
+    Returns:
+        Every tracked Markdown file at the repository root, plus every tracked
+        Markdown file under `docs/` outside the internal working directories,
+        sorted. These are the documents a reader reaches, whether through the
+        repository page or through the published site.
+
+    Raises:
+        AssertionError: If the tracked-file inventory cannot be read.
+    """
+    swept: list[Path] = []
+    for relative in _tracked_files(repo_root):
+        if relative.suffix != ".md":
+            continue
+        if len(relative.parts) == 1:
+            swept.append(relative)
+            continue
+        if relative.parts[0] != MOJO_PIN_DOC_DIRECTORY:
+            continue
+        if str(relative).startswith(MOJO_PIN_INTERNAL_DIRECTORIES):
+            continue
+        swept.append(relative)
+    return sorted(swept)
+
+
+def check_no_stale_mojo_pin_claims(repo_root: Path = REPO_ROOT) -> None:
+    """Assert no reader-facing document names a toolchain this repo does not pin.
+
+    `MOJO_PIN_SITES` is hand-written, so on its own it holds the documents
+    someone remembered. A page added tomorrow saying which compiler to install
+    would be ungated from birth, exactly as an undeclared version transcript
+    would be, so the question is inverted here the way
+    `check_no_undeclared_transcripts` inverts it: sweep the documents a reader
+    acts on and fail on any claim that disagrees with the manifest.
+
+    Unlike a declared site, a swept document may state no toolchain at all —
+    most of them do, and requiring a claim would turn every page into a version
+    surface. The property is that whatever it does say is true.
+
+    The sweep stops at Markdown under the repository root and `docs/`, and that
+    boundary is a measurement rather than a preference. `MOJO_PIN_CLAIM_RE`
+    matches in 55 tracked files; extending the sweep to all of them would need
+    47 exemptions, and the exemptions would not be incidental:
+
+    - 22 are machine-generated protocol snapshots under
+      `tests/snapshots/protocol/`, whose toolchain header `transcripts-check`
+      already holds byte-for-byte against a regeneration at the pinned
+      compiler — a strictly stronger oracle than a string comparison. Their
+      number also changes whenever a fixture is added, so listing them would
+      reintroduce the per-fixture ledger edit this repository deliberately
+      removed.
+    - Several deliberately name a version that is *not* the pin, because that
+      difference is what they test: `scripts/e2e/scenarios/doctor.py`,
+      `tests/unit/test_cli_doctor.mojo`, `scripts/tests/test_community_recipe.py`
+      and `scripts/tests/test_build_stamp.py`. A sweep demanding they agree
+      would have to exempt exactly the files whose value is that they disagree.
+    - The rest are `pixi.lock`, vendored material, test data, and the four code
+      restatements described under `MOJO_PIN_SITES`, each already gated against
+      something stronger than this manifest.
+
+    Args:
+        repo_root: Repository root to sweep.
+
+    Raises:
+        AssertionError: If a swept document names another toolchain, or if the
+            manifest pin or the tracked-file inventory cannot be read.
+    """
+    # The inventory first: without it the sweep cannot tell a document that
+    # states nothing from a tree it failed to enumerate, so it refuses there
+    # rather than after reading a manifest it would have no use for.
+    swept = swept_documentation(repo_root)
+    pinned = _manifest_mojo_pin(repo_root / "pixi.toml")
+    for relative in swept:
+        for claim in MOJO_PIN_CLAIM_RE.findall(_read_text(repo_root / relative)):
+            if claim != pinned:
+                raise AssertionError(
+                    f"stale toolchain claim: {relative} names Mojo {claim!r}, "
+                    f"but {repo_root / 'pixi.toml'} pins {pinned!r}"
+                )
+
+
 def _tracked_files(repo_root: Path) -> list[Path]:
     """List every file git tracks in one repository, as relative paths.
 
@@ -532,8 +661,9 @@ def main() -> int:
     Returns:
         0 once the three parsed versions are byte-identical and equal to
         `EXPECTED_VERSION`, every public transcript renders that same version,
-        no undeclared tracked file renders one, and every restatement of the
-        Mojo pin matches the manifest; printing the agreed version. 1 after
+        no undeclared tracked file renders one, every restatement of the Mojo
+        pin matches the manifest, and no reader-facing document names another
+        toolchain; printing the agreed version. 1 after
         printing the drift to stderr, so `pixi run ci` fails instead of building
         a mislabeled artifact or publishing a false claim.
     """
@@ -546,6 +676,7 @@ def main() -> int:
         check_no_undeclared_transcripts()
         check_support_matrix()
         check_mojo_pin_sites()
+        check_no_stale_mojo_pin_claims()
     except AssertionError as exc:
         print(f"version-check: FAIL: {exc}", file=sys.stderr)
         return 1

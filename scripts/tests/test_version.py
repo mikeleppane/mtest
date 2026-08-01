@@ -328,6 +328,128 @@ class MojoPinGateTests(unittest.TestCase):
         )
 
 
+class MojoPinSweepTests(unittest.TestCase):
+    """The inverse sweep that stops a new page from claiming a toolchain."""
+
+    def _repository(self, root: Path) -> None:
+        """Build a temporary git repository holding the swept documents.
+
+        Args:
+            root: Empty directory to initialize as a repository.
+        """
+        subprocess.run(["git", "-C", str(root), "init", "-q"], check=True)
+        tracked = (*version.swept_documentation(), Path("pixi.toml"))
+        for relative in tracked:
+            _clone_file(root, relative)
+        subprocess.run(
+            ["git", "-C", str(root), "add", "--", *(str(p) for p in tracked)],
+            check=True,
+        )
+
+    def _track(self, root: Path, relative: str, text: str) -> None:
+        """Write one extra document into the temporary repository and track it.
+
+        Args:
+            root: The temporary repository root.
+            relative: Repository-relative path of the new document.
+            text: Its contents.
+        """
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        subprocess.run(["git", "-C", str(root), "add", "--", relative], check=True)
+
+    def test_repository_documents_claim_only_the_pinned_toolchain(self) -> None:
+        version.check_no_stale_mojo_pin_claims()
+
+    def test_the_swept_set_is_the_reader_facing_documentation(self) -> None:
+        """Named here so widening or narrowing the sweep is a reviewed diff."""
+        swept = version.swept_documentation()
+        self.assertIn(Path("README.md"), swept)
+        self.assertIn(Path("docs/getting-started.md"), swept)
+        self.assertIn(Path("docs/releasing.md"), swept)
+        self.assertNotIn(
+            Path(
+                "docs/superpowers/specs/2026-07-23-test-confidence-hardening-design.md"
+            ),
+            swept,
+        )
+        for relative in swept:
+            self.assertEqual(relative.suffix, ".md", relative)
+            self.assertIn(len(relative.parts), (1, 2), relative)
+
+    def test_every_markdown_pin_site_is_inside_the_swept_set(self) -> None:
+        """The declared list and the sweep must not describe different sets."""
+        swept = set(version.swept_documentation())
+        for relative in version.MOJO_PIN_SITES:
+            if relative.suffix == ".md":
+                self.assertIn(relative, swept, relative)
+
+    def test_a_new_page_claiming_another_toolchain_is_rejected(self) -> None:
+        """The hole the hand-written site list cannot close on its own."""
+        with tempfile.TemporaryDirectory(prefix="mtest-pin-sweep-") as raw:
+            root = Path(raw)
+            self._repository(root)
+            self._track(
+                root,
+                "docs/tutorial.md",
+                "# Tutorial\n\nThis release requires Mojo `1.0.0b1`.\n",
+            )
+            with self.assertRaisesRegex(AssertionError, r"1\.0\.0b1"):
+                version.check_no_stale_mojo_pin_claims(root)
+
+    def test_a_document_stating_no_toolchain_is_accepted(self) -> None:
+        """A swept document may say nothing; only a false claim is a failure."""
+        with tempfile.TemporaryDirectory(prefix="mtest-pin-sweep-") as raw:
+            root = Path(raw)
+            self._repository(root)
+            self._track(root, "docs/tutorial.md", "# Tutorial\n\nNothing here.\n")
+            version.check_no_stale_mojo_pin_claims(root)
+
+    def test_an_untracked_draft_is_not_swept(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-pin-sweep-") as raw:
+            root = Path(raw)
+            self._repository(root)
+            (root / "docs" / "draft.md").write_text(
+                "Requires Mojo `1.0.0b1`.\n", encoding="utf-8"
+            )
+            version.check_no_stale_mojo_pin_claims(root)
+
+    def test_an_internal_working_document_is_not_swept(self) -> None:
+        """Nothing publishes them, so a stale claim inside one reaches no one."""
+        with tempfile.TemporaryDirectory(prefix="mtest-pin-sweep-") as raw:
+            root = Path(raw)
+            self._repository(root)
+            self._track(
+                root,
+                "docs/superpowers/specs/design.md",
+                "Captured against Mojo `1.0.0b1`.\n",
+            )
+            version.check_no_stale_mojo_pin_claims(root)
+
+    def test_a_manifest_bump_that_forgets_a_document_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-pin-sweep-") as raw:
+            root = Path(raw)
+            self._repository(root)
+            pixi = root / "pixi.toml"
+            pinned = version._manifest_mojo_pin(pixi)
+            pixi.write_text(
+                pixi.read_text(encoding="utf-8").replace(
+                    f'mojo = "=={pinned}', 'mojo = "==9.9.9b9', 1
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(AssertionError, r"9\.9\.9b9"):
+                version.check_no_stale_mojo_pin_claims(root)
+
+    def test_a_tree_without_git_fails_closed(self) -> None:
+        with (
+            tempfile.TemporaryDirectory(prefix="mtest-pin-sweep-") as raw,
+            self.assertRaisesRegex(AssertionError, "cannot list tracked files"),
+        ):
+            version.check_no_stale_mojo_pin_claims(Path(raw))
+
+
 class SupportMatrixGateTests(unittest.TestCase):
     """The published support matrix against the toolchain actually pinned."""
 
