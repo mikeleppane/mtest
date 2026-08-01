@@ -1555,7 +1555,8 @@ modular-community publication procedure.
 
 Requires [pixi](https://pixi.sh). The toolchain (Mojo `1.0.0b2`) and all
 tasks are pinned in [pixi.toml](pixi.toml); re-pinning on a Modular release
-regenerates the protocol transcripts so the diff is the changelog.
+regenerates the protocol transcripts. See [CHANGELOG.md](CHANGELOG.md) for
+release-to-release changes.
 
 ```console
 $ pixi install
