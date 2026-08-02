@@ -871,12 +871,16 @@ struct JunitReporter(Reporter):
             cases.append(_case_for_test(t, cn))
 
         if e.attempts_used > 1:
-            if not e.outcome.is_failing():
+            if e.outcome == Outcome.FLAKY:
                 cases.append(self._attempts_flaky(cn, accum_idx))
-            elif failing_test_rows > 0:
-                cases.append(self._attempts_pertest(cn, accum_idx))
-            else:
-                cases.append(self._attempts_filelevel(cn, accum_idx, e))
+            elif e.outcome.is_failing():
+                if failing_test_rows > 0:
+                    cases.append(self._attempts_pertest(cn, accum_idx))
+                else:
+                    cases.append(self._attempts_filelevel(cn, accum_idx, e))
+            # Else: attempts_used > 1 but the outcome is a plain, non-promoted
+            # pass -- a stale-name recovery with no crash-class retry, so
+            # nothing was ever flaky-eligible. No sentinel row to add.
         elif e.outcome.is_failing() and failing_test_rows == 0:
             var d = _outcome_diag(e, bounded_text_from_bytes(e.captured_stderr))
             cases.append(

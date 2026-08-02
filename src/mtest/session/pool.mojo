@@ -56,8 +56,8 @@ from mtest.session.attempt import (
     _AttemptResult,
     _compile_crash_residual,
     _finalize_attempt,
-    _flaky_eligible,
     _make_attempt_finished,
+    flaky_eligible,
 )
 from mtest.session.build import (
     _COMPILE_GRACE_MS,
@@ -1147,7 +1147,7 @@ def _run_pool_batch[
                     res.stdout_truncated,
                 )
                 var cls = classify(term, trusted.report, trusted.is_overflow)
-                var attempt_passed = _flaky_eligible(cls.file_outcome)
+                var attempt_passed = flaky_eligible(cls.file_outcome)
                 var rc = retry_classify("run", term, False, res.stderr_bytes)
                 var retry_admitted = False
                 if rc.retry_eligible and not stop_scheduling:
