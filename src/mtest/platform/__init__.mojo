@@ -23,6 +23,7 @@ operation beats wrapping it.
 The public surface is re-exported here so callers write
 `from mtest.platform import create_unique_temp, rename_path, ...`.
 """
+from mtest.platform.exec_replace import exec_replace
 from mtest.platform.executable import is_executable_file, resolve_executable
 from mtest.platform.fs import (
     prepare_directory_for_rename,
