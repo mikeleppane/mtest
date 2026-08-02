@@ -127,6 +127,7 @@ single **invocation root**. In v1 the root is the **current working directory**.
 | `--durations N` | ✓ | — | — |
 | `--junit-xml PATH`, `--gh-annotations` | ✓ | — | — |
 | `--json PATH\|-` | ✓ | — | — |
+| `--format lines\|json` | — | ✓ | — |
 | `-q`, `-v`, `--color WHEN` | ✓ | ✓ | ✓ |
 | `--collect-only` | ✓ (→ behaves as `collect`) | n/a | — |
 
@@ -140,6 +141,12 @@ the one exception: unlike the other run-only flags above, it is applicable in
 `collect` mode too, because it also bounds each file's `--skip-all` collection
 probe (§5, §6) — a probe is a real process spawn with the same hang risk as a
 run.
+
+`--format lines|json` runs the other way: it shapes a listing, so it is the one
+flag that belongs to `collect` alone, and supplying it to `run`, to
+`config show`, or to `doctor` is an applicability error (exit 4). `lines` is
+the default and is the plain one-node-id-per-line listing this section
+describes; `json` selects the machine-readable stream specified in §16.
 
 `-n`/`--workers` is marked **accepted, inert** under `collect` because that is
 what this build does: the flag parses and is not refused, but collection probes
@@ -674,7 +681,7 @@ grow:
 | 1 | at least one selected outcome is FAIL, CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT, MALFORMED-SUITE, or PRECOMPILE-ERROR; or the session would otherwise exit 0 and, under `--fail-on-flaky` (§13), counted at least one FLAKY file |
 | 2 | interrupted (SIGINT/SIGTERM); a partial summary is printed |
 | 3 | internal `mtest` error — including protocol drift (a report present but off-grammar) and an environment/I-O failure such as a runtime report-destination open/write failure (a `--json` destination that cannot be opened at session start, or whose stream write later fails — a fatal abort; or a `--junit-xml` target that cannot be created at session start, or whose report cannot be finalized and renamed onto PATH) |
-| 4 | pre-run usage error (unknown flag, bad value, nonexistent path, an explicit operand of a file type mtest cannot run (a FIFO, socket, or device, §5), a path discovery cannot inspect (§5), unknown node id, forbidden build argument, mutually exclusive `--config`/`--no-config`, `--seed` without `--shuffle`, `--shuffle` beside `--lf`/`--ff` (§18), a selected project config that is missing, unreadable, malformed, or has an invalid key/value, a syntactically invalid `--json` or `--junit-xml` report destination — an empty value or a nonexistent parent directory, the machine-stdout conflict — `--json -` without an explicit `--gh-annotations off`, since the byte-pure stream and the annotation tail cannot share stdout, or a `--cache-clear` target mtest can see and cannot prove it owns, or can prove and cannot delete, §8.5 — a target it cannot characterize at all is treated as absent and exits `0`) — detected **before any test runs** |
+| 4 | pre-run usage error (unknown flag, bad value, nonexistent path, an explicit operand of a file type mtest cannot run (a FIFO, socket, or device, §5), a path discovery cannot inspect (§5), unknown node id, forbidden build argument, mutually exclusive `--config`/`--no-config`, `--seed` without `--shuffle`, `--shuffle` beside `--lf`/`--ff` (§18), a flag applied to a subcommand it does not belong to (§4) — a run-only flag under `collect`, `--format` outside `collect`, or any run, build, selection, state, or reporter flag under `doctor` — a `--format` value that is neither `lines` nor `json`, a selected project config that is missing, unreadable, malformed, or has an invalid key/value, a syntactically invalid `--json` or `--junit-xml` report destination — an empty value or a nonexistent parent directory, the machine-stdout conflict — `--json -` without an explicit `--gh-annotations off`, since the byte-pure stream and the annotation tail cannot share stdout, or a `--cache-clear` target mtest can see and cannot prove it owns, or can prove and cannot delete, §8.5 — a target it cannot characterize at all is treated as absent and exits `0`) — detected **before any test runs** |
 | 5 | no tests collected (empty walk, `-k` matched nothing, everything excluded) |
 
 **Precedence** when outcomes mix. A usage error aborts before the run with 4.
@@ -1196,6 +1203,16 @@ MALFORMED-SUITE), else **5** if nothing was collectable, else **0** —
 consistent with the §9 precedence, under which an internal error (→ 3)
 dominates a failing outcome (→ 1), which dominates "nothing collected" (→ 5).
 
+`--format json` renders that same listing as a versioned NDJSON stream instead
+of plain lines: a header, one `node` record per node id in the identical order,
+and a `collect_finished` terminal carrying the node count and the exit code.
+Both formats are derived from the one sorted listing, so they can never
+describe different test sets, and the diagnostics above stay identical stderr
+text under either. The terminal's `exit_code` is the **final process exit
+code**, teardown included, so a consumer may gate on the record alone.
+`docs/collect-stream.md` is the normative specification; `--format lines` (the
+default) is byte-identical to the listing this section describes.
+
 ---
 
 ## 17. Determinism
@@ -1376,7 +1393,11 @@ file's result line carries an informal `SERIAL` marker (§15.1).
   (§15.4; normatively `docs/json-stream.md`) — its framing, header, event and
   field names, and token vocabularies, frozen at stream `version` 1 and
   growing only additively (new fields and kinds; a removal or a meaning-change
-  bumps the header version); the `collect` format; the test-module contract.
+  bumps the header version); the `collect` format — both the plain listing and
+  the `--format json` collect stream (§16; normatively
+  `docs/collect-stream.md`), whose framing, header, event names and field names
+  are frozen at collect-stream `version` 1 and grow only additively under that
+  same rule; the test-module contract.
 - **STABLE-INTENT** — default values (timeouts, `auto` worker sizing) may be
   tuned in minor versions; the self-versioned `.mtest-cache/lastrun` format
   (§26), whose incompatible changes require a new format version.
@@ -1748,14 +1769,16 @@ above — it only reports which of those surfaces are wired up yet.
 `-n`/`--workers`, `--serial`, `--shuffle`/`--seed`,
 `--no-cache`, `--cache-clear`, `--gate`,
 `-s`/`--show-output`,
-`--durations`, `-q`/`-v`, `--color`,
+`--durations`, `-q`/`-v`, `--color`, `--format`,
 `-h`/`--help`, `--version`, and the `run`, `collect`, `config show`, `doctor`,
 `version`, and `help` subcommands (`--collect-only` too, as an alias that
 behaves as `collect`).
 `--shard` applies under both `run` and `collect`. `--json` (the machine event
 stream, §15.4), `--junit-xml` (the JUnit report, §15.2), and `--gh-annotations`
 (the CI annotation tail, §15.3) are served too — see §24.2 for how they are now
-reached. `--no-cache`/`--cache-clear` act on the persistent build-artifact
+reached. `--format lines|json` is served under `collect` and refused everywhere
+else (§4), with `lines` the default.
+`--no-cache`/`--cache-clear` act on the persistent build-artifact
 store described in §8.5, which this build reads and writes by default.
 
 Every flag and subcommand in the frozen contract above is now served: nothing is
@@ -1788,7 +1811,9 @@ code exist today. Section 27 separately covers the reachable `config show` and
   report-destination failures (§9).
 - **4** — reachable under `run` and `collect` for every served cause in §9 —
   including mutually exclusive config controls; `--seed` without `--shuffle`
-  and `--shuffle` beside `--lf`/`--ff`; a selected config that is
+  and `--shuffle` beside `--lf`/`--ff`; a `--format` value that is neither
+  `lines` nor `json`, and `--format` outside `collect` at all; a selected
+  config that is
   missing, unreadable, malformed, or invalid; a syntactically invalid `--json`
   or `--junit-xml` destination; the `--json -`/annotations stdout conflict; and
   a `--cache-clear` target that is a symlink, carries no deletion-authorization
@@ -1819,6 +1844,15 @@ resolved-on. Beside `--json -` it must be explicitly `off` — the default `auto
 and an explicit `on` are usage errors (exit 4) detected by pre-run resolved
 validation (§9). The stop-commands fencing of echoed child output is active whenever
 `GITHUB_ACTIONS=true`, independent of the mode.
+
+**`--format` reachability.** `--format lines|json` is served under `collect`
+(§16): `lines` is the default and leaves the listing byte-identical to a run
+without the flag, while `json` renders the collect stream specified in
+`docs/collect-stream.md`. Both refusals are pre-run usage errors (exit 4): an
+unrecognized value, and the flag supplied to anything but `collect`. Because
+the terminal record carries the teardown-adjusted exit code, none of the codes
+above becomes unreachable or changes meaning under `json`; the stream reports
+whichever one the collection resolves.
 - **5** — reachable via an empty walk, via the everything-excluded case, and
   via deselection (`-k` matched nothing, §9).
 
@@ -1847,7 +1881,8 @@ the node-id grammar, and both converge to the contract as the runner matures.
   does not yet reject a repeated single-valued option (`-k`, `--shard`,
   `--maxfail`, `--timeout`, `--retries`, `-n`/`--workers`, `--mojo`,
   `--compile-timeout`, `-s`/`--show-output`, `--durations`, `--color`,
-  `--json`, `--junit-xml`, `--gh-annotations`, `--config`): it silently uses
+  `--format`, `--json`, `--junit-xml`, `--gh-annotations`, `--config`,
+  `--seed`): it silently uses
   the **last** occurrence (so `-k a -k b` filters by `b`, not `a or b`). Until
   the at-most-one check is enforced (a usage error, exit 4), do not rely on
   repeating these flags. The mutually-exclusive `-q`/`-v` pair is already

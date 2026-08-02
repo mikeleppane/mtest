@@ -94,6 +94,15 @@ struct RunnerConfig(Copyable, Movable):
     discovered file for its node ids and print the sorted listing, running no
     test body. When True the session takes the collect path, not a run."""
 
+    var collect_json: Bool
+    """`--format json`: render the collect listing as an NDJSON stream.
+
+    Read only when `collect` is True, which the parser enforces by refusing
+    `--format` outside collect mode. `False` (the default, and `--format
+    lines`) keeps the plain one-node-id-per-line listing byte-for-byte.
+    CLI-only by design: this is deliberately exempt from `mtest.toml`, so it
+    is never a layered value and carries no file or environment source."""
+
     var last_failed: Bool
     """Whether `--lf`/`--last-failed` narrows to remembered failures."""
 
@@ -200,7 +209,8 @@ struct RunnerConfig(Copyable, Movable):
         all `0`, which disables each limit and leaves the run unsharded.
         `shuffle_seed` is `-1`, the sentinel for "derive one at session start".
         Every
-        list is empty; `paths_supplied`, `exitfirst`, `collect`, `last_failed`,
+        list is empty; `paths_supplied`, `exitfirst`, `collect`,
+        `collect_json`, `last_failed`,
         `failed_first`, `fail_on_flaky`, `shuffle`, `no_cache`, and
         `cache_clear` are False; and
         `keyword`, `json_dest`, and `junit_dest` are `""`, so no keyword
@@ -244,6 +254,7 @@ struct RunnerConfig(Copyable, Movable):
             fail_on_flaky=False,
             durations=0,
             collect=False,
+            collect_json=False,
             last_failed=False,
             failed_first=False,
             shard_mode=ShardMode.HASH,
@@ -260,3 +271,44 @@ struct RunnerConfig(Copyable, Movable):
             no_cache=False,
             cache_clear=False,
         )
+
+
+def cli_only_resolution_defaults(parsed: RunnerConfig) -> RunnerConfig:
+    """Seed a resolution base with the fields no config layer may supply.
+
+    Layered resolution starts from contract defaults and folds the project
+    file, the environment, and the CLI overlay over them. The fields below are
+    outside that model entirely: they are decided by argv alone and have no
+    `mtest.toml` key, so nothing downstream would ever restore them. This
+    carries them across, and everything else stays at its contract default for
+    the resolver to fill.
+
+    A field missing from this projection is the quietest defect in the runner:
+    the flag parses, the config carries it, and it is silently discarded on the
+    way to the session, so the feature is simply inert. `main` is a program
+    rather than a package and cannot be imported by a test, which is why this
+    lives here — `tests/unit/test_config.mojo` holds it to carrying every
+    CLI-only field.
+
+    Args:
+        parsed: The config `parse_args` produced. Not mutated.
+
+    Returns:
+        A freshly allocated config: contract defaults everywhere except the
+        CLI-only fields, which are copied from `parsed`.
+    """
+    var defaults = RunnerConfig.default()
+    defaults.exitfirst = parsed.exitfirst
+    defaults.keyword = parsed.keyword.copy()
+    defaults.collect = parsed.collect
+    defaults.collect_json = parsed.collect_json
+    defaults.last_failed = parsed.last_failed
+    defaults.failed_first = parsed.failed_first
+    defaults.shard_mode = parsed.shard_mode
+    defaults.shard_m = parsed.shard_m
+    defaults.shard_n = parsed.shard_n
+    defaults.shuffle = parsed.shuffle
+    defaults.shuffle_seed = parsed.shuffle_seed
+    defaults.no_cache = parsed.no_cache
+    defaults.cache_clear = parsed.cache_clear
+    return defaults^

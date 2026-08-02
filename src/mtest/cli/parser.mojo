@@ -204,6 +204,27 @@ def _parse_compile_timeout(value: String) raises -> Int:
     return parsed.value()
 
 
+def _parse_format(value: String) raises -> Bool:
+    """Parse a `--format` value into "render the collect stream".
+
+    Args:
+        value: The flag's value: `lines` (the plain listing) or `json` (the
+            NDJSON collect stream).
+
+    Returns:
+        True for `json`, False for `lines`.
+
+    Raises:
+        Error: A usage error (exit 4) naming the offending value for anything
+            else, an empty value included.
+    """
+    if value == "lines":
+        return False
+    if value == "json":
+        return True
+    raise _err("'--format' wants 'lines' or 'json', got '" + value + "'")
+
+
 def _parse_show_output(value: String) raises -> ShowOutput:
     """Parse a `--show-output` mode: `failures`, `all`, or `none`."""
     var parsed = parse_show_output_value(value)
@@ -403,6 +424,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             short-flag group, `-q` and `-v` together, `--config` with
             `--no-config`, `--lf` with `--ff`, either of those with `--shard`,
             `--seed` without `--shuffle`, `--shuffle` with `--lf`/`--ff`,
+            `--format` outside collect mode,
             a run-only flag combined with collect mode, or a run, build, or
             reporter flag combined with doctor.
 
@@ -504,6 +526,8 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     # `-1` is the parser's "no seed given" sentinel; the session derives one.
     var shuffle_seed = -1
     var saw_seed = False
+    var collect_json = False
+    var saw_format = False
     var saw_select = False
     var saw_shard = False
     var saw_passthrough = False
@@ -671,6 +695,9 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         elif s.id == FlagId.WORKERS:
             workers = _parse_workers(value)
             saw_workers = True
+        elif s.id == FlagId.FORMAT:
+            collect_json = _parse_format(value)
+            saw_format = True
         elif s.id == FlagId.JSON:
             json_dest = _validate_json_dest(
                 value, not config_show and not doctor
@@ -708,6 +735,12 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         raise _err(
             "'--shuffle' and '--lf'/'--ff' choose conflicting orders; pick one"
         )
+    # `--format` shapes a listing, so it is refused wherever there is no
+    # listing. Checked here rather than in the doctor and collect blocks below
+    # because those refuse run flags under collect, and this is the mirror
+    # image: the one flag collect alone accepts.
+    if saw_format and not collect:
+        raise _err("'--format' is a collect-only flag")
 
     if doctor:
         if saw_paths:
@@ -958,6 +991,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     defaults.exitfirst = exitfirst
     defaults.keyword = keyword^
     defaults.collect = collect
+    defaults.collect_json = collect_json
     defaults.last_failed = last_failed
     defaults.failed_first = failed_first
     defaults.shard_mode = shard_mode

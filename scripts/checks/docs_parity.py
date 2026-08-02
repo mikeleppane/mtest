@@ -100,16 +100,17 @@ and still passing.
 REFERENCE_PAGES = (
     Path("docs/cli-contract.md"),
     Path("docs/json-stream.md"),
+    Path("docs/collect-stream.md"),
     Path("docs/releasing.md"),
 )
 """Documents the site navigates to, which are originals rather than copies.
 
 Excluded from parity by this explicit rule, not by being forgotten: parity is
-agreement between a copy and the source it copied, and these three copy
+agreement between a copy and the source it copied, and these four copy
 nothing. Each is the surface that owns its own content — the frozen
 command-line contract (whose documented behaviors the contract gate executes),
-the event-stream specification, and the release runbook — and the contract is a
-version-transcript site in its own right.
+the two machine-format specifications, and the release runbook — and the
+contract is a version-transcript site in its own right.
 
 Naming them is what lets the sweep below invert the question. Without an
 explicit list, "not a site page" and "not gated at all" would be the same

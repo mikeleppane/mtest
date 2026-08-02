@@ -1,0 +1,3 @@
+{"event":"collect","version":1,"generator":"mtest x.y.z"}
+{"event":"node", this is not valid json}
+{"event":"collect_finished","nodes":1,"exit_code":0}

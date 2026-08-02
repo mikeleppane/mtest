@@ -41,6 +41,8 @@ supports.
   subcommand, flag, exit code, and stream.
 - [JSON event stream](json-stream.md) — the machine-readable stream, event by
   event.
+- [Collect JSON stream](collect-stream.md) — the machine-readable test listing
+  `collect --format json` writes.
 - [Releasing](releasing.md) — the maintainer runbook.
 
 Everything else stays in the

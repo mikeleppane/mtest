@@ -57,6 +57,7 @@ struct FlagId:
     comptime FAIL_ON_FLAKY = 33
     comptime SHUFFLE = 34
     comptime SEED = 35
+    comptime FORMAT = 36
 
 
 struct FlagGroup:
@@ -403,6 +404,15 @@ def flag_specs() -> List[FlagSpec]:
             False,
             "Choose auto|always|never color output.",
             "WHEN",
+            FlagGroup.REPORTING,
+        ),
+        FlagSpec(
+            "--format",
+            FlagId.FORMAT,
+            1,
+            False,
+            "Collect output format: lines (default) or json.",
+            "FORMAT",
             FlagGroup.REPORTING,
         ),
         FlagSpec(

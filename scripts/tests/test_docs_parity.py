@@ -44,7 +44,7 @@ class RepositoryParityTests(unittest.TestCase):
             ),
         )
 
-    def test_reference_pages_are_the_three_documents_the_site_navigates_to(
+    def test_reference_pages_are_the_documents_the_site_navigates_to(
         self,
     ) -> None:
         self.assertEqual(
@@ -52,6 +52,7 @@ class RepositoryParityTests(unittest.TestCase):
             (
                 Path("docs/cli-contract.md"),
                 Path("docs/json-stream.md"),
+                Path("docs/collect-stream.md"),
                 Path("docs/releasing.md"),
             ),
         )

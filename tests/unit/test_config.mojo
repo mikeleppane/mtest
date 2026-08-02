@@ -24,9 +24,11 @@ from mtest.config import (
     ColorWhen,
     Precompile,
     RunnerConfig,
+    ShardMode,
     ShowOutput,
     Verbosity,
     annotations_resolved_on,
+    cli_only_resolution_defaults,
     resolve_mojo_path,
     shell_join,
     shell_quote,
@@ -307,6 +309,75 @@ def test_build_flags_string_quotes_control_characters_verbatim() raises:
             " --build-arg 'single'\\''quote'"
         ),
     )
+
+
+def _every_cli_only_field_set() -> RunnerConfig:
+    """A config whose every CLI-only field differs from its contract default.
+
+    Written by reading the flags that have no `mtest.toml` key, the same way
+    `frozen_inventory()` transcribes the flag table: an independent list, so
+    the projection cannot be its own oracle. Each value is deliberately NOT the
+    default, since a field the projection drops comes back as the default and
+    that is exactly what has to fail.
+    """
+    var parsed = RunnerConfig.default()
+    parsed.exitfirst = True
+    parsed.keyword = "needle"
+    parsed.collect = True
+    parsed.collect_json = True
+    parsed.last_failed = True
+    parsed.failed_first = True
+    parsed.shard_mode = ShardMode.SLICE
+    parsed.shard_m = 2
+    parsed.shard_n = 5
+    parsed.shuffle = True
+    parsed.shuffle_seed = 4242
+    parsed.no_cache = True
+    parsed.cache_clear = True
+    return parsed^
+
+
+def test_cli_only_projection_carries_every_cli_only_field() raises:
+    # The defect this pins is silent: a flag parses, lands in the config, and
+    # is dropped on the way to resolution, so the feature is simply inert. It
+    # has happened once already, to `--format json`.
+    var projected = cli_only_resolution_defaults(_every_cli_only_field_set())
+    assert_true(projected.exitfirst, "exitfirst dropped")
+    assert_equal(projected.keyword, "needle", "keyword dropped")
+    assert_true(projected.collect, "collect dropped")
+    assert_true(projected.collect_json, "collect_json dropped")
+    assert_true(projected.last_failed, "last_failed dropped")
+    assert_true(projected.failed_first, "failed_first dropped")
+    assert_true(projected.shard_mode == ShardMode.SLICE, "shard_mode dropped")
+    assert_equal(projected.shard_m, 2, "shard_m dropped")
+    assert_equal(projected.shard_n, 5, "shard_n dropped")
+    assert_true(projected.shuffle, "shuffle dropped")
+    assert_equal(projected.shuffle_seed, 4242, "shuffle_seed dropped")
+    assert_true(projected.no_cache, "no_cache dropped")
+    assert_true(projected.cache_clear, "cache_clear dropped")
+
+
+def test_cli_only_projection_leaves_config_eligible_fields_default() raises:
+    # The other half of the contract: a config-eligible field must arrive at
+    # its contract default so the file, environment, and CLI layers decide it.
+    # Carrying one here would silently outrank `mtest.toml`.
+    var parsed = _every_cli_only_field_set()
+    parsed.timeout_secs = 7
+    parsed.retries = 9
+    parsed.workers = 11
+    parsed.maxfail = 13
+    parsed.durations = 15
+    parsed.json_dest = "out.ndjson"
+    parsed.junit_dest = "r.xml"
+    var projected = cli_only_resolution_defaults(parsed)
+    var defaults = RunnerConfig.default()
+    assert_equal(projected.timeout_secs, defaults.timeout_secs)
+    assert_equal(projected.retries, defaults.retries)
+    assert_equal(projected.workers, defaults.workers)
+    assert_equal(projected.maxfail, defaults.maxfail)
+    assert_equal(projected.durations, defaults.durations)
+    assert_equal(projected.json_dest, defaults.json_dest)
+    assert_equal(projected.junit_dest, defaults.junit_dest)
 
 
 def main() raises:

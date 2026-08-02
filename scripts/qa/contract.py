@@ -58,6 +58,7 @@ import tempfile
 import time
 from typing import TYPE_CHECKING, NoReturn
 
+from scripts.checks.reports import collect_stream as collect_stream_oracle
 from scripts.checks.reports import json_stream as json_stream_oracle
 
 
@@ -748,6 +749,8 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "run: --seed without --shuffle -> 4",
     "run: --shuffle with --ff -> 4",
     "collect: --shuffle rejected -> 4",
+    "collect: --format bogus -> 4",
+    "run: --format is collect-only -> 4",
     "collect: -k ignored with a loud notice (\u00a724.3 deviation)",
     "collect: node-id operand lists whole file (\u00a724.3 deviation)",
     "build-arg: -o forbidden -> 4, and the test never ran (pre-run, \u00a79)",
@@ -772,6 +775,7 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "served: collect --shard partitions (not exit 4)",
     "collect: exact node-id set for tests/",
     "determinism: collect byte-identical",
+    "collect: --format json agrees with the lines listing and the exit",
     "determinism: --shuffle --seed repeats its file order",
     "help: --help -> stdout, exit 0",
     "usage error: -V -> stderr, exit 4",
@@ -1045,6 +1049,112 @@ class Runner:
             ref,
             "" if ok else "two collect runs differed or were empty",
         )
+
+    def check_collect_json(self) -> None:
+        """Assert the collect stream agrees with the listing it replaces.
+
+        Four properties, each catching a different lie. The node ids must equal
+        the `--format lines` run's stdout lines IN ORDER, so the stream cannot
+        list a different set or a different order from the format it mirrors.
+        Every record must satisfy the oracle's frozen schema, which is what
+        catches a `node` whose triple does not decompose — a defect counts and
+        ordering cannot see. A directory named with `::` is collected too,
+        because `node_id` must then be split at its LAST separator and a
+        first-separator split produces a wrong `path`/`name` pair that is
+        otherwise well-formed. And two runs must be byte-identical, the same
+        determinism the listing itself promises.
+
+        **What this does NOT cover.** `terminal.exit_code == returncode` is
+        asserted, but that equality alone does not prove the runner resolves
+        the code BEFORE printing: in collect mode nothing owns a `--json` or
+        JUnit descriptor, so the only thing teardown can still escalate is a
+        `runtime.close()` failure, and the fault-injection symbols that would
+        force one live in the test-only native object that `build/mtest` never
+        links. Both orderings therefore pass this check. The ordering is
+        argued in `src/main.mojo` and unproven by any gate.
+        """
+        ref = "§16/§17 collect --format json: same nodes, same exit, byte-stable"
+        name = "collect: --format json agrees with the lines listing and the exit"
+        lines = self.mtest(["collect", "-I", "build", "tests"])
+        first = self.mtest(["collect", "--format", "json", "-I", "build", "tests"])
+        again = self.mtest(["collect", "--format", "json", "-I", "build", "tests"])
+        try:
+            report = collect_stream_oracle.parse_collect_stream(first.stdout)
+        except collect_stream_oracle.CollectStreamError as exc:
+            self.record(FAIL, name, ref, f"stream did not parse: {exc}")
+            return
+        problems = []
+        if lines.returncode != 0 or first.returncode != 0:
+            problems.append(
+                f"lines exited {lines.returncode}, json exited {first.returncode}"
+            )
+        expected = lines.stdout.splitlines()
+        if not expected:
+            problems.append("the lines listing was empty, so it proves nothing")
+        if report.node_ids != expected:
+            problems.append(f"node ids {report.node_ids} != listing {expected}")
+        if report.nodes != len(expected):
+            problems.append(f"terminal nodes={report.nodes}, listed {len(expected)}")
+        if report.exit_code != first.returncode:
+            problems.append(
+                f"terminal exit_code={report.exit_code} but the process exited "
+                f"{first.returncode}"
+            )
+        if report.torn_tail:
+            problems.append("a complete run produced a torn tail")
+        if first.stdout != again.stdout:
+            problems.append("two identical runs produced different streams")
+        problems += self._collect_json_separator_path_problems()
+        ok = not problems
+        self.record(PASS if ok else FAIL, name, ref, "" if ok else "; ".join(problems))
+
+    def _collect_json_separator_path_problems(self) -> list[str]:
+        """Collect a file under a `::`-named directory and check its triple.
+
+        A node id is `path::name`, and a path may itself contain `::` while a
+        test name never can, so the decomposition has to split at the LAST
+        separator. Splitting at the first one yields
+        `path="oddroot/od", name="d/test_odd.mojo::test_odd_one"` — a triple
+        that still concatenates back to the right `node_id`, so only the
+        name-has-no-`::` rule in the oracle rejects it.
+
+        The `::` directory is reached by naming its PARENT, never itself: an
+        operand containing `::` is read as a node id (`select`/`discover`
+        refuse anything but one separator), so such a file is discoverable by a
+        walk and not addressable directly. That is a pre-existing limitation of
+        the operand grammar, unrelated to this format.
+
+        Returns:
+            One problem string per violation, empty when the triple is right.
+            A setup failure is itself reported as a problem, never skipped.
+        """
+        odd_dir = self.root / "oddroot" / "od::d"
+        try:
+            odd_dir.mkdir(parents=True, exist_ok=True)
+            (odd_dir / "test_odd.mojo").write_text(
+                HEAD + "def test_odd_one() raises:\n    assert_equal(1, 1)\n" + MAIN
+            )
+        except OSError as exc:
+            return [f"could not scaffold a '::' path: {exc}"]
+
+        run = self.mtest(["collect", "--format", "json", "-I", "build", "oddroot"])
+        if run.returncode != 0:
+            return [f"collecting a '::' path exited {run.returncode}: {run.stderr}"]
+        try:
+            report = collect_stream_oracle.parse_collect_stream(run.stdout)
+        except collect_stream_oracle.CollectStreamError as exc:
+            return [f"the '::' path stream did not parse: {exc}"]
+
+        want_id = "oddroot/od::d/test_odd.mojo::test_odd_one"
+        if report.node_ids != [want_id]:
+            return [f"'::' path listed {report.node_ids}, want [{want_id!r}]"]
+        node = next(r for r in report.records if r.get("event") == "node")
+        problems = []
+        if node.get("path") != "oddroot/od::d/test_odd.mojo":
+            problems.append(f"'::' path decomposed to path={node.get('path')!r}")
+        if node.get("name") != "test_odd_one":
+            problems.append(f"'::' path decomposed to name={node.get('name')!r}")
+        return problems
 
     def _shuffled_file_order(self, seed: str) -> tuple[str, ...]:
         """The ordered `file_started` paths of one seeded shuffled run.
@@ -1953,6 +2063,20 @@ def build_matrix() -> list[Check]:
             ["collect", *I, "--shuffle", "tests"],
             4,
         ),
+        # `--format` is the mirror image of the rows above: the one flag that
+        # belongs to collect alone, refused everywhere else.
+        Check(
+            "collect: --format bogus -> 4",
+            "§16",
+            ["collect", *I, "--format", "xml", "tests"],
+            4,
+        ),
+        Check(
+            "run: --format is collect-only -> 4",
+            "§4",
+            [*I, "--format", "json", "tests"],
+            4,
+        ),
         Check(
             "collect: -k ignored with a loud notice (§24.3 deviation)",
             "§24.3",
@@ -2153,6 +2277,8 @@ def main() -> int:
             runner.check_collect_exact()
         if wanted("determinism: collect byte-identical"):
             runner.check_determinism()
+        if wanted("collect: --format json agrees with the lines listing and the exit"):
+            runner.check_collect_json()
         if wanted("determinism: --shuffle --seed repeats its file order"):
             runner.check_shuffle_determinism()
         if wanted("help: --help -> stdout, exit 0") or wanted(

@@ -12,7 +12,12 @@ The public surface is re-exported here, so callers can write
 `from mtest.model import Outcome, Event, resolve_exit_code, ...`.
 """
 from mtest.model.outcome import Outcome
-from mtest.model.node_id import NodeId, NodeIdSplit, split_node_token
+from mtest.model.node_id import (
+    NodeId,
+    NodeIdSplit,
+    split_node_token,
+    split_rendered_node_id,
+)
 from mtest.model.test_result import TestResult
 from mtest.model.parse_disposition import ParseDisposition
 from mtest.model.attribution import AttributionDisposition

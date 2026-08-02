@@ -8,6 +8,9 @@ reporters `--json`/`--junit-xml`/`--gh-annotations`) combined with collect are a
 usage error — the reporters and `--retries` on PROVISION, so even
 `--gh-annotations off` is refused; `--timeout` is NOT refused — it bounds the
 collection probes. Operands (paths, node ids) and `-k` remain allowed.
+
+`--format` runs the other way: it is the one flag that belongs to collect alone,
+so it is refused everywhere else.
 """
 from std.testing import assert_equal, assert_raises, assert_true, TestSuite
 
@@ -151,6 +154,91 @@ def test_keyword_with_collect_is_allowed() raises:
     var r = parse_args(argv)
     assert_true(r.config.collect)
     assert_equal(r.config.keyword, "add")
+
+
+def test_format_json_with_collect_selects_the_stream() raises:
+    var argv: List[String] = ["collect", "--format", "json", "tests/"]
+    var r = parse_args(argv)
+    assert_true(r.config.collect)
+    assert_true(r.config.collect_json, "'--format json' selects the stream")
+
+
+def test_format_json_with_collect_only_alias_selects_the_stream() raises:
+    var argv: List[String] = ["--collect-only", "--format", "json"]
+    var r = parse_args(argv)
+    assert_true(r.config.collect_json)
+
+
+def test_format_lines_with_collect_keeps_the_plain_listing() raises:
+    var argv: List[String] = ["collect", "--format", "lines", "tests/"]
+    var r = parse_args(argv)
+    assert_true(r.config.collect)
+    assert_true(not r.config.collect_json, "'lines' is the plain listing")
+
+
+def test_format_inline_value_parses() raises:
+    var argv: List[String] = ["collect", "--format=json"]
+    var r = parse_args(argv)
+    assert_true(r.config.collect_json)
+
+
+def test_format_last_wins() raises:
+    var argv: List[String] = [
+        "collect",
+        "--format",
+        "json",
+        "--format",
+        "lines",
+    ]
+    var r = parse_args(argv)
+    assert_true(not r.config.collect_json)
+
+
+def test_collect_without_format_defaults_to_lines() raises:
+    var argv: List[String] = ["collect", "tests/"]
+    var r = parse_args(argv)
+    assert_true(not r.config.collect_json, "lines is the default format")
+
+
+def test_format_unknown_value_is_usage_error() raises:
+    var argv: List[String] = ["collect", "--format", "xml"]
+    with assert_raises(
+        contains="'--format' wants 'lines' or 'json', got 'xml'"
+    ):
+        _ = parse_args(argv)
+
+
+def test_format_empty_value_is_usage_error() raises:
+    var argv: List[String] = ["collect", "--format", ""]
+    with assert_raises(contains="'--format' wants 'lines' or 'json'"):
+        _ = parse_args(argv)
+
+
+def test_format_without_collect_is_usage_error() raises:
+    var argv: List[String] = ["--format", "json", "tests/"]
+    with assert_raises(contains="'--format' is a collect-only flag"):
+        _ = parse_args(argv)
+
+
+def test_format_with_run_subcommand_is_usage_error() raises:
+    var argv: List[String] = ["run", "--format", "lines"]
+    with assert_raises(contains="collect-only flag"):
+        _ = parse_args(argv)
+
+
+def test_format_with_doctor_is_usage_error() raises:
+    var argv: List[String] = ["doctor", "--format", "json"]
+    with assert_raises(contains="collect-only flag"):
+        _ = parse_args(argv)
+
+
+def test_format_value_is_validated_before_applicability() raises:
+    # A bad value under a run is still refused for being a bad value: the
+    # per-value message names what to type, which the applicability refusal
+    # cannot.
+    var argv: List[String] = ["--format", "xml"]
+    with assert_raises(contains="wants 'lines' or 'json'"):
+        _ = parse_args(argv)
 
 
 def main() raises:

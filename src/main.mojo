@@ -13,7 +13,8 @@ file, and exits with the session's resolved code.
 Five output classes bypass the event seam by design: pre-session diagnostics
 go straight to stderr; `config show` writes its resolution-only TOML directly
 to stdout; doctor writes its fixed check lines directly to stdout;
-`--collect-only` writes its frozen node-id listing directly to stdout; and a
+`--collect-only` writes its frozen node-id listing — plain lines, or the
+NDJSON collect stream under `--format json` — directly to stdout; and a
 post-close state-write failure goes to stderr after the terminal event already
 sealed the stream.
 
@@ -52,6 +53,7 @@ from mtest.config import (
     StateDelta,
     TOML_SOURCE_MAX_BYTES,
     annotations_resolved_on,
+    cli_only_resolution_defaults,
     encode_last_run_state,
     merge_last_run_state,
     parse_toml,
@@ -64,6 +66,7 @@ from mtest.model import (
     EXIT_INTERNAL_ERROR,
     TerminalFacts,
     resolve_exit_code,
+    split_rendered_node_id,
 )
 from mtest.platform import (
     BoundedRegularFileRead,
@@ -81,6 +84,9 @@ from mtest.report import (
     JunitReporter,
     StandardReportCoordinator,
     close_json_fd,
+    collect_finished_line,
+    collect_node_line,
+    collect_stream_header,
     open_json_fd,
     open_junit_artifact,
     open_junit_spool,
@@ -345,23 +351,6 @@ def _load_config(
     return ConfigLoad(parsed.config.copy(), representation, "", 0)
 
 
-def _resolution_defaults(parsed: RunnerConfig) -> RunnerConfig:
-    var defaults = RunnerConfig.default()
-    defaults.exitfirst = parsed.exitfirst
-    defaults.keyword = parsed.keyword.copy()
-    defaults.collect = parsed.collect
-    defaults.last_failed = parsed.last_failed
-    defaults.failed_first = parsed.failed_first
-    defaults.shard_mode = parsed.shard_mode
-    defaults.shard_m = parsed.shard_m
-    defaults.shard_n = parsed.shard_n
-    defaults.shuffle = parsed.shuffle
-    defaults.shuffle_seed = parsed.shuffle_seed
-    defaults.no_cache = parsed.no_cache
-    defaults.cache_clear = parsed.cache_clear
-    return defaults^
-
-
 @fieldwise_init
 struct StateLoad(Copyable, Movable):
     """The previous last-run records plus contained nonfatal read diagnostics.
@@ -614,7 +603,7 @@ def main():
         no_color=_no_color_set(),
     )
     var resolved = resolve_config(
-        _resolution_defaults(result.config),
+        cli_only_resolution_defaults(result.config),
         loaded.file,
         environment,
         result.overlay,
@@ -703,7 +692,9 @@ def main():
     # the SECOND sanctioned exception to the event seam (usage errors are the
     # first): the listing is a frozen machine-readable contract, so it is written
     # OUTSIDE any reporter, STDOUT carries ONLY the listing, and every diagnostic
-    # goes to STDERR. A discover: usage error still routes to exit 4.
+    # goes to STDERR. A discover: usage error still routes to exit 4. `--format
+    # json` renders the same listing as the NDJSON collect stream; the
+    # diagnostics stay identical stderr text under either format.
     if config.collect:
         var collected = CollectResult(List[String](), List[String](), 0)
         try:
@@ -716,11 +707,30 @@ def main():
             exit(resources.close_into(EXIT_USAGE_ERROR, rank_delivery=False))
         for line in collected.diagnostics:
             _eprintln(line)
+        # Teardown FIRST, before a single byte of the listing is printed: the
+        # stream's terminal has to carry the code this process will actually
+        # exit with, and releasing the runtime can still escalate it to 3.
+        # Printing first and resolving after would let the two disagree.
+        var final_code = resources.close_into(
+            collected.code, rank_delivery=True
+        )
         var listing = String("")
-        for nid in collected.listing:
-            listing += nid + "\n"
+        if config.collect_json:
+            listing += collect_stream_header(MTEST_VERSION) + "\n"
+            for nid in collected.listing:
+                # Both formats re-split the ONE sorted listing, so a node line
+                # and its plain-text twin cannot describe different tests. The
+                # split is `render()`'s inverse, at the LAST separator: a test
+                # name never contains `::` but a file path can.
+                var node = split_rendered_node_id(nid)
+                listing += collect_node_line(nid, node.path, node.name) + "\n"
+            listing += collect_finished_line(len(collected.listing), final_code)
+            listing += "\n"
+        else:
+            for nid in collected.listing:
+                listing += nid + "\n"
         print(listing, end="", flush=True)
-        exit(resources.close_into(collected.code, rank_delivery=True))
+        exit(final_code)
 
     # Resolve the machine-stream destination and, with it, the console's own
     # destination. Under `--json -` the stream OWNS stdout (byte-pure), so the

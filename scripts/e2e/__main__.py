@@ -147,6 +147,7 @@ SCENARIOS: ScenarioRegistry = (
     ("stale-recovery-two-builds", selection.s_stale_recovery_two_builds),
     ("mojo-executable-precedence", selection.s_mojo_executable_precedence),
     ("collect", selection.s_collect),
+    ("collect-json-stream", selection.s_collect_json_stream),
     ("cache-cold-then-warm", cache.s_cache_cold_then_warm),
     ("shuffle-seed-reproduces", dev_loop.s_shuffle_seed_reproduces),
     ("passthrough+forbidden", core.s_passthrough_and_forbidden),

@@ -599,6 +599,7 @@ class CheckRosterTests(unittest.TestCase):
             [
                 "collect: exact node-id set for tests/",
                 "determinism: collect byte-identical",
+                "collect: --format json agrees with the lines listing and the exit",
                 "determinism: --shuffle --seed repeats its file order",
                 "help: --help -> stdout, exit 0",
                 "usage error: -V -> stderr, exit 4",
@@ -676,6 +677,11 @@ class CheckRosterTests(unittest.TestCase):
 
             def check_determinism(self) -> None:
                 self._perform("determinism: collect byte-identical")
+
+            def check_collect_json(self) -> None:
+                self._perform(
+                    "collect: --format json agrees with the lines listing and the exit"
+                )
 
             def check_shuffle_determinism(self) -> None:
                 self._perform("determinism: --shuffle --seed repeats its file order")

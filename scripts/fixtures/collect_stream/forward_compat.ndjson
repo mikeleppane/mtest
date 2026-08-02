@@ -1,0 +1,5 @@
+{"event":"collect","version":1,"generator":"mtest x.y.z","future_field":"ignored by a v1 consumer"}
+{"event":"node","node_id":"tests/test_a.mojo::test_one","path":"tests/test_a.mojo","name":"test_one"}
+{"event":"quantum_flux","some_new_field":42,"nested":{"a":1,"b":[1,2,3]}}
+{"event":"node","node_id":"tests/test_b.mojo::test_two","path":"tests/test_b.mojo","name":"test_two","vnext_marker":true}
+{"event":"collect_finished","nodes":2,"exit_code":0,"unknown_tail_field":"still fine"}

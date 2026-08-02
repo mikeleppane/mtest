@@ -339,6 +339,16 @@ def frozen_inventory() -> List[InvRow]:
             "Choose off|on|auto GitHub annotations.",
             "--gh-annotations MODE",
         ),
+        # `--format lines|json`: collect-only; `lines` is the default.
+        InvRow(
+            "--format",
+            1,
+            False,
+            "FORMAT",
+            FlagGroup.REPORTING,
+            "Collect output format: lines (default) or json.",
+            "--format FORMAT",
+        ),
         # `--json PATH|-`: now served.
         InvRow(
             "--json",
@@ -517,8 +527,8 @@ def test_help_renders_every_option_once_with_values_and_aligned_help() raises:
     for line_slice in rendered.split("\n"):
         if String(line_slice).startswith("  -"):
             option_rows += 1
-    # Five two-spelling aliases collapse 41 spellings into 36 physical rows.
-    assert_equal(option_rows, 36)
+    # Five two-spelling aliases collapse 42 spellings into 37 physical rows.
+    assert_equal(option_rows, 37)
     for row in frozen_inventory():
         var expected_line = "  " + row.help_label
         for _ in range(30 - expected_line.count_codepoints()):

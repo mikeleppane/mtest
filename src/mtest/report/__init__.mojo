@@ -22,7 +22,9 @@ Every machine format splits the same way: a pure renderer module with no I/O
 (`json_stream`, `junit`, `annotations`) and a stateful `Reporter` shell that
 owns the destination and its failure latching (`json_stream_reporter`,
 `junit_reporter`, `annotations_reporter`). Reach for the pure half to test a
-format, the shell to compose a run.
+format, the shell to compose a run. `collect_stream` is the one machine format
+with no shell: collect drives no reporter, so `main` renders and prints the
+listing itself.
 
 The public surface is re-exported here so callers write
 `from mtest.report import Reporter, CompositeReporter, ConsoleReporter, ...`.
@@ -33,6 +35,11 @@ from mtest.report.coordinator import (
     RecordingCoordinator,
     ReportCoordinator,
     StandardReportCoordinator,
+)
+from mtest.report.collect_stream import (
+    collect_finished_line,
+    collect_node_line,
+    collect_stream_header,
 )
 from mtest.report.console import ConsoleReporter
 from mtest.report.recording import RecordingReporter

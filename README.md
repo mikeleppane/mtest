@@ -501,6 +501,26 @@ exit at the end. Per-test narrowing is a `run` behavior in this build:
 under `collect`, `-k` prints a loud ignored notice and a `path::test`
 operand contributes its whole file to the listing.
 
+#### Machine-readable collection
+
+`--format json` prints the same listing as a versioned NDJSON stream, for a CI
+job or an editor integration that would otherwise split the plain lines
+([docs/collect-stream.md](docs/collect-stream.md) is the normative spec):
+
+```console
+$ pixi run bash -c 'build/mtest collect --format json e2e/matrix'
+{"event":"collect","version":1,"generator":"mtest 1.0.0"}
+{"event":"node","node_id":"e2e/matrix/test_alpha.mojo::test_alpha_one","path":"e2e/matrix/test_alpha.mojo","name":"test_alpha_one"}
+[...one node record per test, in the same order as the plain listing...]
+{"event":"collect_finished","nodes":5,"exit_code":0}
+```
+
+The terminal's `exit_code` is the exit code the process really ends with,
+teardown included, so a consumer can gate on the record without also reading
+`$?`. Diagnostics stay on stderr under either format, and `--format lines` is
+the default. Collection compiles and probes every file it lists, so this is a
+command to run when the test set changes, not one to run per keystroke.
+
 ### Retries and FLAKY
 
 `--retries N` grants up to `N` extra attempts, and only to crash-class
@@ -1414,6 +1434,7 @@ Reporting:
   -q                          Suppress passing file rows.
   -v                          Show build commands and step timings.
   --color WHEN                Choose auto|always|never color output.
+  --format FORMAT             Collect output format: lines (default) or json.
   --json PATH|-               Write NDJSON events to PATH or stdout.
   --junit-xml PATH            Write a JUnit XML report.
   --gh-annotations MODE       Choose off|on|auto GitHub annotations.

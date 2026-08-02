@@ -22,6 +22,7 @@ nav:
   - Reference:
       - Command-line contract: cli-contract.md
       - JSON event stream: json-stream.md
+      - Collect JSON stream: collect-stream.md
   - Maintainers:
       - Releasing: releasing.md
 
