@@ -6,9 +6,14 @@ whole event stream: ordering (SessionStarted -> excluded -> warning -> file
 pairs -> SessionFinished), the selected/excluded counts, the per-file verdicts
 (a real PASS and a real FAIL, kept distinct), the summary tally, and the exact
 resolved exit code. Both recorders must observe the identical stream.
+
+The `--shuffle` cases belong here for the same reason: what they assert is the
+ORDER the stream announces its run files in, and the seed the opening event
+carries.
 """
 from std.testing import assert_equal, assert_true, TestSuite
 
+from mtest.config import ShardMode
 from mtest.model import (
     EventKind,
     Outcome,
@@ -123,6 +128,164 @@ def test_flow_pass_fail_excluded_warning_exit1() raises:
     assert_equal(comp.composite.reporters[1].count(), 10)
     assert_true(
         comp.composite.reporters[1].kind_at(9) == EventKind.SESSION_FINISHED
+    )
+
+
+def _shuffle_tree() raises -> String:
+    """A four-file temp suite whose sorted order is a, b, c, d."""
+    var root = temp_root()
+    write_file(root, "tests/test_a.mojo", SRC_PASS)
+    write_file(root, "tests/test_b.mojo", SRC_PASS)
+    write_file(root, "tests/test_c.mojo", SRC_PASS)
+    write_file(root, "tests/test_d.mojo", SRC_PASS)
+    return root^
+
+
+def _run_shuffled(root: String, seed: Int) raises -> List[String]:
+    """The ordered FILE_STARTED paths of one shuffled session over `root`."""
+    var config = base_config()
+    config.shuffle = True
+    config.shuffle_seed = seed
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
+    _ = run_session(config, root, comp)
+    ref rec = comp.composite.reporters[0]
+    var started = List[String]()
+    for i in range(rec.count()):
+        if rec.kind_at(i) == EventKind.FILE_STARTED:
+            started.append(rec.path_at(i))
+    return started^
+
+
+def test_shuffle_draws_the_frozen_order_for_its_seed() raises:
+    # The seed -> order mapping is a frozen 1.x contract, so the expected
+    # permutation is written out rather than merely asserted to be "not sorted":
+    # a shuffle applied to the wrong list still produces something unsorted.
+    # WHERE the shuffle sits relative to the shard partition is a separate
+    # property this case cannot see (nothing here is sharded);
+    # `test_shard_membership_is_chosen_before_the_shuffle` owns it.
+    var starts = _run_shuffled(_shuffle_tree(), 7)
+    assert_equal(len(starts), 4)
+    assert_equal(starts[0], "tests/test_b.mojo")
+    assert_equal(starts[1], "tests/test_c.mojo")
+    assert_equal(starts[2], "tests/test_a.mojo")
+    assert_equal(starts[3], "tests/test_d.mojo")
+
+
+def test_same_seed_repeats_and_a_different_seed_reorders() raises:
+    var root = _shuffle_tree()
+    var first = _run_shuffled(root, 7)
+    var again = _run_shuffled(root, 7)
+    var other = _run_shuffled(root, 9)
+    assert_equal(len(again), 4)
+    assert_equal(len(other), 4)
+    for i in range(4):
+        assert_equal(again[i], first[i], "a seed must reproduce its order")
+    # Seed 9 draws c, d, b, a over the same four files: the seed is what the
+    # order depends on, not the tree.
+    assert_equal(other[0], "tests/test_c.mojo")
+    assert_equal(other[1], "tests/test_d.mojo")
+    assert_equal(other[2], "tests/test_b.mojo")
+    assert_equal(other[3], "tests/test_a.mojo")
+
+
+def test_shard_membership_is_chosen_before_the_shuffle() raises:
+    # `slice:1/2` deals the SORTED list round-robin, so this shard owns sorted
+    # indices 0 and 2 — a and c. Shuffling first would have dealt b and a from
+    # seed 7's b, c, a, d, so the MEMBERSHIP assertion is what pins the order of
+    # the two operations; the permutation below then proves the shuffle still
+    # ran afterwards (seed 9 swaps a two-element list).
+    var config = base_config()
+    config.shard_mode = ShardMode.SLICE
+    config.shard_m = 1
+    config.shard_n = 2
+    config.shuffle = True
+    config.shuffle_seed = 9
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
+    _ = run_session(config, _shuffle_tree(), comp)
+    ref rec = comp.composite.reporters[0]
+    var started = List[String]()
+    for i in range(rec.count()):
+        if rec.kind_at(i) == EventKind.FILE_STARTED:
+            started.append(rec.path_at(i))
+    assert_equal(len(started), 2)
+    assert_equal(started[0], "tests/test_c.mojo")
+    assert_equal(started[1], "tests/test_a.mojo")
+
+
+def test_gate_files_keep_their_listed_order_under_shuffle() raises:
+    # Gates are not in the shuffled list at all: they run first, in the order
+    # they were listed, which is deliberately not sorted order here.
+    var root = temp_root()
+    write_file(root, "tests/test_gate_z.mojo", SRC_PASS)
+    write_file(root, "tests/test_gate_m.mojo", SRC_PASS)
+    write_file(root, "tests/test_a.mojo", SRC_PASS)
+    write_file(root, "tests/test_b.mojo", SRC_PASS)
+
+    var config = base_config()
+    config.gates.append("tests/test_gate_z.mojo")
+    config.gates.append("tests/test_gate_m.mojo")
+    config.shuffle = True
+    config.shuffle_seed = 9
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
+    _ = run_session(config, root, comp)
+    ref rec = comp.composite.reporters[0]
+    var started = List[String]()
+    for i in range(rec.count()):
+        if rec.kind_at(i) == EventKind.FILE_STARTED:
+            started.append(rec.path_at(i))
+    assert_equal(len(started), 4)
+    assert_equal(started[0], "tests/test_gate_z.mojo")
+    assert_equal(started[1], "tests/test_gate_m.mojo")
+    # Seed 9 swaps the two-file run set, so the gates above are not merely
+    # sitting in an order the shuffle happened to leave alone.
+    assert_equal(started[2], "tests/test_b.mojo")
+    assert_equal(started[3], "tests/test_a.mojo")
+
+
+def test_seed_zero_is_a_seed_not_an_unset_sentinel() raises:
+    # `-1` is the "no --seed given" sentinel; `0` is an ordinary seed. Widening
+    # the session's check to `<= 0` would silently draw entropy instead, which
+    # only a pinned seed-0 permutation plus the reported seed can catch.
+    var config = base_config()
+    config.shuffle = True
+    config.shuffle_seed = 0
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
+    _ = run_session(config, _shuffle_tree(), comp)
+    ref rec = comp.composite.reporters[0]
+    assert_equal(rec.event_at(0).data[SessionStartedPayload].shuffle_seed, 0)
+    var started = List[String]()
+    for i in range(rec.count()):
+        if rec.kind_at(i) == EventKind.FILE_STARTED:
+            started.append(rec.path_at(i))
+    assert_equal(len(started), 4)
+    assert_equal(started[0], "tests/test_c.mojo")
+    assert_equal(started[1], "tests/test_b.mojo")
+    assert_equal(started[2], "tests/test_a.mojo")
+    assert_equal(started[3], "tests/test_d.mojo")
+
+
+def test_unseeded_shuffle_resolves_a_seed_before_announcing_the_run() raises:
+    # The header has to be able to quote a seed for EVERY shuffled run, so the
+    # derivation happens ahead of SessionStarted, never lazily at the epilogue.
+    var config = base_config()
+    config.shuffle = True
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
+    _ = run_session(config, _shuffle_tree(), comp)
+    ref rec = comp.composite.reporters[0]
+    ref started = rec.event_at(0).data[SessionStartedPayload]
+    assert_true(started.shuffle)
+    assert_true(
+        started.shuffle_seed >= 0, "an unseeded --shuffle must resolve a seed"
     )
 
 

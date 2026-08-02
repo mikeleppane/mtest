@@ -4,9 +4,9 @@ bad-value case.
 
 The available arity-1 spellings are enumerated, not sampled: `--exclude`, `-I`,
 `--build-arg`, `--precompile`, `--mojo`, `--timeout`, `--show-output`,
-`--color`, `--gate`, `--maxfail`, `--durations`. Each proves that omitting the
-value is a located usage error and that the `--flag=value` spelling lands the
-same value as `--flag value`.
+`--color`, `--gate`, `--maxfail`, `--durations`, `--seed`. Each proves that
+omitting the value is a located usage error and that the `--flag=value`
+spelling lands the same value as `--flag value`.
 """
 from std.testing import assert_equal, assert_raises, assert_true, TestSuite
 
@@ -86,6 +86,12 @@ def test_durations_missing_value() raises:
 def test_config_missing_value() raises:
     var argv: List[String] = ["--config"]
     with assert_raises(contains="'--config' requires a value"):
+        _ = parse_args(argv)
+
+
+def test_seed_missing_value() raises:
+    var argv: List[String] = ["--seed"]
+    with assert_raises(contains="'--seed' requires a value"):
         _ = parse_args(argv)
 
 
@@ -193,6 +199,40 @@ def test_durations_defaults_to_zero() raises:
     assert_equal(parse_args(argv).config.durations, 0)
 
 
+def test_seed_equals_form() raises:
+    var argv: List[String] = ["--shuffle", "--seed=41"]
+    assert_equal(parse_args(argv).config.shuffle_seed, 41)
+
+
+def test_shuffle_with_seed_parses() raises:
+    var argv: List[String] = ["--shuffle", "--seed", "834719", "tests"]
+    var result = parse_args(argv)
+    assert_true(result.config.shuffle)
+    assert_equal(result.config.shuffle_seed, 834719)
+
+
+def test_seed_requires_shuffle() raises:
+    var argv: List[String] = ["--seed", "7", "tests"]
+    with assert_raises(contains="'--seed' requires '--shuffle'"):
+        _ = parse_args(argv)
+
+
+def test_unseeded_shuffle_defers_the_seed_to_the_session() raises:
+    # `-1` is the sentinel the session reads as "derive one now", which is what
+    # lets the header print a seed for every shuffled run.
+    var argv: List[String] = ["--shuffle", "tests"]
+    var result = parse_args(argv)
+    assert_true(result.config.shuffle)
+    assert_equal(result.config.shuffle_seed, -1)
+
+
+def test_shuffle_is_off_by_default() raises:
+    var argv: List[String] = ["tests"]
+    var result = parse_args(argv)
+    assert_true(not result.config.shuffle)
+    assert_equal(result.config.shuffle_seed, -1)
+
+
 def test_gate_accumulates_and_preserves_spaces() raises:
     var argv: List[String] = [
         "--gate",
@@ -242,6 +282,18 @@ def test_durations_rejects_non_integer() raises:
 def test_durations_rejects_negative() raises:
     var argv: List[String] = ["--durations", "-1"]
     with assert_raises(contains="wants an integer"):
+        _ = parse_args(argv)
+
+
+def test_seed_wants_a_nonnegative_integer() raises:
+    var argv: List[String] = ["--shuffle", "--seed", "x", "tests"]
+    with assert_raises(contains="'--seed' wants an integer >= 0"):
+        _ = parse_args(argv)
+
+
+def test_seed_rejects_negative() raises:
+    var argv: List[String] = ["--shuffle", "--seed", "-1", "tests"]
+    with assert_raises(contains="'--seed' wants an integer >= 0"):
         _ = parse_args(argv)
 
 

@@ -599,6 +599,7 @@ class CheckRosterTests(unittest.TestCase):
             [
                 "collect: exact node-id set for tests/",
                 "determinism: collect byte-identical",
+                "determinism: --shuffle --seed repeats its file order",
                 "help: --help -> stdout, exit 0",
                 "usage error: -V -> stderr, exit 4",
                 "collect: streams split, listing continues past a bad probe",
@@ -675,6 +676,9 @@ class CheckRosterTests(unittest.TestCase):
 
             def check_determinism(self) -> None:
                 self._perform("determinism: collect byte-identical")
+
+            def check_shuffle_determinism(self) -> None:
+                self._perform("determinism: --shuffle --seed repeats its file order")
 
             def check_help_stream(self) -> None:
                 self._perform("help: --help -> stdout, exit 0")

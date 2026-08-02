@@ -740,6 +740,10 @@ struct ConsoleReporter(Reporter):
     for the slowest-files list. Only files that reached the run step
     (`duration_seconds > 0.0`) are recorded; a COMPILE_ERROR, EXCLUDED or
     NOT_RUN file carries `0.0` and is never added."""
+    var _shuffle: Bool
+    """Whether SESSION_STARTED said run-file order was randomized."""
+    var _shuffle_seed: Int
+    """The seed that order was drawn from, for the reproduce note."""
     var _run_root: String
     """The run root from SESSION_STARTED, for root-relativizing `At` lines."""
     var _toolchain: String
@@ -838,6 +842,8 @@ struct ConsoleReporter(Reporter):
         self._head_flushed = 0
         self._sections = String("")
         self._summary = String("")
+        self._shuffle = False
+        self._shuffle_seed = 0
         self._run_root = String("")
         self._toolchain = String("")
         self._file_tests = List[TestResult]()
@@ -1157,6 +1163,10 @@ struct ConsoleReporter(Reporter):
         """
         self._run_root = e.root.copy()
         self._toolchain = e.toolchain.copy()
+        # Latched before the quiet return: the summary band and its epilogue
+        # render under `-q` too, and the note quotes this seed.
+        self._shuffle = e.shuffle
+        self._shuffle_seed = e.shuffle_seed
         if self.verbosity == Verbosity.QUIET:
             return
         self._head += (
@@ -1179,6 +1189,8 @@ struct ConsoleReporter(Reporter):
         # count above one surfaces the token.
         if e.workers > 1:
             counts += "   workers: " + String(e.workers)
+        if e.shuffle:
+            counts += "   shuffle seed: " + String(e.shuffle_seed)
         self._head += counts + "\n\n"
 
     def _on_warning(mut self, e: WarningPayload):
@@ -1691,6 +1703,10 @@ struct ConsoleReporter(Reporter):
 
         So passed + failed + skipped is the number of tests run, and the file
         abnormals plus excluded plus not-run cover every file with no test rows.
+
+        The band's epilogue follows it: the slowest-files list when
+        `--durations` asked for one, then the `--shuffle` reproduce note when a
+        randomized run ended on any nonzero code.
         """
         var s = e.summary.copy()
         var tc = e.test_counts
@@ -1754,6 +1770,19 @@ struct ConsoleReporter(Reporter):
             "\n" + self._paint(_worst_color(s, tc, flaky_failing), band) + "\n"
         )
         self._summary += self._render_slowest_files()
+        # A randomized order is worth reproducing whenever the run did not end
+        # clean — a failure, an interrupt, or an internal error all leave a user
+        # wanting that order back, and under `-q` this note is the only place
+        # the seed appears at all. The seed is the whole of what mtest can
+        # promise here: it never saw the argv, so it names the two flags to add
+        # rather than inventing a command line it cannot know.
+        if self._shuffle and e.exit_code != 0:
+            self._summary += (
+                "\nnote: file order was randomized; rerun the same command"
+                + " with: --shuffle --seed "
+                + String(self._shuffle_seed)
+                + "\n"
+            )
 
     def _render_slowest_files(self) -> String:
         """The after-band slowest-files list, or `""` when it says nothing.

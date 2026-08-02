@@ -159,6 +159,22 @@ struct RunnerConfig(Copyable, Movable):
     (non-empty, with an existing parent directory); a runtime creation failure
     is the session's to resolve."""
 
+    var shuffle: Bool
+    """`--shuffle`: randomize the order the run files execute in.
+
+    Applied after the shard partition and only to run files; gate files keep
+    their listed order, and every reported surface stays node-id sorted.
+    CLI-only by design: this is deliberately exempt from `mtest.toml`, so it
+    is never a layered value and carries no file or environment source.
+    Defaults to `False`."""
+
+    var shuffle_seed: Int
+    """`--seed N`: the seed that fixes the `--shuffle` order.
+
+    `-1` (the default) means no seed was given, so the session derives one at
+    start and reports it; any value `>= 0` is used verbatim. Read only when
+    `shuffle` is True. CLI-only by design, like `shuffle` itself."""
+
     var no_cache: Bool
     """`--no-cache`: build without reading or writing the build cache.
 
@@ -181,10 +197,12 @@ struct RunnerConfig(Copyable, Movable):
         The nonzero numeric defaults are the two deadlines, `timeout_secs=300`
         and `compile_timeout_secs=600`, plus `workers=1` for the sequential
         path. `maxfail`, `durations`, `retries`, `shard_m`, and `shard_n` are
-        all `0`, which disables each limit and leaves the run unsharded. Every
+        all `0`, which disables each limit and leaves the run unsharded.
+        `shuffle_seed` is `-1`, the sentinel for "derive one at session start".
+        Every
         list is empty; `paths_supplied`, `exitfirst`, `collect`, `last_failed`,
-        `failed_first`, `fail_on_flaky`, `no_cache`, and `cache_clear` are
-        False; and
+        `failed_first`, `fail_on_flaky`, `shuffle`, `no_cache`, and
+        `cache_clear` are False; and
         `keyword`, `json_dest`, and `junit_dest` are `""`, so no keyword
         filter, event stream, or JUnit report is configured. The rest are
         `mojo_path="mojo"`,
@@ -237,6 +255,8 @@ struct RunnerConfig(Copyable, Movable):
             json_dest="",
             gh_annotations=AnnotationsMode.AUTO,
             junit_dest="",
+            shuffle=False,
+            shuffle_seed=-1,
             no_cache=False,
             cache_clear=False,
         )

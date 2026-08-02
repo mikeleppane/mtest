@@ -83,6 +83,56 @@ def test_failed_precompile_fans_out_all_as_not_run() raises:
     )
 
 
+def _casualties(root: String, seed: Int) raises -> List[String]:
+    """The named casualties of a failed precompile under one shuffle seed."""
+    var config = base_config()
+    config.precompiles.append(Precompile("badpkg", None))
+    config.shuffle = True
+    config.shuffle_seed = seed
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
+    _ = run_session(config, root, comp)
+    ref rec = comp.composite.reporters[0]
+    for i in range(rec.count()):
+        if rec.kind_at(i) == EventKind.PRECOMPILE_FAILED:
+            return (
+                rec.event_at(i).data[PrecompileFailedPayload].casualties.copy()
+            )
+    raise Error("the session emitted no PrecompileFailed event")
+
+
+def test_precompile_casualties_stay_sorted_under_every_seed() raises:
+    # `--shuffle` randomizes EXECUTION order; a casualty list is a report, and
+    # reports stay node-id sorted. Nothing here even runs, so a list that moved
+    # with the seed would be the randomizer leaking into a surface the stream
+    # contract calls deterministic.
+    var root = temp_root()
+    write_file(root, "badpkg/__init__.mojo", SRC_COMPILE_ERROR)
+    write_file(root, "tests/test_a.mojo", SRC_PASS)
+    write_file(root, "tests/test_b.mojo", SRC_PASS)
+    write_file(root, "tests/test_c.mojo", SRC_PASS)
+    write_file(root, "tests/test_d.mojo", SRC_PASS)
+
+    # Seeds 7 and 9 draw different orders over four files, so a casualty list
+    # built from the execution order cannot agree with itself across the pair.
+    var sorted_names: List[String] = [
+        "tests/test_a.mojo",
+        "tests/test_b.mojo",
+        "tests/test_c.mojo",
+        "tests/test_d.mojo",
+    ]
+    for seed in [7, 9]:
+        var named = _casualties(root, seed)
+        assert_equal(len(named), 4)
+        for i in range(4):
+            assert_equal(
+                named[i],
+                sorted_names[i],
+                "casualties moved with the shuffle seed",
+            )
+
+
 def test_successful_precompile_widens_include_path() raises:
     var root = temp_root()
     write_file(

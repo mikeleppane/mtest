@@ -194,6 +194,21 @@ def test_session_started_serializes_workers_once() raises:
     assert_true('"workers":8' in line)
 
 
+def test_session_started_carries_the_seed_only_when_shuffling() raises:
+    # Additive and conditional: an unshuffled record is byte-identical to the
+    # one emitted before the flag existed, so no consumer sees a new field it
+    # cannot interpret.
+    var plain = serialize_event(Event.session_started("root", "mojo", 3, 0))
+    assert_true("shuffle_seed" not in plain)
+    var shuffled = serialize_event(
+        Event.session_started(
+            "root", "mojo", 3, 0, shuffle=True, shuffle_seed=7
+        )
+    )
+    assert_equal(len(shuffled.split('"shuffle_seed":')), 2)
+    assert_true(shuffled.endswith(',"shuffle_seed":7}'))
+
+
 def test_file_finished_serializes_serial_once() raises:
     # The serial flag rides the verdict exactly once, as a bare bool.
     var line = serialize_event(

@@ -160,6 +160,12 @@ struct SessionStartedPayload(EventPayload):
     """The resolved worker count for the run; 1 for a sequential run."""
     var config_file: String
     """The normalized project-config path, or empty when none was loaded."""
+    var shuffle: Bool
+    """Whether run-file order was randomized for this run."""
+    var shuffle_seed: Int
+    """The seed the randomized order was drawn from; meaningless unless
+    `shuffle`. Always the resolved value, never the `--seed`-absent sentinel,
+    so a reporter can quote a seed for every shuffled run."""
 
 
 @fieldwise_init
@@ -528,6 +534,8 @@ struct Event(Copyable, Movable):
         sharded_out_count: Int = 0,
         workers: Int = 1,
         config_file: String = "",
+        shuffle: Bool = False,
+        shuffle_seed: Int = 0,
     ) -> Event:
         """The run began.
 
@@ -544,6 +552,9 @@ struct Event(Copyable, Movable):
                 run.
             config_file: The normalized project-config path, or empty when no
                 file was loaded.
+            shuffle: Whether run-file order was randomized for this run.
+            shuffle_seed: The resolved seed the order was drawn from;
+                meaningless unless `shuffle`.
 
         Returns:
             A SESSION_STARTED event.
@@ -558,6 +569,8 @@ struct Event(Copyable, Movable):
                 sharded_out_count,
                 workers,
                 config_file,
+                shuffle,
+                shuffle_seed,
             )
         )
 

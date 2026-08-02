@@ -94,6 +94,19 @@ def test_session_started_threads_workers() raises:
     assert_equal(par.data[SessionStartedPayload].workers, 4)
 
 
+def test_session_started_threads_the_resolved_shuffle_seed() raises:
+    # An unshuffled run carries the inert pair; a shuffled one carries the seed
+    # the session already resolved, so a reporter never has to derive it.
+    var plain = Event.session_started("tests", "mojo", 3, 0)
+    assert_true(not plain.data[SessionStartedPayload].shuffle)
+    assert_equal(plain.data[SessionStartedPayload].shuffle_seed, 0)
+    var shuffled = Event.session_started(
+        "tests", "mojo", 3, 0, shuffle=True, shuffle_seed=834719
+    )
+    assert_true(shuffled.data[SessionStartedPayload].shuffle)
+    assert_equal(shuffled.data[SessionStartedPayload].shuffle_seed, 834719)
+
+
 def test_session_started_threads_config_file() raises:
     var event = Event.session_started(
         "tests", "mojo", 1, 0, config_file="../shared/mtest.toml"

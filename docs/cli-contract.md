@@ -120,6 +120,7 @@ single **invocation root**. In v1 the root is the **current working directory**.
 | `--timeout`, `--compile-timeout` | ✓ | ✓ (compile only) | — |
 | `--retries N` | ✓ | — | — |
 | `--fail-on-flaky` | ✓ | — | — |
+| `--shuffle`, `--seed N` | ✓ | — | — |
 | `--no-cache`, `--cache-clear` | ✓ | ✓ | — |
 | `--gate PATH` | ✓ | — | — |
 | `-s`, `--show-output MODE` | ✓ | — | — |
@@ -132,8 +133,9 @@ single **invocation root**. In v1 the root is the **current working directory**.
 `collect` compiles files to enumerate their tests, so it honors the build and
 selection flags; it does not schedule test execution, so run-time flags
 (`-x`, `--maxfail`, `--retries`, `--fail-on-flaky`, `--durations`, `--serial`,
-`--lf`, `--ff`, reporters) do not apply. The failure-selection flags are
-refused based on CLI presence under either `collect` spelling. `--timeout` is
+`--shuffle`, `--seed`, `--lf`, `--ff`, reporters) do not apply. The
+failure-selection flags are refused based on CLI presence under either
+`collect` spelling. `--timeout` is
 the one exception: unlike the other run-only flags above, it is applicable in
 `collect` mode too, because it also bounds each file's `--skip-all` collection
 probe (§5, §6) — a probe is a real process spawn with the same hang risk as a
@@ -672,7 +674,7 @@ grow:
 | 1 | at least one selected outcome is FAIL, CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT, MALFORMED-SUITE, or PRECOMPILE-ERROR; or the session would otherwise exit 0 and, under `--fail-on-flaky` (§13), counted at least one FLAKY file |
 | 2 | interrupted (SIGINT/SIGTERM); a partial summary is printed |
 | 3 | internal `mtest` error — including protocol drift (a report present but off-grammar) and an environment/I-O failure such as a runtime report-destination open/write failure (a `--json` destination that cannot be opened at session start, or whose stream write later fails — a fatal abort; or a `--junit-xml` target that cannot be created at session start, or whose report cannot be finalized and renamed onto PATH) |
-| 4 | pre-run usage error (unknown flag, bad value, nonexistent path, an explicit operand of a file type mtest cannot run (a FIFO, socket, or device, §5), a path discovery cannot inspect (§5), unknown node id, forbidden build argument, mutually exclusive `--config`/`--no-config`, a selected project config that is missing, unreadable, malformed, or has an invalid key/value, a syntactically invalid `--json` or `--junit-xml` report destination — an empty value or a nonexistent parent directory, the machine-stdout conflict — `--json -` without an explicit `--gh-annotations off`, since the byte-pure stream and the annotation tail cannot share stdout, or a `--cache-clear` target mtest can see and cannot prove it owns, or can prove and cannot delete, §8.5 — a target it cannot characterize at all is treated as absent and exits `0`) — detected **before any test runs** |
+| 4 | pre-run usage error (unknown flag, bad value, nonexistent path, an explicit operand of a file type mtest cannot run (a FIFO, socket, or device, §5), a path discovery cannot inspect (§5), unknown node id, forbidden build argument, mutually exclusive `--config`/`--no-config`, `--seed` without `--shuffle`, `--shuffle` beside `--lf`/`--ff` (§18), a selected project config that is missing, unreadable, malformed, or has an invalid key/value, a syntactically invalid `--json` or `--junit-xml` report destination — an empty value or a nonexistent parent directory, the machine-stdout conflict — `--json -` without an explicit `--gh-annotations off`, since the byte-pure stream and the annotation tail cannot share stdout, or a `--cache-clear` target mtest can see and cannot prove it owns, or can prove and cannot delete, §8.5 — a target it cannot characterize at all is treated as absent and exits `0`) — detected **before any test runs** |
 | 5 | no tests collected (empty walk, `-k` matched nothing, everything excluded) |
 
 **Precedence** when outcomes mix. A usage error aborts before the run with 4.
@@ -1226,6 +1228,16 @@ each below states its actual promise, scoped precisely:
   never a duration or byte-payload field. Two runs' raw streams may differ line
   for line while still agreeing on that projection.
 
+**`--shuffle` randomizes execution order and nothing else.** It reorders the
+run files a session executes; every reported surface above stays node-id
+sorted, exactly as it does under `-n`, so no listing, document, or summary
+moves because the order did. The promises in this section are promises about
+the same inputs, and a seed is one of those inputs: `--shuffle --seed N` holds
+all of them run to run, while a bare `--shuffle` draws a fresh seed per
+invocation, which is a different input each time. The resolved seed is printed
+on the console header and, under `--json`, carried on `session_started`, so the
+order a run actually took is always attributable and repeatable.
+
 The build cache is the one thing that varies with history rather than with
 inputs, and both projections carve it out:
 
@@ -1312,6 +1324,20 @@ this shard does not own is not this shard's to reject. Sharded-out files are
 **counted, not listed** (§10.2), and a shard that owns no run files falls under
 the empty-collection exit code (§9).
 
+**`--shuffle` and `--seed N`.** `--shuffle` randomizes the order the RUN files
+execute in, to surface a test file that only passes because another ran first.
+Gate files are never shuffled: they keep their listed order and still run
+first. `--seed N` fixes that order to a reproducible draw and requires
+`--shuffle` (exit 4 otherwise, as is `--seed` with a value that is not an
+integer `>= 0`). Without `--seed` the runner draws a seed itself and reports
+it, so any randomized run can be replayed. The seed-to-order mapping is frozen
+for 1.x: one seed names one order over one file list, on every platform.
+`--shuffle` is refused beside `--lf`/`--ff` (exit 4), because those choose an
+order too. It composes with `--shard`: the partition is applied first, over the
+sorted list, so shard membership is unchanged and only the order within a
+shard's own files moves. It is a run-only flag (§4) and is never read from
+`mtest.toml`.
+
 **`--serial GLOB` (repeatable).** Pins every file matching `GLOB` to run outside
 the parallel pool, one at a time, for suites with a shared resource (a port, a
 device) that cannot tolerate concurrent access. Each occurrence adds one glob
@@ -1371,8 +1397,7 @@ unrecognized by the parser, or recognized-but-refused as noted:
 `--durations` (the slowest individual *tests*, not just files — blocked on the
 same upstream per-test timing gap that blocks per-test attribution elsewhere;
 the file-level `--durations N` is itself served now, §15.1); markers /
-`xfail`; `--asan`; `--shuffle` (file-order randomization to surface order
-dependencies); watch mode; a **relocatable** build-cache
+`xfail`; `--asan`; watch mode; a **relocatable** build-cache
 directory (`--cache-dir`); and a
 machine-readable `config show` format (the served TOML display is informal
 human output, §27.1). The build cache itself is served (§8.5), but only as a
@@ -1720,7 +1745,8 @@ above — it only reports which of those surfaces are wired up yet.
 `-x`/`--exitfirst`, `--maxfail`, `--timeout`, `--compile-timeout`, `--retries`,
 `--fail-on-flaky`,
 `--shard`, `--lf`/`--last-failed`, `--ff`/`--failed-first`,
-`-n`/`--workers`, `--serial`, `--no-cache`, `--cache-clear`, `--gate`,
+`-n`/`--workers`, `--serial`, `--shuffle`/`--seed`,
+`--no-cache`, `--cache-clear`, `--gate`,
 `-s`/`--show-output`,
 `--durations`, `-q`/`-v`, `--color`,
 `-h`/`--help`, `--version`, and the `run`, `collect`, `config show`, `doctor`,
@@ -1761,7 +1787,8 @@ code exist today. Section 27 separately covers the reachable `config show` and
   in both `run` and `collect`, and via runtime `--json` or `--junit-xml`
   report-destination failures (§9).
 - **4** — reachable under `run` and `collect` for every served cause in §9 —
-  including mutually exclusive config controls; a selected config that is
+  including mutually exclusive config controls; `--seed` without `--shuffle`
+  and `--shuffle` beside `--lf`/`--ff`; a selected config that is
   missing, unreadable, malformed, or invalid; a syntactically invalid `--json`
   or `--junit-xml` destination; the `--json -`/annotations stdout conflict; and
   a `--cache-clear` target that is a symlink, carries no deletion-authorization

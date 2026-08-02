@@ -355,6 +355,8 @@ def _resolution_defaults(parsed: RunnerConfig) -> RunnerConfig:
     defaults.shard_mode = parsed.shard_mode
     defaults.shard_m = parsed.shard_m
     defaults.shard_n = parsed.shard_n
+    defaults.shuffle = parsed.shuffle
+    defaults.shuffle_seed = parsed.shuffle_seed
     defaults.no_cache = parsed.no_cache
     defaults.cache_clear = parsed.cache_clear
     return defaults^

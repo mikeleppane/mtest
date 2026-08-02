@@ -58,6 +58,8 @@ import tempfile
 import time
 from typing import TYPE_CHECKING, NoReturn
 
+from scripts.checks.reports import json_stream as json_stream_oracle
+
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -743,6 +745,9 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "collect: --gh-annotations rejected in collect -> 4 (even off)",
     "collect: --fail-on-flaky rejected in collect -> 4",
     "run: --fail-on-flaky green run stays 0",
+    "run: --seed without --shuffle -> 4",
+    "run: --shuffle with --ff -> 4",
+    "collect: --shuffle rejected -> 4",
     "collect: -k ignored with a loud notice (\u00a724.3 deviation)",
     "collect: node-id operand lists whole file (\u00a724.3 deviation)",
     "build-arg: -o forbidden -> 4, and the test never ran (pre-run, \u00a79)",
@@ -767,6 +772,7 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "served: collect --shard partitions (not exit 4)",
     "collect: exact node-id set for tests/",
     "determinism: collect byte-identical",
+    "determinism: --shuffle --seed repeats its file order",
     "help: --help -> stdout, exit 0",
     "usage error: -V -> stderr, exit 4",
     "collect: streams split, listing continues past a bad probe",
@@ -798,6 +804,10 @@ against its stage ledger.
 
 class ContractRosterError(Exception):
     """The gate did not perform the checks it reports."""
+
+
+class ContractStreamExitError(Exception):
+    """A run whose stream was to be compared did not exit as the check needs."""
 
 
 def verify_every_check_ran(performed: tuple[str, ...], filtered: bool) -> None:
@@ -1035,6 +1045,98 @@ class Runner:
             ref,
             "" if ok else "two collect runs differed or were empty",
         )
+
+    def _shuffled_file_order(self, seed: str) -> tuple[str, ...]:
+        """The ordered `file_started` paths of one seeded shuffled run.
+
+        Reads the byte-pure `--json -` stream through the stream oracle rather
+        than the console, because §17 excludes the wall clock and the
+        build-cache counters from byte identity: two console outputs of the same
+        run legitimately differ, so comparing them proves nothing either way.
+
+        Args:
+            seed: The `--seed` value to run under.
+
+        Returns:
+            The paths in the order the run announced them.
+
+        Raises:
+            StreamError: If the stream is corrupt.
+            ContractStreamExitError: If the run did not exit 0, so its order is not
+                evidence about ordering.
+        """
+        run = self.mtest(
+            [
+                "-I",
+                "build",
+                "--shuffle",
+                "--seed",
+                seed,
+                "-n",
+                "1",
+                "--json",
+                "-",
+                "--gh-annotations",
+                "off",
+                "tests",
+            ]
+        )
+        if run.returncode != 0:
+            raise ContractStreamExitError(
+                f"--shuffle --seed {seed} exited {run.returncode}: {run.stderr}"
+            )
+        report = json_stream_oracle.parse_stream(run.stdout)
+        return tuple(
+            str(record.get("path", ""))
+            for record in report.records
+            if record.get("event") == "file_started"
+        )
+
+    def check_shuffle_determinism(self) -> None:
+        """Assert a seed repeats its order and another seed really moves files.
+
+        Two same-seed runs agreeing is necessary but nowhere near sufficient: a
+        `--shuffle` that never reordered anything agrees with itself too. A run
+        under a different seed is what separates a working shuffle from a no-op
+        — and comparing the two orders' SETS first separates "the order moved"
+        from "a different set of files ran", which would be a far worse defect
+        wearing the same symptom.
+
+        The alternative seeds are TRIED IN TURN rather than fixed at one value.
+        Over a small file set two particular seeds can legitimately draw the
+        same permutation, and a scaffold edit could make the pair collide, which
+        would report a working shuffle as broken. Only every candidate agreeing
+        is evidence of a no-op.
+
+        What this check cannot see: WHERE the shuffle sits relative to the
+        `--shard` partition. Nothing here is sharded, so a shuffle moved above
+        the partition would pass every assertion below.
+        `test_shard_membership_is_chosen_before_the_shuffle` owns that property.
+        """
+        ref = "§17/§18 a seed reproduces its order; another seed changes it"
+        name = "determinism: --shuffle --seed repeats its file order"
+        reference, candidates = "7", ("9", "2", "3")
+        try:
+            first = self._shuffled_file_order(reference)
+            again = self._shuffled_file_order(reference)
+            others = {seed: self._shuffled_file_order(seed) for seed in candidates}
+        except (json_stream_oracle.StreamError, ContractStreamExitError) as exc:
+            self.record(FAIL, name, ref, str(exc))
+            return
+        problems = []
+        if len(first) < 3:
+            problems.append(f"too few files ran to carry an order: {first}")
+        if first != again:
+            problems.append(f"one seed drew two orders: {first} then {again}")
+        wrong_set = {s: o for s, o in others.items() if sorted(o) != sorted(first)}
+        if wrong_set:
+            problems.append(f"a second seed ran a different SET: {wrong_set}")
+        elif all(order == first for order in others.values()):
+            problems.append(
+                f"no seed in {candidates} reordered {first}, so nothing was randomized"
+            )
+        ok = not problems
+        self.record(PASS if ok else FAIL, name, ref, "" if ok else "; ".join(problems))
 
     def check_help_stream(self) -> None:
         """Assert help goes to stdout and a usage error goes to stderr.
@@ -1376,9 +1478,14 @@ class Runner:
             "--maxfail",
             "--retries",
             "--durations",
+            "--seed",
         ):
+            # `--seed` is refused outright without `--shuffle`, so it is passed
+            # with it: otherwise this check would pass on the wrong refusal and
+            # say nothing about the wrapped value.
+            prefix = ["-I", "build"] + (["--shuffle"] if flag == "--seed" else [])
             for value in ("9223372036854775808", "9223372036854775809"):
-                r = self.mtest(["-I", "build", flag, value, "tests/"])
+                r = self.mtest([*prefix, flag, value, "tests/"])
                 if r.returncode != 4:
                     bad.append(f"{flag} {value} -> exit {r.returncode}")
         # The neighbour below the wrap must still be ACCEPTED: the guard must
@@ -1826,6 +1933,26 @@ def build_matrix() -> list[Check]:
             [*I, "--fail-on-flaky", "tests"],
             0,
         ),
+        # Ordering flags: a seed without the flag it seeds, and two flags that
+        # each choose an order, are both refused pre-run (§18).
+        Check(
+            "run: --seed without --shuffle -> 4",
+            "§4",
+            [*I, "--seed", "1", "tests"],
+            4,
+        ),
+        Check(
+            "run: --shuffle with --ff -> 4",
+            "§4",
+            [*I, "--shuffle", "--ff", "tests"],
+            4,
+        ),
+        Check(
+            "collect: --shuffle rejected -> 4",
+            "§4",
+            ["collect", *I, "--shuffle", "tests"],
+            4,
+        ),
         Check(
             "collect: -k ignored with a loud notice (§24.3 deviation)",
             "§24.3",
@@ -2026,6 +2153,8 @@ def main() -> int:
             runner.check_collect_exact()
         if wanted("determinism: collect byte-identical"):
             runner.check_determinism()
+        if wanted("determinism: --shuffle --seed repeats its file order"):
+            runner.check_shuffle_determinism()
         if wanted("help: --help -> stdout, exit 0") or wanted(
             "usage error: -V -> stderr, exit 4"
         ):

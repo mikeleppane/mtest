@@ -230,6 +230,81 @@ def test_session_started_header_byte_identical_at_single_worker() raises:
     )
 
 
+def _shuffled_run(shuffle: Bool, exit_code: Int, seed: Int = 4242) -> String:
+    """The whole rendered buffer for a file-free run under `shuffle`."""
+    var c = _console()
+    c.handle(
+        Event.session_started(
+            "tests", "mojo 1.0.0b2", 3, 0, shuffle=shuffle, shuffle_seed=seed
+        )
+    )
+    var s = Summary.zeros()
+    s.counts[Outcome.PASS.code] = 3
+    c.handle(
+        Event.session_finished(
+            s.copy(),
+            1.0,
+            exit_code,
+            test_counts=TestCounts(passed=3, failed=0, skipped=0, deselected=0),
+        )
+    )
+    return c.output()
+
+
+def test_header_names_the_shuffle_seed() raises:
+    # The seed is on the header of EVERY shuffled run, seeded or not: it is the
+    # only place the order a reader is looking at can be traced back from.
+    assert_true("   shuffle seed: 4242\n" in _shuffled_run(True, 0))
+    # An unshuffled header is byte-identical to what it was before the flag.
+    assert_true("shuffle seed" not in _shuffled_run(False, 0))
+
+
+def test_shuffle_note_follows_a_failing_randomized_run() raises:
+    assert_true(
+        _shuffled_run(True, 1).endswith(
+            "\nnote: file order was randomized; rerun the same command with:"
+            " --shuffle --seed 4242\n"
+        )
+    )
+
+
+def test_shuffle_note_follows_an_interrupted_randomized_run() raises:
+    # Not just exit 1: an interrupt (2) or an internal error (3) is exactly when
+    # a user wants the order back, and under `-q` the note is the only place the
+    # seed appears at all.
+    assert_true("--shuffle --seed 4242" in _shuffled_run(True, 2))
+    assert_true("--shuffle --seed 4242" in _shuffled_run(True, 3))
+
+
+def test_shuffle_note_is_silent_when_it_would_teach_nothing() raises:
+    # Both conjuncts matter: a green randomized run has nothing to reproduce,
+    # and an ordinary failing run was never reordered.
+    assert_false("randomized" in _shuffled_run(True, 0))
+    assert_false("randomized" in _shuffled_run(False, 1))
+
+
+def test_shuffle_note_survives_quiet() raises:
+    # The band and its epilogue render under `-q`, so the seed must be latched
+    # before the header's quiet short-circuit or the note loses its value.
+    var c = _console(verbosity=Verbosity.QUIET)
+    c.handle(
+        Event.session_started(
+            "tests", "mojo 1.0.0b2", 3, 0, shuffle=True, shuffle_seed=99
+        )
+    )
+    var s = Summary.zeros()
+    s.counts[Outcome.FAIL.code] = 1
+    c.handle(
+        Event.session_finished(
+            s.copy(),
+            1.0,
+            1,
+            test_counts=TestCounts(passed=0, failed=1, skipped=0, deselected=0),
+        )
+    )
+    assert_true(c.output().endswith("--shuffle --seed 99\n"))
+
+
 def test_one_verdict_line_per_file_in_order() raises:
     var c = _console()
     _feed_mock_run(c)

@@ -1395,6 +1395,8 @@ Execution:
   --fail-on-flaky             Exit 1 when any file passed only after retries.
   -n, --workers N|auto        Set worker count (default: 1).
   --serial GLOB               Run matching files serially (repeatable).
+  --shuffle                   Randomize run-file order (gates keep theirs).
+  --seed N                    Fix the --shuffle order to a reproducible seed.
   --no-cache                  Build without reading/writing the build cache.
   --cache-clear               Delete .mtest-cache (cache/last-run state), run.
 
@@ -1457,6 +1459,8 @@ General:
 | `--shard [hash:\|slice:]M/N` | run (or collect) only shard `M` of `N`; `hash:` (default, stable over the path) or `slice:` (sorted round-robin) |
 | `-n`, `--workers N\|auto` | run files across a pool of `N` worker processes; `auto` is half the logical cores (default `1`, sequential; ignored under `-k`/node-id selection) |
 | `--serial GLOB` | (repeatable) pin matching files to a final one-at-a-time pass after the parallel batch |
+| `--shuffle` | randomize the order run files execute in, to surface order dependencies; gates keep their listed order and every report stays node-id sorted; CLI-only, never read from `mtest.toml` |
+| `--seed N` | fix the `--shuffle` order to a reproducible seed (requires `--shuffle`); without it the runner draws one and prints it |
 | `--no-cache` | build without reading or writing the build cache; CLI-only, never read from `mtest.toml` |
 | `--cache-clear` | delete `.mtest-cache` (build cache and last-run state), then run; CLI-only, never read from `mtest.toml` |
 | `--json PATH\|-` | write the versioned NDJSON event stream to `PATH`, or to stdout with `-` |

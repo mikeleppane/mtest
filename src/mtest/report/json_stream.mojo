@@ -397,6 +397,11 @@ def _session_started(p: SessionStartedPayload) -> String:
     s += ',"sharded_out_count":' + String(p.sharded_out_count)
     s += ',"workers":' + String(p.workers)
     s += ',"config_file":"' + _cap_runner_string(p.config_file) + '"'
+    # Conditional by design: an unshuffled run's record is byte-identical to the
+    # one it emitted before `--shuffle` existed, and a consumer that sees the
+    # field knows the order was randomized without also reading a flag.
+    if p.shuffle:
+        s += ',"shuffle_seed":' + String(p.shuffle_seed)
     s += "}"
     return s^
 

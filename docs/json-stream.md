@@ -48,7 +48,11 @@ event.
 
 Every record after the header opens with `"event":"<name>"` in `snake_case` and
 then mirrors the landed event's payload fields **1:1** under their own names,
-with a single naming exception (the `*_us` duration rule, §3). Closed-vocabulary
+with two exceptions. The first is a naming one, the `*_us` duration rule (§3).
+The second is `session_started`: its payload carries a `shuffle` boolean beside
+`shuffle_seed`, but the record carries only the conditional `shuffle_seed`. The
+**presence** of that field is how shuffle state is represented on the wire; the
+boolean itself is never serialized. Closed-vocabulary
 values (`outcome`, `parse_disposition`, `attribution_disposition`) serialize as
 their frozen lowercase string **tokens**; counts, indices, and the termination
 discriminants serialize as bare integers; booleans as `true`/`false`.
@@ -76,6 +80,7 @@ consumer never sees a `progress` record and never a blank line in its place.
 | `sharded_out_count` | int | files handed to other shards |
 | `workers` | int | resolved worker count; `1` for a sequential run |
 | `config_file` | string | lexically normalized root-relative path when inside the invocation root, normalized absolute path when outside it, or `""` when none |
+| `shuffle_seed` | int | **present only under `--shuffle`**: the resolved seed the run-file order was drawn from. Absent on an unshuffled run, which is what keeps that record byte-identical to a v1 stream written before the flag existed |
 
 ### 2.2 `warning`
 
@@ -466,12 +471,25 @@ fields that legitimately vary run to run.
   `detail_omitted_bytes`, `build_argv`/`attempt_argv`/`casualties` byte content
   and their `*_omitted` counts;
 - the `generator` string (carries the version label);
+- `session_started.shuffle_seed` — present only under `--shuffle`, and stable
+  across runs only when `--seed N` supplied it; a bare `--shuffle` draws a fresh
+  one every invocation;
 - the build-cache split `built_files`/`cached_files` — their SUM is stable for
   identical inputs (it is the first-attempt compile admission count), but how it
   divides depends on what the store already held when the run started.
 
-The excluded set is exactly the run-to-run-variable surface; everything else is
-byte-stable for identical inputs.
+**A bare `--shuffle` is not the same inputs twice.** The seed it draws is itself
+an input and it changes per invocation, so the Included list above holds under
+`--shuffle --seed N` and not under `--shuffle` alone. The reach is wider than
+the seed field: whenever an early stop is in play (`-x`, `--maxfail`, or a
+failing `--gate`), *which* files reach a verdict depends on the drawn order, so
+`outcome`, the `summary` object, `test_counts` and the final `exit_code` may all
+differ between two bare-`--shuffle` runs of the same command line. Fix the seed
+before comparing two streams.
+
+With that precondition met, the excluded set above is exactly the
+run-to-run-variable surface; everything else is byte-stable for identical
+inputs.
 
 ---
 

@@ -39,7 +39,13 @@ struct DiscoveryResult(Copyable, Movable):
 
     var run_files: List[String]
     """Non-gate files to run, root-relative, deduped, exclusions and gate
-    overlaps removed, sorted lexicographically for deterministic scheduling."""
+    overlaps removed, sorted lexicographically as discovery produces it.
+
+    The sort is discovery's promise, not a standing invariant: the session
+    rewrites this list in place to set the EXECUTION order (`--failed-first`
+    reorders it, `--shuffle` permutes it), and keeps its own sorted snapshot of
+    the post-shard set for every surface that reports the run set rather than
+    driving it. A later consumer of this field is reading a schedule."""
 
     var excluded: List[ExcludedEntry]
     """Every excluded file with the pattern that removed it, sorted by path."""

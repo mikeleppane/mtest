@@ -291,6 +291,25 @@ def frozen_inventory() -> List[InvRow]:
             "Run matching files serially (repeatable).",
             "--serial GLOB",
         ),
+        # CLI-only: never read from mtest.toml (order randomization).
+        InvRow(
+            "--shuffle",
+            0,
+            False,
+            "",
+            FlagGroup.EXECUTION,
+            "Randomize run-file order (gates keep theirs).",
+            "--shuffle",
+        ),
+        InvRow(
+            "--seed",
+            1,
+            False,
+            "N",
+            FlagGroup.EXECUTION,
+            "Fix the --shuffle order to a reproducible seed.",
+            "--seed N",
+        ),
         # CLI-only: never read from mtest.toml (build cache).
         InvRow(
             "--no-cache",
@@ -498,8 +517,8 @@ def test_help_renders_every_option_once_with_values_and_aligned_help() raises:
     for line_slice in rendered.split("\n"):
         if String(line_slice).startswith("  -"):
             option_rows += 1
-    # Five two-spelling aliases collapse 39 spellings into 34 physical rows.
-    assert_equal(option_rows, 34)
+    # Five two-spelling aliases collapse 41 spellings into 36 physical rows.
+    assert_equal(option_rows, 36)
     for row in frozen_inventory():
         var expected_line = "  " + row.help_label
         for _ in range(30 - expected_line.count_codepoints()):

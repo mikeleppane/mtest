@@ -160,6 +160,14 @@ def _parse_retries(value: String) raises -> Int:
     return parsed.value()
 
 
+def _parse_seed(value: String) raises -> Int:
+    """Parse a `--seed` value: a non-negative integer."""
+    var parsed = parse_nonnegative_decimal(value)
+    if not parsed:
+        raise _err("'--seed' wants an integer >= 0, got '" + value + "'")
+    return parsed.value()
+
+
 def _parse_workers(value: String) raises -> Int:
     """Parse a `-n`/`--workers` value into a worker count.
 
@@ -394,6 +402,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             missing or malformed value, a forbidden build argument, a bundled
             short-flag group, `-q` and `-v` together, `--config` with
             `--no-config`, `--lf` with `--ff`, either of those with `--shard`,
+            `--seed` without `--shuffle`, `--shuffle` with `--lf`/`--ff`,
             a run-only flag combined with collect mode, or a run, build, or
             reporter flag combined with doctor.
 
@@ -491,6 +500,10 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     var cache_clear = False
     var fail_on_flaky = False
     var saw_fail_on_flaky = False
+    var shuffle = False
+    # `-1` is the parser's "no seed given" sentinel; the session derives one.
+    var shuffle_seed = -1
+    var saw_seed = False
     var saw_select = False
     var saw_shard = False
     var saw_passthrough = False
@@ -583,6 +596,8 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             elif s.id == FlagId.FAIL_ON_FLAKY:
                 fail_on_flaky = True
                 saw_fail_on_flaky = True
+            elif s.id == FlagId.SHUFFLE:
+                shuffle = True
             i += 1
             continue
 
@@ -650,6 +665,9 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         elif s.id == FlagId.RETRIES:
             retries = _parse_retries(value)
             saw_retries = True
+        elif s.id == FlagId.SEED:
+            shuffle_seed = _parse_seed(value)
+            saw_seed = True
         elif s.id == FlagId.WORKERS:
             workers = _parse_workers(value)
             saw_workers = True
@@ -683,6 +701,12 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         raise _err(
             "'--lf'/'--last-failed' and '--ff'/'--failed-first' cannot be"
             " combined with '--shard'"
+        )
+    if saw_seed and not shuffle:
+        raise _err("'--seed' requires '--shuffle'")
+    if shuffle and (last_failed or failed_first):
+        raise _err(
+            "'--shuffle' and '--lf'/'--ff' choose conflicting orders; pick one"
         )
 
     if doctor:
@@ -727,6 +751,13 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             raise _err(
                 "'--fail-on-flaky' is a run flag and cannot be combined with"
                 " doctor"
+            )
+        # `--seed` alone was already refused above for wanting `--shuffle`, so
+        # gating on `shuffle` covers the pair.
+        if shuffle:
+            raise _err(
+                "'--shuffle' and '--seed' are run flags and cannot be combined"
+                " with doctor"
             )
         if saw_retries:
             raise _err(
@@ -837,6 +868,13 @@ def parse_args(argv: List[String]) raises -> ParseResult:
                 "'--fail-on-flaky' is a run-only flag and cannot be combined"
                 " with collect mode"
             )
+        # `--seed` alone was already refused above for wanting `--shuffle`, so
+        # gating on `shuffle` covers the pair.
+        if shuffle:
+            raise _err(
+                "'--shuffle' and '--seed' are run-only flags and cannot be"
+                " combined with collect mode"
+            )
         if saw_retries:
             raise _err(
                 "'--retries' is a run-only flag and cannot be combined with"
@@ -925,6 +963,8 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     defaults.shard_mode = shard_mode
     defaults.shard_m = shard_m
     defaults.shard_n = shard_n
+    defaults.shuffle = shuffle
+    defaults.shuffle_seed = shuffle_seed
     defaults.no_cache = no_cache
     defaults.cache_clear = cache_clear
     var cfg = overlay.fold(defaults)
