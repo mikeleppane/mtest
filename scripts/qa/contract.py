@@ -49,6 +49,7 @@ import contextlib
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import subprocess
@@ -619,6 +620,23 @@ def scaffold(root: Path) -> None:
         HEAD + "def test_smoke() raises:\n    assert_equal(0, 1)\n" + MAIN,
     )
 
+    # -- retry: crashes on its first attempt and passes once the marker exists,
+    #    so `--retries 1` yields a FLAKY file with nothing else failing. The
+    #    marker is written in the invocation root, which is the working
+    #    directory every test binary is spawned in.
+    w(
+        "retry/test_crash_once.mojo",
+        "from std.os import abort\n"
+        "from std.os.path import exists\n"
+        "from std.testing import assert_equal, TestSuite\n\n\n"
+        "def test_eventually_passes() raises:\n"
+        '    if not exists("retry.marker"):\n'
+        '        with open("retry.marker", "w") as f:\n'
+        '            f.write("1")\n'
+        '        abort("POISON: the first attempt always aborts")\n'
+        "    assert_equal(1, 1)\n" + MAIN,
+    )
+
     # -- probe outcomes.
     w(
         "probes/test_fail.mojo",
@@ -723,6 +741,8 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "collect: --json rejected in collect -> 4",
     "collect: --junit-xml rejected in collect -> 4",
     "collect: --gh-annotations rejected in collect -> 4 (even off)",
+    "collect: --fail-on-flaky rejected in collect -> 4",
+    "run: --fail-on-flaky green run stays 0",
     "collect: -k ignored with a loud notice (\u00a724.3 deviation)",
     "collect: node-id operand lists whole file (\u00a724.3 deviation)",
     "build-arg: -o forbidden -> 4, and the test never ran (pre-run, \u00a79)",
@@ -758,6 +778,7 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "value: 2^63 refused for every non-negative integer flag",
     "report: --json to a readerless FIFO fails fast, never blocks",
     "path: a long-but-legal path builds, never a false COMPILE-ERROR",
+    "flaky: --fail-on-flaky turns a FLAKY-only run's 0 into 1",
     "interrupt: SIGINT frees the owned process group",
 )
 """Every check `main` must perform, in order, on an unfiltered run.
@@ -815,6 +836,66 @@ def verify_every_check_ran(performed: tuple[str, ...], filtered: bool) -> None:
             "the contract gate ran a filtered subset out of roster order or "
             f"more than once: {list(performed)}"
         )
+
+
+# Two fields of a summary line are properties of the machine and the store
+# rather than of any behavior under test: the wall time, and the build-cache
+# counters, which depend on what the store held when the run started. Both are
+# elided before an exact comparison, so a warm scaffold cannot flap a check.
+_RUN_SPECIFICS = re.compile(r", builds: \d+, cached: \d+| in \d+\.\d+s")
+
+
+def _sole_line(lines: list[str], prefix: str) -> str | None:
+    """The one line starting with `prefix`, or None when there is not exactly one."""
+    matched = [ln for ln in lines if ln.startswith(prefix)]
+    return matched[0] if len(matched) == 1 else None
+
+
+def _flaky_surface_problems(
+    label: str,
+    result: subprocess.CompletedProcess[str],
+    want_exit: int,
+    want_body: str,
+) -> list[str]:
+    """Check one half of the fail-on-flaky pair on all three of its surfaces.
+
+    The exit code, the console summary band, and the annotation `::notice` are
+    produced by three separate paths, so all three are asserted. The band and
+    the notice are compared as WHOLE lines against the same expected body: a
+    substring would pass against duplicated or malformed rendering, and
+    checking only one of the two would miss a reporter that lost its wiring.
+
+    Args:
+        label: Which half this is, for the failure detail.
+        result: The completed `mtest` run.
+        want_exit: The exit code the contract freezes for this half.
+        want_body: The exact summary text both surfaces must carry, with the
+            wall time and cache counters removed.
+
+    Returns:
+        One string per property that did not hold; empty when the half passed.
+    """
+    probs: list[str] = []
+    if result.returncode != want_exit:
+        probs.append(f"{label}: exit {result.returncode}, want {want_exit}")
+    lines = result.stdout.splitlines()
+
+    band = _sole_line(lines, "===== ")
+    if band is None:
+        probs.append(f"{label}: expected exactly one console summary band")
+    else:
+        got = _RUN_SPECIFICS.sub("", band.removeprefix("===== ").removesuffix(" ====="))
+        if got != want_body:
+            probs.append(f"{label}: band is {got!r}, want {want_body!r}")
+
+    notice = _sole_line(lines, "::notice::")
+    if notice is None:
+        probs.append(f"{label}: expected exactly one ::notice line")
+    else:
+        got = _RUN_SPECIFICS.sub("", notice.removeprefix("::notice::"))
+        if got != want_body:
+            probs.append(f"{label}: notice is {got!r}, want {want_body!r}")
+    return probs
 
 
 class Runner:
@@ -1394,6 +1475,54 @@ class Runner:
             f"(PATH_MAX 4096); stderr={r.stderr[:200]!r}",
         )
 
+    def check_fail_on_flaky(self) -> None:
+        """Assert a FLAKY-only run exits 0, and 1 once `--fail-on-flaky` is set.
+
+        A paired run over one scaffold, with the crash-once marker reset between
+        halves so the two differ only in the flag. The exit codes alone are not
+        an oracle: a runner that never retried at all would also exit 0 on the
+        first half, so each half is held to the exact summary text on BOTH
+        independently composed surfaces (§15.1's console band and §15.3's
+        `::notice`). `--gh-annotations on` is what makes the tail render outside
+        GitHub Actions at all; without it the notice never appears and this
+        check would silently stop covering the reporter it names.
+        """
+        ref = "§13/§15.3 --fail-on-flaky demotes a would-be 0 and says why"
+        name = "flaky: --fail-on-flaky turns a FLAKY-only run's 0 into 1"
+        marker = self.root / "retry.marker"
+        argv = [
+            "-I",
+            "build",
+            "--retries",
+            "1",
+            "--gh-annotations",
+            "on",
+            "retry/test_crash_once.mojo",
+        ]
+
+        try:
+            marker.unlink(missing_ok=True)
+            off = self.mtest(argv)
+            marker.unlink(missing_ok=True)
+            on = self.mtest([*argv, "--fail-on-flaky"])
+        except subprocess.TimeoutExpired:
+            self.record(FAIL, name, ref, "timed out running the retry probe")
+            return
+        finally:
+            marker.unlink(missing_ok=True)
+
+        bare = "1 passed, 0 failed, 0 skipped, 1 flaky (0 excluded, 0 not run)"
+        named = (
+            "1 passed, 0 failed, 0 skipped, 1 flaky (failing: --fail-on-flaky)"
+            " (0 excluded, 0 not run)"
+        )
+        probs = _flaky_surface_problems("without the flag", off, 0, bare)
+        probs += _flaky_surface_problems("with the flag", on, 1, named)
+        if probs:
+            self.record(FAIL, name, ref, "; ".join(probs))
+        else:
+            self.record(PASS, name, ref)
+
     # -- interrupt: signal ONLY mtest, so the child's survival tests mtest's own
     #    process-group teardown (§18/§24.2) rather than a signal the child caught.
     def check_interrupt(self, strict: bool) -> None:
@@ -1685,6 +1814,19 @@ def build_matrix() -> list[Check]:
             4,
         ),
         Check(
+            "collect: --fail-on-flaky rejected in collect -> 4",
+            "§4",
+            ["collect", *I, "--fail-on-flaky", "tests"],
+            4,
+        ),
+        # The flag alone never moves a clean run: only a FLAKY file does.
+        Check(
+            "run: --fail-on-flaky green run stays 0",
+            "§13",
+            [*I, "--fail-on-flaky", "tests"],
+            0,
+        ),
+        Check(
             "collect: -k ignored with a loud notice (§24.3 deviation)",
             "§24.3",
             ["collect", *I, "-k", "reverse", "tests"],
@@ -1908,6 +2050,8 @@ def main() -> int:
             runner.check_json_fifo_does_not_block()
         if wanted("path: a long-but-legal path builds, never a false COMPILE-ERROR"):
             runner.check_long_path_builds()
+        if wanted("flaky: --fail-on-flaky turns a FLAKY-only run's 0 into 1"):
+            runner.check_fail_on_flaky()
         if wanted("interrupt: SIGINT frees the owned process group"):
             if args.no_interrupt:
                 # Recorded rather than bypassed: testing --no-interrupt BEFORE

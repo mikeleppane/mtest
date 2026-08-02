@@ -610,6 +610,7 @@ class CheckRosterTests(unittest.TestCase):
                 "value: 2^63 refused for every non-negative integer flag",
                 "report: --json to a readerless FIFO fails fast, never blocks",
                 "path: a long-but-legal path builds, never a false COMPILE-ERROR",
+                "flaky: --fail-on-flaky turns a FLAKY-only run's 0 into 1",
                 "interrupt: SIGINT frees the owned process group",
             ],
         )
@@ -717,6 +718,11 @@ class CheckRosterTests(unittest.TestCase):
             def check_long_path_builds(self) -> None:
                 self._perform(
                     "path: a long-but-legal path builds, never a false COMPILE-ERROR"
+                )
+
+            def check_fail_on_flaky(self) -> None:
+                self._perform(
+                    "flaky: --fail-on-flaky turns a FLAKY-only run's 0 into 1"
                 )
 
             def check_interrupt(self, _strict: bool) -> None:

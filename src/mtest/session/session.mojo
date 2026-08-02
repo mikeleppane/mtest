@@ -29,7 +29,8 @@ The session does not decide the exit code: it states the facts it observed and
 `resolve_exit_code` in the model layer ranks them. The precedence, high to low:
 an interrupt is 2; an internal error (spawn failure or machinery raise) is 3; a
 report that drifted off the pinned grammar is also 3; a precompile failure is 1;
-otherwise `exit_code_for` over the run outcomes decides 1, 5, or 0. A terminal
+otherwise `exit_code_for` over the run outcomes decides 1, 5, or 0, and under
+`--fail-on-flaky` a 0 with at least one FLAKY file becomes 1. A terminal
 artifact that could not be delivered then escalates anything below 2 to 3. The
 selection, probe, and gate paths route non-valid reports through the same
 `resolve_report`/`classify` machinery as the default path, so a forged or
@@ -988,6 +989,13 @@ def run_session[
     # the model ranks them, so the precedence lives in one place for every caller
     # that reaches an exit code. A stream death or a failed JUnit finalization is
     # the same fact to the resolver: a terminal artifact was not delivered.
+    # A file that passed only after a crash-class retry tallied under FLAKY; that
+    # run-wide count rides the SessionFinished summary line, and under
+    # `--fail-on-flaky` it is also a terminal fact the model ranks. Derived once,
+    # ahead of the resolve, so both resolutions below rank the same fact.
+    var flaky_files = summary.count_of(Outcome.FLAKY)
+    var flaky_failed = config.fail_on_flaky and flaky_files > 0
+
     var code = resolve_exit_code(
         TerminalFacts(
             interrupted=interrupt_latched,
@@ -996,13 +1004,11 @@ def run_session[
             precompile_failed=precompile_failed,
             outcome_code=outcome_code,
             delivery_failed=stream_dead or finalize_failed,
+            flaky_failed=flaky_failed,
         )
     )
 
     var wall = Float64(perf_counter_ns() - started_ns) / 1.0e9
-    # A file that passed only after a crash-class retry tallied under FLAKY; that
-    # run-wide count rides the SessionFinished summary line.
-    var flaky_files = summary.count_of(Outcome.FLAKY)
     reporter.handle(
         Event.session_finished(
             summary^,
@@ -1029,7 +1035,7 @@ def run_session[
     # could not have seen, because it did not exist yet. Re-poll the SAME
     # latch Phase 1 already polls; if it is now set and was not already
     # folded into `stream_dead`, re-resolve with the pure function again,
-    # passing the SAME interrupt/error/drift/precompile/outcome facts (a
+    # passing the SAME interrupt/error/drift/precompile/outcome/flaky facts (a
     # finalization-phase interrupt still must not move the code — only the
     # delivery outcome does) and `delivery_failed=True`. The same
     # precedence applies: a resolved 2 still stands, a resolved 3 stays 3, a
@@ -1046,6 +1052,7 @@ def run_session[
                 precompile_failed=precompile_failed,
                 outcome_code=outcome_code,
                 delivery_failed=True,
+                flaky_failed=flaky_failed,
             )
         )
     return code

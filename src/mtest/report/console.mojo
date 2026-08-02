@@ -601,11 +601,14 @@ def _sort_slowest(mut files: List[_FileDuration]):
             files[best] = tmp^
 
 
-def _worst_color(s: Summary, tc: TestCounts) -> StaticString:
+def _worst_color(
+    s: Summary, tc: TestCounts, flaky_failing: Bool
+) -> StaticString:
     """The summary-band color.
 
-    Red-bold if any crash-class file ran, otherwise red if any test failed or
-    any file is a FAIL, otherwise green.
+    Red-bold if any crash-class file ran, otherwise red if any test failed, any
+    file is a FAIL, or `--fail-on-flaky` is failing the run over a FLAKY file,
+    otherwise green.
     """
     if (
         s.count_of(Outcome.CRASH) > 0
@@ -616,7 +619,7 @@ def _worst_color(s: Summary, tc: TestCounts) -> StaticString:
         or s.count_of(Outcome.PRECOMPILE_ERROR) > 0
     ):
         return _RED_BOLD
-    if s.count_of(Outcome.FAIL) > 0 or tc.failed > 0:
+    if s.count_of(Outcome.FAIL) > 0 or tc.failed > 0 or flaky_failing:
         return _RED
     return _GREEN
 
@@ -711,6 +714,12 @@ struct ConsoleReporter(Reporter):
     """`--durations N`: how many slowest-running files to list after the summary
     band; `0`, or the flag being absent, renders nothing extra. Independent of
     `verbosity`, so an explicit `--durations` survives `-q`."""
+    var fail_on_flaky: Bool
+    """Whether `--fail-on-flaky` is in effect, so a FLAKY file fails the run.
+
+    Presentation only: it names the flag beside a nonzero flaky tally and turns
+    the band red. The exit code is the session's, resolved from the same fact,
+    and is never read back from here."""
     var _head: String
     """The streamed header, warnings, banners, and verdict/excluded lines."""
     var _head_flushed: Int
@@ -770,6 +779,7 @@ struct ConsoleReporter(Reporter):
         var mtest_build_flags: String,
         durations: Int,
         gh_actions: Bool = False,
+        fail_on_flaky: Bool = False,
     ):
         """Construct a reporter and resolve color once.
 
@@ -795,6 +805,8 @@ struct ConsoleReporter(Reporter):
             gh_actions: Whether the run is inside GitHub Actions
                 (`GITHUB_ACTIONS=true`). When True, echoed captured child output
                 is wrapped in collision-proof stop-commands fencing.
+            fail_on_flaky: Whether `--fail-on-flaky` is in effect, so a nonzero
+                flaky tally names the flag on the band and paints it red.
 
         Examples:
 
@@ -821,6 +833,7 @@ struct ConsoleReporter(Reporter):
         self.show_output = show_output
         self.mtest_build_flags = mtest_build_flags^
         self.durations = durations
+        self.fail_on_flaky = fail_on_flaky
         self._head = String("")
         self._head_flushed = 0
         self._sections = String("")
@@ -1696,6 +1709,14 @@ struct ConsoleReporter(Reporter):
         body += _extra_count(s, Outcome.COMPILE_TIMEOUT, "compile timeout")
         body += _extra_count(s, Outcome.PRECOMPILE_ERROR, "precompile error")
         body += _extra_count(s, Outcome.FLAKY, "flaky")
+        # Under `--fail-on-flaky` the tally is the reason the run failed, so the
+        # band names the flag rather than leaving a green-looking count beside a
+        # nonzero exit. Derived from the flag and the tally, never from the exit
+        # code: a real failure beside a flaky file with the flag off must not
+        # pick up the suffix.
+        var flaky_failing = self.fail_on_flaky and s.count_of(Outcome.FLAKY) > 0
+        if flaky_failing:
+            body += " (failing: --fail-on-flaky)"
         # The build-cache accounting, on the same band as the outcome counts and
         # only when the cache actually admitted something: `builds` counts
         # first-attempt compiles (failures included), `cached` counts store
@@ -1729,7 +1750,9 @@ struct ConsoleReporter(Reporter):
             + _fmt_fixed(e.wall_time_seconds, 1)
             + "s ====="
         )
-        self._summary = "\n" + self._paint(_worst_color(s, tc), band) + "\n"
+        self._summary = (
+            "\n" + self._paint(_worst_color(s, tc, flaky_failing), band) + "\n"
+        )
         self._summary += self._render_slowest_files()
 
     def _render_slowest_files(self) -> String:

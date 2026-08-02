@@ -139,6 +139,7 @@ def test_config_show_defaults_render_every_key_in_fixed_order() raises:
             "retries = 0  # (default)\n"
             "maxfail = 0  # (default)\n"
             "state = true  # (default)\n"
+            "fail-on-flaky = false  # (default)\n"
             "\n"
             "[build]\n"
             'mojo = "mojo"  # (default)\n'

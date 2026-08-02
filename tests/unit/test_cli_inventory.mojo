@@ -242,6 +242,16 @@ def frozen_inventory() -> List[InvRow]:
             "Retry crash-class outcomes N times.",
             "--retries N",
         ),
+        # `--fail-on-flaky`: valueless; a FLAKY file turns a would-be 0 into 1.
+        InvRow(
+            "--fail-on-flaky",
+            0,
+            False,
+            "",
+            FlagGroup.EXECUTION,
+            "Exit 1 when any file passed only after retries.",
+            "--fail-on-flaky",
+        ),
         # `--compile-timeout SECS`: non-negative int; 0 disables.
         InvRow(
             "--compile-timeout",
@@ -488,8 +498,8 @@ def test_help_renders_every_option_once_with_values_and_aligned_help() raises:
     for line_slice in rendered.split("\n"):
         if String(line_slice).startswith("  -"):
             option_rows += 1
-    # Five two-spelling aliases collapse 38 spellings into 33 physical rows.
-    assert_equal(option_rows, 33)
+    # Five two-spelling aliases collapse 39 spellings into 34 physical rows.
+    assert_equal(option_rows, 34)
     for row in frozen_inventory():
         var expected_line = "  " + row.help_label
         for _ in range(30 - expected_line.count_codepoints()):

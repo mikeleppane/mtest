@@ -69,6 +69,12 @@ struct CliOverlay(Copyable, Movable):
     var saw_maxfail: Bool
     """Whether argv supplied `--maxfail`."""
 
+    var fail_on_flaky: Bool
+    """Whether a FLAKY file must turn a would-be 0 into exit 1."""
+
+    var saw_fail_on_flaky: Bool
+    """Whether argv supplied `--fail-on-flaky`."""
+
     var state: Bool
     """Whether persistent last-run state is enabled."""
 
@@ -171,6 +177,8 @@ struct CliOverlay(Copyable, Movable):
             saw_retries=False,
             maxfail=0,
             saw_maxfail=False,
+            fail_on_flaky=False,
+            saw_fail_on_flaky=False,
             state=True,
             saw_state=False,
             mojo_path="mojo",
@@ -241,6 +249,8 @@ struct CliOverlay(Copyable, Movable):
             config.retries = self.retries
         if self.saw_maxfail:
             config.maxfail = self.maxfail
+        if self.saw_fail_on_flaky:
+            config.fail_on_flaky = self.fail_on_flaky
         if self.saw_mojo:
             config.mojo_path = self.mojo_path.copy()
         if self.saw_include:

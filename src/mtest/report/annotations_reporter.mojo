@@ -55,16 +55,18 @@ struct AnnotationsReporter(Reporter):
     var _acc: AnnotationAccumulator
     """The online row accumulator: lightweight rows only, never raw captures."""
 
-    def __init__(out self, active: Bool):
+    def __init__(out self, active: Bool, fail_on_flaky: Bool = False):
         """Construct a reporter, self-gated on the resolved-on decision.
 
         Args:
             active: Whether annotations render, as resolved from the
                 `--gh-annotations` mode and `GITHUB_ACTIONS`. `False` yields an
                 inert reporter that accumulates and renders nothing.
+            fail_on_flaky: Whether `--fail-on-flaky` is in effect, so the
+                terminal notice names the flag beside a nonzero flaky tally.
         """
         self._active = active
-        self._acc = AnnotationAccumulator()
+        self._acc = AnnotationAccumulator(fail_on_flaky)
 
     @staticmethod
     def inert() -> Self:

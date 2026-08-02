@@ -4,8 +4,9 @@ This module owns the process exit code end to end. `exit_code_for` maps the
 multiset of run outcomes to the three codes that mapping alone decides: 1, 5,
 and 0. `resolve_exit_code` then folds that outcome code together with the run's
 control-flow facts (an interrupt, an internal error, protocol drift, a
-precompile failure, and whether a terminal artifact was delivered) into the
-single code the process exits with. Every caller that reaches an exit code goes
+precompile failure, whether a terminal artifact was delivered, and whether a
+file that passed only after retries must fail the run) into the single code the
+process exits with. Every caller that reaches an exit code goes
 through it, so the precedence is stated once and re-derived nowhere.
 
 Code 4 is the one exception, and it stays with the entry point: a usage error is
@@ -73,7 +74,7 @@ def exit_code_for(outcomes: List[Outcome]) -> Int:
 struct TerminalFacts(ImplicitlyCopyable, Movable):
     """What a finished run observed, as data the resolver ranks.
 
-    Six independent observations and no policy: which of them wins is
+    Seven independent observations and no policy: which of them wins is
     `resolve_exit_code`'s decision alone. Plain Bool and Int fields with no
     owned resources, so copies and moves are trivial.
     """
@@ -101,6 +102,13 @@ struct TerminalFacts(ImplicitlyCopyable, Movable):
     destination, a JUnit report that could not be published, and a `--json`
     descriptor whose close reported a deferred write error.
     """
+    var flaky_failed: Bool
+    """Whether the run must fail because a file passed only after retries.
+
+    True only when `--fail-on-flaky` (or `[run] fail-on-flaky`) is in effect
+    AND the run's summary counted at least one FLAKY file. The caller ANDs
+    those two together, so this is already the decision, not the flag.
+    """
 
 
 def resolve_exit_code(facts: TerminalFacts) -> Int:
@@ -113,7 +121,8 @@ def resolve_exit_code(facts: TerminalFacts) -> Int:
     - The base precedence: an interrupt dominates and yields 2, ranking above a
       resolved internal error because the run was truncated on purpose; else an
       internal error or protocol drift yields 3; else a precompile failure
-      yields 1; else the outcome code stands.
+      yields 1; else the outcome code stands, except that a `flaky_failed` run
+      whose outcome code is 0 yields 1 instead.
     - The delivery precedence, applied last: a base of 2 stands, so an interrupt
       is never displaced by a later I/O failure; a base of 3 stays 3; and a base
       of 0, 1, or 5 escalates to 3 when a terminal artifact could not be
@@ -140,6 +149,7 @@ def resolve_exit_code(facts: TerminalFacts) -> Int:
             precompile_failed=False,
             outcome_code=0,
             delivery_failed=False,
+            flaky_failed=False,
         )
     )  # 3: an internal error outranks the clean outcome code
     ```
@@ -155,6 +165,11 @@ def resolve_exit_code(facts: TerminalFacts) -> Int:
         base = EXIT_FAILURE
     else:
         base = facts.outcome_code
+        if base == EXIT_SUCCESS and facts.flaky_failed:
+            # Under --fail-on-flaky a green-only-after-retries session fails.
+            # Only a would-be 0 is demoted: 5 stays 5 (an empty run has no
+            # flaky file), 1 already says failure.
+            base = EXIT_FAILURE
     if base == EXIT_INTERRUPTED:
         return EXIT_INTERRUPTED
     if facts.delivery_failed:

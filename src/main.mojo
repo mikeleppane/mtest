@@ -535,6 +535,10 @@ struct RunResources:
         """
         self._discard_junit_scratch()
         var resolved = code
+        # `flaky_failed` is False here on purpose: the session already applied
+        # it, so a flaky-forced failure arrives as `outcome_code=1` and survives
+        # this re-resolution. Re-stating the fact could only demote a 0 that the
+        # session had already decided was not one.
         if self.json_owns_fd:
             var delivery_failed = close_json_fd(self.json_fd)
             self.json_owns_fd = False
@@ -547,6 +551,7 @@ struct RunResources:
                         precompile_failed=False,
                         outcome_code=code,
                         delivery_failed=delivery_failed,
+                        flaky_failed=False,
                     )
                 )
         try:
@@ -763,6 +768,7 @@ def main():
         build_flags^,
         config.durations,
         gh_actions,
+        config.fail_on_flaky,
     )
     # Resolve the JUnit report destination. Unlike `--json`, the destination is
     # NEVER opened for live truncation: a unique temp file is created in the
@@ -799,7 +805,7 @@ def main():
     var junit = JunitReporter(
         junit_spool, junit_active, junit_target, junit_temp
     )
-    var annotations = AnnotationsReporter(annotations_on)
+    var annotations = AnnotationsReporter(annotations_on, config.fail_on_flaky)
     var comp = StandardReportCoordinator(
         console^, stream^, junit^, annotations^
     )

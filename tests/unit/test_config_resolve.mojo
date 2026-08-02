@@ -44,6 +44,7 @@ def _assert_all_sources(sources: ConfigProvenance, expected: Provenance) raises:
     assert_true(sources.timeout_secs == expected)
     assert_true(sources.retries == expected)
     assert_true(sources.maxfail == expected)
+    assert_true(sources.fail_on_flaky == expected)
     assert_true(sources.state == expected)
     assert_true(sources.mojo_path == expected)
     assert_true(sources.include_paths == expected)
@@ -68,6 +69,7 @@ def _assert_all_active(keys: ActiveConfigKeys) raises:
     assert_true(keys.timeout_secs)
     assert_true(keys.retries)
     assert_true(keys.maxfail)
+    assert_true(keys.fail_on_flaky)
     assert_true(keys.state)
     assert_true(keys.mojo_path)
     assert_true(keys.include_paths)
@@ -125,6 +127,8 @@ def _set_every_file_value(mut file: FileConfig):
     file.saw_retries = True
     file.maxfail = 5
     file.saw_maxfail = True
+    file.fail_on_flaky = True
+    file.saw_fail_on_flaky = True
     file.state = False
     file.saw_state = True
     file.mojo_path = "file-mojo"
@@ -170,6 +174,8 @@ def _set_every_cli_value(mut overlay: CliOverlay):
     overlay.saw_retries = True
     overlay.maxfail = 8
     overlay.saw_maxfail = True
+    overlay.fail_on_flaky = False
+    overlay.saw_fail_on_flaky = True
     overlay.state = True
     overlay.saw_state = True
     overlay.mojo_path = "cli-mojo"
@@ -258,6 +264,7 @@ def test_file_values_replace_defaults_for_every_key() raises:
     assert_equal(config.timeout_secs, 41)
     assert_equal(config.retries, 4)
     assert_equal(config.maxfail, 5)
+    assert_true(config.fail_on_flaky)
     assert_false(resolved.state)
     assert_equal(config.mojo_path, "file-mojo")
     _assert_string_list(config.include_paths, ["file-include"])
@@ -296,6 +303,8 @@ def test_accumulated_cli_values_replace_file_values_for_every_key() raises:
     assert_equal(config.timeout_secs, 42)
     assert_equal(config.retries, 7)
     assert_equal(config.maxfail, 8)
+    # The file layer set this True; the CLI layer replaces it with False.
+    assert_false(config.fail_on_flaky)
     assert_true(resolved.state)
     assert_equal(config.mojo_path, "cli-mojo")
     _assert_string_list(
@@ -596,6 +605,7 @@ def test_collect_projection_excludes_run_and_report_only_keys() raises:
     assert_true(keys.timeout_secs)
     assert_false(keys.retries)
     assert_false(keys.maxfail)
+    assert_false(keys.fail_on_flaky)
     assert_false(keys.state)
     assert_true(keys.mojo_path)
     assert_true(keys.include_paths)

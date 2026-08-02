@@ -65,6 +65,9 @@ struct ActiveConfigKeys(Copyable, Movable):
     var maxfail: Bool
     """Whether the failure ceiling participates."""
 
+    var fail_on_flaky: Bool
+    """Whether the flaky-fails-the-run verdict participates."""
+
     var state: Bool
     """Whether persistent last-run state participates."""
 
@@ -120,6 +123,7 @@ struct ActiveConfigKeys(Copyable, Movable):
             timeout_secs=True,
             retries=True,
             maxfail=True,
+            fail_on_flaky=True,
             state=True,
             mojo_path=True,
             include_paths=True,
@@ -156,6 +160,7 @@ struct ActiveConfigKeys(Copyable, Movable):
             timeout_secs=True,
             retries=False,
             maxfail=False,
+            fail_on_flaky=False,
             state=False,
             mojo_path=True,
             include_paths=True,
@@ -347,6 +352,9 @@ def resolve_config(
     if file.saw_maxfail:
         config.maxfail = file.maxfail
         sources.maxfail = Provenance.MTEST_TOML
+    if file.saw_fail_on_flaky:
+        config.fail_on_flaky = file.fail_on_flaky
+        sources.fail_on_flaky = Provenance.MTEST_TOML
     if file.saw_state:
         state = file.state
         sources.state = Provenance.MTEST_TOML
@@ -416,6 +424,9 @@ def resolve_config(
     if overlay.saw_maxfail:
         config.maxfail = overlay.maxfail
         sources.maxfail = Provenance.CLI
+    if overlay.saw_fail_on_flaky:
+        config.fail_on_flaky = overlay.fail_on_flaky
+        sources.fail_on_flaky = Provenance.CLI
     if overlay.saw_state:
         state = overlay.state
         sources.state = Provenance.CLI

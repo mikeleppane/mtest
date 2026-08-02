@@ -1,7 +1,7 @@
 """Arity-0 parameterized tests plus placement, after-`--`, and unknown flags.
 
 Every valueless spelling (`-x`, `--exitfirst`, `-s`, `-q`, `-v`, `-h`,
-`--help`, `--version`) rejects an attached `=value`. Placement cases prove a
+`--help`, `--version`, `--fail-on-flaky`) rejects an attached `=value`. Placement cases prove a
 flag is recognized wherever it sits, after-`--` cases prove a flag token is
 forwarded verbatim once passthrough starts, and the unknown-flag cases prove an
 unrecognized token is a located usage error.
@@ -86,6 +86,12 @@ def test_failed_first_spellings_reject_values() raises:
         _ = parse_args(long)
 
 
+def test_fail_on_flaky_rejects_value() raises:
+    var argv: List[String] = ["--fail-on-flaky=true"]
+    with assert_raises(contains="takes no value"):
+        _ = parse_args(argv)
+
+
 # --- placement: a flag is recognized wherever it sits ---
 
 
@@ -97,6 +103,15 @@ def test_exitfirst_placement_leading() raises:
 def test_exitfirst_placement_trailing() raises:
     var argv: List[String] = ["tests/", "-x"]
     assert_true(parse_args(argv).config.exitfirst)
+
+
+def test_fail_on_flaky_placement_trailing() raises:
+    var argv: List[String] = ["tests/", "--fail-on-flaky"]
+    var r = parse_args(argv)
+    assert_true(r.config.fail_on_flaky)
+    # Absent by default: the flag is the only thing that turns it on.
+    var bare: List[String] = ["tests/"]
+    assert_true(not parse_args(bare).config.fail_on_flaky)
 
 
 def test_show_all_placement_between_paths() raises:

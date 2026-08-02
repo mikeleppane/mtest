@@ -119,6 +119,7 @@ single **invocation root**. In v1 the root is the **current working directory**.
 | `--serial GLOB` | ✓ | — | — |
 | `--timeout`, `--compile-timeout` | ✓ | ✓ (compile only) | — |
 | `--retries N` | ✓ | — | — |
+| `--fail-on-flaky` | ✓ | — | — |
 | `--no-cache`, `--cache-clear` | ✓ | ✓ | — |
 | `--gate PATH` | ✓ | — | — |
 | `-s`, `--show-output MODE` | ✓ | — | — |
@@ -130,12 +131,13 @@ single **invocation root**. In v1 the root is the **current working directory**.
 
 `collect` compiles files to enumerate their tests, so it honors the build and
 selection flags; it does not schedule test execution, so run-time flags
-(`-x`, `--maxfail`, `--retries`, `--durations`, `--serial`, `--lf`, `--ff`,
-reporters) do not apply. The failure-selection flags are refused based on CLI
-presence under either `collect` spelling. `--timeout` is the one exception:
-unlike the other run-only flags above, it is applicable in `collect` mode too,
-because it also bounds each file's `--skip-all` collection probe (§5, §6) — a
-probe is a real process spawn with the same hang risk as a run.
+(`-x`, `--maxfail`, `--retries`, `--fail-on-flaky`, `--durations`, `--serial`,
+`--lf`, `--ff`, reporters) do not apply. The failure-selection flags are
+refused based on CLI presence under either `collect` spelling. `--timeout` is
+the one exception: unlike the other run-only flags above, it is applicable in
+`collect` mode too, because it also bounds each file's `--skip-all` collection
+probe (§5, §6) — a probe is a real process spawn with the same hang risk as a
+run.
 
 `-n`/`--workers` is marked **accepted, inert** under `collect` because that is
 what this build does: the flag parses and is not refused, but collection probes
@@ -667,7 +669,7 @@ grow:
 | Code | Meaning |
 |------|---------|
 | 0 | the session ran; every selected test's outcome is PASS or SKIP (exclusions allowed) |
-| 1 | at least one selected outcome is FAIL, CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT, MALFORMED-SUITE, or PRECOMPILE-ERROR |
+| 1 | at least one selected outcome is FAIL, CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT, MALFORMED-SUITE, or PRECOMPILE-ERROR; or the session would otherwise exit 0 and, under `--fail-on-flaky` (§13), counted at least one FLAKY file |
 | 2 | interrupted (SIGINT/SIGTERM); a partial summary is printed |
 | 3 | internal `mtest` error — including protocol drift (a report present but off-grammar) and an environment/I-O failure such as a runtime report-destination open/write failure (a `--json` destination that cannot be opened at session start, or whose stream write later fails — a fatal abort; or a `--junit-xml` target that cannot be created at session start, or whose report cannot be finalized and renamed onto PATH) |
 | 4 | pre-run usage error (unknown flag, bad value, nonexistent path, an explicit operand of a file type mtest cannot run (a FIFO, socket, or device, §5), a path discovery cannot inspect (§5), unknown node id, forbidden build argument, mutually exclusive `--config`/`--no-config`, a selected project config that is missing, unreadable, malformed, or has an invalid key/value, a syntactically invalid `--json` or `--junit-xml` report destination — an empty value or a nonexistent parent directory, the machine-stdout conflict — `--json -` without an explicit `--gh-annotations off`, since the byte-pure stream and the annotation tail cannot share stdout, or a `--cache-clear` target mtest can see and cannot prove it owns, or can prove and cannot delete, §8.5 — a target it cannot characterize at all is treated as absent and exits `0`) — detected **before any test runs** |
@@ -675,9 +677,12 @@ grow:
 
 **Precedence** when outcomes mix. A usage error aborts before the run with 4.
 Otherwise: an interrupt dominates (→ 2); else an internal error (→ 3); else any
-failing outcome (→ 1); else nothing collected (→ 5); else 0. A user interrupt
-outranks an internal error because the run was truncated on purpose and its
-result is no longer authoritative.
+failing outcome (→ 1); else nothing collected (→ 5); else, under
+`--fail-on-flaky` with at least one FLAKY file, 1 (§13); else 0. A user
+interrupt outranks an internal error because the run was truncated on purpose
+and its result is no longer authoritative. The flaky rung sits at the bottom on
+purpose: it can only ever move a 0, never displace a code some other fact
+already decided.
 
 A `--shard` (§18) that owns no run files reaches exit 5 by the same
 nothing-collected rule — but only when nothing else ran: a shard whose gates ran
@@ -799,8 +804,12 @@ rebuilt.
   `--compile-timeout` budget as the first.
 - Every attempt's diagnostics are retained in the report. The **last** attempt's
   outcome is authoritative. A test that passes only after a retry is reported
-  **FLAKY** and, being a pass, exits 0 and by default passes CI
-  (`--fail-on-flaky` is reserved).
+  **FLAKY** and, being a pass, exits 0 and by default passes CI.
+- Under `--fail-on-flaky` (or `[run] fail-on-flaky`), a session whose outcome
+  tier would be 0 and whose summary counts at least one FLAKY file exits 1
+  instead. Terminal verdict only: retry behavior, `--maxfail` counting (a flaky
+  pass still counts 0), and last-run state (a FLAKY file still clears a prior
+  failure — it passed) are unchanged.
 
 Retries apply to precompile, build, and run steps on both ordinary and
 selection (`-k` or node-id) paths.
@@ -1363,7 +1372,7 @@ unrecognized by the parser, or recognized-but-refused as noted:
 same upstream per-test timing gap that blocks per-test attribution elsewhere;
 the file-level `--durations N` is itself served now, §15.1); markers /
 `xfail`; `--asan`; `--shuffle` (file-order randomization to surface order
-dependencies); `--fail-on-flaky`; watch mode; a **relocatable** build-cache
+dependencies); watch mode; a **relocatable** build-cache
 directory (`--cache-dir`); and a
 machine-readable `config show` format (the served TOML display is informal
 human output, §27.1). The build cache itself is served (§8.5), but only as a
@@ -1554,6 +1563,7 @@ timeout = 30  # (cli)
 retries = 1  # (mtest.toml)
 maxfail = 0  # (default)
 state = true  # (default)
+fail-on-flaky = false  # (default)
 
 [build]
 mojo = "mojo"  # (default)
@@ -1708,6 +1718,7 @@ above — it only reports which of those surfaces are wired up yet.
 `--config`, `--no-config`, `-I`, `--build-arg` (and post-`--` passthrough),
 `--precompile`, `--mojo`,
 `-x`/`--exitfirst`, `--maxfail`, `--timeout`, `--compile-timeout`, `--retries`,
+`--fail-on-flaky`,
 `--shard`, `--lf`/`--last-failed`, `--ff`/`--failed-first`,
 `-n`/`--workers`, `--serial`, `--no-cache`, `--cache-clear`, `--gate`,
 `-s`/`--show-output`,
@@ -1736,7 +1747,9 @@ code exist today. Section 27 separately covers the reachable `config show` and
 - **1** — reachable for FAIL, CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT,
   MALFORMED-SUITE, and PRECOMPILE-ERROR. FLAKY (a pass produced only after a
   crash-class retry) is also emitted now, and, being a pass, does **not** raise
-  the exit code — a FLAKY-only session exits 0.
+  the exit code — a FLAKY-only session exits 0. It is additionally reachable
+  from a FLAKY-only session under `--fail-on-flaky` (or `[run] fail-on-flaky`),
+  which demotes that would-be 0 to 1 (§13).
 - **2** — reachable for both the sequential and the parallel path. An interrupt
   (SIGINT/SIGTERM) prints a partial summary, reports the files that had not yet
   started as NOT-RUN, and cleans up every in-flight child's process group with a
@@ -1840,6 +1853,7 @@ timeout = 300                    # integer seconds >= 0
 retries = 0                      # integer >= 0
 maxfail = 0                      # integer >= 0
 state = true
+fail-on-flaky = false            # exit 1 on a FLAKY-only session
 
 [build]
 mojo = "mojo"

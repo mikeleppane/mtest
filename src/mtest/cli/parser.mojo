@@ -489,6 +489,8 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     var failed_first = False
     var no_cache = False
     var cache_clear = False
+    var fail_on_flaky = False
+    var saw_fail_on_flaky = False
     var saw_select = False
     var saw_shard = False
     var saw_passthrough = False
@@ -578,6 +580,9 @@ def parse_args(argv: List[String]) raises -> ParseResult:
                 no_cache = True
             elif s.id == FlagId.CACHE_CLEAR:
                 cache_clear = True
+            elif s.id == FlagId.FAIL_ON_FLAKY:
+                fail_on_flaky = True
+                saw_fail_on_flaky = True
             i += 1
             continue
 
@@ -718,6 +723,11 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             raise _err(
                 "'--durations' is a run flag and cannot be combined with doctor"
             )
+        if saw_fail_on_flaky:
+            raise _err(
+                "'--fail-on-flaky' is a run flag and cannot be combined with"
+                " doctor"
+            )
         if saw_retries:
             raise _err(
                 "'--retries' is a run flag and cannot be combined with doctor"
@@ -822,6 +832,11 @@ def parse_args(argv: List[String]) raises -> ParseResult:
                 "'--durations' is a run-only flag and cannot be combined"
                 " with collect mode"
             )
+        if saw_fail_on_flaky:
+            raise _err(
+                "'--fail-on-flaky' is a run-only flag and cannot be combined"
+                " with collect mode"
+            )
         if saw_retries:
             raise _err(
                 "'--retries' is a run-only flag and cannot be combined with"
@@ -871,6 +886,8 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         saw_retries=saw_retries,
         maxfail=maxfail,
         saw_maxfail=saw_maxfail,
+        fail_on_flaky=fail_on_flaky,
+        saw_fail_on_flaky=saw_fail_on_flaky,
         state=True,
         saw_state=False,
         mojo_path=overlay_mojo^,

@@ -2,7 +2,8 @@
 
 Collect mode is set by the `collect` subcommand OR the `--collect-only` flag, and
 the two are identical. Run-only flags served by this build (`-x`/`--exitfirst`,
-`--maxfail`, `--durations`, `--gate`, `-s`/`--show-output`, `--retries`, and the
+`--maxfail`, `--durations`, `--fail-on-flaky`, `--gate`, `-s`/`--show-output`,
+`--retries`, and the
 reporters `--json`/`--junit-xml`/`--gh-annotations`) combined with collect are a
 usage error — the reporters and `--retries` on PROVISION, so even
 `--gh-annotations off` is refused; `--timeout` is NOT refused — it bounds the
@@ -60,6 +61,15 @@ def test_durations_with_collect_is_usage_error() raises:
     with assert_raises(contains="--durations"):
         _ = parse_args(argv)
     var argv2: List[String] = ["collect", "--durations", "5"]
+    with assert_raises(contains="run-only"):
+        _ = parse_args(argv2)
+
+
+def test_fail_on_flaky_with_collect_is_usage_error() raises:
+    var argv: List[String] = ["collect", "--fail-on-flaky"]
+    with assert_raises(contains="--fail-on-flaky"):
+        _ = parse_args(argv)
+    var argv2: List[String] = ["--collect-only", "--fail-on-flaky"]
     with assert_raises(contains="run-only"):
         _ = parse_args(argv2)
 

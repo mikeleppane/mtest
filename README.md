@@ -512,7 +512,10 @@ pass with a visible history, never a plain PASS:
 
 ![A real retry run: a yellow TRY line naming the crashed first attempt, then a FLAKY verdict and a green summary band](docs/assets/mtest-flaky.svg)
 
-A FLAKY-only session exits `0`. Without `--retries`, the same crash stands
+A FLAKY-only session exits `0`, unless `--fail-on-flaky` is set: that turns a
+would-be `0` into `1` and changes nothing else — the same tests run, the same
+retries happen, and the summary band names the flag beside the flaky count.
+Without `--retries`, the same crash stands
 as the file's final outcome, and every CRASH triggers the bounded
 attribution pass:
 
@@ -730,6 +733,7 @@ timeout = 120  # (mtest.toml)
 retries = 1  # (mtest.toml)
 maxfail = 0  # (default)
 state = true  # (default)
+fail-on-flaky = false  # (default)
 
 [build]
 mojo = "mojo"  # (default)
@@ -1388,6 +1392,7 @@ Execution:
   --maxfail N                 Stop after N failed tests (0 disables).
   --timeout SECS              Set per-file run timeout (0 disables).
   --retries N                 Retry crash-class outcomes N times.
+  --fail-on-flaky             Exit 1 when any file passed only after retries.
   -n, --workers N|auto        Set worker count (default: 1).
   --serial GLOB               Run matching files serially (repeatable).
   --no-cache                  Build without reading/writing the build cache.
@@ -1443,6 +1448,7 @@ General:
 | `--timeout SECS` | bound a single file's run (default `300`, `0` disables); exceeding it yields TIMEOUT |
 | `--compile-timeout SECS` | bound a single file's build (default `600`, `0` disables); exceeding it yields COMPILE-TIMEOUT |
 | `--retries N` | crash-class-only retries, `N` extra attempts (default `0`); a late pass is reported FLAKY |
+| `--fail-on-flaky` | exit `1` when the run would otherwise exit `0` and at least one file is FLAKY |
 | `-s`, `--show-output MODE` | `failures` (default), `all`, or `none`: which outcomes show captured output |
 | `--durations N` | print the `N` slowest files by run-only wall-clock after the summary (`0`, the default, disables); survives `-q` |
 | `-q` | quiet: omit PASS lines |
@@ -1503,7 +1509,7 @@ and `doctor` have command-specific exit domains in
 | Code | Meaning |
 |------|---------|
 | `0` | every selected test's outcome is PASS or SKIP |
-| `1` | at least one failing outcome (FAIL, CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT, MALFORMED-SUITE, PRECOMPILE-ERROR) |
+| `1` | at least one failing outcome (FAIL, CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT, MALFORMED-SUITE, PRECOMPILE-ERROR); or a would-be `0` under `--fail-on-flaky` with at least one FLAKY file |
 | `2` | interrupted (SIGINT/SIGTERM); a partial summary is printed |
 | `3` | internal mtest error, including protocol drift and a report-destination I/O failure |
 | `4` | CLI usage error, detected before any test runs |

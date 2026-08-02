@@ -132,6 +132,12 @@ struct FileConfig(Copyable, Movable):
     var saw_maxfail: Bool
     """Whether `[run] maxfail` was supplied."""
 
+    var fail_on_flaky: Bool
+    """Whether a FLAKY file must turn a would-be 0 into exit 1."""
+
+    var saw_fail_on_flaky: Bool
+    """Whether `[run] fail-on-flaky` was supplied."""
+
     var state: Bool
     """Whether last-run state is enabled."""
 
@@ -240,6 +246,8 @@ struct FileConfig(Copyable, Movable):
             saw_retries=False,
             maxfail=0,
             saw_maxfail=False,
+            fail_on_flaky=False,
+            saw_fail_on_flaky=False,
             state=True,
             saw_state=False,
             mojo_path="mojo",

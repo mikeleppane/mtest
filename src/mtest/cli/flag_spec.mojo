@@ -54,6 +54,7 @@ struct FlagId:
     comptime FAILED_FIRST = 30
     comptime NO_CACHE = 31
     comptime CACHE_CLEAR = 32
+    comptime FAIL_ON_FLAKY = 33
 
 
 struct FlagGroup:
@@ -226,6 +227,15 @@ def flag_specs() -> List[FlagSpec]:
             False,
             "Retry crash-class outcomes N times.",
             "N",
+            FlagGroup.EXECUTION,
+        ),
+        FlagSpec(
+            "--fail-on-flaky",
+            FlagId.FAIL_ON_FLAKY,
+            0,
+            False,
+            "Exit 1 when any file passed only after retries.",
+            "",
             FlagGroup.EXECUTION,
         ),
         FlagSpec(

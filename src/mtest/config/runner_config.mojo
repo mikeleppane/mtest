@@ -79,6 +79,12 @@ struct RunnerConfig(Copyable, Movable):
     """`--maxfail N`: stop scheduling once N failing tests have accumulated;
     `0` disables the limit."""
 
+    var fail_on_flaky: Bool
+    """`--fail-on-flaky`: exit 1 when the run would otherwise exit 0 and at
+    least one file passed only after a crash-class retry (FLAKY). A terminal
+    verdict only: it changes no retry, `--maxfail`, or last-run-state behavior.
+    `False` (the default) keeps a FLAKY-only session at exit 0."""
+
     var durations: Int
     """`--durations N`: how many of the slowest files the console reporter
     lists after the summary band; `0` suppresses the listing."""
@@ -177,7 +183,8 @@ struct RunnerConfig(Copyable, Movable):
         path. `maxfail`, `durations`, `retries`, `shard_m`, and `shard_n` are
         all `0`, which disables each limit and leaves the run unsharded. Every
         list is empty; `paths_supplied`, `exitfirst`, `collect`, `last_failed`,
-        `failed_first`, `no_cache`, and `cache_clear` are False; and
+        `failed_first`, `fail_on_flaky`, `no_cache`, and `cache_clear` are
+        False; and
         `keyword`, `json_dest`, and `junit_dest` are `""`, so no keyword
         filter, event stream, or JUnit report is configured. The rest are
         `mojo_path="mojo"`,
@@ -216,6 +223,7 @@ struct RunnerConfig(Copyable, Movable):
             exitfirst=False,
             keyword="",
             maxfail=0,
+            fail_on_flaky=False,
             durations=0,
             collect=False,
             last_failed=False,

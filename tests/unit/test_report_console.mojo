@@ -57,6 +57,7 @@ def _console(
     no_color: Bool = False,
     mtest_build_flags: String = "",
     durations: Int = 0,
+    fail_on_flaky: Bool = False,
 ) -> ConsoleReporter:
     """A console reporter with the mock's version and the given config."""
     return ConsoleReporter(
@@ -68,6 +69,7 @@ def _console(
         show_output=show_output,
         mtest_build_flags=mtest_build_flags,
         durations=durations,
+        fail_on_flaky=fail_on_flaky,
     )
 
 
@@ -1105,6 +1107,137 @@ def test_summary_band_omits_zero_file_abnormals() raises:
     assert_false("crashed" in out)
     assert_false("timed out" in out)
     assert_false("compile error" in out)
+
+
+def _flaky_summary(flaky: Int, fails: Int) -> Summary:
+    """One PASS file, `flaky` FLAKY files, and `fails` FAIL files."""
+    var s = Summary.zeros()
+    s.counts[Outcome.PASS.code] = 1
+    s.counts[Outcome.FLAKY.code] = flaky
+    s.counts[Outcome.FAIL.code] = fails
+    return s^
+
+
+def _band(
+    summary: Summary,
+    tc: TestCounts,
+    fail_on_flaky: Bool,
+    color: ColorWhen = ColorWhen.NEVER,
+) -> String:
+    """The WHOLE rendered buffer for a lone `SessionFinished`.
+
+    Only the terminal event is fed, so `output()` is exactly the summary band:
+    every assertion below can therefore compare the complete bytes rather than
+    a substring, which is what makes duplicated or malformed rendering visible.
+    """
+    var c = _console(color=color, fail_on_flaky=fail_on_flaky)
+    c.handle(Event.session_finished(summary.copy(), 1.0, 0, test_counts=tc))
+    return c.output()
+
+
+def test_flaky_tally_is_bare_without_fail_on_flaky() raises:
+    assert_equal(
+        _band(
+            _flaky_summary(flaky=1, fails=0),
+            TestCounts(passed=2, failed=0, skipped=0, deselected=0),
+            fail_on_flaky=False,
+        ),
+        (
+            "\n===== 2 passed, 0 failed, 0 skipped, 1 flaky"
+            " (0 excluded, 0 not run) in 1.0s =====\n"
+        ),
+    )
+
+
+def test_flaky_tally_names_the_flag_under_fail_on_flaky() raises:
+    assert_equal(
+        _band(
+            _flaky_summary(flaky=1, fails=0),
+            TestCounts(passed=2, failed=0, skipped=0, deselected=0),
+            fail_on_flaky=True,
+        ),
+        (
+            "\n===== 2 passed, 0 failed, 0 skipped, 1 flaky (failing:"
+            " --fail-on-flaky) (0 excluded, 0 not run) in 1.0s =====\n"
+        ),
+    )
+
+
+def test_fail_on_flaky_says_nothing_when_no_file_was_flaky() raises:
+    # The flag alone must render NOTHING: the suffix is conjoined with a nonzero
+    # tally, and a mutant that drops that conjunct would paint a clean green run
+    # red and blame a flag for a failure that never happened.
+    assert_equal(
+        _band(
+            _flaky_summary(flaky=0, fails=0),
+            TestCounts(passed=2, failed=0, skipped=0, deselected=0),
+            fail_on_flaky=True,
+        ),
+        (
+            "\n===== 2 passed, 0 failed, 0 skipped"
+            " (0 excluded, 0 not run) in 1.0s =====\n"
+        ),
+    )
+
+
+def test_flaky_suffix_is_never_inferred_from_the_exit_code() raises:
+    # A real failure beside a flaky file, with the flag OFF: the run exits 1 for
+    # the FAIL, and the band must not claim the flaky file failed it.
+    assert_equal(
+        _band(
+            _flaky_summary(flaky=1, fails=1),
+            TestCounts(passed=1, failed=1, skipped=0, deselected=0),
+            fail_on_flaky=False,
+        ),
+        (
+            "\n===== 1 passed, 1 failed, 0 skipped, 1 flaky"
+            " (0 excluded, 0 not run) in 1.0s =====\n"
+        ),
+    )
+
+
+def test_fail_on_flaky_paints_an_otherwise_green_band_red() raises:
+    # No FAIL and no crash-class file, so only the flag-plus-tally pair can make
+    # this band red. All three variants are compared as whole buffers, so the
+    # escape codes are pinned in position, not merely present somewhere.
+    var counts = TestCounts(passed=2, failed=0, skipped=0, deselected=0)
+    var plain = (
+        "2 passed, 0 failed, 0 skipped, 1 flaky (0 excluded, 0 not run) in 1.0s"
+    )
+    assert_equal(
+        _band(
+            _flaky_summary(flaky=1, fails=0),
+            counts,
+            fail_on_flaky=False,
+            color=ColorWhen.ALWAYS,
+        ),
+        "\n\x1b[32m===== " + plain + " =====\x1b[0m\n",
+    )
+    assert_equal(
+        _band(
+            _flaky_summary(flaky=1, fails=0),
+            counts,
+            fail_on_flaky=True,
+            color=ColorWhen.ALWAYS,
+        ),
+        (
+            "\n\x1b[31m===== 2 passed, 0 failed, 0 skipped, 1 flaky (failing:"
+            " --fail-on-flaky) (0 excluded, 0 not run) in 1.0s =====\x1b[0m\n"
+        ),
+    )
+    # Flag on, nothing flaky: green, exactly as with the flag off.
+    assert_equal(
+        _band(
+            _flaky_summary(flaky=0, fails=0),
+            counts,
+            fail_on_flaky=True,
+            color=ColorWhen.ALWAYS,
+        ),
+        (
+            "\n\x1b[32m===== 2 passed, 0 failed, 0 skipped"
+            " (0 excluded, 0 not run) in 1.0s =====\x1b[0m\n"
+        ),
+    )
 
 
 def test_deselected_shows_in_band_only_when_nonzero() raises:

@@ -265,6 +265,11 @@ def render_config_show(resolved: ResolvedConfig, state_present: Bool) -> String:
         "maxfail = " + String(config.maxfail) + _comment(sources.maxfail)
     )
     rendered += "state = " + _bool(resolved.state) + _comment(sources.state)
+    rendered += (
+        "fail-on-flaky = "
+        + _bool(config.fail_on_flaky)
+        + _comment(sources.fail_on_flaky)
+    )
 
     rendered += "\n[build]\n"
     rendered += (
