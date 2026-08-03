@@ -344,7 +344,8 @@ with one binary. What it does differently:
   `-I` include paths.
 - Per-test outcomes parsed from each file's `TestSuite` report: `-k`
   substring selection, `path::test` node ids, `--maxfail N`, and
-  `mtest collect` to list node ids without running any test body.
+  `mtest collect` to list node ids without running any test body — as plain
+  lines, or as a versioned NDJSON stream with `--format json`.
 - A full outcome model: PASS, FAIL, SKIP, CRASH, TIMEOUT, COMPILE-ERROR,
   COMPILE-TIMEOUT, MALFORMED-SUITE, and PRECOMPILE-ERROR, plus a FLAKY
   annotation for a pass that needed retries. A file that builds and exits
@@ -354,7 +355,8 @@ with one binary. What it does differently:
   words (`signal 11 — SIGSEGV, segmentation fault`).
 - Crash-class retries (`--retries N`) with an explicit FLAKY verdict for a
   late pass. Deterministic failures, such as an ordinary compile error or a
-  failing assertion, are never retried.
+  failing assertion, are never retried. `--fail-on-flaky` turns a FLAKY-only
+  session's `0` into a `1` for a pipeline that will not tolerate one.
 - Bounded crash attribution: after a CRASH, a strictly bounded pass re-runs
   that file's tests one at a time to name a culprit, and reports honestly
   when it cannot. It never changes the verdict or the exit code.
@@ -363,7 +365,9 @@ with one binary. What it does differently:
   run timeout that had to go past the polite terminate says so on its
   verdict line (`escalated to SIGKILL`).
 - Deterministic sharding (`--shard`) for spreading one suite across a CI
-  matrix.
+  matrix, and `--shuffle` for the opposite question: run the files in a random
+  order to surface a suite that only passes in one. The seed is printed, and
+  `--seed N` replays it.
 - Three machine reporters: an NDJSON event stream (`--json`),
   schema-validated JUnit XML (`--junit-xml`), and GitHub Actions annotations
   (`--gh-annotations`).
@@ -379,6 +383,12 @@ with one binary. What it does differently:
 - `mtest doctor`: ten read-only environment checks (toolchain identity,
   configuration, last-run state, temp, report destinations) without building
   or running a test.
+- `mtest debug path::test`: prepare one test the way a run would, print the
+  build and run commands it used, then hand the terminal to the binary and get
+  out of the way — no capture pipe, no summary, no mtest verdict.
+- `mtest new` and `mtest init`: write the first test file, or the whole
+  starting project (a test, an `mtest.toml`, a `.gitignore` entry, and
+  optionally a CI workflow). Neither ever overwrites what is already there.
 - Gate files (`--gate`), precompiled package dependencies (`--precompile`),
   a slowest-files list (`--durations`), quiet and verbose modes, and color
   control (`--color`, `NO_COLOR`).
@@ -531,7 +541,8 @@ and is counted `not run`. A `-k` that empties the whole session exits `5`.
 
 `mtest collect` (and `--collect-only`) compiles each file, enumerates its
 tests through a probe that skips every test body, and lists node ids in
-plain lexicographic order:
+lexicographic order — as plain lines by default, or as a versioned NDJSON
+stream under `--format json` ([below](#machine-readable-collection)):
 
 ```console
 $ pixi run bash -c 'build/mtest collect e2e/matrix'
@@ -1569,6 +1580,7 @@ General:
 | `--config PATH`, `--no-config` | select one project config or disable config discovery |
 | `config show [PATHS...] [flags]` | render the fully resolved configuration without running tests |
 | `doctor [flags]` | run ten contained environment checks without starting a test session |
+| `debug PATH::TEST` | build and probe one test, print the `build:`/`run:` commands, then replace mtest with the binary; no summary and no mtest verdict |
 | `new PATH` | scaffold one runnable test file at `PATH`, creating parent directories; never overwrites (exit `4`) |
 | `init [--ci github]` | bootstrap a project in the current directory: a first test, an `mtest.toml`, a `.gitignore` entry, and with `--ci github` a workflow; nothing existing is replaced |
 | `--lf`, `--last-failed` | run only tests recorded as failed in the last completed state |
@@ -1595,8 +1607,18 @@ General:
 | `--junit-xml PATH` | write a schema-validated JUnit XML report, renamed atomically onto `PATH` |
 | `--gh-annotations MODE` | `off\|on\|auto` (default `auto`); `--json -` requires an explicit `--gh-annotations off` |
 | `collect [PATHS] [flags]`, `--collect-only` | list node ids, sorted lexicographically, instead of running anything |
+| `--format lines\|json` | `collect` only: the plain listing (default) or the versioned NDJSON collect stream |
 | `-h`, `--help` | print the usage text and exit `0` |
 | `--version` | print the version and exit `0` |
+
+**The first argument is read as a subcommand when it names one.** `mtest new`
+is the scaffolding command even in a directory that contains a `new/`, and the
+same holds for `collect`, `debug`, `init`, `doctor`, `config`, `version`, and
+`help`. Spell the path `./new` to run it instead — a token starting `./` is
+never a subcommand, so that spelling keeps working as more subcommands are
+added. Only the leading token is affected: `mtest run new` and
+`mtest collect new` need no prefix, and neither does `[run] paths` in an
+`mtest.toml`.
 
 `-n`/`--workers N` runs discovered files across a pool of `N` worker
 processes; `-n auto` sizes the pool to half the machine's logical cores. The

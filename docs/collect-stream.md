@@ -104,11 +104,20 @@ record is the value the process exits with. A consumer may gate on it without
 also reading `$?`, and the two can never disagree.
 
 The collect exit codes are the runner's ordinary ones: `0` when everything
-listed, `1` when a file failed to collect, `3` on protocol drift or an internal
-failure, `5` when nothing was collectable, `4` for a usage error refused before
-any collection began. A usage error produces **no stream at all**: the refusal
-goes to stderr and stdout stays empty, so there is no header and no terminal to
-read.
+listed, `1` when a file failed to collect, `2` when the collection was
+interrupted, `3` on protocol drift or an internal failure, `5` when nothing was
+collectable, `4` for a usage error refused before any collection began. A usage
+error produces **no stream at all**: the refusal goes to stderr and stdout stays
+empty, so there is no header and no terminal to read.
+
+`2` is worth expecting rather than treating as impossible. A `SIGINT` or
+`SIGTERM` that arrives while files are still being probed ends the collection
+where it stands, and the stream that follows is well-formed: a header, however
+many `node` records the finished files produced, and a terminal reading
+`{"event":"collect_finished","nodes":0,"exit_code":2}` when nothing had been
+listed yet. A consumer that gates on `exit_code` therefore needs no separate
+signal handling to notice it was cut short — but see §5 on truncation, which is
+the different case where the terminal never arrives at all.
 
 ---
 

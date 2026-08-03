@@ -1,19 +1,43 @@
 # mtest command-line contract
 
 **Status: FROZEN for the 1.x series.** This document specifies the v1
-command-line interface of `mtest`. It is the public API of the tool, frozen as
-of the 1.0.0 release.
+command-line interface of `mtest`. It is the public API of the tool. A surface
+freezes on the release that first **serves** it, not on 1.0.0: the inventory
+1.0.0 shipped froze there, and a surface added by a later 1.x minor freezes
+when that minor ships it. Nothing is retroactively frozen and nothing is
+retroactively promised — a surface that was never served carried no promise to
+break.
 
-The amendment rule, so the freeze means something concrete. §20 sorts every
-surface into three tiers and they carry different promises:
+The amendment rule, so the freeze means something concrete. Within 1.x the
+surface inventory may grow: a minor release may add subcommands, flags, and
+machine-format fields, additively. What FROZEN means is that nothing served
+ever changes meaning, is removed, or has its exit domain, grammar, or format
+altered within 1.x — those changes are what a major version is for.
+
+**The one compatibility exception, stated rather than buried.** Additive growth
+is not free, and the place it costs something is the leading token. `run` is the
+default subcommand, so a first argument that is not a known subcommand is a path
+(§3). Serving a *new* subcommand therefore reserves that word: `mtest init` ran
+a directory named `init` before 1.1 and bootstraps a project after it, and
+`mtest new` and `mtest debug` changed from running a path to refusing an
+argument list. This is a real change of meaning for those invocations and is
+permitted only because the alternative — never adding a subcommand within 1.x —
+was judged the worse trade. **The bare subcommand vocabulary is therefore not
+frozen; every other served surface is.** A path whose name collides is still
+reachable, spelled `./name`, and that spelling is stable: it can never be read
+as a subcommand. Scripts that pass a path as the first operand should spell it
+`./name` for exactly this reason.
+
+§20 sorts every surface into three tiers and they carry different promises:
 
 - **FROZEN** surfaces — the subcommands, flag names and semantics, exit codes,
   the node-id grammar, `mtest.toml` key names and semantics, the JUnit mapping,
-  the annotation shapes, the `--json` event stream, the `collect` format, and
-  the test-module contract — do not change, are not removed, and are not added
-  to within 1.x. The one exception is the one §20 states itself: the `--json`
-  stream grows additively at schema `version` 1, gaining event kinds and fields,
-  while a removal or a meaning change bumps the header version.
+  the annotation shapes, the `--json` event stream, the `collect` formats, and
+  the test-module contract — never change meaning and are never removed or
+  narrowed within 1.x. The inventory grows only by addition, and a machine
+  format grows only at its stated schema `version`: the `--json` event stream
+  and the `collect --format json` stream both gain event kinds and fields at
+  `version` 1, while a removal or a meaning change bumps the header version.
 - **STABLE-INTENT** surfaces carry a weaker promise on purpose. Default values —
   timeouts, `auto` worker sizing — may be tuned in a minor release, and the
   `.mtest-cache/lastrun` format changes only by taking a new format version.
@@ -22,9 +46,39 @@ surface into three tiers and they carry different promises:
   `config show` output — carry no compatibility promise at all. Read the
   `--json` event stream rather than the console rendering if you need stability.
 
-New command-line grammar is a major version. The subcommand set and the flag
-inventory are frozen above, and §21 lists what the next major version is
-reserved to add; none of it can land in a 1.x release whatever its size.
+New grammar for a surface that is already served is a major version: changing
+how an existing flag parses, what it means, or which codes it can exit with.
+§21 lists what is planned and not served; the additive entries there may land
+in a future minor, and anything that would move a served surface waits for a
+major.
+
+**What 1.1 adds.** Six served command-line surfaces:
+
+- `--fail-on-flaky` demotes a would-be exit `0` to `1` when at least one file
+  passed only after a crash-class retry (§13).
+- `--shuffle` and `--seed N` randomize the order run files execute in and print
+  the seed that reproduces the order (§18).
+- `collect --format json` renders the listing as a versioned stream beside the
+  plain one, at collect-stream `version` 1 (§16, `docs/collect-stream.md`).
+- `mtest debug PATH::TEST` prepares one test and hands it the terminal, exiting
+  only before the handoff (§28).
+- `mtest new PATH` writes one runnable test file and never overwrites (§29.1).
+- `mtest init [--ci github]` bootstraps a project in the invocation root and
+  replaces nothing that already exists (§29.2).
+
+Two additions are not command-line surfaces and are easy to miss, so they are
+named too:
+
+- the `[run] fail-on-flaky` project-configuration key, which resolves through
+  the ordinary layer precedence like every other key (§25);
+- the `session_started.shuffle_seed` field on the `--json` event stream, which
+  is present only under `--shuffle`. Its absence on an unshuffled run is what
+  keeps that record byte-identical to a stream written before the flag existed
+  (§15.4, `docs/json-stream.md`).
+
+No previously served surface changed meaning. The one exception is deliberate,
+declared above, and confined to the leading token: `new`, `init`, and `debug`
+are now subcommands where a bare path of that name used to be an operand.
 
 The rule binds the interface, not the prose: sharpening this document's
 description of a surface that does not itself move is not an amendment.
@@ -47,8 +101,8 @@ means `mtest`.
 
 ```text
 mtest [run] [PATHS...] [flags] [-- BUILD-ARGS...]   # run is the default subcommand
-mtest collect [PATHS...] [flags]                    # list node ids, one per line
-mtest config show [PATHS...] [flags]                # render resolved configuration
+mtest collect [PATHS...] [--format lines|json] [flags]   # list node ids
+mtest config show [PATHS...] [flags] [-- BUILD-ARGS...] # resolved configuration
 mtest doctor [--config PATH | --no-config] [--color WHEN] [-q | -v]
 mtest debug PATH::TEST [build flags] [-- BUILD-ARGS...]  # hand over the terminal
 mtest new PATH                                      # scaffold one test file
@@ -58,7 +112,9 @@ mtest --help | mtest help
 ```
 
 `run` is the default: `mtest tests/` means `mtest run tests/`. A leading token
-that is not a known subcommand is treated as a path or flag for `run`.
+that is not a known subcommand is treated as a path or flag for `run` — so a
+path whose name *is* a subcommand is shadowed by it and must be spelled
+`./name` (see the compatibility exception at the top of this document).
 `config show` is the sole two-token subcommand. `debug` is the only one that
 does not end by reporting: it prepares a single test and then replaces the
 mtest process with it (§28). `new` and `init` are the two that write source
@@ -86,6 +142,13 @@ single **invocation root**. In v1 the root is the **current working directory**.
 
 ## 3. Argument grammar
 
+- The **first** token is read as a subcommand when it matches one, and as a
+  path or flag for `run` otherwise. The match is exact and unabbreviated, and
+  it wins over the filesystem: `mtest new` is the scaffolding subcommand even
+  in a directory that contains one called `new`. Spell such a path `./new` —
+  a token beginning `./` is never a subcommand, which makes that spelling
+  stable across every release. Only the leading token is read this way, so
+  `mtest run new` and `mtest collect new` need no prefix at all.
 - Flags may be written `--flag value` or `--flag=value`. Both spellings are
   accepted everywhere a flag takes a value.
 - Short flags that take no value may not be bundled in v1 (`-x -q`, not `-xq`).
@@ -223,6 +286,11 @@ project configuration (§29.2).
 - Positional PATHS replace `[run] paths` as a whole. With no positional PATHS,
   configured paths are used when present; otherwise the default is `tests/` if
   it exists, else `.`. Configured paths are files or directories, not node ids.
+- A path named after a subcommand is only ambiguous in the **leading** position,
+  where the subcommand wins (§3). Write `./collect`, `./debug`, `./new`, or
+  `./init` to run one, and note that `[run] paths` and every non-leading
+  operand are unaffected — nothing there is ever read as a subcommand, so a
+  configured `paths = ["init"]` means the directory.
 
 **Walk totality.** A directory walk characterizes every entry it lists, and no
 `test_*.mojo` entry it cannot run is dropped in silence. A symlink to a regular
@@ -711,9 +779,10 @@ is safe to delete by hand at any time: it holds nothing that cannot be rebuilt.
 ## 9. Run and collect exit codes
 
 Exit domains are per subcommand. This table and precedence govern `run` and
-`collect`; §27 defines the narrower domains for `config show` and `doctor`, and
-§28 defines `debug`'s pre-handoff domain — past the handoff the exit status is
-the test binary's own and mtest has no code left to define.
+`collect`; §27 defines the narrower domains for `config show` and `doctor`,
+§29 defines the `{0, 3, 4}` domains of `new` and `init`, and §28 defines
+`debug`'s pre-handoff domain — past the handoff the exit status is the test
+binary's own and mtest has no code left to define.
 The meanings and precedence within each command domain are **FROZEN**.
 Exit-4's enumerated run/collect triggers grow only as served pre-run surfaces
 grow:
@@ -1220,8 +1289,10 @@ this section summarizes it.
 
 ## 16. `collect`
 
-`mtest collect [PATHS] [flags]` (and `mtest --collect-only`) lists node ids, one
-per line, sorted **lexicographically**. The runner imposes its own order so the
+`mtest collect [PATHS] [flags]` (and `mtest --collect-only`) lists node ids
+sorted **lexicographically**, in one of two formats: `--format lines`, the
+default, prints one node id per line, and `--format json` prints the versioned
+NDJSON collect stream described below. The runner imposes its own order so the
 frozen output format never couples to TestSuite's discovery order (execution
 still uses discovery order internally). `collect` accepts the selection and
 build flags because it compiles files to enumerate them.
@@ -1240,11 +1311,17 @@ Per file, the build-then-probe (§5, §6) resolves one of four ways:
 - An internal/machinery failure (e.g. an unspawnable build) **aborts** the
   listing outright at **exit 3**.
 
-The session exit code is **3** if any drift or internal failure occurred, else
+The session exit code is **2** if the collection was interrupted, else **3** if
+any drift or internal failure occurred, else
 **1** if any file failed to collect (compile error, crash, timeout, or
 MALFORMED-SUITE), else **5** if nothing was collectable, else **0** —
-consistent with the §9 precedence, under which an internal error (→ 3)
+consistent with the §9 precedence, under which an interrupt (→ 2) dominates an
+internal error (→ 3), which
 dominates a failing outcome (→ 1), which dominates "nothing collected" (→ 5).
+An interrupt reaches `collect` for the same reason it reaches a run: a
+collection probes real child processes, and a `SIGINT` that arrives partway
+through ends it where it stands rather than completing a listing nobody waited
+for.
 
 `--format json` renders that same listing as a versioned NDJSON stream instead
 of plain lines: a header, one `node` record per node id in the identical order,
@@ -1429,51 +1506,89 @@ file's result line carries an informal `SERIAL` marker (§15.1).
 
 ## 20. Stability tiers
 
-- **FROZEN at v1.0, and frozen now** — subcommands; flag names and semantics;
+- **FROZEN, each from the release that first served it** — the bulk of this
+  list shipped in 1.0.0 and froze there; the entries marked below as 1.1's are
+  frozen from 1.1. The bare subcommand *vocabulary* is the one declared
+  exception (see the header): reserving a new leading token is permitted, while
+  every subcommand already served keeps its name, grammar, and meaning. The
+  list: subcommands; flag names and semantics;
   exit codes; the node-id grammar; `mtest.toml` key names and semantics (§25);
   `--lf`/`--last-failed` and `--ff`/`--failed-first` semantics (§26);
+  *(from 1.1)* `--shuffle`/`--seed` semantics, including what shuffling
+  reorders and what it leaves node-id sorted, and the **seed-to-order
+  mapping**: one seed names one permutation of one file list, byte-identically
+  on every platform, so a printed seed reproduces the order that produced a
+  failure (§18); *(from 1.1)* `--fail-on-flaky` semantics and its position in
+  the exit precedence (§13, §9); *(from 1.1)* the `--format` value set and
+  which subcommand it belongs to (§4, §16);
   the JUnit mapping; the annotation shapes; the `--json` event stream schema
   (§15.4; normatively `docs/json-stream.md`) — its framing, header, event and
   field names, and token vocabularies, frozen at stream `version` 1 and
   growing only additively (new fields and kinds; a removal or a meaning-change
-  bumps the header version); the `collect` format — both the plain listing and
-  the `--format json` collect stream (§16; normatively
+  bumps the header version); the `collect` format — the plain listing, and
+  *(from 1.1)* the `--format json` collect stream (§16; normatively
   `docs/collect-stream.md`), whose framing, header, event names and field names
   are frozen at collect-stream `version` 1 and grow only additively under that
-  same rule; the test-module contract.
+  same rule; *(from 1.1)* `debug`'s preparation semantics and refusal set, and
+  the presence and order of its two `build:`/`run:` lines (§28); *(from 1.1)*
+  the refusal rules and exit domains of `new` and `init` (§29); the
+  test-module contract.
 - **STABLE-INTENT** — default values (timeouts, `auto` worker sizing) may be
   tuned in minor versions; the self-versioned `.mtest-cache/lastrun` format
-  (§26), whose incompatible changes require a new format version; the content
-  of every file `mtest init` writes (§29.2). The workflow among them pins each
-  third-party action to the same commit the documentation pins, and is
-  required to stay byte-identical to it, so a pin that moves in the
-  documentation moves in the scaffold — which is what makes those commits a
-  deliberate choice rather than a copy that quietly went stale.
+  (§26), whose incompatible changes require a new format version; the contents
+  of every file `new` and `init` scaffold (§29). Those templates may improve in
+  a minor release: what is promised is the §29 refusal rules — the no-replace
+  publication and the exit domains above — and, for the workflow, byte-parity
+  with the first YAML block of [the continuous-integration page](ci.md). That
+  parity includes pinning each third-party action to the same commit the
+  documentation pins, so a pin that moves in the documentation moves in the
+  scaffold — which is what makes those commits a deliberate choice rather than
+  a copy that quietly went stale.
 - **INFORMAL** — console text layout and colors; the human-facing
-  `config show` TOML output (§27.1).
+  `config show` TOML output (§27.1); the wording of the per-artifact and
+  next-step status lines `new` and `init` print (§29); the exact quoting style
+  of `debug`'s two lines, whose presence and order are frozen above while the
+  shell-quoting that makes them pasteable is not (§28).
 - TestSuite invocation details are an internal seam, never public API.
 
 ---
 
-## 21. Reserved (documented as reserved, not in v1)
+## 21. Planned, not served
 
-The following are out of scope for v1 and reserved for the next major version.
-Under the amendment rule at the top of this document, none of them can land in
-a 1.x release: adding one is what a major version is for. Each is either
-unrecognized by the parser, or recognized-but-refused as noted:
+The following are not served by any build in the 1.x line so far. Nothing here
+is a commitment to a release, and each is either unrecognized by the parser or
+recognized-but-refused as noted. They do **not** share one release rule, so the
+list is split by which one applies: whether serving the item would only add to
+the inventory, or would change what something already served means.
 
-`--root`; boolean `-k` expressions; `--pattern`; a **per-test** granularity for
-`--durations` (the slowest individual *tests*, not just files — blocked on the
-same upstream per-test timing gap that blocks per-test attribution elsewhere;
-the file-level `--durations N` is itself served now, §15.1); markers /
-`xfail`; `--asan`; watch mode; a **relocatable** build-cache
-directory (`--cache-dir`); and a
-machine-readable `config show` format (the served TOML display is informal
-human output, §27.1). The build cache itself is served (§8.5), but only as a
-per-checkout store at the fixed path `.mtest-cache/build-v1/`: choosing where it
-lives, sharing it between checkouts or machines, and saving and restoring it in
-CI are separate deliverables, each of which needs a key that survives leaving
-the machine it was computed on.
+**Additive — may land in a future minor.** `--root`; `--pattern`; markers /
+`xfail`; `--asan`; watch mode; and a **relocatable** build-cache directory
+(`--cache-dir`). Each of these is a new flag whose absence today means "off",
+so serving one leaves every existing invocation reading exactly as it does now.
+The build cache itself is served (§8.5), but only as a per-checkout store at
+the fixed path `.mtest-cache/build-v1/`: choosing where it lives, sharing it
+between checkouts or machines, and saving and restoring it in CI are separate
+deliverables, each of which needs a key that survives leaving the machine it
+was computed on.
+
+**Not additive — these wait for a major**, because serving them would move a
+surface that is already frozen:
+
+- **Boolean `-k` expressions.** `-k` is served as a case-insensitive substring
+  filter (§5), so today `-k "a and b"` matches node ids containing that literal
+  text. Giving `and`, `or`, and `not` meaning would silently change what an
+  existing, currently-valid `-k` value selects — a meaning change to a served
+  flag, not an addition beside it.
+- **A per-test granularity for `--durations`** (the slowest individual *tests*,
+  not just files). The file-level `--durations N` is served (§15.1), so this is
+  a redefinition of what `N` counts rather than a new surface. It is
+  additionally blocked on the same upstream per-test timing gap that blocks
+  per-test attribution elsewhere.
+- **A machine-readable `config show` format.** §20 freezes the `--format` value
+  set *and which subcommand it belongs to*: `--format` is `collect`'s alone,
+  and supplying it anywhere else is a usage error (§4). Serving
+  `config show --format json` would change that frozen applicability. The
+  served TOML display stays informal human output in the meantime (§27.1).
 
 ---
 
@@ -1853,7 +1968,10 @@ code exist today. Section 27 separately covers the reachable `config show` and
   started as NOT-RUN, and cleans up every in-flight child's process group with a
   two-pass terminate-then-kill sweep; a second interrupt escalates to an
   immediate hard kill of every group, leaving no survivor. The exit is 2
-  regardless of any failing outcome already accounted.
+  regardless of any failing outcome already accounted. It is reachable under
+  `collect` too, where a probe is an ordinary child process: the listing ends
+  where the interrupt found it, and under `--format json` the terminal record
+  carries the same 2 the process exits with.
 - **3** — reachable via a spawn failure (the runner could not spawn `mojo` or
   a built binary), via protocol drift (a report present but off-grammar, §6)
   in both `run` and `collect`, and via runtime `--json` or `--junit-xml`
@@ -2171,7 +2289,17 @@ diagnostic as `run`.
 The human-facing output is valid, copy-pasteable TOML in fixed `[run]`,
 `[build]`, `[report]`, then ordered `[[override]]` table order. Every set
 configuration key carries one trailing source label: `default`, `mtest.toml`,
-`env MTEST_MOJO`, or `cli`. Unset optional destinations are comments.
+`env MTEST_MOJO`, or `cli`.
+
+**The rendering grows with the configuration schema, and that is not a
+compatibility event.** A minor that adds a configuration key adds its line
+here — 1.1 added `fail-on-flaky = false  # (default)` under `[run]`, so the
+same project renders one more line than it did under 1.0. This output is
+INFORMAL (§20) precisely so the display can track the schema without every new
+key becoming a breaking change; a tool that needs a stable answer should read
+the `--json` event stream rather than parse this.
+
+Unset optional destinations are comments.
 `workers = "auto"` represents the automatic worker sentinel. Strings and
 arrays are TOML basic strings, precompile entries use canonical `SRC` or
 `SRC:OUT` form, and enum values use their accepted lowercase spellings.
@@ -2379,6 +2507,12 @@ in its own destination directory and published with a hard link, so an existing
 file is refused by the filesystem itself and its bytes are never opened,
 truncated, appended to, or renamed onto. `init`'s `.gitignore` handling is the
 one documented departure, specified in §29.2.
+
+Both words are now reserved in the leading position, which is the compatibility
+exception declared at the top of this document: `mtest new` and `mtest init`
+are these subcommands even in a directory holding files by those names, where
+earlier builds would have run them. Spell the path `./new` or `./init` to get
+the old behavior back; the prefix is never read as a subcommand.
 
 ### 29.1 One test file — `mtest new PATH`
 
