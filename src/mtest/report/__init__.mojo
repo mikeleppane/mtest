@@ -77,3 +77,11 @@ from mtest.report.report_md import (
     md_summary_row,
     md_summary_table_header,
 )
+from mtest.report.report_html import (
+    html_document_close,
+    html_document_open,
+    html_file_section,
+    html_machine_index,
+    html_not_run_line,
+    html_summary_row,
+)
