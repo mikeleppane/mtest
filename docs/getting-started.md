@@ -7,6 +7,14 @@ and come back.
 
 ## Save a test file
 
+In a directory with nothing in it yet, `mtest init` is the one command that
+writes all of this at once — a first test file, an `mtest.toml` pointing at
+`tests/`, a `.gitignore`, and with `--ci github` a workflow — and prints the
+prerequisites still to run. The
+[Starting a project section of the README](https://github.com/mikeleppane/mtest#starting-a-project)
+walks through it. The rest of this page builds the same thing a piece at a
+time, so you can see what each one is for.
+
 A test file is an ordinary Mojo program. It declares test functions and a
 `main()` that hands them to the standard library's suite, which keeps owning
 discovery and the report format inside the file. Save this as

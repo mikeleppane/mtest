@@ -117,9 +117,11 @@ it again.
 overwriting, so a second `init` reports each one as `skipped` and still exits
 `0`, and a file you have already edited is left exactly as it was.
 `.gitignore` is the one file `init` edits rather than creates: the
-`.mtest-cache/` entry is appended to whatever is already there, and a
-`.gitignore` that is a symlink or not a regular file is refused (exit `4`)
-before any artifact is written.
+`.mtest-cache/` and `build/bin/` entries — mtest's working state, and the
+binaries it compiles your test files into — are appended to whatever is already
+there, and only the ones actually missing are added. A `.gitignore` that is a
+symlink or not a regular file is refused (exit `4`) before any artifact is
+written.
 
 ## Your first test
 
@@ -960,6 +962,61 @@ runs, and `[run] state = false`.
 specifies the format, the outcome-to-record mapping, and the merge rule that
 preserves a failure you have not retested yet.
 
+### Random order: `--shuffle` and `--seed`
+
+A suite that passes only in one order is a suite with a hidden dependency
+between its files — shared state on disk, a fixture one file leaves behind for
+the next. `--shuffle` runs the files in a random order to surface it. The seed
+is printed in the header, because the whole point of a random order is being
+able to run it again:
+
+```console
+$ pixi run bash -c 'build/mtest --shuffle --show-output none e2e/matrix e2e/suite/test_passing.mojo'
+mtest 1.0.0 (mojo)
+root: /home/mikko/dev/mtest   selected: 3 files   excluded: 0   shuffle seed: 4039837840016826
+
+PASS           e2e/suite/test_passing.mojo     0.02s
+PASS           e2e/matrix/test_beta.mojo       0.02s
+PASS           e2e/matrix/test_alpha.mojo      0.04s
+
+===== 8 passed, 0 failed, 0 skipped, builds: 0, cached: 3 (0 excluded, 0 not run) in 1.0s =====
+```
+
+Hand that number back with `--seed N` and the same file list runs in the same
+order, on any platform: one seed names one order, and that mapping is frozen
+for 1.x. So a shuffled CI failure is reproducible from its own log, which is
+the only thing that makes randomizing safe to leave on.
+
+```console
+$ pixi run bash -c 'build/mtest --shuffle --seed 4039837840016826 --show-output none e2e/matrix e2e/suite/test_passing.mojo'
+mtest 1.0.0 (mojo)
+root: /home/mikko/dev/mtest   selected: 3 files   excluded: 0   shuffle seed: 4039837840016826
+
+PASS           e2e/suite/test_passing.mojo     0.02s
+PASS           e2e/matrix/test_beta.mojo       0.03s
+PASS           e2e/matrix/test_alpha.mojo      0.04s
+
+===== 8 passed, 0 failed, 0 skipped, builds: 0, cached: 3 (0 excluded, 0 not run) in 1.0s =====
+```
+
+Only the **execution** order moves. Gates keep the order they were listed in
+and still run first, `--shard` partitions the sorted list before the shuffle so
+shard membership never changes, and every report — the summary band, the JUnit
+document, the `collect` listing — stays sorted by node id. `--seed` without
+`--shuffle` is a usage error, and so is asking for two orders at once:
+
+```console
+$ pixi run bash -c 'build/mtest --shuffle --lf e2e/matrix'
+cli: '--shuffle' and '--lf'/'--ff' choose conflicting orders; pick one (see mtest --help)
+$ echo $?
+4
+```
+
+`--shuffle` is a command-line flag only — it is never read from `mtest.toml`,
+because a randomized order is something you ask for on an invocation rather
+than something a project should silently impose — and it is refused under
+`collect`, whose listing is specified to be sorted.
+
 ### Diagnosing the environment: `mtest doctor`
 
 `mtest doctor` answers "is this machine set up to run tests?" without running
@@ -1500,6 +1557,7 @@ drift from that output:
 mtest — a pytest-like test runner for Mojo
 
 usage: mtest [run] [PATHS...] [flags] [-- BUILD-ARGS...]
+       mtest collect [PATHS...] [--format lines|json] [flags]
        mtest config show [PATHS...] [flags] [-- BUILD-ARGS...]
        mtest doctor [--config PATH | --no-config] [--color WHEN] [-q | -v]
        mtest debug PATH::TEST [build flags] [-- BUILD-ARGS...]

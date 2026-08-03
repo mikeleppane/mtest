@@ -76,6 +76,7 @@ def help_text() -> String:
     var rendered = String(
         "mtest — a pytest-like test runner for Mojo\n\n",
         "usage: mtest [run] [PATHS...] [flags] [-- BUILD-ARGS...]\n",
+        "       mtest collect [PATHS...] [--format lines|json] [flags]\n",
         "       mtest config show [PATHS...] [flags] [-- BUILD-ARGS...]\n",
         (
             "       mtest doctor [--config PATH | --no-config]"

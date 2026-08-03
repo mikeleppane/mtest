@@ -189,7 +189,7 @@ only `--ci VALUE` beside them (§29).
 | `-n, --workers N\|auto` | ✓ | accepted, inert | — | — |
 | `--shard M/N` | ✓ | ✓ | — | — |
 | `--lf`, `--last-failed`, `--ff`, `--failed-first` | ✓ | — | — | — |
-| `--serial GLOB` | ✓ | — | — | — |
+| `--serial GLOB` | ✓ | accepted, inert | — | — |
 | `--timeout`, `--compile-timeout` | ✓ | ✓ (compile only) | — | — |
 | `--retries N` | ✓ | — | — | — |
 | `--fail-on-flaky` | ✓ | — | — | — |
@@ -222,13 +222,15 @@ flag that belongs to `collect` alone, and supplying it to `run`, to
 the default and is the plain one-node-id-per-line listing this section
 describes; `json` selects the machine-readable stream specified in §16.
 
-`-n`/`--workers` is marked **accepted, inert** under `collect` because that is
-what this build does: the flag parses and is not refused, but collection probes
-files one at a time, so the value changes nothing. It is recorded rather than
-turned into a refusal because refusing a flag that earlier builds accepted
-would break invocations that pass a uniform flag set to both subcommands.
-Parallel collection is not reserved — it is simply not implemented yet, and
-whichever way it is resolved, this row moves with it.
+`-n`/`--workers` and `--serial GLOB` are marked **accepted, inert** under
+`collect` because that is what this build does: both parse and neither is
+refused, but collection probes files one at a time, so neither value changes
+anything — and with no parallel pass there is nothing for `--serial` to pin a
+file outside of. They are recorded rather than turned into refusals because
+refusing a flag that earlier builds accepted would break invocations that pass
+a uniform flag set to both subcommands. Parallel collection is not reserved —
+it is simply not implemented yet, and whichever way it is resolved, both rows
+move with it.
 
 `config show` accepts the full `run` grammar, including selection and
 per-invocation flags. It resolves the same default, project-file, environment,
@@ -793,7 +795,7 @@ grow:
 | 1 | at least one selected outcome is FAIL, CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT, MALFORMED-SUITE, or PRECOMPILE-ERROR; or the session would otherwise exit 0 and, under `--fail-on-flaky` (§13), counted at least one FLAKY file |
 | 2 | interrupted (SIGINT/SIGTERM); a partial summary is printed |
 | 3 | internal `mtest` error — including protocol drift (a report present but off-grammar) and an environment/I-O failure such as a runtime report-destination open/write failure (a `--json` destination that cannot be opened at session start, or whose stream write later fails — a fatal abort; or a `--junit-xml` target that cannot be created at session start, or whose report cannot be finalized and renamed onto PATH) |
-| 4 | pre-run usage error (unknown flag, bad value, nonexistent path, an explicit operand of a file type mtest cannot run (a FIFO, socket, or device, §5), a path discovery cannot inspect (§5), unknown node id, forbidden build argument, mutually exclusive `--config`/`--no-config`, `--seed` without `--shuffle`, `--shuffle` beside `--lf`/`--ff` (§18), a flag applied to a subcommand it does not belong to (§4) — a run-only flag under `collect`, `--format` outside `collect`, or any run, build, selection, state, or reporter flag under `doctor` — a `--format` value that is neither `lines` nor `json`, a selected project config that is missing, unreadable, malformed, or has an invalid key/value, a syntactically invalid `--json` or `--junit-xml` report destination — an empty value or a nonexistent parent directory, the machine-stdout conflict — `--json -` without an explicit `--gh-annotations off`, since the byte-pure stream and the annotation tail cannot share stdout, or a `--cache-clear` target mtest can see and cannot prove it owns, or can prove and cannot delete, §8.5 — a target it cannot characterize at all is treated as absent and exits `0`) — detected **before any test runs** |
+| 4 | pre-run usage error (unknown flag, bad value, nonexistent path, an explicit operand of a file type mtest cannot run (a FIFO, socket, or device, §5), a path discovery cannot inspect (§5), unknown node id, forbidden build argument, mutually exclusive `--config`/`--no-config`, `--seed` without `--shuffle`, `--shuffle` beside `--lf`/`--ff` (§18), a flag applied to a subcommand it does not belong to (§4) — a run-only flag `collect` marks `—`, `--format` outside `collect`, or any run, build, selection, state, or reporter flag under `doctor` — a `--format` value that is neither `lines` nor `json`, a selected project config that is missing, unreadable, malformed, or has an invalid key/value, a syntactically invalid `--json` or `--junit-xml` report destination — an empty value or a nonexistent parent directory, the machine-stdout conflict — `--json -` without an explicit `--gh-annotations off`, since the byte-pure stream and the annotation tail cannot share stdout, or a `--cache-clear` target mtest can see and cannot prove it owns, or can prove and cannot delete, §8.5 — a target it cannot characterize at all is treated as absent and exits `0`) — detected **before any test runs** |
 | 5 | no tests collected (empty walk, `-k` matched nothing, everything excluded) |
 
 **Precedence** when outcomes mix. A usage error aborts before the run with 4.
@@ -804,6 +806,13 @@ interrupt outranks an internal error because the run was truncated on purpose
 and its result is no longer authoritative. The flaky rung sits at the bottom on
 purpose: it can only ever move a 0, never displace a code some other fact
 already decided.
+
+**A domain is closed against a departed consumer.** `mtest` ignores `SIGPIPE`
+around every write it makes to a descriptor, so a reader that closes early —
+`mtest collect --format json | head -1`, `mtest --help | head -1` — costs the
+rest of that write and nothing else. Death at signal 13, which a shell reports
+as 141, is a status no subcommand produces, and every command exits with a code
+from its own domain whether or not anyone was still reading.
 
 A `--shard` (§18) that owns no run files reaches exit 5 by the same
 nothing-collected rule — but only when nothing else ran: a shard whose gates ran
@@ -930,7 +939,12 @@ rebuilt.
   tier would be 0 and whose summary counts at least one FLAKY file exits 1
   instead. Terminal verdict only: retry behavior, `--maxfail` counting (a flaky
   pass still counts 0), and last-run state (a FLAKY file still clears a prior
-  failure — it passed) are unchanged.
+  failure — it passed) are unchanged. The report artifacts are unchanged too,
+  and the `--junit-xml` document is the one to know about: a FLAKY file is a
+  pass with a `flakyFailure` child, so the document still reports
+  `failures="0"` beside a process that exits 1. The console band, the
+  `--json` stream's `exit_code`, and the `::notice` all carry the demotion;
+  a CI that renders JUnit alone sees green.
 
 Retries apply to precompile, build, and run steps on both ordinary and
 selection (`-k` or node-id) paths.
@@ -1021,9 +1035,13 @@ could otherwise drive the terminal through the very message that rejects it.
 **Which** code points are neutralized is one definition shared by all of these
 surfaces; only the spelling differs.
 
-The `--collect` listing (§16) is the one terminal-reachable output that is
-**not** escaped, deliberately: it is a byte-exact machine listing of node ids,
-specified for tooling to consume, and escaping it would break that contract.
+The `collect` listing under `--format lines` (§16) is the one
+terminal-reachable output that is **not** escaped, deliberately: it is a
+byte-exact machine listing of node ids, specified for tooling to consume, and
+escaping it would break that contract. Under `--format json` the same ids are
+carried as JSON strings and are escaped by that encoding
+(`docs/collect-stream.md`), which is a transport rule rather than this
+display boundary.
 
 This boundary is **display-only**. It does not change what mtest captures, what
 its parser reads, or what the JUnit report (§15.2) or the machine event stream
@@ -2018,8 +2036,9 @@ itself exits with: 4 for a malformed node id, an unknown path, a node id whose
 path is not a runnable file, an unknown test name, or any flag outside its
 grammar; 2 for an interrupt during the build or the probe; 3 for a spawn or
 machinery failure, for protocol drift, and for a failed exec or a failed
-runtime restoration; and 1 for a compile error or a probe that crashed, timed
-out, overflowed its capture, or did not read as a collection listing. Once the
+runtime restoration; and 1 for a failed precompile step, a compile error, a
+build killed at `--compile-timeout`, or a probe that crashed, timed out,
+overflowed its capture, or did not read as a collection listing. Once the
 handoff happens mtest is gone, so the process's exit status is the binary's own
 statement and no code in this section applies to it.
 
@@ -2591,7 +2610,7 @@ read, no toolchain is resolved, and no file is discovered, built, or run.
 | `tests/test_example.mojo` | the §29.1 test file, for the subject `example` |
 | `mtest.toml` | `[run] paths = ["tests"]`, so a bare `mtest` runs the suite |
 | `.github/workflows/test.yml` | under `--ci github` only |
-| `.gitignore` | a `.mtest-cache/` entry, added rather than replaced |
+| `.gitignore` | `.mtest-cache/` and `build/bin/` entries, added rather than replaced |
 
 The workflow is byte-identical to the first YAML block of
 [the continuous-integration page](ci.md), which is therefore the single place
@@ -2650,18 +2669,28 @@ rewriting it, so this artifact alone is read, appended to, and renamed over —
 and the content written back is the content read followed by the added lines,
 which is what makes replacing it correct rather than destructive.
 
+Two entries are written, each under its own comment line and each added only
+when it is missing: `.mtest-cache/` for the build cache and last-run state
+(§8), and `build/bin/` for the binaries every run and every `mtest debug`
+compile from the project's test files (§28). `build/` itself is deliberately
+not claimed — the rest of that tree belongs to whatever else the project
+builds there.
+
 It is read and written as **bytes**. Git accepts a `.gitignore` that is not
 valid UTF-8, so decoding one in order to write it back would turn a legal file
 into a failed bootstrap; only ASCII is ever compared. A file larger than
 1 MiB is refused rather than read to that ceiling and written back truncated.
 
-Whether the cache is already ignored is decided by git's own rules, not by a
+Whether an entry is already ignored is decided by git's own rules, not by a
 substring search: leading whitespace is part of a pattern (so `  .mtest-cache/`
 ignores nothing and the entry is still added), trailing whitespace is not, a
-`#` comment ignores nothing, and the **last** matching pattern decides — a
-`!.mtest-cache/` after a positive pattern puts the directory back, so the entry
-is added again. `skipped .gitignore (exists)` therefore means `git check-ignore`
-would agree, not merely that some line looked right.
+`#` comment ignores nothing, a pattern naming an ancestor directory counts (a
+project already ignoring `build/` needs no `build/bin/` line), and the **last**
+matching pattern decides — a `!.mtest-cache/` after a positive pattern puts the
+directory back, so the entry is added again. Wildcards are not expanded, so a
+pattern that would only match through a glob reads as no match and the entry is
+added. `skipped .gitignore (exists)` therefore means `git check-ignore` would
+agree, not merely that some line looked right.
 
 The permission bits of an existing `.gitignore` survive the rewrite, including
 a read-only mode: the replacement is a rename in the containing directory, so

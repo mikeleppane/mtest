@@ -46,10 +46,10 @@ supports.
 - [Releasing](releasing.md) — the maintainer runbook.
 
 Everything else stays in the
-[README](https://github.com/mikeleppane/mtest#readme): selection, retries,
-timeouts, sharding, the build cache, project scaffolding, handing the terminal
-to a single test, assertion diagnostics, and the complete command-line
-listing. That document is the front door on purpose, and the few
+[README](https://github.com/mikeleppane/mtest#readme): selection, retries and
+failing a run on flaky files, timeouts, sharding, random run order, the build
+cache, project scaffolding, handing the terminal to a single test, assertion
+diagnostics, and the complete command-line listing. That document is the front door on purpose, and the few
 commands and outputs this site needs are mirrored from it byte for byte rather
 than retyped: a gate compares each mirror to its source on every run, so a page
 here cannot quietly disagree with the README. Two parts of the README are
