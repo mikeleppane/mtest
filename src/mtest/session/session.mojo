@@ -1035,7 +1035,7 @@ def run_session[
         stream_dead = True
 
     # Classify why each selected file (gate and run alike, casualty_files by
-    # construction) never produced a tallied verdict -- one record per entry,
+    # construction) never produced a tallied verdict — one record per entry,
     # including a file that DID run, because a consumer with verdict knowledge
     # (the report writer's row index) filters rather than this call. Latched
     # causal facts are checked first, in their causal order: a latched earlier
@@ -1062,6 +1062,7 @@ def run_session[
         )
         not_run_records.append(NotRunRecord(path, reason))
     reporter.note_not_run_records(not_run_records)
+
     # Synthesize a `[not-run]` row into the JUnit report for every selected file
     # that never produced a verdict (interrupt/gate-abort/--maxfail casualties),
     # then finalize the report: assemble in node-id order, verify-write the

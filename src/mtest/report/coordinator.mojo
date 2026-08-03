@@ -508,13 +508,14 @@ struct RecordingCoordinator[*Rs: Reporter](ReportCoordinator):
         self.junit.note_not_run(selected_paths)
 
     def note_not_run_records(mut self, records: List[NotRunRecord]):
-        """Record the classified not-run records for a test driver to read.
+        """Append the classified not-run records for a test driver to read.
 
         Args:
-            records: One record per selected file. Copied and stored on
-                `self.not_run_records`.
+            records: One record per selected file. Copied and appended to
+                `self.not_run_records`, so a driver that calls this more than
+                once still finds every batch, in call order.
         """
-        self.not_run_records = records.copy()
+        self.not_run_records.extend(records.copy())
 
     def finalize_junit(
         mut self, built_files: Int, cached_files: Int

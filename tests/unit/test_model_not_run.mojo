@@ -3,8 +3,9 @@
 `not_run_reason_label` is asserted total over the whole closed vocabulary plus
 an out-of-band code. `classify_not_run` is the pure precedence function the
 session's classification site calls per selected file; every rank of the
-precedence chain is pinned individually, then the three cross-rank overlap
-cases the precedence review specifically settled are pinned by name.
+precedence chain is pinned individually, then three named cases where two
+facts from different ranks are both true at once are pinned by name, since
+that is exactly where a wrong precedence would first show a wrong answer.
 """
 from std.testing import assert_equal, assert_true, TestSuite
 
@@ -217,7 +218,7 @@ def test_classify_no_fact_at_all_is_limit_reached() raises:
     assert_true(reason == NotRunReason.LIMIT_REACHED)
 
 
-# --- The three cross-rank overlap cases the precedence review pinned. --------
+# --- Cross-rank overlap: two facts from different ranks, both true at once. --
 
 
 def test_classify_stream_dead_beats_gate_file_when_gate_abort_unlatched() raises:

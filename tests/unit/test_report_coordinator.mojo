@@ -243,6 +243,30 @@ def test_recording_coordinator_records_not_run_records() raises:
     assert_true(coord.not_run_records[1].reason == NotRunReason.GATE_CASUALTY)
 
 
+def test_recording_coordinator_note_not_run_records_accumulates_across_calls() raises:
+    # A second call must not overwrite the first: both batches survive, in
+    # call order, exactly as the field's own docstring promises.
+    var coord = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
+    coord.note_not_run_records(
+        [NotRunRecord("tests/test_a.mojo", NotRunReason.LIMIT_REACHED)]
+    )
+    coord.note_not_run_records(
+        [
+            NotRunRecord("tests/test_b.mojo", NotRunReason.GATE_CASUALTY),
+            NotRunRecord("tests/test_c.mojo", NotRunReason.INTERRUPTED),
+        ]
+    )
+    assert_equal(len(coord.not_run_records), 3)
+    assert_equal(coord.not_run_records[0].path, "tests/test_a.mojo")
+    assert_true(coord.not_run_records[0].reason == NotRunReason.LIMIT_REACHED)
+    assert_equal(coord.not_run_records[1].path, "tests/test_b.mojo")
+    assert_true(coord.not_run_records[1].reason == NotRunReason.GATE_CASUALTY)
+    assert_equal(coord.not_run_records[2].path, "tests/test_c.mojo")
+    assert_true(coord.not_run_records[2].reason == NotRunReason.INTERRUPTED)
+
+
 def test_recording_coordinator_records_the_whole_stream() raises:
     # The second conformer: a recording pack standing in for the console, with
     # every lifecycle channel inert. This is what the session's own drivers use.
