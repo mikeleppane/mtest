@@ -1,6 +1,6 @@
 ---
 name: validating-mtest
-description: Use when QA-testing or acceptance-testing the mtest runner, validating it against docs/cli-contract.md, verifying exit codes / outcome labels / determinism / the availability matrix, checking a change or a Mojo re-pin did not break a user-facing promise, or hunting for silent or contract-violating behavior before a release.
+description: Use when QA-testing or acceptance-testing the mtest runner, validating it against docs/cli-contract.md, verifying exit codes / outcome labels / determinism / the availability matrix / the collect stream / the source-writing subcommands, checking a change or a Mojo re-pin did not break a user-facing promise, or hunting for silent or contract-violating behavior before a release.
 ---
 
 # Validating mtest
@@ -94,14 +94,21 @@ always a bug:
 | Code | Meaning |
 |------|---------|
 | 0 | every selected outcome PASS or SKIP (exclusions allowed) |
-| 1 | any FAIL / CRASH / TIMEOUT / COMPILE-ERROR / **COMPILE-TIMEOUT** / MALFORMED-SUITE / PRECOMPILE-ERROR |
+| 1 | any FAIL / CRASH / TIMEOUT / COMPILE-ERROR / **COMPILE-TIMEOUT** / MALFORMED-SUITE / PRECOMPILE-ERROR; or a would-be 0 with a FLAKY file under `--fail-on-flaky` |
 | 2 | interrupted (SIGINT/SIGTERM) — partial summary printed |
 | 3 | internal mtest error, incl. protocol drift and spawn failure |
 | 4 | usage error — detected **before any test runs** |
 | 5 | nothing collected (empty walk, `-k` matched nothing, all excluded, only NO-TESTS) |
 
-Precedence when outcomes mix: 4 → 2 → 3 → 1 → 5 → 0. (COMPILE-TIMEOUT and FLAKY
-are in the frozen vocabulary but not emitted by this build yet — §24.2.)
+Precedence when outcomes mix: 4 → 2 → 3 → 1 → 5 → 0, with the `--fail-on-flaky`
+rung last of all: it can only move a 0, never displace a code another fact
+already decided. Probe that rung from both sides — an interrupt or an
+everything-excluded session with a FLAKY file must still exit 2 and 5.
+
+Four commands have narrower domains of their own and the table above does not
+govern them: `config show` and `doctor` (§27), `debug` (§28 — `{1,2,3,4}`
+pre-handoff, and the debuggee's own status after), and `new`/`init` (§29 —
+`{0,3,4}`).
 
 ## Running mtest correctly (harness traps that produce false findings)
 
@@ -110,6 +117,17 @@ A false finding wastes everyone's time. Most come from the harness, not mtest:
 - **Toolchain on PATH.** mtest spawns `mojo build` per file. Run under the pixi
   environment; the validator captures it and scrubs a stray `MTEST_MOJO` so the
   scaffold and the runner do not build with different toolchains.
+- **`PATH` alone is not the pixi environment.** A hand-rolled scaffold outside
+  `pixi run` also needs `MODULAR_HOME` (and `CONDA_PREFIX`); without it every
+  file COMPILE-ERRORs with `unable to locate module 'std'` and you are one step
+  from filing the scaffold as a runner defect. Copy both out of `pixi run env`
+  into the scratch environment.
+- **The tool shell is zsh, which does not word-split an unquoted variable.** A
+  refusal matrix built from `for f in "--retries 1"; do mtest debug $f $NODE`
+  passes *one* argument, so every row comes back `unknown flag '--retries 1'`
+  and the applicability check you meant to run never happened. Build flag
+  matrices in an explicit `bash` script with `"$@"`. `PIPESTATUS` needs the same
+  `bash -c`; in zsh it is `pipestatus` and reads empty.
 - **Root = current working directory (§2).** An operand outside the root is a
   correct exit-4 error. To test a scaffolded project, run mtest *from inside* it
   — do not pass an absolute path into it from elsewhere and call the exit-4 a bug.
@@ -119,6 +137,13 @@ A false finding wastes everyone's time. Most come from the harness, not mtest:
   to **stderr**; §16 routes `collect` node ids to **stdout**, diagnostics to
   **stderr**. Merging them (`2>&1`) makes routing regressions invisible — assert
   per stream.
+- **A departed reader and a closed descriptor are two different probes.**
+  `mtest ... | head -1` tests §9's SIGPIPE promise: the write is lost and the
+  exit stays in the domain. `mtest ... >&-` tests something else — there is no
+  reader, no pipe and no `EPIPE`, the descriptor is simply gone. Run both, on
+  both streams (a usage error only writes to fd 2). A command that survives the
+  first can still die on the second, and only the second reaches the writer's
+  own error handling.
 - **Session suites need the native object.** A bare
   `build/mtest tests/integration/test_session_*.mojo` link-fails on
   `mtest_exec_*` symbols — a missing `-Xlinker build/native/...`, a harness
@@ -180,6 +205,11 @@ Every row below is a check in `scripts/qa/contract.py` unless marked *(manual)*.
 | interrupt | SIGINT to **mtest only** → exit 2, partial summary, **child tree freed** (tests mtest's own teardown, not a direct signal) | 9,24.2 |
 | color | `--color never`→no ANSI, `always`→ANSI, and the flag **wins over `NO_COLOR`** | 15.1 |
 | build cache *(manual)* | edit a source → `cached` drops and the **new** behavior runs (poison the edit so a stale hit exits 1); `touch` alone → still a hit; a new `mojo` or an edit under an `-I` root → everything rebuilds; unclassifiable `--build-arg` → one `cache-off` warning, exit unchanged; `--no-cache` writes no store at all; `--cache-clear` on a symlinked or unmarked `.mtest-cache` → 4 with the tree untouched | 8.5,9 |
+| flaky verdict *(manual)* | `--fail-on-flaky` and `[run] fail-on-flaky` move a 0 to 1 and **nothing else**: same `TRY` lines, `--maxfail`/`-x` leave the exact same not-run count, and a FLAKY file still *clears* its `lastrun` entry. JUnit stays `failures="0"` beside exit 1; the `--json` `exit_code` and the `::notice` carry the demotion | 13,9 |
+| shuffle *(manual)* | one seed = one order, replayed; the **set** never moves (digest the sorted node list across seeds); JUnit / annotations / `--json` projection identical seed to seed; gates first in listed order, `--shard` membership unchanged, `--serial` still last; `--seed` without `--shuffle` and `--shuffle` beside `--lf`/`--ff` → 4; `[run] shuffle`/`seed` → 4 unknown key | 17,18 |
+| collect stream *(manual)* | `--format lines` **byte-identical** to the flagless listing; JSON node order == lines order; whole stream byte-identical across runs; terminal `exit_code` == process exit at 0/1/2/3/5; a usage error emits **no stream at all**; stdout carries stream bytes only | 16 |
+| debug *(manual)* | two `build:`/`run:` lines, then the debuggee's own status (a crasher exits 139 with no band); paste both lines back and they work; every out-of-grammar flag → 4, reporter refusals naming the reason; `[report]` keys write nothing and `lastrun` stays `cmp`-clean; a malformed doc is still 4 | 28 |
+| new / init *(manual)* | `new` refuses `::`, a non-`.mojo` name, an uncollectable basename, and an existing target (4), and what it writes **passes**; `init` re-run is an all-skip at 0, its workflow diffs clean against the first `docs/ci.md` YAML fence, and every `.gitignore` decision agrees with real `git check-ignore` | 29 |
 
 Still worth a *manual* probe beyond the oracle: `--collect-only` alias
 equivalence; exclusion winning over `--gate`/explicit operand (§12); valid
@@ -194,6 +224,20 @@ same scenario twice over one root, asserting the exact counters both times.
 Cold then warm proves reuse happens; cold, edit, warm proves it stops happening
 when it must. Only the second pair can catch a stale hit, and only the counters
 plus a poisoned edit make it fail loudly instead of quietly passing.
+
+Two of the manual rows need a fixture the scaffold does not have:
+
+- **FLAKY on demand.** Nothing about `--fail-on-flaky` is reachable without a
+  file that fails crash-class once and passes next. Copy the shape of
+  `e2e/flaky/test_flaky.mojo`: a marker path under the invocation root decides
+  the outcome, the first attempt writes it and then faults, the retry finds it
+  and passes. Delete the marker between scenarios or the second scenario runs
+  green on the first attempt and proves nothing about the rung.
+- **Shuffle needs a digest, not a count.** A per-seed *count* cannot tell a
+  dropped file from a doubled one. Add a poison file, then compare a hash of the
+  **sorted** node-id list from each seed's `--junit-xml`: equal digests plus an
+  equal exit code across seeds is what proves the order moved and the set did
+  not. Keep the digest out of Python's `hash()` — it is salted per process.
 
 ## Triage — classify every finding
 
@@ -242,6 +286,18 @@ Severity by user impact: silent-wrong > wrong-exit-code > confusing-output.
 - A cache condition changed a verdict or an exit code. §8.5 promises it never
   does: a cache that cannot be trusted must cost a rebuild, never a run. This
   one is always a BUG, at the top of the severity order.
+- A flag matrix where every row came back `unknown flag '--x value'` — the shell
+  handed mtest one argument, so you tested quoting, not applicability.
+- A `--shuffle` scenario whose seed you did not record. The order is an input;
+  a failure you cannot replay with `--seed N` is not a finding yet, and the
+  console header and `--json` `session_started.shuffle_seed` both carry it.
+- A `collect --format json` check that read only the node lines. The terminal's
+  `exit_code` is specified to equal the process exit *including teardown* — read
+  both and compare them, and treat a **missing** terminal as truncation rather
+  than an empty test set.
+- A `debug` scenario you scored by its exit status alone. Past the handoff that
+  status is the debuggee's, not a verdict — what mtest owes you there is the two
+  lines, the refusal set, and having touched no report destination or `lastrun`.
 
 ## Complementary gates (do not reinvent)
 
