@@ -235,6 +235,17 @@ BARRIER_DEADLINE = 180.0
 """Seconds a scenario waits for a marker before calling the run hung. Sized for
 a cold `mojo build` of the actor, which every one of these runs pays."""
 
+WCHAN_DEADLINE = 5.0
+"""How long to wait for the kernel to report a task blocked in a pipe write.
+
+Its own budget rather than `BARRIER_DEADLINE`: this poll waits on a state a
+process reaches in milliseconds, so anything past a few seconds means the
+kernel is not going to answer — `wchan` reads back empty without
+`CONFIG_KALLSYMS`, and a `hidepid` mount hides it too. Reusing the 180-second
+budget would spend eighteen minutes over the six graces below before falling
+back to them.
+"""
+
 BARRIER_POLL = 0.01
 """Seconds between marker polls."""
 
@@ -537,7 +548,7 @@ def _await_blocked_pipe_write(pid: int) -> bool:
     wchan = Path(f"/proc/{pid}/wchan")
     if not wchan.exists():
         return False
-    limit = time.monotonic() + BARRIER_DEADLINE
+    limit = time.monotonic() + WCHAN_DEADLINE
     while time.monotonic() < limit:
         try:
             state = wchan.read_text()
@@ -822,17 +833,25 @@ def s_new_then_run(context: ScenarioContext) -> str:
             "the scaffolded file is missing, so the parent directories were "
             "never created",
         )
-        mode = scaffolded.stat().st_mode & 0o777
-        expect(
-            mode & 0o044 != 0,
-            f"the scaffolded file carries the private mode {mode:#o} a "
-            "temporary file is created with, not the umask-derived one an "
-            "editor would have produced",
-        )
         siblings = sorted(p.name for p in scaffolded.parent.iterdir())
         expect(
             siblings == ["test_scaffolded.mojo"],
             f"the publication left something beside the file it created: {siblings}",
+        )
+        # Compared against a file created here the ordinary way rather than
+        # against a fixed bit pattern: "the mode an editor would have
+        # produced" is whatever the umask says, so `0o044` would go red under
+        # `umask 077` with nothing wrong. The probe is made after the litter
+        # check above and removed immediately.
+        ordinary = scaffolded.parent / "ordinary.probe"
+        ordinary.write_text("x")
+        want_mode = ordinary.stat().st_mode & 0o777
+        ordinary.unlink()
+        mode = scaffolded.stat().st_mode & 0o777
+        expect(
+            mode == want_mode,
+            f"the scaffolded file carries mode {mode:#o}, not the "
+            f"{want_mode:#o} an ordinary create in this directory produces",
         )
 
         ran = runner.run_mtest(["tests/nested/test_scaffolded.mojo"])
