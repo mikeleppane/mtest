@@ -22,6 +22,7 @@ from mtest.model import (
     Event,
     EventKind,
     FileFinishedPayload,
+    NotRunRecord,
     PrecompileFailedPayload,
     TestReportedPayload,
 )
@@ -83,6 +84,20 @@ trait ReportCoordinator:
 
         Args:
             selected_paths: The selected files that must appear in the report.
+        """
+        ...
+
+    def note_not_run_records(mut self, records: List[NotRunRecord]):
+        """Deliver one classified not-run record per selected file.
+
+        A parallel channel to `note_not_run`, carrying WHY each file never
+        produced a verdict rather than just its path. Records arrive for
+        EVERY selected file, including one that DID produce a verdict, so a
+        consumer with verdict knowledge filters rather than this call.
+
+        Args:
+            records: One record per selected file, in the session's stated
+                order. Not mutated.
         """
         ...
 
@@ -318,6 +333,18 @@ struct StandardReportCoordinator(ReportCoordinator):
         """
         self.junit.note_not_run(selected_paths)
 
+    def note_not_run_records(mut self, records: List[NotRunRecord]):
+        """Accept and discard the classified not-run records.
+
+        No report-writer sink is wired to these records yet, so production
+        drops every entry here without touching the console, machine stream,
+        or JUnit reporters.
+
+        Args:
+            records: One record per selected file. Discarded; not stored.
+        """
+        pass
+
     def finalize_junit(
         mut self, built_files: Int, cached_files: Int
     ) -> JunitFinalizeResult:
@@ -416,6 +443,9 @@ struct RecordingCoordinator[*Rs: Reporter](ReportCoordinator):
     var state_tracker: _StateTracker
     """Folds the state delta from the same ordered event stream."""
 
+    var not_run_records: List[NotRunRecord]
+    """Every record `note_not_run_records` has been handed, in call order."""
+
     def __init__(out self, var composite: CompositeReporter[*Self.Rs]):
         """Compose the pack alone, with every lifecycle channel inert.
 
@@ -427,6 +457,7 @@ struct RecordingCoordinator[*Rs: Reporter](ReportCoordinator):
         self.junit = JunitReporter.inert()
         self.annotations = AnnotationsReporter.inert()
         self.state_tracker = _StateTracker.empty()
+        self.not_run_records = List[NotRunRecord]()
 
     def __init__(
         out self,
@@ -450,6 +481,7 @@ struct RecordingCoordinator[*Rs: Reporter](ReportCoordinator):
         self.junit = junit^
         self.annotations = annotations^
         self.state_tracker = _StateTracker.empty()
+        self.not_run_records = List[NotRunRecord]()
 
     def handle(mut self, e: Event):
         """Fan the event to the pack, then to each lifecycle reporter.
@@ -474,6 +506,15 @@ struct RecordingCoordinator[*Rs: Reporter](ReportCoordinator):
             selected_paths: The selected files that must appear in the report.
         """
         self.junit.note_not_run(selected_paths)
+
+    def note_not_run_records(mut self, records: List[NotRunRecord]):
+        """Record the classified not-run records for a test driver to read.
+
+        Args:
+            records: One record per selected file. Copied and stored on
+                `self.not_run_records`.
+        """
+        self.not_run_records = records.copy()
 
     def finalize_junit(
         mut self, built_files: Int, cached_files: Int

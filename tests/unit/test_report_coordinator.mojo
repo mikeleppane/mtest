@@ -15,6 +15,8 @@ from mtest.model import (
     Event,
     EventKind,
     NodeId,
+    NotRunRecord,
+    NotRunReason,
     Outcome,
     Summary,
     TestCounts,
@@ -206,6 +208,39 @@ def test_standard_coordinator_reports_inert_lifecycle_channels() raises:
     assert_false(coord.finalize_junit(0, 0).failed)
     assert_equal(len(coord.annotation_tail()), 0)
     assert_equal(coord.fence_token(), "")
+
+
+def test_standard_coordinator_note_not_run_records_is_a_no_op() raises:
+    # No report-writer sink is wired to these records yet: production accepts
+    # and discards them, and every other coordinator surface stays untouched.
+    var coord = StandardReportCoordinator(
+        _console(),
+        JsonStreamReporter.inert(),
+        JunitReporter.inert(),
+        AnnotationsReporter.inert(),
+    )
+    coord.note_not_run_records(
+        [NotRunRecord("tests/test_gamma.mojo", NotRunReason.LIMIT_REACHED)]
+    )
+    assert_equal(coord.console_output(), "")
+    assert_false(coord.finalize_junit(0, 0).failed)
+
+
+def test_recording_coordinator_records_not_run_records() raises:
+    var coord = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
+    coord.note_not_run_records(
+        [
+            NotRunRecord("tests/test_a.mojo", NotRunReason.LIMIT_REACHED),
+            NotRunRecord("tests/test_b.mojo", NotRunReason.GATE_CASUALTY),
+        ]
+    )
+    assert_equal(len(coord.not_run_records), 2)
+    assert_equal(coord.not_run_records[0].path, "tests/test_a.mojo")
+    assert_true(coord.not_run_records[0].reason == NotRunReason.LIMIT_REACHED)
+    assert_equal(coord.not_run_records[1].path, "tests/test_b.mojo")
+    assert_true(coord.not_run_records[1].reason == NotRunReason.GATE_CASUALTY)
 
 
 def test_recording_coordinator_records_the_whole_stream() raises:

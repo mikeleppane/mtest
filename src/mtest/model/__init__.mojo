@@ -51,6 +51,13 @@ from mtest.model.exit_code import (
     EXIT_INTERNAL_ERROR,
 )
 from mtest.model.slow import SLOW_THRESHOLD_SECONDS, is_slow, slow_step_label
+from mtest.model.not_run import (
+    NotRunFacts,
+    NotRunReason,
+    NotRunRecord,
+    classify_not_run,
+    not_run_reason_label,
+)
 from mtest.model.control_chars import (
     escape_one_line,
     is_c0_control,

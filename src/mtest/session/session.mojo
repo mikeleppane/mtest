@@ -45,10 +45,13 @@ from mtest.discover import discover
 from mtest.exec import ExecRuntime, interrupt_requested
 from mtest.model import (
     Event,
+    NotRunFacts,
+    NotRunRecord,
     Outcome,
     Summary,
     TerminalFacts,
     TestCounts,
+    classify_not_run,
     exit_code_for,
     resolve_exit_code,
 )
@@ -166,6 +169,22 @@ def _warn_cache_off[
         return
     reporter.handle(Event.warning("cache-off", ctx.disable_reason))
     ctx.warned = True
+
+
+def _is_gate_file(gate_files: List[String], path: String) -> Bool:
+    """Whether `path` is one of the run's gate files, by exact match.
+
+    Args:
+        gate_files: The run's gate paths. Not mutated.
+        path: The path to test.
+
+    Returns:
+        True iff `path` equals one entry of `gate_files`.
+    """
+    for gate in gate_files:
+        if gate == path:
+            return True
+    return False
 
 
 @fieldwise_init
@@ -1015,6 +1034,34 @@ def run_session[
     if reporter.stream_failed():
         stream_dead = True
 
+    # Classify why each selected file (gate and run alike, casualty_files by
+    # construction) never produced a tallied verdict -- one record per entry,
+    # including a file that DID run, because a consumer with verdict knowledge
+    # (the report writer's row index) filters rather than this call. Latched
+    # causal facts are checked first, in their causal order: a latched earlier
+    # cause explains the stop even when the exit-code resolver later escalates
+    # for delivery, because these rows answer "why did this file not run"
+    # while `resolve_exit_code` separately answers "can the verdict be
+    # trusted". A dead stream ranks below every latched cause and above the
+    # bare gate-membership heuristic, so a gate file that never ran because the
+    # stream died is a delivery casualty, not a gate casualty, when no gate
+    # actually aborted.
+    var not_run_records = List[NotRunRecord]()
+    for i in range(len(casualty_files)):
+        var path = casualty_files[i]
+        var reason = classify_not_run(
+            NotRunFacts(
+                interrupt_latched=interrupt_latched,
+                internal_error=internal_error,
+                drift=drift,
+                precompile_failed=precompile_failed,
+                gate_abort=gate_abort,
+                stream_dead=stream_dead,
+                is_gate_file=_is_gate_file(disc.gate_files, path),
+            )
+        )
+        not_run_records.append(NotRunRecord(path, reason))
+    reporter.note_not_run_records(not_run_records)
     # Synthesize a `[not-run]` row into the JUnit report for every selected file
     # that never produced a verdict (interrupt/gate-abort/--maxfail casualties),
     # then finalize the report: assemble in node-id order, verify-write the
