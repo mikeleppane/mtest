@@ -26,7 +26,9 @@ The public surface is re-exported here so callers write
 from mtest.platform.exec_replace import exec_replace
 from mtest.platform.executable import is_executable_file, resolve_executable
 from mtest.platform.fs import (
+    default_file_mode,
     prepare_directory_for_rename,
+    publish_new_file,
     rename_path,
     set_permissions,
 )

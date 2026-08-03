@@ -51,6 +51,7 @@ mtest collect [PATHS...] [flags]                    # list node ids, one per lin
 mtest config show [PATHS...] [flags]                # render resolved configuration
 mtest doctor [--config PATH | --no-config] [--color WHEN] [-q | -v]
 mtest debug PATH::TEST [build flags] [-- BUILD-ARGS...]  # hand over the terminal
+mtest new PATH                                      # scaffold one test file
 mtest version
 mtest --help | mtest help
 ```
@@ -59,7 +60,8 @@ mtest --help | mtest help
 that is not a known subcommand is treated as a path or flag for `run`.
 `config show` is the sole two-token subcommand. `debug` is the only one that
 does not end by reporting: it prepares a single test and then replaces the
-mtest process with it (§28).
+mtest process with it (§28). `new` is the only one that writes a source file
+rather than reading one (§29).
 
 ---
 
@@ -104,6 +106,9 @@ single **invocation root**. In v1 the root is the **current working directory**.
 ---
 
 ## 4. Subcommands and flag applicability
+
+`new` is absent from the table below because there is nothing to tabulate: it
+accepts no flag at all except `-h`/`--help` (§29).
 
 | Flag | `run` | `collect` | `doctor` | `debug` |
 |------|:-----:|:---------:|:--------:|:-------:|
@@ -183,6 +188,14 @@ controls shown in the table. A path operand, passthrough token, or any other
 run, build, selection, state, or reporter flag is an argv applicability error
 (exit 4). Malformed values, unknown flags, `-q` with `-v`, and `--config` with
 `--no-config` retain their ordinary usage refusals.
+
+`new` is narrower still, and for a different reason: it discovers nothing,
+builds nothing, and runs nothing, so no flag has anything to act on. It takes
+exactly one `PATH` operand and, beside it, only `-h`/`--help`. Every other
+token — a second operand, a passthrough `--`, or any flag, the configuration
+controls included — is an applicability error (exit 4). It reads no project
+configuration at all, so a malformed `mtest.toml` neither changes nor prevents
+the file it writes (§29).
 
 ---
 
@@ -1790,8 +1803,8 @@ above — it only reports which of those surfaces are wired up yet.
 `-s`/`--show-output`,
 `--durations`, `-q`/`-v`, `--color`, `--format`,
 `-h`/`--help`, `--version`, and the `run`, `collect`, `config show`, `doctor`,
-`debug`, `version`, and `help` subcommands (`--collect-only` too, as an alias
-that behaves as `collect`).
+`debug`, `new`, `version`, and `help` subcommands (`--collect-only` too, as an
+alias that behaves as `collect`).
 `--shard` applies under both `run` and `collect`. `--json` (the machine event
 stream, §15.4), `--junit-xml` (the JUnit report, §15.2), and `--gh-annotations`
 (the CI annotation tail, §15.3) are served too — see §24.2 for how they are now
@@ -1803,7 +1816,8 @@ store described in §8.5, which this build reads and writes by default.
 Every flag and subcommand in the frozen contract above is now served: nothing is
 refused for being unavailable. For `run` and `collect`, exit 4 therefore covers
 exactly the frozen §9 causes. `Config show` and `doctor` use the applicability
-rules and command-specific exit domains in §27; `debug` uses §28's.
+rules and command-specific exit domains in §27; `debug` uses §28's and `new`
+uses §29's.
 
 ### 24.2 Run and collect exit codes reachable in this build
 
@@ -1874,6 +1888,13 @@ runtime restoration; and 1 for a compile error or a probe that crashed, timed
 out, overflowed its capture, or did not read as a collection listing. Once the
 handoff happens mtest is gone, so the process's exit status is the binary's own
 statement and no code in this section applies to it.
+
+**`new` reachability.** `mtest new PATH` is served (§29). Its whole exit domain
+is `{0, 3, 4}`: 0 with `created PATH` on stdout, 4 for a target carrying `::`,
+a target that is not Mojo source, a basename no directory walk would collect, a
+target that already exists, or anything in argv but one operand and
+`-h`/`--help`, and 3 for a filesystem failure while creating the directories or
+the file. There is no other code, because nothing is discovered, built, or run.
 
 **`--format` reachability.** `--format lines|json` is served under `collect`
 (§16): `lines` is the default and leaves the listing byte-identical to a run
@@ -2317,3 +2338,63 @@ arriving between the first restored disposition and the exec follows the
 restored disposition rather than being guaranteed a `debug` exit code. The
 window is the price of handing over a process whose signal state is the default
 one.
+
+---
+
+## 29. Scaffolding one test file
+
+`mtest new PATH` writes a single runnable test file and stops. It is the one
+subcommand that produces source rather than consuming it, and it exists because
+the shape of a Mojo test file is not guessable: `test_*` functions are only half
+of it, and a file without the `main()` that hands them to `TestSuite` builds
+into a program that runs nothing (§6).
+
+**Grammar.** Exactly one `PATH` operand, plus `-h`/`--help` and nothing else
+(§4). No configuration is read, no toolchain is resolved, and no file is
+discovered, built, or run. `PATH` is not root-constrained — it names a file to
+create rather than a test to select, so the §2 rule for operands does not
+apply to it, exactly as it does not apply to a report destination (§15.2).
+
+**What it writes.** A file whose basename a directory walk would collect
+(§5) — so `test_*.mojo`, and any other spelling is refused rather than written
+somewhere the runner will never look again. A `PATH` containing `::` is refused
+for the same reason from the other direction: `::` separates a path from a test
+name (§5), so a file created under such a name is one mtest could never be
+pointed at afterwards. Missing parent directories are created. The file is
+created with the permissions any other tool would give it — `0666` minus the
+process umask — not the private mode a temporary file carries.
+
+The file's subject is its own basename with the `test_` prefix and the `.mojo`
+suffix removed, so `tests/test_math.mojo` is a file of tests for `math`. That
+name is escaped for the docstring it lands in, so every legal basename yields a
+file that compiles. It carries a module docstring, the `std.testing` import,
+one passing example test, and the `main()` that discovers and runs them, and it
+passes as written:
+
+```console
+$ mtest new tests/test_math.mojo
+created tests/test_math.mojo
+$ mtest tests/test_math.mojo; echo "EXIT=$?"
+...
+EXIT=0
+```
+
+**Scaffold targets are never overwritten.** An existing target is refused, and
+that refusal is a property of the filesystem rather than of a check: the file
+is written under a temporary name in the target's own directory and published
+with a hard link, which fails when the destination name is taken. A file
+created by anything else between the decision and the publication is therefore
+refused too, and its bytes are left exactly as they were. No path through this
+subcommand opens, truncates, appends to, or renames onto an existing file.
+
+**Exit codes.**
+
+| Code | Cause |
+|------|-------|
+| 0 | the file was created; `created PATH` is written to stdout |
+| 4 | a target containing `::`, a target that does not end in `.mojo`, a basename no directory walk would collect, a target that already exists, or anything in argv beyond one operand and `-h`/`--help` |
+| 3 | a filesystem failure: the parent directories could not be created, or the file could not be written or published |
+
+Nothing else is reachable. Every diagnostic goes to stderr and the success line
+goes to stdout (§19), and the diagnostics themselves are informal text (§20) —
+the exit code and the file's presence are what this section freezes.

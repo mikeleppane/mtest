@@ -1,16 +1,23 @@
 """Atomic filesystem promotion and narrow permission operations.
 
 Part of the narrow platform-I/O boundary. `rename_path` lets publishers replace
-a file indivisibly. `set_permissions` supports explicit mode changes, while
-`prepare_directory_for_rename` makes an identity-checked damaged cache
-directory movable on Darwin without following substituted symlinks.
+a file indivisibly, and `publish_new_file` is its opposite number: a
+publication that can only ever create, never replace. `set_permissions`
+supports explicit mode changes, while `prepare_directory_for_rename` makes an
+identity-checked damaged cache directory movable on Darwin without following
+substituted symlinks.
 
 The pinned standard library does not expose these operations with the required
-semantics. Their foreign calls stay proven and centralized here instead of
-being redeclared in session or tests.
+semantics. Its `link` wrapper is the closest, and it is not close enough: it
+folds every failure into one message whose only distinguishing mark is
+`strerror` prose, so a caller cannot tell "the destination already exists" —
+the answer a never-overwrite publication is entirely about — from a full disk
+without matching on locale-dependent text. Their foreign calls stay proven and
+centralized here instead of being redeclared in session or tests.
 """
 from std.ffi import external_call
 from std.memory import alloc, memset_zero
+from std.os import remove
 from std.os.path import realpath
 from std.sys.info import CompilationTarget
 
@@ -19,6 +26,14 @@ from mtest.platform.stream import close_fd, errno_now
 
 
 comptime _EINTR = 4
+comptime _EEXIST = 17
+"""`EEXIST`, identical on Linux and Darwin: the destination name is taken."""
+comptime _EPERM = 1
+comptime _EXDEV = 18
+comptime _EOPNOTSUPP = 45 if CompilationTarget.is_macos() else 95
+"""`EOPNOTSUPP`, which unlike the three above is not the same number on both."""
+comptime _CREATE_MODE = 0o666
+"""The mode `open(2)` is given for a new ordinary file, before the umask."""
 comptime _STAT_BYTES = 144
 comptime _S_IFMT = 0o170000
 comptime _S_IFDIR = 0o40000
@@ -69,6 +84,69 @@ def set_permissions(path: String, mode: Int) raises:
         raise Error(
             "platform: chmod failed for '" + path + "' to mode " + String(mode)
         )
+
+
+def _replace_umask(mask: Int) -> Int:
+    """Install `mask` as the process file-creation mask and return the old one.
+
+    Args:
+        mask: The permission bits to withhold from newly created files.
+
+    Returns:
+        The mask that was in effect. Allocates nothing and cannot fail —
+        `umask(2)` has no error return.
+    """
+    comptime if CompilationTarget.is_macos():
+        # SAFETY: Darwin libc `umask` has the exact fixed ABI
+        # `mode_t umask(mode_t)`, with `mode_t` a UInt16, and the caller's
+        # permission-only value fits it exactly. There is no pointer to
+        # provide, alias, or retain, nothing is allocated on either side, and
+        # the call cannot fail. The one effect is process-global: the
+        # file-creation mask is replaced, which every caller here restores on
+        # the next line, and mtest is single-threaded at both call sites, so
+        # no concurrent creation can observe the intermediate mask.
+        return Int(external_call["umask", UInt16](UInt16(mask)))
+    else:
+        # SAFETY: Linux libc `umask` has the exact fixed ABI
+        # `mode_t umask(mode_t)`, with `mode_t` a UInt32, and the caller's
+        # permission-only value fits it exactly. There is no pointer to
+        # provide, alias, or retain, nothing is allocated on either side, and
+        # the call cannot fail. The one effect is process-global: the
+        # file-creation mask is replaced, which every caller here restores on
+        # the next line, and mtest is single-threaded at both call sites, so
+        # no concurrent creation can observe the intermediate mask.
+        return Int(external_call["umask", UInt32](UInt32(mask)))
+
+
+def default_file_mode() -> Int:
+    """The permission bits an ordinary new file would get from this process.
+
+    A file created through `mkstemp(3)` is `0600` by contract, which is the
+    right mode for a temporary and the wrong one for source code a person is
+    about to edit and commit. This answers what any other tool would have
+    produced instead: the `0666` an `open(2)` asks for, minus the process
+    umask.
+
+    `umask(2)` can only be read by replacing it, so this installs a mask and
+    puts the old one straight back. That is safe here and only here: mtest
+    creates no file from another thread, and both callers of this run before
+    any concurrent work exists.
+
+    Returns:
+        The permission bits, `0600` at worst. Allocates nothing, cannot fail,
+        and leaves the process umask exactly as it found it.
+
+    Examples:
+
+    ```mojo
+    from mtest.platform import default_file_mode, set_permissions
+
+    set_permissions("draft.txt", default_file_mode())  # 0644 under umask 022
+    ```
+    """
+    var previous = _replace_umask(0)
+    _ = _replace_umask(previous)
+    return _CREATE_MODE & ~previous
 
 
 def prepare_directory_for_rename(
@@ -283,3 +361,117 @@ def rename_path(src: String, dst: String) raises:
     _ = d^
     if rc != 0:
         raise Error("platform: rename failed: '" + src + "' -> '" + dst + "'")
+
+
+def _link_failure_cause(err: Int) -> String:
+    """Name what a failing `link(2)` errno means, when the name is actionable.
+
+    Args:
+        err: The errno the failed `link(2)` reported.
+
+    Returns:
+        A clause to append to the failure message, or an empty string when the
+        errno speaks for itself.
+    """
+    if err == _EPERM or err == _EOPNOTSUPP:
+        return (
+            "; this filesystem does not support hard links, so a file cannot"
+            " be published here without replacing what is already there"
+        )
+    if err == _EXDEV:
+        return "; the two paths are on different filesystems"
+    return String("")
+
+
+def publish_new_file(temp_path: String, dst: String) raises -> Bool:
+    """Publish `temp_path` at `dst` without ever replacing what is there.
+
+    `link(2)` is what makes that a promise rather than an intention: it fails
+    with `EEXIST` when `dst` already names something, so the refusal is decided
+    by the filesystem in the same indivisible step that would have created the
+    file. A check-then-`rename_path` cannot say the same, because `rename`
+    replaces its destination and a file created between the check and the
+    rename would be destroyed by it.
+
+    Both paths must live on the same filesystem; callers derive `temp_path`
+    from `dst`'s own directory, so they always share one.
+
+    The published file keeps the temporary's permission bits, because both
+    names share one inode; a caller that wants a mode other than the one its
+    temporary carries has to set it before publishing, not after.
+
+    Args:
+        temp_path: An existing file, in `dst`'s directory, whose bytes are
+            published. Its removal is ATTEMPTED once the link succeeds; on
+            every other path, and on a removal that itself fails, the
+            temporary is left for the caller's own cleanup to retire.
+        dst: The path to create. Never opened, truncated, or modified when it
+            already exists.
+
+    Returns:
+        True when `dst` was created, False when it already existed and nothing
+        was written. Allocates only the two transient path copies.
+
+    Raises:
+        Error: If the link failed for any reason other than an occupied
+            destination — naming the errno, and what it means where that is
+            actionable — or if the temporary could not be removed after a
+            successful link. In that last case `dst` exists and is complete;
+            only the temporary beside it is left over, and the message names
+            both paths so the caller can say which is which.
+    """
+    var s = c_string_bytes(temp_path)
+    var d = c_string_bytes(dst)
+    # SAFETY: libc `link` has the exact fixed ABI
+    # `int link(const char*, const char*)` on both supported targets, so this
+    # one declaration matches each of them, and it is the only declaration of
+    # `link` in this repository's Mojo sources. `s` and `d` point at complete,
+    # fully initialized, NUL-terminated byte copies this frame uniquely owns —
+    # `c_string_bytes` allocates them here and nothing else references them —
+    # so provenance is local and neither buffer aliases the other. Both are
+    # still live locals at the call and are consumed only after it returns,
+    # which keeps the pointers valid for the whole synchronous call. Neither
+    # escapes: `link` reads the two path strings, writes through neither, and
+    # retains no pointer past its return. Every byte read is inside the
+    # terminated region. The callee allocates nothing for this frame to free,
+    # and creates a directory entry only on success, so there is no partial
+    # state to unwind — on both paths the only cleanup is releasing the two
+    # lists, which Mojo does where they are consumed below. The result is a
+    # plain scalar status.
+    var rc = external_call["link", Int32](s.unsafe_ptr(), d.unsafe_ptr())
+    # Read `errno` while the failed `link` is still the last call: releasing
+    # the two lists below could overwrite the slot.
+    var err = errno_now() if rc != 0 else 0
+    _ = s^
+    _ = d^
+    if rc != 0:
+        if err == _EEXIST:
+            return False
+        raise Error(
+            "platform: link failed: '"
+            + temp_path
+            + "' -> '"
+            + dst
+            + "' (errno "
+            + String(err)
+            + ")"
+            + _link_failure_cause(err)
+        )
+    # The bytes now live under both names, so the temporary one is the only
+    # thing left to retire. A failure here is reported rather than swallowed:
+    # the publication succeeded, and the caller is owed the fact that a stray
+    # file was left beside its new one. It is left where it is rather than
+    # retried, because the caller's own cleanup already owns exactly that
+    # path on every other failure.
+    try:
+        remove(temp_path)
+    except e:
+        raise Error(
+            "platform: published '"
+            + dst
+            + "' but could not remove the temporary '"
+            + temp_path
+            + "': "
+            + String(e)
+        )
+    return True

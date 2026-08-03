@@ -794,6 +794,12 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "path: a long-but-legal path builds, never a false COMPILE-ERROR",
     "flaky: --fail-on-flaky turns a FLAKY-only run's 0 into 1",
     "debug: the handoff is the test's own exit, with no mtest verdict",
+    "new: scaffolds a discoverable file",
+    "new: refuses to overwrite -> 4",
+    "new: non-discoverable name -> 4",
+    "new: node-id-shaped path -> 4",
+    "new: the scaffolded file runs green",
+    "new: a hostile basename still compiles and passes",
     "interrupt: SIGINT frees the owned process group",
 )
 """Every check `main` must perform, in order, on an unfiltered run.
@@ -1793,6 +1799,156 @@ class Runner:
         else:
             self.record(PASS, name, ref)
 
+    # -- new (§29). Each of these builds its OWN directory, never `tests/`,
+    #    whose node-id set `EXPECTED_TESTS` pins exactly. Independent setup is
+    #    the point: an earlier version chained them, and `-k 'refuses to
+    #    overwrite'` then passed by creating the file it meant to find already
+    #    there, which is the failure mode a filtered run exists to expose.
+    def _new_dir(self, name: str) -> Path:
+        """A fresh, empty directory under the scaffold for one `new` check."""
+        directory = self.root / name
+        if directory.exists():
+            shutil.rmtree(directory)
+        directory.mkdir()
+        return directory
+
+    def check_new_creates(self) -> None:
+        """Assert `mtest new` writes the file and says so, into an empty dir."""
+        ref = "§29 new PATH creates one discoverable file, exit 0 on stdout"
+        name = "new: scaffolds a discoverable file"
+        directory = self._new_dir("new_ok")
+        r = self.mtest(["new", "new_ok/test_scaffolded.mojo"])
+        probs: list[str] = []
+        if r.returncode != 0:
+            probs.append(f"exit {r.returncode}, want 0")
+        if r.stdout != "created new_ok/test_scaffolded.mojo\n":
+            probs.append(f"stdout is not the frozen success line: {r.stdout!r}")
+        if r.stderr:
+            probs.append(f"a successful scaffold wrote diagnostics: {r.stderr!r}")
+        written = sorted(p.name for p in directory.iterdir())
+        if written != ["test_scaffolded.mojo"]:
+            probs.append(f"the publication left litter beside the file: {written}")
+        else:
+            mode = directory.joinpath("test_scaffolded.mojo").stat().st_mode & 0o777
+            if mode & 0o044 == 0:
+                probs.append(
+                    f"the file carries mkstemp's private mode {mode:#o}, not the "
+                    "umask-derived one an editor would have produced"
+                )
+        self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
+
+    def check_new_refuses_to_overwrite(self) -> None:
+        """Assert an occupied target is refused with its bytes untouched.
+
+        The exit code alone would pass against an implementation that
+        truncated the file and then failed, so the surviving content and the
+        absence of a leftover temporary are asserted beside it.
+        """
+        ref = "§29 an existing target is refused (4), never modified"
+        name = "new: refuses to overwrite -> 4"
+        directory = self._new_dir("new_taken")
+        target = directory / "test_taken.mojo"
+        mine = "# hand-written, and not to be replaced\n"
+        target.write_text(mine)
+        r = self.mtest(["new", "new_taken/test_taken.mojo"])
+        probs: list[str] = []
+        if r.returncode != 4:
+            probs.append(f"exit {r.returncode}, want 4")
+        if "refusing to overwrite" not in r.stderr:
+            probs.append(f"the refusal does not name itself: {r.stderr!r}")
+        if r.stdout:
+            probs.append(f"a refused scaffold wrote to stdout: {r.stdout!r}")
+        if target.read_text() != mine:
+            probs.append(f"the target's bytes changed: {target.read_text()!r}")
+        left = sorted(p.name for p in directory.iterdir())
+        if left != ["test_taken.mojo"]:
+            probs.append(f"the refusal left a temporary behind: {left}")
+        self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
+
+    def check_new_refuses_unusable_names(self) -> None:
+        """Assert the two name refusals, each against an untouched directory.
+
+        A basename no walk would collect, and a path carrying `::`, which the
+        node-id grammar reserves — mtest would be unable to address the file
+        afterwards, so it declines to create it in the first place.
+        """
+        cases = [
+            (
+                "new: non-discoverable name -> 4",
+                "§5,§29 a scaffold must be a file a directory walk collects",
+                "new_bad/helper.mojo",
+                "test_*.mojo",
+            ),
+            (
+                "new: node-id-shaped path -> 4",
+                "§5,§29 `::` is the node-id separator and cannot name a path",
+                "new_colon/test_a::b.mojo",
+                "contains '::'",
+            ),
+        ]
+        for name, ref, operand, wanted_text in cases:
+            directory = self.root / operand.split("/")[0]
+            if directory.exists():
+                shutil.rmtree(directory)
+            r = self.mtest(["new", operand])
+            probs: list[str] = []
+            if r.returncode != 4:
+                probs.append(f"exit {r.returncode}, want 4")
+            if wanted_text not in r.stderr:
+                probs.append(f"the refusal does not say {wanted_text!r}: {r.stderr!r}")
+            if directory.exists():
+                probs.append(
+                    "the refusal created the parent directory of a file it "
+                    "declined to write"
+                )
+            self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
+
+    def check_new_scaffold_runs(self) -> None:
+        """Assert the file `mtest new` wrote actually compiles and passes.
+
+        The exit-code checks above prove the refusals; this proves the point.
+        A scaffold a reader has to repair before it runs is worse than no
+        scaffold at all, and nothing about its exit code would say so — only
+        building and running the bytes it wrote can. The second half runs the
+        same gauntlet through a basename carrying the two characters that end
+        a Mojo string literal, because the stem is interpolated into the
+        file's own docstring: unescaped, `new` reports success and emits a
+        file that does not compile.
+        """
+        ref = "§29 the scaffolded file is runnable as written, any legal name"
+        halves = [
+            ("new: the scaffolded file runs green", "new_run", "test_scaffolded.mojo"),
+            (
+                "new: a hostile basename still compiles and passes",
+                "new_hostile",
+                'test_a"""b\\.mojo',
+            ),
+        ]
+        for name, directory_name, basename in halves:
+            directory = self._new_dir(directory_name)
+            operand = f"{directory_name}/{basename}"
+            probs: list[str] = []
+            created = self.mtest(["new", operand])
+            if created.returncode != 0:
+                probs.append(f"new exited {created.returncode}: {created.stderr!r}")
+            elif not (directory / basename).is_file():
+                probs.append("new reported success but wrote no file")
+            else:
+                try:
+                    r = self.mtest([operand])
+                except subprocess.TimeoutExpired:
+                    probs.append("timed out running the scaffolded file")
+                    r = None
+                if r is not None:
+                    if r.returncode != 0:
+                        probs.append(f"exit {r.returncode}, want 0")
+                    if "1 passed" not in r.stdout:
+                        probs.append(
+                            f"the summary does not report the one scaffolded "
+                            f"test: {r.stdout!r}{r.stderr!r}"
+                        )
+            self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
+
     # -- interrupt: signal ONLY mtest, so the child's survival tests mtest's own
     #    process-group teardown (§18/§24.2) rather than a signal the child caught.
     def check_interrupt(self, strict: bool) -> None:
@@ -2392,6 +2548,18 @@ def main() -> int:
             runner.check_fail_on_flaky()
         if wanted("debug: the handoff is the test's own exit, with no mtest verdict"):
             runner.check_debug_handoff()
+        if wanted("new: scaffolds a discoverable file"):
+            runner.check_new_creates()
+        if wanted("new: refuses to overwrite -> 4"):
+            runner.check_new_refuses_to_overwrite()
+        if wanted("new: non-discoverable name -> 4") or wanted(
+            "new: node-id-shaped path -> 4"
+        ):
+            runner.check_new_refuses_unusable_names()
+        if wanted("new: the scaffolded file runs green") or wanted(
+            "new: a hostile basename still compiles and passes"
+        ):
+            runner.check_new_scaffold_runs()
         if wanted("interrupt: SIGINT frees the owned process group"):
             if args.no_interrupt:
                 # Recorded rather than bypassed: testing --no-interrupt BEFORE

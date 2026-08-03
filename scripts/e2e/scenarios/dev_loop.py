@@ -11,12 +11,18 @@ the run's wall clock and its build-cache counters, which the contract excludes
 from byte identity, so two console outputs of the identical run differ for
 reasons that have nothing to do with ordering.
 
-`debug` is the other one, and its claim is about what is left of mtest after it
+`debug` is the second, and its claim is about what is left of mtest after it
 hands a terminal to a single test: the exit status has to be the test's own,
 nothing may dress a handed-over zero up as an mtest verdict, and the process
 the test wakes up in has to be a clean one. All three are black-box facts about
 a finished process, so all three are asserted from out here rather than from
 inside the runner.
+
+`new` is the third, and its claim is about a file rather than a process: the
+bytes it scaffolds have to compile and pass, and a second scaffold has to leave
+an existing file exactly as it found it. Only building and running the real
+output settles the first, and only putting known content in the way settles the
+second.
 """
 
 from __future__ import annotations
@@ -503,20 +509,62 @@ def _fill_pipe(write_fd: int) -> int:
     return written
 
 
-def s_debug_interrupt_before_handoff(context: ScenarioContext) -> str:
-    """An interrupt latched before the exec is answered by mtest, not the test.
+def _await_blocked_pipe_write(pid: int) -> bool:
+    """Wait until the kernel reports `pid` asleep inside a pipe write.
 
-    The window is real and was reachable: the two marker lines are written
-    before the handoff, and a reader that has stopped reading blocks that write
-    for as long as it likes. An interrupt arriving then used to be carried
-    straight through the exec, and the process exited with whatever the test
-    binary went on to return — a SIGINT answered with a green run.
+    This is the barrier the scenario below needs and the ready marker could
+    never be: the marker says the probe actor finished, which is several steps
+    short of mtest reaching the write the scenario is trying to interrupt. On
+    Linux the kernel answers the real question directly — `/proc/<pid>/wchan`
+    names the function the task is sleeping in, and mtest's only pipe is the
+    stdout the caller deliberately filled, so `pipe_write` is unambiguous.
 
-    The pipe is filled to capacity before mtest is spawned, so its marker write
-    is guaranteed to block; the actor's own ready marker says the probe has
-    finished, so the SIGINT is guaranteed to land after the preparation. Then
-    the pipe is drained, which releases the write, and mtest samples the latch
-    it was holding.
+    Args:
+        pid: The mtest process to observe.
+
+    Returns:
+        True once the process is observed blocked in a pipe write. False when
+        the kernel cannot be asked — no `/proc`, or a `hidepid` mount — which
+        leaves the caller to fall back on its own retry budget rather than
+        reporting a failure it has no evidence for.
+    """
+    wchan = Path(f"/proc/{pid}/wchan")
+    if not wchan.exists():
+        return False
+    limit = time.monotonic() + BARRIER_DEADLINE
+    while time.monotonic() < limit:
+        try:
+            state = wchan.read_text()
+        except OSError:
+            return False
+        # `anon_pipe_write` on current kernels, `pipe_write` on older ones.
+        if "pipe_write" in state:
+            return True
+        time.sleep(0.002)
+    return False
+
+
+INTERRUPT_GRACES = (0.0, 0.02, 0.1, 0.5, 2.0, 5.0)
+"""Delays tried in turn where the kernel barrier above is unavailable.
+
+Only reached on a platform without a readable `/proc`. Each entry is one whole
+attempt, and every attempt still asserts the property that must always hold, so
+the budget buys coverage of the write window rather than permission to fail.
+"""
+
+
+def _interrupt_before_handoff(
+    context: ScenarioContext, grace: float
+) -> tuple[int, str]:
+    """Interrupt one `debug` run while its marker write is blocked.
+
+    Args:
+        context: The scenario context supplying the binary under test.
+        grace: Seconds to wait after the probe marker before signalling, used
+            only when `_await_blocked_pipe_write` could not answer.
+
+    Returns:
+        The run's exit code, and everything it wrote to stdout past the filler.
     """
     with tempfile.TemporaryDirectory(prefix="mtest-debug-int-") as raw:
         project = Path(raw)
@@ -544,6 +592,8 @@ def s_debug_interrupt_before_handoff(context: ScenarioContext) -> str:
         os.close(write_fd)
         try:
             _await_marker(ready, "the --skip-all probe")
+            if not _await_blocked_pipe_write(process.pid):
+                time.sleep(grace)
             os.kill(process.pid, signal.SIGINT)
             captured = b""
             while True:
@@ -558,23 +608,50 @@ def s_debug_interrupt_before_handoff(context: ScenarioContext) -> str:
                 process.kill()
                 process.wait()
         text = captured[filler:].decode("utf-8", errors="replace")
+    return code, text
 
-    expect(
-        code == 2,
-        f"an interrupt before the handoff exited {code}, want 2; mtest handed "
-        f"the terminal over while holding a latched SIGINT\n{text!r}",
+
+def s_debug_interrupt_before_handoff(context: ScenarioContext) -> str:
+    """An interrupt latched before the exec is answered by mtest, not the test.
+
+    The window is real and was reachable: the two marker lines are written
+    before the handoff, and a reader that has stopped reading blocks that write
+    for as long as it likes. An interrupt arriving then used to be carried
+    straight through the exec, and the process exited with whatever the test
+    binary went on to return — a SIGINT answered with a green run.
+
+    The pipe is filled to capacity before mtest is spawned, so its marker write
+    is guaranteed to block, and the SIGINT is sent only once the kernel says
+    mtest is sleeping in that write. Waiting on the actor's ready marker alone
+    was not enough and was not a rare miss: the marker says the probe finished,
+    which is several steps before the write, so on a single CPU the signal won
+    the race every time and the scenario reported that it had proved nothing.
+    A platform whose kernel cannot be asked falls back to a retry budget, and
+    the properties that must always hold — an exit of two, and no output from
+    the test binary — are asserted on every attempt either way.
+    """
+    for attempt, grace in enumerate(INTERRUPT_GRACES, start=1):
+        code, text = _interrupt_before_handoff(context, grace)
+        expect(
+            code == 2,
+            f"an interrupt before the handoff exited {code}, want 2; mtest "
+            f"handed the terminal over while holding a latched SIGINT\n{text!r}",
+        )
+        expect(
+            "tests run:" not in text,
+            f"the test binary ran anyway, so the exec happened despite the "
+            f"latched interrupt: {text!r}",
+        )
+        if "build: " in text and "run: " in text:
+            return (
+                "SIGINT during the blocked marker write -> exit 2, no handoff "
+                f"(attempt {attempt} of {len(INTERRUPT_GRACES)})"
+            )
+    raise ScenarioError(
+        "every attempt interrupted mtest before it reached the marker write, "
+        "so the handoff window went untested; the kernel barrier is "
+        "unavailable here and the retry budget was not enough"
     )
-    expect(
-        "build: " in text and "run: " in text,
-        f"the interrupt landed before the marker write, so this run proves "
-        f"nothing about the handoff window: {text!r}",
-    )
-    expect(
-        "tests run:" not in text,
-        f"the test binary ran anyway, so the exec happened despite the "
-        f"latched interrupt: {text!r}",
-    )
-    return "SIGINT during the blocked marker write -> exit 2, no handoff"
 
 
 def s_debug_default_sigpipe(context: ScenarioContext) -> str:
@@ -696,3 +773,121 @@ def s_debug_inactive_config(context: ScenarioContext) -> str:
             f"{malformed.stderr!r}",
         )
     return "no report written, lastrun untouched, malformed document still 4"
+
+
+def s_new_then_run(context: ScenarioContext) -> str:
+    """The scaffolded file runs green, and a second scaffold never replaces it.
+
+    The deliverable is not the exit code of `mtest new`; it is that the bytes
+    it wrote are a test file the real toolchain compiles and the real runner
+    passes. So the scenario runs them, in a throwaway root, rather than
+    comparing them with a copy of the template.
+
+    The second half is the never-overwrite promise, asserted the only way that
+    means anything: the target is replaced with hand-written content, the
+    scaffold is asked for again, and the refusal is checked together with the
+    bytes still being exactly what was put there. The last half runs the same
+    build through a basename carrying the characters that would end the
+    docstring the name is interpolated into, and pins the two refusals that
+    exist so no file is created that mtest could not address afterwards.
+    """
+    with tempfile.TemporaryDirectory(prefix="mtest-new-") as raw:
+        project = Path(raw)
+        runner = E2ERunner(
+            repo_root=project,
+            mtest=context.runner.mtest,
+            default_timeout=context.runner.default_timeout,
+            short_timeout=context.runner.short_timeout,
+        )
+        created = runner.run_mtest(["new", "tests/nested/test_scaffolded.mojo"])
+        expect_exit(created, 0)
+        expect(
+            created.stdout == "created tests/nested/test_scaffolded.mojo\n",
+            f"the success line is not the contract's: {created.stdout!r}",
+        )
+        expect(
+            created.stderr == "",
+            f"a successful scaffold wrote diagnostics: {created.stderr!r}",
+        )
+
+        scaffolded = project / "tests" / "nested" / "test_scaffolded.mojo"
+        expect(
+            scaffolded.is_file(),
+            "the scaffolded file is missing, so the parent directories were "
+            "never created",
+        )
+        mode = scaffolded.stat().st_mode & 0o777
+        expect(
+            mode & 0o044 != 0,
+            f"the scaffolded file carries the private mode {mode:#o} a "
+            "temporary file is created with, not the umask-derived one an "
+            "editor would have produced",
+        )
+        siblings = sorted(p.name for p in scaffolded.parent.iterdir())
+        expect(
+            siblings == ["test_scaffolded.mojo"],
+            f"the publication left something beside the file it created: {siblings}",
+        )
+
+        ran = runner.run_mtest(["tests/nested/test_scaffolded.mojo"])
+        expect_exit(ran, 0)
+        expect(
+            "1 passed" in ran.stdout,
+            f"the scaffolded file did not run as one passing test: {ran.stdout!r}",
+        )
+
+        mine = "# hand-written, and not to be replaced\n"
+        scaffolded.write_text(mine, encoding="utf-8")
+        refused = runner.run_mtest(["new", "tests/nested/test_scaffolded.mojo"])
+        expect_exit(refused, 4)
+        expect(
+            "refusing to overwrite" in refused.stderr,
+            f"the refusal does not say what it refused: {refused.stderr!r}",
+        )
+        expect(
+            refused.stdout == "",
+            f"a refused scaffold wrote to stdout: {refused.stdout!r}",
+        )
+        expect(
+            scaffolded.read_text(encoding="utf-8") == mine,
+            "the refused scaffold overwrote the file it refused to overwrite: "
+            f"{scaffolded.read_text(encoding='utf-8')!r}",
+        )
+        leftovers = sorted(p.name for p in scaffolded.parent.iterdir())
+        expect(
+            leftovers == ["test_scaffolded.mojo"],
+            f"the refusal left a temporary file behind: {leftovers}",
+        )
+
+        # The stem is interpolated into the scaffolded file's own docstring, so
+        # a basename carrying the two characters that end a Mojo string
+        # literal is the case where `new` can report success and leave behind
+        # something that does not compile. Only building it settles that.
+        hostile = 'test_a"""b\\.mojo'
+        made = runner.run_mtest(["new", hostile])
+        expect_exit(made, 0)
+        hostile_run = runner.run_mtest([hostile])
+        expect_exit(hostile_run, 0)
+        expect(
+            "1 passed" in hostile_run.stdout,
+            f"a hostile basename scaffolded a file that does not run: "
+            f"{hostile_run.stdout!r}{hostile_run.stderr!r}",
+        )
+
+        # `::` is the node-id separator, so a file created under it is one
+        # mtest could never be pointed at again; it is refused before the
+        # directory is created rather than written and then unreachable.
+        colon = runner.run_mtest(["new", "colon/test_a::b.mojo"])
+        expect_exit(colon, 4)
+        expect(
+            "contains '::'" in colon.stderr,
+            f"the node-id refusal does not name its cause: {colon.stderr!r}",
+        )
+        expect(
+            not (project / "colon").exists(),
+            "the refusal created the parent directory of a file it declined to write",
+        )
+    return (
+        "scaffold ran green (hostile basename included); a second scaffold "
+        "refused and changed nothing"
+    )

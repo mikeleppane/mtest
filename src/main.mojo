@@ -3,16 +3,20 @@
 `main` is the only place that reads the process argv and environment, talks to
 the terminal, and calls `exit`. It parses argv and resolves project config.
 `doctor` runs its contained environment checks before main acquires the
-invocation root or exec runtime. A `config show` request renders its resolution
+invocation root or exec runtime. `new` scaffolds one test file just after the
+root and before any configuration is read, because nothing in a project file
+can change which file it writes. A `config show` request renders its resolution
 and exits before state loading or run resources. Otherwise main loads last-run
 state, constructs the exec runtime, resolves report destinations, composes
 reporters into the `StandardReportCoordinator` interface the session drives,
 runs the session, closes every resource, conditionally promotes the next state
 file, and exits with the session's resolved code.
 
-Five output classes bypass the event seam by design: pre-session diagnostics
-go straight to stderr; `config show` writes its resolution-only TOML directly
-to stdout; doctor writes its fixed check lines directly to stdout;
+Several output classes bypass the event seam by design, all of them from
+commands that never open a session: pre-session diagnostics go straight to
+stderr; `config show` writes its resolution-only TOML directly to stdout;
+doctor writes its fixed check lines directly to stdout; `new` writes its
+`created <path>` line directly to stdout and its refusals to stderr;
 `--collect-only` writes its frozen node-id listing — plain lines, or the
 NDJSON collect stream under `--format json` — directly to stdout; and a
 post-close state-write failure goes to stderr after the terminal event already
@@ -40,6 +44,7 @@ from mtest.cli import (
     help_text,
     parse_args,
     run_doctor,
+    run_new,
     version_text,
 )
 from mtest.exec import (
@@ -603,6 +608,33 @@ def main():
         _eprintln("mtest: internal error: " + String(e))
         exit(EXIT_INTERNAL_ERROR)
         return
+
+    # Scaffolding needs the root to resolve a relative path and nothing else:
+    # no configuration layer can change which file is created or what goes in
+    # it, so a malformed project file must not stop someone from writing their
+    # first test. That is why this sits between the root and the config load
+    # rather than beside `config show` below.
+    if result.is_new():
+        # No `try` around this call, and the compiler is what makes that safe
+        # rather than optimistic: `run_new` is declared without `raises`, so a
+        # raise that escaped its own containment would not compile. The
+        # {0, 3, 4} exit domain is therefore closed structurally — an escaping
+        # error cannot leave the process on the uncaught-error exit 1, the one
+        # code that would read as "your test failed".
+        var scaffolded = run_new(root, result.operand)
+        var rendered = String("")
+        for line in scaffolded.lines:
+            rendered += line + "\n"
+        # A refusal and an I/O failure are diagnostics and belong on stderr;
+        # `created <path>` is the command's output and belongs on stdout.
+        var destination = 1 if scaffolded.code == 0 else 2
+        print(
+            rendered,
+            end="",
+            file=FileDescriptor(destination),
+            flush=True,
+        )
+        exit(scaffolded.code)
 
     var loaded = _load_config(root, result.config_path, result.no_config)
     if loaded.error_code != 0:

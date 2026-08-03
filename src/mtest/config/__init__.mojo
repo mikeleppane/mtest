@@ -69,6 +69,7 @@ from mtest.config.toml_bridge import (
 from mtest.config.verbosity import Verbosity
 from mtest.config.value_validation import (
     build_arg_rejection,
+    escape_control_characters,
     parse_annotations_value,
     parse_color_value,
     parse_nonnegative_decimal,

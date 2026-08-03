@@ -1,8 +1,9 @@
 """The hand-rolled full-contract argument parser.
 
 `parse_args` turns an argument vector into a `ParseResult`: a configured run, a
-resolved-config display request, a doctor request, or a help/version directive.
-Anything it refuses becomes a `cli:`-prefixed usage error instead.
+resolved-config display request, a doctor request, a scaffolding request, or a
+help/version directive. Anything it refuses becomes a `cli:`-prefixed usage
+error instead.
 
 The parser is hand-rolled by decision. The `prism` argument-parsing library was
 evaluated and rejected on source evidence: it has no `--` pass-through, and
@@ -80,7 +81,8 @@ def help_text() -> String:
             "       mtest doctor [--config PATH | --no-config]"
             " [--color WHEN] [-q | -v]\n"
         ),
-        "       mtest debug PATH::TEST [build flags] [-- BUILD-ARGS...]\n\n",
+        "       mtest debug PATH::TEST [build flags] [-- BUILD-ARGS...]\n",
+        "       mtest new PATH\n\n",
         "Subcommands:\n",
     )
     rendered += _help_row(
@@ -99,6 +101,7 @@ def help_text() -> String:
     rendered += _help_row(
         "debug PATH::TEST", "Run one test with the terminal handed over."
     )
+    rendered += _help_row("new PATH", "Create one runnable test file.")
     rendered += _help_row("help", "Show this help and exit.")
     rendered += _help_row("version", "Show the version and exit.")
 
@@ -648,13 +651,68 @@ def _parse_debug(argv: List[String]) raises -> ParseResult:
     return ParseResult.debug(cfg^, overlay^, operand^, config_path^, no_config)
 
 
+def _err_new_operand() -> Error:
+    """The usage error for anything but exactly one path operand."""
+    return _err("'new' wants exactly one PATH")
+
+
+def _parse_new(argv: List[String]) raises -> ParseResult:
+    """Parse the `new` tail: one path, and nothing else.
+
+    Scaffolding a file reads no configuration, builds nothing, and runs
+    nothing, so there is no flag whose value could reach it. Every one is
+    refused by name rather than accepted and ignored. `--help` is the
+    exception, because it describes a command rather than acting on one.
+
+    Args:
+        argv: The complete argument vector; the `new` head token is skipped.
+
+    Returns:
+        A result whose `kind` is `NEW`, or the help directive when `--help`
+        appears anywhere in the tail.
+
+    Raises:
+        Error: A `cli:`-prefixed usage error for a missing or repeated
+            operand, or for any flag other than `-h`/`--help`.
+    """
+    var operand = String("")
+    var saw_operand = False
+    var i = 1
+    while i < len(argv):
+        var tok = argv[i]
+        if not tok.startswith("-") or tok == "-":
+            if saw_operand:
+                raise _err_new_operand()
+            operand = tok
+            saw_operand = True
+            i += 1
+            continue
+        var name = tok
+        var has_inline = False
+        if tok.find("=") != -1:
+            name = String(tok.split("=", 1)[0])
+            has_inline = True
+        if name == "-h" or name == "--help":
+            if has_inline:
+                raise _err(
+                    "flag '" + name + "' takes no value, got '" + tok + "'"
+                )
+            return ParseResult.show_help()
+        raise _err("'" + name + "' cannot be combined with 'new'")
+    if not saw_operand:
+        raise _err_new_operand()
+    return ParseResult.scaffold(operand^)
+
+
 def parse_args(argv: List[String]) raises -> ParseResult:
-    """Parse `argv` into a run, config-display, doctor, help, or version result.
+    """Parse `argv` into a run, inspection, scaffolding, or directive result.
 
     A leading `help` or `version` token returns that directive immediately. A
     leading `run`, `collect`, or `doctor` token is consumed as a subcommand,
-    with `collect` equivalent to `--collect-only`. A leading `config show` pair
-    requests resolution-only display while reusing the run grammar. Any other
+    with `collect` equivalent to `--collect-only`. A leading `debug` or `new`
+    token hands the rest of the vector to that subcommand's own narrow walk,
+    and a leading `config show` pair requests resolution-only display while
+    reusing the run grammar. Any other
     first token is left to the general token loop, which reads it as a flag
     when it starts with `-` (a bare `-` excepted) and as a path operand
     otherwise, so an argument vector may open with a flag. Everything after a
@@ -669,7 +727,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
 
     Returns:
         A configured run, config-display request, doctor request, debug
-        request, or help/version directive.
+        request, scaffolding request, or help/version directive.
 
     Raises:
         Error: A `cli:`-prefixed usage error, raised for an unknown flag, a
@@ -678,8 +736,9 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             `--no-config`, `--lf` with `--ff`, either of those with `--shard`,
             `--seed` without `--shuffle`, `--shuffle` with `--lf`/`--ff`,
             `--format` outside collect mode,
-            a run-only flag combined with collect mode, or a run, build, or
-            reporter flag combined with doctor.
+            a run-only flag combined with collect mode, a run, build, or
+            reporter flag combined with doctor, or — under `new` — anything
+            but exactly one path operand and any flag but `-h`/`--help`.
 
     Examples:
 
@@ -716,6 +775,10 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             # build controls and refuses everything else by name, which the
             # general loop would have to unlearn flag by flag.
             return _parse_debug(argv)
+        if head == "new":
+            # `new` owns its tail for the opposite reason: it accepts no flag
+            # at all, so the general loop's whole table is wrong for it.
+            return _parse_new(argv)
         if head == "config":
             if len(argv) < 2 or argv[1] != "show":
                 raise _err(

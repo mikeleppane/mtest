@@ -2,9 +2,9 @@
 
 Parsing either yields a configured run, `config show`, `doctor`, or `debug`
 request with both its typed argv overlay and defaults-folded compatibility
-config, or a non-error directive to print help or the version. A usage error is
-not a `ParseResult`: it is raised. `main` handles each result; this layer never
-prints or exits.
+config, a `new` scaffolding request, or a non-error directive to print help or
+the version. A usage error is not a `ParseResult`: it is raised. `main` handles
+each result; this layer never prints or exits.
 """
 from mtest.config import CliOverlay, RunnerConfig
 
@@ -16,8 +16,8 @@ struct ParseResult(Copyable, Movable):
     A tagged union over `kind`. For `RUN`, `CONFIG_SHOW`, `DOCTOR`, and
     `DEBUG`, `overlay` holds argv presence and values while `config` holds
     their defaults-folded compatibility view. `DEBUG` additionally carries the
-    one node id it was given in `operand`. Only help and version carry
-    placeholder fields.
+    one node id it was given in `operand`, and `NEW` carries the one path it
+    was given there. Help, version, and `NEW` carry placeholder fields.
 
     Examples:
 
@@ -47,11 +47,12 @@ struct ParseResult(Copyable, Movable):
     """Whether configuration-file discovery is explicitly disabled."""
 
     var operand: String
-    """The single `PATH::TEST` node id a `DEBUG` result names; empty otherwise.
+    """The one path-shaped operand `DEBUG` and `NEW` name; empty otherwise.
 
-    It is kept out of `config.paths` on purpose: the debug preparation owns
-    the operand and resolves it against a projection in which a project file's
-    own path list never participates."""
+    It is kept out of `config.paths` on purpose: both commands own their
+    operand and resolve it against a projection in which a project file's own
+    path list never participates — under `NEW` there is no configuration at
+    all, since the file is scaffolded before any is loaded."""
 
     comptime RUN = 0
     comptime SHOW_HELP = 1
@@ -59,6 +60,7 @@ struct ParseResult(Copyable, Movable):
     comptime CONFIG_SHOW = 3
     comptime DOCTOR = 4
     comptime DEBUG = 5
+    comptime NEW = 6
 
     @staticmethod
     def run(
@@ -196,6 +198,28 @@ struct ParseResult(Copyable, Movable):
             operand=operand^,
         )
 
+    @staticmethod
+    def scaffold(var operand: String) -> ParseResult:
+        """A result asking `main` to scaffold one test file.
+
+        Its config and overlay are placeholders: the file is created before any
+        project configuration is discovered, so none of it applies.
+
+        Args:
+            operand: The path to create. Consumed.
+
+        Returns:
+            A result whose `kind` is `NEW`.
+        """
+        return ParseResult(
+            kind=Self.NEW,
+            config=RunnerConfig.default(),
+            overlay=CliOverlay.default(),
+            config_path="",
+            no_config=False,
+            operand=operand^,
+        )
+
     def is_run(self) -> Bool:
         """Whether this result is a configured run."""
         return self.kind == Self.RUN
@@ -219,3 +243,7 @@ struct ParseResult(Copyable, Movable):
     def is_debug(self) -> Bool:
         """Whether this result asks to hand the terminal to one test."""
         return self.kind == Self.DEBUG
+
+    def is_new(self) -> Bool:
+        """Whether this result asks to scaffold one test file."""
+        return self.kind == Self.NEW

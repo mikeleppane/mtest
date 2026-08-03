@@ -109,6 +109,18 @@ def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
 ```
 
+`mtest new` writes exactly that shape, so the first file is one command rather
+than a page to copy:
+
+```console
+$ pixi run mtest new tests/test_math.mojo
+created tests/test_math.mojo
+```
+
+It creates missing parent directories, refuses a basename no directory walk
+would collect, and **never overwrites an existing file** — a second `mtest new`
+on the same path exits `4` and leaves your bytes alone.
+
 `mtest` builds each test file and runs the resulting binary, so `mojo` has to
 be reachable from the workspace — which it is, because `pixi add mtest` pulled
 in the pinned `mojo-compiler` as a run dependency. `run` is the default
@@ -1443,6 +1455,7 @@ usage: mtest [run] [PATHS...] [flags] [-- BUILD-ARGS...]
        mtest config show [PATHS...] [flags] [-- BUILD-ARGS...]
        mtest doctor [--config PATH | --no-config] [--color WHEN] [-q | -v]
        mtest debug PATH::TEST [build flags] [-- BUILD-ARGS...]
+       mtest new PATH
 
 Subcommands:
   run [PATHS...] [flags]      Run tests (the default subcommand).
@@ -1450,6 +1463,7 @@ Subcommands:
   config show [PATHS...]      Show resolved configuration.
   doctor [flags]              Diagnose the environment without running tests.
   debug PATH::TEST            Run one test with the terminal handed over.
+  new PATH                    Create one runnable test file.
   help                        Show this help and exit.
   version                     Show the version and exit.
 
@@ -1516,6 +1530,7 @@ General:
 | `--config PATH`, `--no-config` | select one project config or disable config discovery |
 | `config show [PATHS...] [flags]` | render the fully resolved configuration without running tests |
 | `doctor [flags]` | run ten contained environment checks without starting a test session |
+| `new PATH` | scaffold one runnable test file at `PATH`, creating parent directories; never overwrites (exit `4`) |
 | `--lf`, `--last-failed` | run only tests recorded as failed in the last completed state |
 | `--ff`, `--failed-first` | run last-failed tests first, then the remaining selection |
 | `-x`, `--exitfirst` | stop scheduling new files after the first failing file |

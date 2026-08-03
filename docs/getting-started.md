@@ -30,6 +30,19 @@ def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
 ```
 
+Or let the runner write it, which is one command instead of a page to copy:
+
+```console
+$ pixi run mtest new tests/test_math.mojo
+created tests/test_math.mojo
+```
+
+`mtest new` creates missing parent directories, refuses a basename no directory
+walk would collect, and never overwrites an existing file — a second one on the
+same path exits `4` and leaves your bytes alone. What it writes is one example
+test rather than the two above, so follow the saved file if you are reading the
+counts in the next section.
+
 The import line matters more than it looks. The standard library's testing
 module resolves under its full name on the supported toolchain, and the bare
 short form does not resolve at all — which is the mistake the last section of

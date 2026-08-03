@@ -614,6 +614,12 @@ class CheckRosterTests(unittest.TestCase):
                 "path: a long-but-legal path builds, never a false COMPILE-ERROR",
                 "flaky: --fail-on-flaky turns a FLAKY-only run's 0 into 1",
                 "debug: the handoff is the test's own exit, with no mtest verdict",
+                "new: scaffolds a discoverable file",
+                "new: refuses to overwrite -> 4",
+                "new: non-discoverable name -> 4",
+                "new: node-id-shaped path -> 4",
+                "new: the scaffolded file runs green",
+                "new: a hostile basename still compiles and passes",
                 "interrupt: SIGINT frees the owned process group",
             ],
         )
@@ -740,6 +746,20 @@ class CheckRosterTests(unittest.TestCase):
                 self._perform(
                     "debug: the handoff is the test's own exit, with no mtest verdict"
                 )
+
+            def check_new_creates(self) -> None:
+                self._perform("new: scaffolds a discoverable file")
+
+            def check_new_refuses_to_overwrite(self) -> None:
+                self._perform("new: refuses to overwrite -> 4")
+
+            def check_new_refuses_unusable_names(self) -> None:
+                self._perform("new: non-discoverable name -> 4")
+                self._perform("new: node-id-shaped path -> 4")
+
+            def check_new_scaffold_runs(self) -> None:
+                self._perform("new: the scaffolded file runs green")
+                self._perform("new: a hostile basename still compiles and passes")
 
             def check_interrupt(self, _strict: bool) -> None:
                 self._perform("interrupt: SIGINT frees the owned process group")

@@ -74,7 +74,7 @@ class RepositoryParityTests(unittest.TestCase):
             counted,
             {
                 Path("docs/index.md"): 1,
-                Path("docs/getting-started.md"): 3,
+                Path("docs/getting-started.md"): 4,
                 Path("docs/ci.md"): 3,
             },
         )

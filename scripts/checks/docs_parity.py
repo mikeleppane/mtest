@@ -251,11 +251,13 @@ PARITY_BLOCKS = (
     # The landing page's install block: the channel and package commands, and
     # the version the installed binary prints back.
     ParityBlock(Path("docs/index.md"), 0, "Installation", 0),
-    # The five-minute path: the test file a reader saves, the passing run, and
-    # the compile error a wrong import produces.
+    # The five-minute path: the test file a reader saves, the command that
+    # writes it for them, the passing run, and the compile error a wrong
+    # import produces.
     ParityBlock(Path("docs/getting-started.md"), 0, "Your first test", 0),
     ParityBlock(Path("docs/getting-started.md"), 1, "Your first test", 1),
     ParityBlock(Path("docs/getting-started.md"), 2, "Your first test", 2),
+    ParityBlock(Path("docs/getting-started.md"), 3, "Your first test", 3),
     # The workflow to paste, the sharded variant of it, and the composite
     # action that replaces the invocation step in either.
     ParityBlock(Path("docs/ci.md"), 0, "Run it in CI", 0),
