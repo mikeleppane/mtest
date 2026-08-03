@@ -278,6 +278,32 @@ def test_build_line_is_a_code_target() raises:
     assert_true(out.find("build: `mojo build tests/e.mojo`\n") != -1)
 
 
+def test_build_line_hostile_sweep_stays_inside_the_code_span() raises:
+    # A code-target position has different rules than a table cell: nothing
+    # here is a cell-structural character, so a pipe, a leading '#', and a
+    # bare '<'/'&' all ride through the span verbatim by Markdown's own
+    # rule for code-span content. The only thing this position must defend
+    # against is an embedded backtick prematurely closing the span, which is
+    # why the fence must grow from one backtick to two.
+    var section = ReportSectionInput(
+        path="tests/f.mojo",
+        root="",
+        outcome_code=Outcome.COMPILE_ERROR.code,
+        tests=List[TestResult](),
+        stdout_text="",
+        stderr_text="",
+        stdout_truncated=False,
+        stderr_truncated=False,
+        attempts=List[String](),
+        build_line="mojo build `-o` a|b <tag>&x # trailing",
+        reproduce_node="",
+    )
+    var out = md_file_section(section, root_note=False)
+    assert_true(
+        out.find("build: ``mojo build `-o` a|b <tag>&x # trailing``\n") != -1
+    )
+
+
 def test_detail_backtrace_is_relativized_against_section_root() raises:
     var tests = List[TestResult]()
     tests.append(
