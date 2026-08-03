@@ -157,6 +157,7 @@ SCENARIOS: ScenarioRegistry = (
     ("debug-interrupt-before-handoff", dev_loop.s_debug_interrupt_before_handoff),
     ("debug-inactive-config", dev_loop.s_debug_inactive_config),
     ("new-then-run", dev_loop.s_new_then_run),
+    ("init-bootstraps", dev_loop.s_init_bootstraps),
     ("passthrough+forbidden", core.s_passthrough_and_forbidden),
     ("out-of-root", core.s_out_of_root),
     ("internal-error", resilience.s_internal_error),

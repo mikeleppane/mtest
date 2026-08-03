@@ -84,6 +84,43 @@ serves one toolchain; accepting a report the runner does not fully understand
 is how a runner produces a false green, and this one exits 3 on protocol drift
 instead.
 
+## Starting a project
+
+`mtest init` writes the files a project needs before any of the rest of this is
+useful, into the current directory:
+
+```console
+$ pixi run mtest init --ci github
+created tests/test_example.mojo
+created mtest.toml
+created .github/workflows/test.yml
+created .gitignore
+next: pixi init .
+next: pixi workspace channel add https://conda.modular.com/max/
+next: pixi workspace channel add https://repo.prefix.dev/modular-community
+next: pixi add mtest
+next: mtest
+next: commit pixi.toml and pixi.lock, which the workflow installs from
+```
+
+Drop `--ci github` and neither the workflow nor the commit line appears. The
+`next:` lines are prerequisites rather than suggestions, and they are ordered:
+`pixi workspace channel add` fails outright without a `pixi.toml`, `mtest` does
+not resolve until the package is in the workspace, and the workflow just
+written installs from the lock file, which `pixi add` is what produces. They
+repeat the [Installation](#installation) sequence because `init` cannot see
+whether you have run it — in a workspace that already has mtest, every line
+before `next: mtest` is already done and `pixi init .` would fail if you ran
+it again.
+
+**Nothing existing is replaced.** Every artifact is published without
+overwriting, so a second `init` reports each one as `skipped` and still exits
+`0`, and a file you have already edited is left exactly as it was.
+`.gitignore` is the one file `init` edits rather than creates: the
+`.mtest-cache/` entry is appended to whatever is already there, and a
+`.gitignore` that is a symlink or not a regular file is refused (exit `4`)
+before any artifact is written.
+
 ## Your first test
 
 A test file is an ordinary Mojo program: `test_*` functions plus a `main()`
@@ -1456,6 +1493,7 @@ usage: mtest [run] [PATHS...] [flags] [-- BUILD-ARGS...]
        mtest doctor [--config PATH | --no-config] [--color WHEN] [-q | -v]
        mtest debug PATH::TEST [build flags] [-- BUILD-ARGS...]
        mtest new PATH
+       mtest init [--ci github]
 
 Subcommands:
   run [PATHS...] [flags]      Run tests (the default subcommand).
@@ -1464,6 +1502,7 @@ Subcommands:
   doctor [flags]              Diagnose the environment without running tests.
   debug PATH::TEST            Run one test with the terminal handed over.
   new PATH                    Create one runnable test file.
+  init [--ci github]          Bootstrap a project in this directory.
   help                        Show this help and exit.
   version                     Show the version and exit.
 
@@ -1531,6 +1570,7 @@ General:
 | `config show [PATHS...] [flags]` | render the fully resolved configuration without running tests |
 | `doctor [flags]` | run ten contained environment checks without starting a test session |
 | `new PATH` | scaffold one runnable test file at `PATH`, creating parent directories; never overwrites (exit `4`) |
+| `init [--ci github]` | bootstrap a project in the current directory: a first test, an `mtest.toml`, a `.gitignore` entry, and with `--ci github` a workflow; nothing existing is replaced |
 | `--lf`, `--last-failed` | run only tests recorded as failed in the last completed state |
 | `--ff`, `--failed-first` | run last-failed tests first, then the remaining selection |
 | `-x`, `--exitfirst` | stop scheduling new files after the first failing file |

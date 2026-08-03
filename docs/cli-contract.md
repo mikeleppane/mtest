@@ -52,6 +52,7 @@ mtest config show [PATHS...] [flags]                # render resolved configurat
 mtest doctor [--config PATH | --no-config] [--color WHEN] [-q | -v]
 mtest debug PATH::TEST [build flags] [-- BUILD-ARGS...]  # hand over the terminal
 mtest new PATH                                      # scaffold one test file
+mtest init [--ci github]                            # bootstrap a project
 mtest version
 mtest --help | mtest help
 ```
@@ -60,8 +61,8 @@ mtest --help | mtest help
 that is not a known subcommand is treated as a path or flag for `run`.
 `config show` is the sole two-token subcommand. `debug` is the only one that
 does not end by reporting: it prepares a single test and then replaces the
-mtest process with it (§28). `new` is the only one that writes a source file
-rather than reading one (§29).
+mtest process with it (§28). `new` and `init` are the two that write source
+files rather than reading them (§29).
 
 ---
 
@@ -107,8 +108,9 @@ single **invocation root**. In v1 the root is the **current working directory**.
 
 ## 4. Subcommands and flag applicability
 
-`new` is absent from the table below because there is nothing to tabulate: it
-accepts no flag at all except `-h`/`--help` (§29).
+`new` and `init` are absent from the table below because there is nothing to
+tabulate: `new` accepts no flag at all except `-h`/`--help`, and `init` accepts
+only `--ci VALUE` beside them (§29).
 
 | Flag | `run` | `collect` | `doctor` | `debug` |
 |------|:-----:|:---------:|:--------:|:-------:|
@@ -195,7 +197,16 @@ exactly one `PATH` operand and, beside it, only `-h`/`--help`. Every other
 token — a second operand, a passthrough `--`, or any flag, the configuration
 controls included — is an applicability error (exit 4). It reads no project
 configuration at all, so a malformed `mtest.toml` neither changes nor prevents
-the file it writes (§29).
+the file it writes (§29.1).
+
+`init` has the same shape and one flag of its own. It takes no operand at all —
+it writes into the invocation root — and accepts `--ci VALUE` beside
+`-h`/`--help`. Every other token is an applicability error (exit 4). `--ci`
+belongs to `init` alone and is not a general flag: supplying it to any other
+subcommand is an unknown-flag usage error (exit 4), which is what keeps
+`mtest --ci github tests` from parsing as a run whose `--ci` value nothing
+reads. Like `new`, `init` reads no project configuration — it writes the
+project configuration (§29.2).
 
 ---
 
@@ -1432,7 +1443,12 @@ file's result line carries an informal `SERIAL` marker (§15.1).
   same rule; the test-module contract.
 - **STABLE-INTENT** — default values (timeouts, `auto` worker sizing) may be
   tuned in minor versions; the self-versioned `.mtest-cache/lastrun` format
-  (§26), whose incompatible changes require a new format version.
+  (§26), whose incompatible changes require a new format version; the content
+  of every file `mtest init` writes (§29.2). The workflow among them pins each
+  third-party action to the same commit the documentation pins, and is
+  required to stay byte-identical to it, so a pin that moves in the
+  documentation moves in the scaffold — which is what makes those commits a
+  deliberate choice rather than a copy that quietly went stale.
 - **INFORMAL** — console text layout and colors; the human-facing
   `config show` TOML output (§27.1).
 - TestSuite invocation details are an internal seam, never public API.
@@ -1803,8 +1819,8 @@ above — it only reports which of those surfaces are wired up yet.
 `-s`/`--show-output`,
 `--durations`, `-q`/`-v`, `--color`, `--format`,
 `-h`/`--help`, `--version`, and the `run`, `collect`, `config show`, `doctor`,
-`debug`, `new`, `version`, and `help` subcommands (`--collect-only` too, as an
-alias that behaves as `collect`).
+`debug`, `new`, `init`, `version`, and `help` subcommands (`--collect-only`
+too, as an alias that behaves as `collect`), plus `init`'s own `--ci VALUE`.
 `--shard` applies under both `run` and `collect`. `--json` (the machine event
 stream, §15.4), `--junit-xml` (the JUnit report, §15.2), and `--gh-annotations`
 (the CI annotation tail, §15.3) are served too — see §24.2 for how they are now
@@ -1816,8 +1832,8 @@ store described in §8.5, which this build reads and writes by default.
 Every flag and subcommand in the frozen contract above is now served: nothing is
 refused for being unavailable. For `run` and `collect`, exit 4 therefore covers
 exactly the frozen §9 causes. `Config show` and `doctor` use the applicability
-rules and command-specific exit domains in §27; `debug` uses §28's and `new`
-uses §29's.
+rules and command-specific exit domains in §27; `debug` uses §28's, and `new`
+and `init` use §29's.
 
 ### 24.2 Run and collect exit codes reachable in this build
 
@@ -1889,12 +1905,26 @@ out, overflowed its capture, or did not read as a collection listing. Once the
 handoff happens mtest is gone, so the process's exit status is the binary's own
 statement and no code in this section applies to it.
 
-**`new` reachability.** `mtest new PATH` is served (§29). Its whole exit domain
-is `{0, 3, 4}`: 0 with `created PATH` on stdout, 4 for a target carrying `::`,
-a target that is not Mojo source, a basename no directory walk would collect, a
-target that already exists, or anything in argv but one operand and
+**`new` reachability.** `mtest new PATH` is served (§29.1). Its whole exit
+domain is `{0, 3, 4}`: 0 with `created PATH` on stdout, 4 for a target carrying
+`::`, a target that is not Mojo source, a basename no directory walk would
+collect, a target that already exists, or anything in argv but one operand and
 `-h`/`--help`, and 3 for a filesystem failure while creating the directories or
 the file. There is no other code, because nothing is discovered, built, or run.
+
+**`init` reachability.** `mtest init [--ci github]` is served (§29.2). Its
+whole exit domain is `{0, 3, 4}`: 0 for a run that created every artifact, one
+that skipped every artifact, or any mixture — an all-skip is a success, because
+the promise is that the artifacts exist, not that this run made them — 4 for a
+`--ci` value other than `github`, for an artifact name held by a symlink or
+anything else that is not a regular file, and for anything in argv beyond
+`--ci VALUE` and `-h`/`--help`, and 3 for a filesystem failure while creating a
+directory, writing an artifact, or rewriting `.gitignore`, for a `.gitignore`
+past the 1 MiB rewrite ceiling, and for a `.gitignore` that appeared after the
+pre-run observation and is not a regular file. Every exit-4 cause is decided
+before the first artifact is created, so a refused `init` leaves the directory
+as it found it. There is no other code, because nothing is discovered, built,
+or run.
 
 **`--format` reachability.** `--format lines|json` is served under `collect`
 (§16): `lines` is the default and leaves the listing byte-identical to a run
@@ -1933,7 +1963,7 @@ the node-id grammar, and both converge to the contract as the runner matures.
   `--maxfail`, `--timeout`, `--retries`, `-n`/`--workers`, `--mojo`,
   `--compile-timeout`, `-s`/`--show-output`, `--durations`, `--color`,
   `--format`, `--json`, `--junit-xml`, `--gh-annotations`, `--config`,
-  `--seed`): it silently uses
+  `--seed`, `init`'s `--ci`): it silently uses
   the **last** occurrence (so `-k a -k b` filters by `b`, not `a or b`). Until
   the at-most-one check is enforced (a usage error, exit 4), do not rely on
   repeating these flags. The mutually-exclusive `-q`/`-v` pair is already
@@ -2341,11 +2371,21 @@ one.
 
 ---
 
-## 29. Scaffolding one test file
+## 29. Writing source: `new` and `init`
 
-`mtest new PATH` writes a single runnable test file and stops. It is the one
-subcommand that produces source rather than consuming it, and it exists because
-the shape of a Mojo test file is not guessable: `test_*` functions are only half
+Two subcommands produce source rather than consuming it. They share one
+publication rule and one promise: an artifact is written under a temporary name
+in its own destination directory and published with a hard link, so an existing
+file is refused by the filesystem itself and its bytes are never opened,
+truncated, appended to, or renamed onto. `init`'s `.gitignore` handling is the
+one documented departure, specified in §29.2.
+
+### 29.1 One test file — `mtest new PATH`
+
+`mtest new PATH` writes a single runnable test file and stops. It is the
+narrower of the two subcommands that produce source rather than consuming it —
+`init` (§29.2) writes a whole project, this one writes exactly one file — and
+it exists because the shape of a Mojo test file is not guessable: `test_*` functions are only half
 of it, and a file without the `main()` that hands them to `TestSuite` builds
 into a program that runs nothing (§6).
 
@@ -2398,3 +2438,120 @@ subcommand opens, truncates, appends to, or renames onto an existing file.
 Nothing else is reachable. Every diagnostic goes to stderr and the success line
 goes to stdout (§19), and the diagnostics themselves are informal text (§20) —
 the exit code and the file's presence are what this section freezes.
+
+### 29.2 A whole project — `mtest init [--ci github]`
+
+`mtest init` writes the files a project needs before a first run means
+anything, into the invocation root, and stops. It runs before configuration
+discovery for the same reason `new` does, and one better: the configuration it
+writes is the file that discovery would have read.
+
+**Grammar.** No operand — the destination is the invocation root — plus
+`--ci VALUE` and `-h`/`--help`, and nothing else (§4). No configuration is
+read, no toolchain is resolved, and no file is discovered, built, or run.
+
+**What it writes**, in this order:
+
+| Artifact | Content |
+|----------|---------|
+| `tests/test_example.mojo` | the §29.1 test file, for the subject `example` |
+| `mtest.toml` | `[run] paths = ["tests"]`, so a bare `mtest` runs the suite |
+| `.github/workflows/test.yml` | under `--ci github` only |
+| `.gitignore` | a `.mtest-cache/` entry, added rather than replaced |
+
+The workflow is byte-identical to the first YAML block of
+[the continuous-integration page](ci.md), which is therefore the single place
+it is written down; a gate extracts that block and compares it against what the
+runner emits, so the two cannot drift. Its `--ci` value is closed: `github` is
+the one provider this build writes a workflow for, and any other value is a
+usage error (exit 4) raised before anything is created.
+
+**Nothing is replaced.** Each artifact goes through §29's no-replace
+publication, so an artifact that already exists is reported and left alone. A
+second `init` is therefore an all-skip that still exits 0: the command promises
+the artifacts exist, not that this run created them. `skipped` means an
+ordinary file is already there and, for `.gitignore`, that the cache is
+genuinely ignored — never merely that the name is taken. A name held by a
+symlink, a directory, or anything else that is not a regular file is a refusal
+(exit 4) decided before the first artifact is created, because reporting it as
+`skipped` would claim a file exists that does not. One line is emitted per
+artifact —
+
+```text
+created <path>
+skipped <path> (exists)
+updated .gitignore
+```
+
+— followed by the prerequisites the project still needs, which are output
+rather than decoration. Every one of them is load-bearing and they are ordered:
+the workspace has to exist before a channel can be added to it (`pixi workspace
+channel add` fails outright without a `pixi.toml`), the package has to be in
+the workspace before `mtest` resolves at all, and under `--ci github` the
+workflow installs from the lock file, which only exists once `pixi add` has
+run. The trailing commit line is emitted under `--ci github` alone, because
+without a workflow nothing here needs a committed lock.
+
+```console
+$ mtest init --ci github
+created tests/test_example.mojo
+created mtest.toml
+created .github/workflows/test.yml
+created .gitignore
+next: pixi init .
+next: pixi workspace channel add https://conda.modular.com/max/
+next: pixi workspace channel add https://repo.prefix.dev/modular-community
+next: pixi add mtest
+next: mtest
+next: commit pixi.toml and pixi.lock, which the workflow installs from
+```
+
+`pixi init .` is listed unconditionally rather than conditionally: `init`
+writes no `pixi.toml` and reads none, so it cannot tell a fresh directory from
+an existing workspace, and the command is a no-op to skip rather than a step to
+guess at. In a workspace that already exists, skip it.
+
+**`.gitignore` is the one file `init` edits.** Adding a line to a file means
+rewriting it, so this artifact alone is read, appended to, and renamed over —
+and the content written back is the content read followed by the added lines,
+which is what makes replacing it correct rather than destructive.
+
+It is read and written as **bytes**. Git accepts a `.gitignore` that is not
+valid UTF-8, so decoding one in order to write it back would turn a legal file
+into a failed bootstrap; only ASCII is ever compared. A file larger than
+1 MiB is refused rather than read to that ceiling and written back truncated.
+
+Whether the cache is already ignored is decided by git's own rules, not by a
+substring search: leading whitespace is part of a pattern (so `  .mtest-cache/`
+ignores nothing and the entry is still added), trailing whitespace is not, a
+`#` comment ignores nothing, and the **last** matching pattern decides — a
+`!.mtest-cache/` after a positive pattern puts the directory back, so the entry
+is added again. `skipped .gitignore (exists)` therefore means `git check-ignore`
+would agree, not merely that some line looked right.
+
+The permission bits of an existing `.gitignore` survive the rewrite, including
+a read-only mode: the replacement is a rename in the containing directory, so
+the file's own write bit never governs it and a `0444` `.gitignore` is updated
+and comes back `0444`. A `.gitignore` whose name is held by a symlink or
+anything else that is not a regular file is refused (exit 4) before any
+artifact is created, rather than followed or replaced.
+
+The window between that read and the rename is a lost update: a concurrent
+writer's change to `.gitignore` inside it is overwritten. This is stated rather
+than solved, and the bound on the damage is what makes that acceptable — it is
+one file, in a directory a person is looking at, in a command run by hand once
+per project.
+
+**Exit codes.**
+
+| Code | Cause |
+|------|-------|
+| 0 | every artifact exists; the per-artifact lines and the next steps go to stdout |
+| 4 | a `--ci` value other than `github`, any artifact name held by a symlink or anything else that is not a regular file, or anything in argv beyond `--ci VALUE` and `-h`/`--help` — each detected before the first artifact is created |
+| 3 | a filesystem failure while creating a directory, writing an artifact, or rewriting `.gitignore`; a `.gitignore` larger than 1 MiB; or a `.gitignore` that appeared between the pre-run observation and its publication and is not a regular file |
+
+Nothing else is reachable. A successful run writes to stdout; a failed one
+writes what it did and what stopped it to stderr, because the record of a
+partial bootstrap belongs with the diagnostic rather than split across two
+streams. As in §29.1, the diagnostics are informal text (§20) — the exit code
+and the artifacts' presence are what this section freezes.

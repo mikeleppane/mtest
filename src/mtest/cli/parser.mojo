@@ -1,9 +1,9 @@
 """The hand-rolled full-contract argument parser.
 
 `parse_args` turns an argument vector into a `ParseResult`: a configured run, a
-resolved-config display request, a doctor request, a scaffolding request, or a
-help/version directive. Anything it refuses becomes a `cli:`-prefixed usage
-error instead.
+resolved-config display request, a doctor request, a scaffolding or bootstrap
+request, or a help/version directive. Anything it refuses becomes a
+`cli:`-prefixed usage error instead.
 
 The parser is hand-rolled by decision. The `prism` argument-parsing library was
 evaluated and rejected on source evidence: it has no `--` pass-through, and
@@ -82,7 +82,8 @@ def help_text() -> String:
             " [--color WHEN] [-q | -v]\n"
         ),
         "       mtest debug PATH::TEST [build flags] [-- BUILD-ARGS...]\n",
-        "       mtest new PATH\n\n",
+        "       mtest new PATH\n",
+        "       mtest init [--ci github]\n\n",
         "Subcommands:\n",
     )
     rendered += _help_row(
@@ -102,6 +103,9 @@ def help_text() -> String:
         "debug PATH::TEST", "Run one test with the terminal handed over."
     )
     rendered += _help_row("new PATH", "Create one runnable test file.")
+    rendered += _help_row(
+        "init [--ci github]", "Bootstrap a project in this directory."
+    )
     rendered += _help_row("help", "Show this help and exit.")
     rendered += _help_row("version", "Show the version and exit.")
 
@@ -704,15 +708,79 @@ def _parse_new(argv: List[String]) raises -> ParseResult:
     return ParseResult.scaffold(operand^)
 
 
+def _parse_init(argv: List[String]) raises -> ParseResult:
+    """Parse the `init` tail: `--ci VALUE` and nothing else.
+
+    `--ci` is read here rather than from the flag-spec table on purpose. A row
+    in that table is a `run` flag by construction, so `mtest --ci github tests`
+    would parse as a run carrying a value nothing acts on. Keeping the flag
+    local means the general loop refuses it, and the usage line and the
+    subcommand row are where a reader learns it exists.
+
+    The provider value is a closed enum and is refused here like every other
+    one, so an unknown provider reads as the usage error it is and carries the
+    pointer at `--help`. `run_init` refuses it a second time, because it is
+    also reachable as a library call.
+
+    Args:
+        argv: The complete argument vector; the `init` head token is skipped.
+
+    Returns:
+        A result whose `kind` is `INIT`, or the help directive when `--help`
+        appears anywhere in the tail.
+
+    Raises:
+        Error: A `cli:`-prefixed usage error for a path operand, an empty or
+            unrecognized `--ci` value, or any flag but `--ci`, `-h`, and
+            `--help`.
+    """
+    var ci = String("")
+    var i = 1
+    while i < len(argv):
+        var tok = argv[i]
+        if not tok.startswith("-") or tok == "-":
+            raise _err("'init' takes no PATH operand; it writes into the root")
+        var name = tok
+        var value = String("")
+        var has_inline = False
+        if tok.find("=") != -1:
+            var parts = tok.split("=", 1)
+            name = String(parts[0])
+            value = String(parts[1])
+            has_inline = True
+        if name == "-h" or name == "--help":
+            if has_inline:
+                raise _err(
+                    "flag '" + name + "' takes no value, got '" + tok + "'"
+                )
+            return ParseResult.show_help()
+        if name != "--ci":
+            raise _err("'" + name + "' cannot be combined with 'init'")
+        if not has_inline:
+            if i + 1 >= len(argv):
+                raise _err("'--ci' requires a provider name")
+            value = argv[i + 1]
+            i += 1
+        if value == "":
+            raise _err("'--ci' requires a provider name")
+        if value != "github":
+            raise _err(
+                "'--ci' wants 'github', got '" + safe_path_label(value) + "'"
+            )
+        ci = value
+        i += 1
+    return ParseResult.bootstrap(ci^)
+
+
 def parse_args(argv: List[String]) raises -> ParseResult:
     """Parse `argv` into a run, inspection, scaffolding, or directive result.
 
     A leading `help` or `version` token returns that directive immediately. A
     leading `run`, `collect`, or `doctor` token is consumed as a subcommand,
-    with `collect` equivalent to `--collect-only`. A leading `debug` or `new`
-    token hands the rest of the vector to that subcommand's own narrow walk,
-    and a leading `config show` pair requests resolution-only display while
-    reusing the run grammar. Any other
+    with `collect` equivalent to `--collect-only`. A leading `debug`, `new`, or
+    `init` token hands the rest of the vector to that subcommand's own narrow
+    walk, and a leading `config show` pair requests resolution-only display
+    while reusing the run grammar. Any other
     first token is left to the general token loop, which reads it as a flag
     when it starts with `-` (a bare `-` excepted) and as a path operand
     otherwise, so an argument vector may open with a flag. Everything after a
@@ -727,7 +795,7 @@ def parse_args(argv: List[String]) raises -> ParseResult:
 
     Returns:
         A configured run, config-display request, doctor request, debug
-        request, scaffolding request, or help/version directive.
+        request, scaffolding or bootstrap request, or help/version directive.
 
     Raises:
         Error: A `cli:`-prefixed usage error, raised for an unknown flag, a
@@ -737,8 +805,10 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             `--seed` without `--shuffle`, `--shuffle` with `--lf`/`--ff`,
             `--format` outside collect mode,
             a run-only flag combined with collect mode, a run, build, or
-            reporter flag combined with doctor, or — under `new` — anything
-            but exactly one path operand and any flag but `-h`/`--help`.
+            reporter flag combined with doctor, under `new` anything but
+            exactly one path operand and any flag but `-h`/`--help`, or —
+            under `init` — a path operand, an empty or unrecognized `--ci`
+            value, and any flag but `--ci`/`-h`/`--help`.
 
     Examples:
 
@@ -779,6 +849,10 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             # `new` owns its tail for the opposite reason: it accepts no flag
             # at all, so the general loop's whole table is wrong for it.
             return _parse_new(argv)
+        if head == "init":
+            # `init` owns its tail because its one flag is deliberately not in
+            # the table: a `--ci` row there would also make it a `run` flag.
+            return _parse_init(argv)
         if head == "config":
             if len(argv) < 2 or argv[1] != "show":
                 raise _err(

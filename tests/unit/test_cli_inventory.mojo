@@ -555,6 +555,7 @@ def test_help_has_grouped_sections_and_clear_subcommands() raises:
     assert_true("  doctor [flags]" in rendered)
     assert_true("  debug PATH::TEST" in rendered)
     assert_true("  new PATH" in rendered)
+    assert_true("  init [--ci github]" in rendered)
     var previous_group_position = -1
     for group in [
         "Selection",

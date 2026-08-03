@@ -35,7 +35,9 @@ from mtest.platform.fs import (
 from mtest.platform.process import process_id
 from mtest.platform.regular_file import (
     BoundedRegularFileRead,
+    PathFacts,
     fsync_path,
+    observe_path,
     read_bounded_regular_file,
     read_regular_file_bytes,
 )
@@ -43,5 +45,6 @@ from mtest.platform.temp_file import (
     UniqueTempFile,
     close_checked_fd,
     create_unique_temp,
+    write_all_bytes_fd,
     write_all_fd,
 )

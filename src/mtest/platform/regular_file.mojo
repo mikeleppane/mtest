@@ -21,6 +21,7 @@ adds the binary's only `fsync` declaration.
 """
 from std.ffi import external_call
 from std.memory import Span, alloc, memset_zero
+from std.os import lstat
 from std.sys.info import CompilationTarget, is_triple
 
 from mtest.platform.cstring import c_string_bytes
@@ -34,6 +35,56 @@ comptime _S_IFREG = 0o100000
 comptime _READ_CHUNK = 1 << 16
 """The staging buffer's size, in bytes. Bounds resident memory independently of
 the caller's ceiling: a 512 MiB cap and a 4 KiB file must not cost a gigabyte."""
+
+
+@fieldwise_init
+struct PathFacts(Copyable, Movable):
+    """What one path names, observed without following a final symlink."""
+
+    var present: Bool
+    """Whether anything was there to observe."""
+
+    var is_regular: Bool
+    """Whether it is a regular file. False for a symlink, whose target is
+    deliberately not consulted: a caller about to replace a name wants to know
+    about the name, not about whatever it points at."""
+
+    var mode: Int
+    """Its permission bits, or zero when nothing was observed."""
+
+
+def observe_path(path: String) -> PathFacts:
+    """Observe what `path` names right now, never following a final symlink.
+
+    The observation a caller makes before deciding whether it may create or
+    replace a name. `lstat(2)` rather than `stat(2)` is the whole point: a
+    symlink must report as "not a regular file" so a publisher refuses it
+    instead of writing through it.
+
+    Args:
+        path: The pathname to observe.
+
+    Returns:
+        Presence, regular-file-ness, and the permission bits. Any failure to
+        observe — a missing path, an unreadable parent — reports absence, so
+        the caller's next filesystem operation is what reports the real
+        problem. Allocates nothing and cannot fail.
+
+    Examples:
+
+    ```mojo
+    from mtest.platform import observe_path
+
+    var facts = observe_path(".gitignore")
+    if facts.present and not facts.is_regular:
+        raise Error("refusing to replace a non-regular .gitignore")
+    ```
+    """
+    try:
+        var raw = Int(lstat(path).st_mode)
+        return PathFacts(True, raw & _S_IFMT == _S_IFREG, raw & 0o777)
+    except:
+        return PathFacts(False, False, 0)
 
 
 @fieldwise_init

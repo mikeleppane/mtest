@@ -7,6 +7,7 @@ replaceable pathname. The write and close helpers preserve the descriptor
 lifecycle needed before an atomic rename.
 """
 from std.ffi import external_call
+from std.memory import Span
 
 from mtest.platform.cstring import c_string_bytes
 from mtest.platform.stream import close_fd, errno_now, write_fd
@@ -110,15 +111,33 @@ def write_all_fd(fd: Int, text: String) raises:
         Error: On a non-interrupted error or zero/impossible progress. The
             descriptor stays owned by the caller and must still be closed.
     """
-    var bytes = text.as_bytes()
-    var total = len(bytes)
+    write_all_bytes_fd(fd, text.as_bytes())
+
+
+def write_all_bytes_fd(fd: Int, data: Span[UInt8, _]) raises:
+    """Write every byte of `data` to `fd`, handling shorts and `EINTR`.
+
+    The undecoded sibling of `write_all_fd`, for a caller republishing bytes it
+    read rather than text it composed: a file this rewrites may legally hold
+    anything, and decoding it to write it back would be a lossy round trip.
+
+    Args:
+        fd: An open descriptor owned by the caller.
+        data: The complete bytes to write. Not mutated.
+
+    Raises:
+        Error: On a non-interrupted error or zero/impossible progress. The
+            descriptor stays owned by the caller and must still be closed.
+    """
+    var total = len(data)
     var offset = 0
     while offset < total:
-        # SAFETY: `bytes` borrows `text` for this whole loop. `offset` is in
-        # `[0, total)`, so the derived pointer addresses exactly the remaining
-        # `total - offset` initialized bytes. `write_fd` retains no pointer and
-        # mutates no input bytes; `text` outlives every synchronous call.
-        var count = write_fd(fd, bytes.unsafe_ptr() + offset, total - offset)
+        # SAFETY: `data` is the caller's borrow, live for this whole loop.
+        # `offset` is in `[0, total)`, so the derived pointer addresses exactly
+        # the remaining `total - offset` initialized bytes. `write_fd` retains
+        # no pointer and mutates no input bytes; the borrow outlives every
+        # synchronous call.
+        var count = write_fd(fd, data.unsafe_ptr() + offset, total - offset)
         if count < 0:
             var err = errno_now()
             if err == _EINTR:
@@ -134,7 +153,7 @@ def write_all_fd(fd: Int, text: String) raises:
                 " impossible progress"
             )
         offset += count
-    _ = bytes
+    _ = data
 
 
 def close_checked_fd(fd: Int) raises:

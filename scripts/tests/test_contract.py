@@ -620,6 +620,9 @@ class CheckRosterTests(unittest.TestCase):
                 "new: node-id-shaped path -> 4",
                 "new: the scaffolded file runs green",
                 "new: a hostile basename still compiles and passes",
+                "init: --ci github bootstraps a runnable project",
+                "init: a second run skips every artifact, still 0",
+                "init: --ci gitlab -> 4",
                 "interrupt: SIGINT frees the owned process group",
             ],
         )
@@ -760,6 +763,11 @@ class CheckRosterTests(unittest.TestCase):
             def check_new_scaffold_runs(self) -> None:
                 self._perform("new: the scaffolded file runs green")
                 self._perform("new: a hostile basename still compiles and passes")
+
+            def check_init_scaffold(self) -> None:
+                self._perform("init: --ci github bootstraps a runnable project")
+                self._perform("init: a second run skips every artifact, still 0")
+                self._perform("init: --ci gitlab -> 4")
 
             def check_interrupt(self, _strict: bool) -> None:
                 self._perform("interrupt: SIGINT frees the owned process group")

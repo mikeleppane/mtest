@@ -23,6 +23,12 @@ bytes it scaffolds have to compile and pass, and a second scaffold has to leave
 an existing file exactly as it found it. Only building and running the real
 output settles the first, and only putting known content in the way settles the
 second.
+
+`init` is the fourth and widens that claim from a file to a directory: the
+project it bootstraps has to run with no operands at all, which is a fact about
+the configuration and the test file together, and a second bootstrap has to
+change nothing — including the `.gitignore` it is the one command here allowed
+to rewrite.
 """
 
 from __future__ import annotations
@@ -891,3 +897,123 @@ def s_new_then_run(context: ScenarioContext) -> str:
         "scaffold ran green (hostile basename included); a second scaffold "
         "refused and changed nothing"
     )
+
+
+def s_init_bootstraps(context: ScenarioContext) -> str:
+    """A bootstrapped project runs, and a second bootstrap changes nothing.
+
+    The claim `init` makes is about a directory rather than a file, and only
+    one thing settles it: run the real binary with no operands in the directory
+    it just wrote. That exercises the `mtest.toml` it wrote (without it there
+    are no paths to walk) and the test file it wrote (without it there is
+    nothing to pass) in a single verdict.
+
+    The second half is the never-replace promise from the other direction: an
+    all-skip second run still succeeds, and `.gitignore` — the one file `init`
+    rewrites rather than creates — keeps the bytes that were already in it.
+    """
+    with tempfile.TemporaryDirectory(prefix="mtest-init-") as raw:
+        project = Path(raw)
+        runner = E2ERunner(
+            repo_root=project,
+            mtest=context.runner.mtest,
+            default_timeout=context.runner.default_timeout,
+            short_timeout=context.runner.short_timeout,
+        )
+        mine = "build/\n"
+        (project / ".gitignore").write_text(mine, encoding="utf-8")
+
+        started = runner.run_mtest(["init", "--ci", "github"])
+        expect_exit(started, 0)
+        expect(
+            started.stderr == "",
+            f"a successful init wrote diagnostics: {started.stderr!r}",
+        )
+        expect(
+            started.stdout.splitlines()
+            == [
+                "created tests/test_example.mojo",
+                "created mtest.toml",
+                "created .github/workflows/test.yml",
+                "updated .gitignore",
+                "next: pixi init .",
+                "next: pixi workspace channel add https://conda.modular.com/max/",
+                (
+                    "next: pixi workspace channel add "
+                    "https://repo.prefix.dev/modular-community"
+                ),
+                "next: pixi add mtest",
+                "next: mtest",
+                (
+                    "next: commit pixi.toml and pixi.lock, which the workflow "
+                    "installs from"
+                ),
+            ],
+            f"the report is not the contract's: {started.stdout!r}",
+        )
+
+        ignored = (project / ".gitignore").read_text(encoding="utf-8")
+        expect(
+            ignored.startswith(mine),
+            f"the .gitignore rewrite dropped what was already there: {ignored!r}",
+        )
+        expect(
+            ignored.endswith(".mtest-cache/\n"),
+            f"the build cache was not appended to .gitignore: {ignored!r}",
+        )
+
+        # No operands: the configuration `init` wrote is what has to make this
+        # find the test file `init` wrote beside it.
+        ran = runner.run_mtest([])
+        expect_exit(ran, 0)
+        expect(
+            "1 passed" in ran.stdout,
+            f"the bootstrapped project did not run as one passing test: "
+            f"{ran.stdout!r}{ran.stderr!r}",
+        )
+
+        again = runner.run_mtest(["init", "--ci", "github"])
+        expect_exit(again, 0)
+        expect(
+            "created " not in again.stdout,
+            f"a second init created something: {again.stdout!r}",
+        )
+        expect(
+            len([ln for ln in again.stdout.splitlines() if ln.startswith("skipped ")])
+            == 4,
+            f"a second init did not skip every artifact: {again.stdout!r}",
+        )
+        expect(
+            (project / ".gitignore").read_text(encoding="utf-8") == ignored,
+            "a second init rewrote a .gitignore that already had the entry",
+        )
+
+        refused = runner.run_mtest(["init", "--ci", "gitlab"])
+        expect_exit(refused, 4)
+        expect(
+            "gitlab" in refused.stderr,
+            f"the refusal does not name the value: {refused.stderr!r}",
+        )
+
+        # A directory sitting where an artifact goes is a refusal, not a skip:
+        # reporting `skipped` there would claim a file exists that does not.
+        with tempfile.TemporaryDirectory(prefix="mtest-init-blocked-") as other:
+            blocked_root = Path(other)
+            (blocked_root / "mtest.toml").mkdir()
+            blocked_runner = E2ERunner(
+                repo_root=blocked_root,
+                mtest=context.runner.mtest,
+                default_timeout=context.runner.default_timeout,
+                short_timeout=context.runner.short_timeout,
+            )
+            blocked = blocked_runner.run_mtest(["init"])
+            expect_exit(blocked, 4)
+            expect(
+                "mtest.toml" in blocked.stderr,
+                f"the refusal does not name the blocked artifact: {blocked.stderr!r}",
+            )
+            expect(
+                not (blocked_root / "tests").exists(),
+                "a refused init created an artifact before refusing",
+            )
+    return "bootstrapped project ran green; a second init skipped everything"

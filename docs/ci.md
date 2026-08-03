@@ -56,6 +56,12 @@ Each action above is pinned to a commit rather than to a tag, the same way this
 repository pins its own workflows, and yours should be too: a tag can be moved
 onto different code, a commit cannot.
 
+`mtest init --ci github` writes exactly this file to
+`.github/workflows/test.yml`, so there is nothing to paste in a project that
+starts that way. It is the same bytes rather than a copy of them: a gate
+extracts the block above and compares it against what the runner emits, which
+is what keeps this page the one place the workflow is written down.
+
 ## Spreading one suite across a matrix
 
 Give each cell a shard and a distinct report name, in the `hash:M/N` syntax

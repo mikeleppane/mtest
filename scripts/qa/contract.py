@@ -800,6 +800,9 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "new: node-id-shaped path -> 4",
     "new: the scaffolded file runs green",
     "new: a hostile basename still compiles and passes",
+    "init: --ci github bootstraps a runnable project",
+    "init: a second run skips every artifact, still 0",
+    "init: --ci gitlab -> 4",
     "interrupt: SIGINT frees the owned process group",
 )
 """Every check `main` must perform, in order, on an unfiltered run.
@@ -813,7 +816,8 @@ SIGINT clause untested. Same shape as `package_consumption.GATE_STAGE_IDS`
 against its stage ledger.
 
 `check_help_stream` records two entries from one dispatch (`--help`, then
-`-V`), so those names are adjacent here and move together.
+`-V`), so those names are adjacent here and move together, and
+`check_init_scaffold` records three the same way.
 """
 
 
@@ -868,6 +872,40 @@ def verify_every_check_ran(performed: tuple[str, ...], filtered: bool) -> None:
 # counters, which depend on what the store held when the run started. Both are
 # elided before an exact comparison, so a warm scaffold cannot flap a check.
 _RUN_SPECIFICS = re.compile(r", builds: \d+, cached: \d+| in \d+\.\d+s")
+
+
+def _first_yaml_fence(page: Path) -> bytes:
+    """The body of the first ```yaml block on `page`, byte for byte.
+
+    Extracted at check time rather than copied into this file, so the page and
+    the runner cannot drift apart without something going red. The FIRST fence
+    is the one that counts because the page carries a second, sharded variant
+    further down, and anchoring on a heading would anchor on prose that can be
+    reworded.
+
+    Bytes, not text. Reading either side in text mode normalizes CRLF to LF, so
+    a page with Windows line endings compares equal to a scaffold with Unix
+    ones while the two files genuinely differ — a byte-parity gate that cannot
+    see a difference in bytes.
+
+    Args:
+        page: The Markdown document to read.
+
+    Returns:
+        Every byte between the opening ```yaml fence line and its closing
+        fence line, its own terminators included. A page with no such block is
+        a setup failure (exit 2), because a missing oracle must be loud rather
+        than a silently-passing comparison against an empty string.
+    """
+    lines = page.read_bytes().splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        if line.rstrip(b"\r\n") != b"```yaml" or not line.endswith(b"\n"):
+            continue
+        for close in range(index + 1, len(lines)):
+            if lines[close].rstrip(b"\r\n") == b"```":
+                return b"".join(lines[index + 1 : close])
+        break
+    _die(f"{page} has no closed ```yaml block to compare the scaffold against")
 
 
 def _sole_line(lines: list[str], prefix: str) -> str | None:
@@ -940,7 +978,7 @@ class Runner:
         self.results: list[tuple[str, str, str, str]] = []
 
     def mtest(
-        self, argv: list[str], timeout: int = 180
+        self, argv: list[str], timeout: int = 180, cwd: Path | None = None
     ) -> subprocess.CompletedProcess[str]:
         """Run the binary under test inside the scaffold, capturing both streams.
 
@@ -948,13 +986,17 @@ class Runner:
             argv: Arguments passed after the binary path.
             timeout: Seconds to wait before `subprocess.TimeoutExpired` is
                 raised; callers turn that into a FAIL, never a pass.
+            cwd: A working directory other than the scaffold. The invocation
+                root is the working directory (§2), so a check about a command
+                that writes into that root needs one of its own rather than
+                the shared scaffold whose contents other checks pin exactly.
 
         Returns:
             The completed process, with both streams decoded as text.
         """
         return subprocess.run(
             [str(MTEST), *argv],
-            cwd=self.root,
+            cwd=cwd if cwd is not None else self.root,
             env=self.env,
             capture_output=True,
             text=True,
@@ -1949,6 +1991,120 @@ class Runner:
                         )
             self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
 
+    # -- init (§29.2). Its invocation root is where it writes, so every run
+    #    below gets its own directory rather than the shared scaffold, whose
+    #    `tests/` node-id set `EXPECTED_TESTS` pins exactly.
+    def check_init_scaffold(self) -> None:
+        """Assert `init` bootstraps a runnable project, twice, and refuses once.
+
+        Three claims, in the order they can be settled. First that the
+        artifacts are what §29.2 says: the workflow is compared byte-for-byte
+        against the first YAML block of `docs/ci.md`, extracted here rather
+        than copied, so the page stays the one place it is written down and a
+        drifted pin reds this gate through the real binary. Then that the
+        scaffolded project runs — the `mtest.toml` it wrote is what makes a
+        bare `mtest` find the test file it wrote beside it, so running with no
+        operands tests both at once. Then that a second `init` changes nothing
+        and still succeeds, and that an unknown provider is refused before any
+        artifact exists.
+        """
+        ref = "§29.2 init bootstraps a project; artifacts are never replaced"
+        name = "init: --ci github bootstraps a runnable project"
+        directory = self._new_dir("init_ok")
+        probs: list[str] = []
+        first = self.mtest(["init", "--ci", "github"], cwd=directory)
+        if first.returncode != 0:
+            probs.append(f"exit {first.returncode}, want 0: {first.stderr!r}")
+        if first.stderr:
+            probs.append(f"a successful init wrote diagnostics: {first.stderr!r}")
+        wanted_lines = [
+            "created tests/test_example.mojo",
+            "created mtest.toml",
+            "created .github/workflows/test.yml",
+            "created .gitignore",
+            "next: pixi init .",
+            "next: pixi workspace channel add https://conda.modular.com/max/",
+            (
+                "next: pixi workspace channel add "
+                "https://repo.prefix.dev/modular-community"
+            ),
+            "next: pixi add mtest",
+            "next: mtest",
+            ("next: commit pixi.toml and pixi.lock, which the workflow installs from"),
+        ]
+        if first.stdout.splitlines() != wanted_lines:
+            probs.append(f"stdout is not the §29.2 report: {first.stdout!r}")
+        written = directory / ".github" / "workflows" / "test.yml"
+        if not written.is_file():
+            probs.append("no workflow was written under --ci github")
+        else:
+            # Both sides read as bytes: text mode would fold CRLF into LF and
+            # report two genuinely different files as identical.
+            documented = _first_yaml_fence(REPO / "docs" / "ci.md")
+            emitted = written.read_bytes()
+            if emitted != documented:
+                probs.append(
+                    "the scaffolded workflow is not byte-identical to the "
+                    f"first yaml block of docs/ci.md ({len(emitted)} bytes "
+                    f"emitted, {len(documented)} documented)"
+                )
+        ignore = directory / ".gitignore"
+        if not ignore.is_file() or ".mtest-cache/" not in ignore.read_text(
+            encoding="utf-8"
+        ):
+            probs.append("the build cache was not added to .gitignore")
+        if not probs:
+            # No operands: the `[run] paths` it just wrote is what has to make
+            # this find the test file it just wrote.
+            try:
+                ran = self.mtest([], cwd=directory)
+            except subprocess.TimeoutExpired:
+                probs.append("timed out running the bootstrapped project")
+                ran = None
+            if ran is not None:
+                if ran.returncode != 0:
+                    probs.append(
+                        f"the bootstrapped project exited {ran.returncode}: "
+                        f"{ran.stdout!r}{ran.stderr!r}"
+                    )
+                if "1 passed" not in ran.stdout:
+                    probs.append(
+                        f"the scaffolded suite did not report its one test: "
+                        f"{ran.stdout!r}"
+                    )
+        self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
+
+        name = "init: a second run skips every artifact, still 0"
+        probs = []
+        before = ignore.read_text(encoding="utf-8") if ignore.is_file() else ""
+        second = self.mtest(["init", "--ci", "github"], cwd=directory)
+        if second.returncode != 0:
+            probs.append(f"exit {second.returncode}, want 0")
+        skipped = [ln for ln in second.stdout.splitlines() if ln.startswith("skipped ")]
+        if len(skipped) != 4:
+            probs.append(f"not every artifact was skipped: {second.stdout!r}")
+        if "created " in second.stdout:
+            probs.append(f"a second init created something: {second.stdout!r}")
+        if ignore.is_file() and ignore.read_text(encoding="utf-8") != before:
+            probs.append("a second init rewrote .gitignore")
+        self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
+
+        name = "init: --ci gitlab -> 4"
+        ref = "§29.2 an unknown --ci provider is refused before anything exists"
+        probs = []
+        untouched = self._new_dir("init_refused")
+        refused = self.mtest(["init", "--ci", "gitlab"], cwd=untouched)
+        if refused.returncode != 4:
+            probs.append(f"exit {refused.returncode}, want 4")
+        if "gitlab" not in refused.stderr:
+            probs.append(f"the refusal does not name the value: {refused.stderr!r}")
+        if refused.stdout:
+            probs.append(f"a refused init wrote to stdout: {refused.stdout!r}")
+        left = sorted(p.name for p in untouched.iterdir())
+        if left:
+            probs.append(f"the refusal created artifacts anyway: {left}")
+        self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
+
     # -- interrupt: signal ONLY mtest, so the child's survival tests mtest's own
     #    process-group teardown (§18/§24.2) rather than a signal the child caught.
     def check_interrupt(self, strict: bool) -> None:
@@ -2560,6 +2716,12 @@ def main() -> int:
             "new: a hostile basename still compiles and passes"
         ):
             runner.check_new_scaffold_runs()
+        if (
+            wanted("init: --ci github bootstraps a runnable project")
+            or wanted("init: a second run skips every artifact, still 0")
+            or wanted("init: --ci gitlab -> 4")
+        ):
+            runner.check_init_scaffold()
         if wanted("interrupt: SIGINT frees the owned process group"):
             if args.no_interrupt:
                 # Recorded rather than bypassed: testing --no-interrupt BEFORE

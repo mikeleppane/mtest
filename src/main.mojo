@@ -3,10 +3,11 @@
 `main` is the only place that reads the process argv and environment, talks to
 the terminal, and calls `exit`. It parses argv and resolves project config.
 `doctor` runs its contained environment checks before main acquires the
-invocation root or exec runtime. `new` scaffolds one test file just after the
-root and before any configuration is read, because nothing in a project file
-can change which file it writes. A `config show` request renders its resolution
-and exits before state loading or run resources. Otherwise main loads last-run
+invocation root or exec runtime. `new` scaffolds one test file, and `init`
+bootstraps a whole project, just after the root and before any configuration is
+read, because nothing in a project file can change what either one writes — and
+`init` writes that project file itself. A `config show` request renders its
+resolution and exits before state loading or run resources. Otherwise main loads last-run
 state, constructs the exec runtime, resolves report destinations, composes
 reporters into the `StandardReportCoordinator` interface the session drives,
 runs the session, closes every resource, conditionally promotes the next state
@@ -15,8 +16,8 @@ file, and exits with the session's resolved code.
 Several output classes bypass the event seam by design, all of them from
 commands that never open a session: pre-session diagnostics go straight to
 stderr; `config show` writes its resolution-only TOML directly to stdout;
-doctor writes its fixed check lines directly to stdout; `new` writes its
-`created <path>` line directly to stdout and its refusals to stderr;
+doctor writes its fixed check lines directly to stdout; `new` and `init` write
+their artifact lines directly to stdout and everything else to stderr;
 `--collect-only` writes its frozen node-id listing — plain lines, or the
 NDJSON collect stream under `--format json` — directly to stdout; and a
 post-close state-write failure goes to stderr after the terminal event already
@@ -44,6 +45,7 @@ from mtest.cli import (
     help_text,
     parse_args,
     run_doctor,
+    run_init,
     run_new,
     version_text,
 )
@@ -635,6 +637,28 @@ def main():
             flush=True,
         )
         exit(scaffolded.code)
+
+    # Beside `new`, and for the same reason: `init` writes the project file
+    # that configuration discovery would read, so it has to run before that
+    # discovery rather than after resolving against a file it is about to
+    # create. `run_init` is declared without `raises` too, which closes its
+    # {0, 3, 4} exit domain structurally.
+    if result.is_init():
+        var bootstrapped = run_init(root, result.ci)
+        var rendered = String("")
+        for line in bootstrapped.lines:
+            rendered += line + "\n"
+        # A failed `init` may already have created something, and the record of
+        # what it did belongs with the diagnostic that stopped it rather than
+        # split across two streams a reader would have to reassemble.
+        var destination = 1 if bootstrapped.code == 0 else 2
+        print(
+            rendered,
+            end="",
+            file=FileDescriptor(destination),
+            flush=True,
+        )
+        exit(bootstrapped.code)
 
     var loaded = _load_config(root, result.config_path, result.no_config)
     if loaded.error_code != 0:
