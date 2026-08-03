@@ -62,3 +62,18 @@ from mtest.report.report_text import (
     md_escape_cell,
     normalize_detail,
 )
+from mtest.report.report_model import (
+    ReportFinalizeContext,
+    ReportHeaderFacts,
+    ReportRow,
+    ReportSectionInput,
+    outcome_label,
+)
+from mtest.report.report_md import (
+    md_file_section,
+    md_header,
+    md_machine_index,
+    md_not_run_line,
+    md_summary_row,
+    md_summary_table_header,
+)
