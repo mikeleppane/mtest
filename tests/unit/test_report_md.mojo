@@ -45,9 +45,10 @@ def _ctx(
     interrupted: Bool = False,
     drift: Bool = False,
     wall_seconds: Float64 = 0.0,
+    counts: List[Int] = _zero_counts(),
 ) -> ReportFinalizeContext:
     return ReportFinalizeContext(
-        counts=_zero_counts(),
+        counts=counts.copy(),
         tests_passed=0,
         tests_failed=0,
         tests_skipped=0,
@@ -81,6 +82,7 @@ def _section_with_node(node: String) -> String:
     var tests = List[TestResult]()
     var section = ReportSectionInput(
         path="tests/a.mojo",
+        root="",
         outcome_code=Outcome.FAIL.code,
         tests=tests^,
         stdout_text="",
@@ -133,6 +135,7 @@ def test_file_section_fences_detail_and_names_reproduce() raises:
     )
     var section = ReportSectionInput(
         path="tests/a.mojo",
+        root="",
         outcome_code=Outcome.FAIL.code,
         tests=tests^,
         stdout_text="",
@@ -165,6 +168,7 @@ def test_reproduce_grows_the_span_past_an_embedded_backtick() raises:
 def _plain_section() -> ReportSectionInput:
     return ReportSectionInput(
         path="tests/a.mojo",
+        root="",
         outcome_code=Outcome.FAIL.code,
         tests=List[TestResult](),
         stdout_text="",
@@ -180,13 +184,14 @@ def _plain_section() -> ReportSectionInput:
 def test_file_section_root_note_is_conditional() raises:
     var with_note = md_file_section(_plain_section(), root_note=True)
     var without_note = md_file_section(_plain_section(), root_note=False)
-    assert_true(with_note.find("root-relative") != -1)
-    assert_true(without_note.find("root-relative") == -1)
+    assert_true(with_note.find("relative to the run root") != -1)
+    assert_true(without_note.find("relative to the run root") == -1)
 
 
 def test_file_section_marks_truncated_streams() raises:
     var section = ReportSectionInput(
         path="tests/b.mojo",
+        root="",
         outcome_code=Outcome.FAIL.code,
         tests=List[TestResult](),
         stdout_text="partial out",
@@ -205,6 +210,102 @@ def test_file_section_marks_truncated_streams() raises:
     assert_true(out.find("debug:") == -1)
 
 
+def test_stream_fences_hold_hostile_content() raises:
+    # Structural Markdown inside a captured stream must stay inert: it rides
+    # through the fence rather than being interpreted, and a run of three
+    # backticks in the content forces the fence itself to grow to four.
+    var section = ReportSectionInput(
+        path="tests/c.mojo",
+        root="",
+        outcome_code=Outcome.FAIL.code,
+        tests=List[TestResult](),
+        stdout_text="closes ``` fence & <tag>",
+        stderr_text="also </style> hostile",
+        stdout_truncated=False,
+        stderr_truncated=False,
+        attempts=List[String](),
+        build_line="",
+        reproduce_node="",
+    )
+    var out = md_file_section(section, root_note=False)
+    assert_true(out.find("````\ncloses ``` fence & <tag>\n````") != -1)
+    assert_true(out.find("also </style> hostile") != -1)
+
+
+def test_attempts_are_cell_escaped_and_cannot_break_the_bullet() raises:
+    # A leading '-' or '#' in an attempt summary must not be readable as a
+    # second list marker or a heading, and a bare '<'/'&' must not survive
+    # as HTML.
+    var attempts = List[String]()
+    attempts.append("# fake heading <b>&amp;</b>")
+    var section = ReportSectionInput(
+        path="tests/d.mojo",
+        root="",
+        outcome_code=Outcome.FAIL.code,
+        tests=List[TestResult](),
+        stdout_text="",
+        stderr_text="",
+        stdout_truncated=False,
+        stderr_truncated=False,
+        attempts=attempts^,
+        build_line="",
+        reproduce_node="",
+    )
+    var out = md_file_section(section, root_note=False)
+    # Only '<' and '&' are escaped; a bare '>' is inert, matching
+    # md_escape_cell's own contract.
+    assert_true(out.find("- \\# fake heading &lt;b>&amp;amp;&lt;/b>\n") != -1)
+    # The raw, unescaped forms must not appear anywhere in the output.
+    assert_true(out.find("\n# fake heading") == -1)
+    assert_true(out.find("<b>") == -1)
+
+
+def test_build_line_is_a_code_target() raises:
+    var section = ReportSectionInput(
+        path="tests/e.mojo",
+        root="",
+        outcome_code=Outcome.COMPILE_ERROR.code,
+        tests=List[TestResult](),
+        stdout_text="",
+        stderr_text="",
+        stdout_truncated=False,
+        stderr_truncated=False,
+        attempts=List[String](),
+        build_line="mojo build tests/e.mojo",
+        reproduce_node="",
+    )
+    var out = md_file_section(section, root_note=False)
+    assert_true(out.find("build: `mojo build tests/e.mojo`\n") != -1)
+
+
+def test_detail_backtrace_is_relativized_against_section_root() raises:
+    var tests = List[TestResult]()
+    tests.append(
+        TestResult(
+            NodeId("tests/a.mojo", "test_x"),
+            Outcome.FAIL,
+            "  At /abs/root/tests/a.mojo:3: assertion failed",
+            "",
+        )
+    )
+    var section = ReportSectionInput(
+        path="tests/a.mojo",
+        root="/abs/root",
+        outcome_code=Outcome.FAIL.code,
+        tests=tests^,
+        stdout_text="",
+        stderr_text="",
+        stdout_truncated=False,
+        stderr_truncated=False,
+        attempts=List[String](),
+        build_line="",
+        reproduce_node="",
+    )
+    var out = md_file_section(section, root_note=False)
+    assert_true(out.find("At tests/a.mojo:3: assertion failed") != -1)
+    assert_true(out.find("/abs/root/tests/a.mojo") == -1)
+
+
 def test_not_run_line_escapes_a_hostile_leading_dash() raises:
     var record = NotRunRecord("-danger.mojo", NotRunReason.LIMIT_REACHED)
     assert_equal(
@@ -214,7 +315,7 @@ def test_not_run_line_escapes_a_hostile_leading_dash() raises:
 
 
 def test_header_names_shuffle_seed_only_when_shuffled() raises:
-    var facts = ReportHeaderFacts(version="1.0.0", platform="Linux x86_64")
+    var facts = ReportHeaderFacts(version="x.y.z", platform="Linux x86_64")
     var shuffled = md_header(facts, _ctx(shuffle=True, shuffle_seed=42))
     var plain = md_header(facts, _ctx(shuffle=False, shuffle_seed=42))
     assert_true(shuffled.find("shuffle seed: 42") != -1)
@@ -222,7 +323,7 @@ def test_header_names_shuffle_seed_only_when_shuffled() raises:
 
 
 def test_header_omits_every_optional_line_for_a_minimal_run() raises:
-    var facts = ReportHeaderFacts(version="1.0.0", platform="Linux x86_64")
+    var facts = ReportHeaderFacts(version="x.y.z", platform="Linux x86_64")
     var out = md_header(facts, _ctx())
     assert_true(out.find("files:") == -1)
     assert_true(out.find("builds:") == -1)
@@ -235,7 +336,7 @@ def test_header_omits_every_optional_line_for_a_minimal_run() raises:
 
 
 def test_header_names_every_fact_when_all_apply() raises:
-    var facts = ReportHeaderFacts(version="1.0.0", platform="Linux x86_64")
+    var facts = ReportHeaderFacts(version="x.y.z", platform="Linux x86_64")
     var out = md_header(
         facts,
         _ctx(
@@ -259,6 +360,25 @@ def test_header_names_every_fact_when_all_apply() raises:
     assert_true(out.find("drift: yes") != -1)
 
 
+def test_header_shard_label_is_cell_escaped() raises:
+    var facts = ReportHeaderFacts(version="x.y.z", platform="Linux x86_64")
+    var out = md_header(facts, _ctx(shard_label="# 2/5 <script>&x"))
+    assert_true(out.find("shard: \\# 2/5 &lt;script>&amp;x\n") != -1)
+    # The raw, unescaped forms must not appear anywhere in the output.
+    assert_true(out.find("<script>") == -1)
+    assert_true(out.find("\nshard: #") == -1)
+
+
+def test_header_files_line_lists_nonzero_counts() raises:
+    var counts = _zero_counts()
+    counts[Outcome.PASS.code] = 3
+    counts[Outcome.FAIL.code] = 1
+    counts[Outcome.NOT_RUN.code] = 2
+    var facts = ReportHeaderFacts(version="x.y.z", platform="Linux x86_64")
+    var out = md_header(facts, _ctx(counts=counts))
+    assert_true(out.find("files: 3 PASS, 1 FAIL, 2 NOT_RUN") != -1)
+
+
 def test_outcome_label_is_total() raises:
     assert_equal(outcome_label(Outcome.PASS.code), "PASS")
     assert_equal(outcome_label(Outcome.FAIL.code), "FAIL")
@@ -278,34 +398,72 @@ def test_outcome_label_is_total() raises:
     assert_equal(outcome_label(99), "OUTCOME(99)")
 
 
-def test_machine_index_lists_exactly_non_green_rows() raises:
+def test_machine_index_lists_exactly_rows_that_need_action() raises:
     var rows = List[ReportRow]()
     rows.append(_row("a.mojo", Outcome.PASS.code))
     rows.append(_row("b.mojo", Outcome.FAIL.code))
     rows.append(_row("c.mojo", Outcome.SKIP.code))
     rows.append(_row("d.mojo", Outcome.NOT_RUN.code))
+    rows.append(_row("e.mojo", Outcome.DESELECTED.code))
+    rows.append(_row("f.mojo", Outcome.EXCLUDED.code))
     var nodes = List[String]()
     nodes.append("a.mojo")
     nodes.append("b.mojo")
     nodes.append("c.mojo")
     nodes.append("d.mojo")
+    nodes.append("e.mojo")
+    nodes.append("f.mojo")
     assert_equal(
         md_machine_index(rows, nodes),
-        (
-            "## Machine index\n\n"
-            "- `b.mojo` — FAIL\n"
-            "- `c.mojo` — SKIP\n"
-            "- `d.mojo` — NOT_RUN\n"
-        ),
+        "## Machine index\n\n- `b.mojo` — FAIL\n- `d.mojo` — NOT_RUN\n",
     )
 
 
-def test_machine_index_is_empty_when_every_row_is_green() raises:
+def test_machine_index_is_empty_when_nothing_needs_action() raises:
     var rows = List[ReportRow]()
     rows.append(_row("a.mojo", Outcome.PASS.code))
+    rows.append(_row("b.mojo", Outcome.SKIP.code))
+    rows.append(_row("c.mojo", Outcome.DESELECTED.code))
+    rows.append(_row("d.mojo", Outcome.EXCLUDED.code))
     var nodes = List[String]()
     nodes.append("a.mojo")
+    nodes.append("b.mojo")
+    nodes.append("c.mojo")
+    nodes.append("d.mojo")
     assert_equal(md_machine_index(rows, nodes), "")
+
+
+def test_machine_index_outcome_inclusion_is_total() raises:
+    # Walk every known outcome code and pin exactly which ones are on the
+    # index: PASS, SKIP, DESELECTED, and EXCLUDED are silent; every other
+    # outcome, FLAKY and NOT_RUN included, gets a line.
+    for code in range(Outcome.COUNT):
+        var rows = List[ReportRow]()
+        rows.append(_row("only.mojo", code))
+        var nodes = List[String]()
+        nodes.append("only.mojo")
+        var out = md_machine_index(rows, nodes)
+        var excluded = (
+            code == Outcome.PASS.code
+            or code == Outcome.SKIP.code
+            or code == Outcome.DESELECTED.code
+            or code == Outcome.EXCLUDED.code
+        )
+        if excluded:
+            assert_equal(out, "")
+        else:
+            assert_true(out.find(outcome_label(code)) != -1)
+
+
+def test_machine_index_guards_a_short_nodes_list() raises:
+    # A `nodes` shorter than `rows` (a violated caller contract) must
+    # degrade a target to '' rather than index out of bounds.
+    var rows = List[ReportRow]()
+    rows.append(_row("a.mojo", Outcome.FAIL.code))
+    var nodes = List[String]()
+    assert_equal(
+        md_machine_index(rows, nodes), "## Machine index\n\n- `''` — FAIL\n"
+    )
 
 
 def test_machine_index_quotes_a_hostile_node() raises:

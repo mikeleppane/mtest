@@ -79,6 +79,11 @@ struct ReportSectionInput(Copyable, Movable):
 
     var path: String
     """The file's root-relative path."""
+    var root: String
+    """The run root a compiler-baked `At <path>` line inside a raw FAIL
+    detail is relativized against, via `normalize_detail` — the same root
+    every other reporter in this run was given, so a report's backtraces
+    read exactly as the console's do."""
     var outcome_code: Int
     """The file's outcome, an `Outcome.code` value rendered through
     `outcome_label`."""

@@ -14,8 +14,9 @@ node id is hostile.
 `md_header` and `md_summary_table_header` open the document; `md_summary_row`,
 `md_file_section`, and `md_not_run_line` render one row/section/reason each;
 `md_machine_index` closes it with a flat, grep-friendly list of every row that
-is not `Outcome.PASS` — the one outcome a row needs to be silent about.
+needs a second look (see `_needs_action` for the exact outcome set).
 """
+from mtest.config import shell_quote
 from mtest.model import NotRunRecord, Outcome, not_run_reason_label
 from mtest.report.console_text import escape_multiline, escape_scalar
 from mtest.report.junit import format_seconds
@@ -32,7 +33,6 @@ from mtest.report.report_text import (
     md_escape_cell,
     normalize_detail,
 )
-from mtest.config import shell_quote
 
 
 def md_header(facts: ReportHeaderFacts, ctx: ReportFinalizeContext) -> String:
@@ -54,9 +54,9 @@ def md_header(facts: ReportHeaderFacts, ctx: ReportFinalizeContext) -> String:
     var out = String("# mtest report\n\n")
     out += (
         "mtest "
-        + escape_scalar(facts.version)
+        + md_escape_cell(facts.version)
         + " ("
-        + escape_scalar(facts.platform)
+        + md_escape_cell(facts.platform)
         + ")\n\n"
     )
     out += "wall time: " + format_seconds(ctx.wall_seconds) + "s\n"
@@ -94,7 +94,7 @@ def md_header(facts: ReportHeaderFacts, ctx: ReportFinalizeContext) -> String:
     if ctx.shuffle:
         out += "shuffle seed: " + String(ctx.shuffle_seed) + "\n"
     if ctx.shard_label.byte_length() > 0:
-        out += "shard: " + escape_scalar(ctx.shard_label) + "\n"
+        out += "shard: " + md_escape_cell(ctx.shard_label) + "\n"
     if ctx.interrupted:
         out += "interrupted: yes\n"
     if ctx.drift:
@@ -182,10 +182,11 @@ def md_file_section(section: ReportSectionInput, root_note: Bool) -> String:
 
     `section.path` is already root-relative, the convention every `NodeId`
     in this runner follows; a compiler-baked `At <path>` line inside a
-    failure's raw detail is not, and this section has no run root to
-    rewrite it with, so it renders that line exactly as the compiler wrote
-    it. `root_note` controls whether a short note says so, so the caller can
-    show it once per document rather than on every section.
+    failure's raw detail is not, and `normalize_detail` rewrites it against
+    `section.root`, exactly as the console does, so the two renderings do
+    not drift apart. `root_note` controls whether a short note says the
+    report's paths are root-relative, so the caller can show it once per
+    document rather than on every section.
 
     Args:
         section: The file's per-test results, captured streams, and repro
@@ -204,9 +205,9 @@ def md_file_section(section: ReportSectionInput, root_note: Bool) -> String:
     )
     if root_note:
         out += (
-            "> File paths above are root-relative. A backtrace `At` line"
-            " inside a failure detail below is not rewritten and may show"
-            " the full path the compiler emitted.\n\n"
+            "> File paths in this report, including a backtrace `At` line"
+            " inside a failure detail, are shown relative to the run"
+            " root.\n\n"
         )
     for ref t in section.tests:
         if t.outcome != Outcome.FAIL:
@@ -214,7 +215,7 @@ def md_file_section(section: ReportSectionInput, root_note: Bool) -> String:
         out += (
             "### FAIL " + md_code_span(escape_scalar(t.node.render())) + "\n\n"
         )
-        var detail = normalize_detail(t.detail, "")
+        var detail = normalize_detail(t.detail, section.root)
         if detail.byte_length() > 0:
             out += md_code_fence(escape_multiline(detail))
     if section.stdout_text.byte_length() > 0:
@@ -232,7 +233,7 @@ def md_file_section(section: ReportSectionInput, root_note: Bool) -> String:
     if len(section.attempts) > 0:
         out += "**attempts**\n\n"
         for ref a in section.attempts:
-            out += "- " + escape_scalar(a) + "\n"
+            out += "- " + md_escape_cell(a) + "\n"
         out += "\n"
     if section.build_line.byte_length() > 0:
         out += "build: " + md_code_span(escape_scalar(section.build_line))
@@ -261,19 +262,40 @@ def md_not_run_line(record: NotRunRecord) -> String:
     )
 
 
+def _needs_action(outcome_code: Int) -> Bool:
+    """Whether a row's outcome belongs on the machine index.
+
+    The index exists so a reader or a script can jump straight to every
+    file that needs a look, so it excludes exactly the outcomes that never
+    do: `PASS` (nothing wrong), `SKIP` (the child suite's own choice, not a
+    stop condition), `DESELECTED`, and `EXCLUDED` (both intentionally kept
+    out of the run, not casualties of it). Every other outcome — `FAIL`,
+    `CRASH`, `TIMEOUT`, `COMPILE_ERROR`, `COMPILE_TIMEOUT`,
+    `MALFORMED_SUITE`, `PRECOMPILE_ERROR`, `FLAKY`, and `NOT_RUN` — is
+    included, `FLAKY` and `NOT_RUN` among them because a flaky pass and an
+    unrun file both warrant a second look even though neither fails the
+    run.
+    """
+    return not (
+        outcome_code == Outcome.PASS.code
+        or outcome_code == Outcome.SKIP.code
+        or outcome_code == Outcome.DESELECTED.code
+        or outcome_code == Outcome.EXCLUDED.code
+    )
+
+
 def md_machine_index(rows: List[ReportRow], nodes: List[String]) -> String:
-    """A flat, grep-friendly index of every row that is not `Outcome.PASS`.
+    """A flat, grep-friendly index of every row that needs a second look.
 
     `nodes` is parallel to `rows`: `nodes[i]` is the reproduce target for
     `rows[i]`, the file's path or a more specific node id, exactly as
     `ReportSectionInput.reproduce_node` carries for that same file. This is
-    a caller contract, not something this function can check — `nodes` must
-    be exactly as long as `rows`, in the same order.
+    a caller contract the function still defends against: a `nodes` shorter
+    than `rows` renders an empty target (`''`) for the rows past its end
+    rather than indexing out of bounds, so a violated contract degrades a
+    line's target instead of crashing the whole document.
 
-    A row whose outcome is `Outcome.PASS` is silent by construction: it is
-    the one outcome a reader or a script never needs to jump to. Every other
-    outcome, `SKIP` included, is worth a line, because a skip is still a
-    file a reader may want to look at.
+    See `_needs_action` for exactly which outcomes are included.
 
     Args:
         rows: The summary rows to filter, in their table order. Not
@@ -281,16 +303,17 @@ def md_machine_index(rows: List[ReportRow], nodes: List[String]) -> String:
         nodes: The parallel reproduce targets. Not mutated.
 
     Returns:
-        `""` when every row is `Outcome.PASS`; otherwise a heading followed
-        by one bullet per non-passing row, in `rows` order.
+        `""` when no row needs action; otherwise a heading followed by one
+        bullet per included row, in `rows` order.
     """
     var body = String("")
     var i = 0
     for ref row in rows:
-        if row.outcome_code != Outcome.PASS.code:
+        if _needs_action(row.outcome_code):
+            var node = nodes[i] if i < len(nodes) else String("")
             body += (
                 "- "
-                + md_code_span(_reproduce_target(nodes[i]))
+                + md_code_span(_reproduce_target(node))
                 + " — "
                 + outcome_label(row.outcome_code)
                 + "\n"
