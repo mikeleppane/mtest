@@ -907,8 +907,9 @@ def main():
             for nid in collected.listing:
                 # Both formats re-split the ONE sorted listing, so a node line
                 # and its plain-text twin cannot describe different tests. The
-                # split is `render()`'s inverse, at the LAST separator: a test
-                # name never contains `::` but a file path can.
+                # split is `render()`'s inverse, at the LAST separator, which
+                # is also the only one: §5 keeps `::` out of every discovered
+                # path, so a listed id carries exactly one.
                 var node = split_rendered_node_id(nid)
                 stream += collect_node_line(nid, node.path, node.name) + "\n"
             stream += collect_finished_line(len(collected.listing), final_code)

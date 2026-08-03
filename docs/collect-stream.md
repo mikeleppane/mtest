@@ -85,11 +85,14 @@ One record per node id, in listing order.
 entry, so `node_id` always equals `path` + `::` + `name`. A consumer may read
 whichever of the three it needs without reconciling them.
 
-`name` never contains `::`; it is a test function's bare identifier. `path`
-**may**, since nothing stops a directory from being named that way. So the
-split point is the **last** `::` in `node_id`, not the first, and those two
-rules together are what let a consumer verify the triple rather than trust it:
-a producer that split at the first separator emits a `name` carrying `::`.
+Neither `path` nor `name` ever contains `::`. `name` is a test function's bare
+identifier, and `path` is addressable by §5 of the CLI contract, which reserves
+the separator for node ids: a directory may of course be named that way on
+disk, but a `test_*.mojo` file underneath one is skipped by the walk and never
+listed here. `node_id` therefore carries exactly one `::`, and a consumer that
+splits on it recovers the pair whichever end it scans from. That is also what
+lets a consumer verify the triple rather than trust it: two separators in a
+`node_id`, or one in either component, is a producer that is not this one.
 
 ### 2.3 `collect_finished` — the terminal
 

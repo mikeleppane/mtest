@@ -14,19 +14,21 @@ The stages:
    directory is walked for `test_*.mojo` files; an explicitly named file is
    taken regardless of the pattern. A node id (`PATH::TEST`) resolves to its
    file part. A nonexistent operand, an operand that escapes the root, an
-   operand with more than one `::`, a node id whose path is a directory, an
-   operand of a file type mtest cannot run, and a path that cannot be
-   inspected each raise a `discover:` usage error (the exit-4 class). An empty
-   walk is not an error: it yields empty run files.
+   operand with more than one `::`, an operand that spells a PATH with `::`
+   rather than a node id, a node id whose path is a directory, an operand of a
+   file type mtest cannot run, and a path that cannot be inspected each raise a
+   `discover:` usage error (the exit-4 class). An empty walk is not an error:
+   it yields empty run files.
 3. Deduplicate on the root-relative path; a file that is both a gate and in a
    walk lands once, in `gate_files` (gate-overlap promotion).
 4. Apply excludes (fnmatch against the whole path). An exclusion wins over both
    a gate and an explicit path, loudly: the file moves to `excluded` with the
    pattern that removed it. A pattern matching nothing becomes a stale entry.
 5. Order. `run_files` sorted lexicographically; `gate_files` in listed order;
-   `excluded` sorted by path; `stale_excludes` in listed order; both loud walk
-   channels — the refused symlinks and the test-named entries that are not
-   runnable files — deduplicated and sorted.
+   `excluded` sorted by path; `stale_excludes` in listed order; all three loud
+   walk channels — the refused symlinks, the test-named entries that are not
+   runnable files, and the test files no node id could address — deduplicated
+   and sorted.
 """
 from std.builtin.sort import sort
 from std.os import lstat
@@ -37,7 +39,7 @@ from mtest.model import escape_one_line, split_node_token
 from mtest.discover.fnmatch import fnmatch
 from mtest.discover.normalize import normalize_operand, normalize_root
 from mtest.discover.result import DiscoveryResult, ExcludedEntry
-from mtest.discover.walk import walk_dir
+from mtest.discover.walk import path_is_addressable, walk_dir
 
 comptime _S_IFMT = 0xF000
 """File-type mask over `st_mode`; POSIX fixes it on Linux and Darwin alike."""
@@ -85,6 +87,36 @@ def _malformed_node_id_error(op: String) -> Error:
     )
 
 
+def _separator_in_path_error(op: String) -> Error:
+    """The exit-4 usage error for an operand spelling a path with `::`.
+
+    Names the operand as the caller typed it, never the prefix before the
+    separator: reporting `no such path 'tests/co'` for `tests/co::l/test_x.mojo`
+    described a path nobody wrote and hid the real problem, which is that §5
+    reserves `::` and this build enforces it.
+    """
+    return Error(
+        "discover: unsupported path '"
+        + escape_one_line(op)
+        + "': '::' is reserved for node ids, so a file path may not contain it"
+        " (see mtest --help)"
+    )
+
+
+def _names_an_existing_path(op: String, nroot: String) -> Bool:
+    """Whether `op`, separator included, names something that exists on disk.
+
+    Asked only once the node-id reading of an operand has already failed to
+    find its file, to tell a node id for a file that is missing from a path
+    that was never a node id at all. An operand that will not normalize (it
+    escapes the root) answers False and keeps its own diagnostic.
+    """
+    try:
+        return exists(_abs_of(nroot, normalize_operand(op, nroot)))
+    except:
+        return False
+
+
 def _node_id_names_directory_error(op: String, dir_part: String) -> Error:
     """The exit-4 usage error for a node id whose path resolves to a directory.
 
@@ -107,6 +139,7 @@ def _classify(
     mut into: List[String],
     mut skipped: List[String],
     mut nonregular: List[String],
+    mut unaddressable: List[String],
 ) raises:
     """Resolve one operand into `into` (walked files, or one explicit file).
 
@@ -118,25 +151,39 @@ def _classify(
     "no such path"), and an operand that `exists` accepted but `lstat` cannot
     characterize. Every raise is the exit-4 class.
 
+    This is the one place the §5 rule that a file path may not contain `::` is
+    applied to an operand, and it is applied in two shapes, because an operand
+    is split at its FIRST separator and so its file part can never carry one.
+    A name part holding a `/` is not a test name at all, so the operand was a
+    path; and a node id whose file is missing while the whole operand names
+    something on disk was a path too. Either way the refusal quotes the
+    operand, so the message can never name a prefix the caller never wrote.
+
     One accepted bound: `exists` folds an unsearchable parent directory into
     plain absence, so an operand under one still reports "no such path".
     Distinguishing the two needs errno detail this layer cannot see; neither
     case is a silent loss, since both refuse the run.
 
-    Any symlink a walk refused is appended to `skipped`, and any test-named
-    walk entry that is not a runnable file to `nonregular`, for the caller to
-    warn about. An explicitly named operand is never refused for being a
-    symlink: naming a file is a direct selection, and `exists` already accepted
-    it.
+    Any symlink a walk refused is appended to `skipped`, any test-named walk
+    entry that is not a runnable file to `nonregular`, and any test file whose
+    path no node id could express to `unaddressable`, for the caller to warn
+    about. An explicitly named operand is never refused for being a symlink:
+    naming a file is a direct selection, and `exists` already accepted it.
     """
     var split = split_node_token(op)
     if split.sep_count > 1:
         raise _malformed_node_id_error(op)
     var is_node_id = split.sep_count == 1
+    if is_node_id and split.name_part.find("/") != -1:
+        # A test name is a Mojo identifier, so it never holds a path
+        # separator. This token was a path spelled with `::`.
+        raise _separator_in_path_error(op)
     var file_op = op if not is_node_id else split.file_part
     var rel = normalize_operand(file_op, nroot)  # raises on root escape
     var fpath = _abs_of(nroot, rel)
     if not exists(fpath):
+        if is_node_id and _names_an_existing_path(op, nroot):
+            raise _separator_in_path_error(op)
         raise Error("discover: no such path '" + escape_one_line(file_op) + "'")
     var kind: Int
     try:
@@ -159,6 +206,8 @@ def _classify(
             skipped.append(s)
         for s in walked.skipped_nonregular:
             nonregular.append(s)
+        for s in walked.skipped_unaddressable:
+            unaddressable.append(s)
     elif names_file:
         into.append(rel)
     else:
@@ -214,13 +263,14 @@ def discover(config: RunnerConfig, root: String) raises -> DiscoveryResult:
 
     Returns:
         A `DiscoveryResult` with the ordered gate and run files, the excluded
-        files, and the stale exclude patterns.
+        files, the stale exclude patterns, and the three loud walk channels.
 
     Raises:
         Error: A `discover:`-prefixed usage error (exit-4 class) for a
             nonexistent operand, an operand escaping the root, a malformed
-            node id, an operand whose file type mtest cannot run, or a path
-            the walk cannot inspect. An empty walk is not an error.
+            node id, an operand that spells a path with `::`, an operand whose
+            file type mtest cannot run, or a path the walk cannot inspect. An
+            empty walk is not an error.
 
     Examples:
 
@@ -247,16 +297,31 @@ def discover(config: RunnerConfig, root: String) raises -> DiscoveryResult:
             operands.append(String(p))
 
     # Stage 2: normalize + classify operands and gates into raw file lists.
-    # Refused symlinks and test-named non-files accumulate across every operand
-    # and gate walk.
+    # Refused symlinks, test-named non-files, and unaddressable test files
+    # accumulate across every operand and gate walk.
     var skipped_links = List[String]()
     var skipped_nonregular = List[String]()
+    var skipped_unaddressable = List[String]()
     var run_raw = List[String]()
     for op in operands:
-        _classify(op, nroot, run_raw, skipped_links, skipped_nonregular)
+        _classify(
+            op,
+            nroot,
+            run_raw,
+            skipped_links,
+            skipped_nonregular,
+            skipped_unaddressable,
+        )
     var gate_raw = List[String]()
     for g in config.gates:
-        _classify(g, nroot, gate_raw, skipped_links, skipped_nonregular)
+        _classify(
+            g,
+            nroot,
+            gate_raw,
+            skipped_links,
+            skipped_nonregular,
+            skipped_unaddressable,
+        )
 
     # Stage 3: dedup; a gate that also appears in a walk stays a gate only.
     var gate_files = _dedup_preserve(gate_raw)
@@ -287,6 +352,8 @@ def discover(config: RunnerConfig, root: String) raises -> DiscoveryResult:
     sort(links)
     var nonregular = _dedup_preserve(skipped_nonregular)
     sort(nonregular)
+    var unaddressable = _dedup_preserve(skipped_unaddressable)
+    sort(unaddressable)
 
     return DiscoveryResult(
         gate_files=gate_kept^,
@@ -295,4 +362,5 @@ def discover(config: RunnerConfig, root: String) raises -> DiscoveryResult:
         stale_excludes=stale^,
         skipped_links=links^,
         skipped_nonregular=nonregular^,
+        skipped_unaddressable=unaddressable^,
     )

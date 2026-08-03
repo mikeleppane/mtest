@@ -616,6 +616,7 @@ class CheckRosterTests(unittest.TestCase):
                 "symlink: a symlinked test file is collected and run, never dropped",
                 "shape: a test-named non-file walk entry is announced, never dropped",
                 "shape: an unsupported operand is refused with its real problem",
+                "path: a '::' path is skipped, never listed, and refused by name",
                 "value: 2^63 refused for every non-negative integer flag",
                 "report: --json to a readerless FIFO fails fast, never blocks",
                 "path: a long-but-legal path builds, never a false COMPILE-ERROR",
@@ -753,6 +754,11 @@ class CheckRosterTests(unittest.TestCase):
             def check_unsupported_operand(self) -> None:
                 self._perform(
                     "shape: an unsupported operand is refused with its real problem"
+                )
+
+            def check_separator_in_path(self) -> None:
+                self._perform(
+                    "path: a '::' path is skipped, never listed, and refused by name"
                 )
 
             def check_integer_overflow_values(self) -> None:

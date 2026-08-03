@@ -794,6 +794,7 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "symlink: a symlinked test file is collected and run, never dropped",
     "shape: a test-named non-file walk entry is announced, never dropped",
     "shape: an unsupported operand is refused with its real problem",
+    "path: a '::' path is skipped, never listed, and refused by name",
     "value: 2^63 refused for every non-negative integer flag",
     "report: --json to a readerless FIFO fails fast, never blocks",
     "path: a long-but-legal path builds, never a false COMPILE-ERROR",
@@ -1126,16 +1127,23 @@ class Runner:
     def check_collect_json(self) -> None:
         """Assert the collect stream agrees with the listing it replaces.
 
-        Four properties, each catching a different lie. The node ids must equal
-        the `--format lines` run's stdout lines IN ORDER, so the stream cannot
-        list a different set or a different order from the format it mirrors.
-        Every record must satisfy the oracle's frozen schema, which is what
-        catches a `node` whose triple does not decompose — a defect counts and
-        ordering cannot see. A directory named with `::` is collected too,
-        because `node_id` must then be split at its LAST separator and a
-        first-separator split produces a wrong `path`/`name` pair that is
-        otherwise well-formed. And two runs must be byte-identical, the same
+        Three properties, each catching a different lie. The node ids must
+        equal the `--format lines` run's stdout lines IN ORDER, so the stream
+        cannot list a different set or a different order from the format it
+        mirrors. Every record must satisfy the oracle's frozen schema, which is
+        what catches a `node` whose triple does not decompose — a defect counts
+        and ordering cannot see. And two runs must be byte-identical, the same
         determinism the listing itself promises.
+
+        A fourth once collected a file under a `::`-named directory, to prove
+        `node_id` was split at its LAST separator rather than its first. §5 is
+        enforced now, so no such file is ever listed and the scenario cannot be
+        built through the binary at all — `path: a '::' path is skipped, never
+        listed, and refused by name` asserts exactly that. The mis-split it
+        guarded against is still caught: the oracle rejects a `name` carrying a
+        separator, and `scripts/tests/test_collect_stream.py` drives both
+        splittings through it with synthetic records, which needs no `::` file
+        on disk.
 
         **What this does NOT cover.** `terminal.exit_code == returncode` is
         asserted, but that equality alone does not prove the runner resolves
@@ -1177,7 +1185,6 @@ class Runner:
             problems.append("a complete run produced a torn tail")
         if first.stdout != again.stdout:
             problems.append("two identical runs produced different streams")
-        problems += self._collect_json_separator_path_problems()
         ok = not problems
         self.record(PASS if ok else FAIL, name, ref, "" if ok else "; ".join(problems))
 
@@ -1547,54 +1554,6 @@ class Runner:
                 )
         ok = not problems
         self.record(PASS if ok else FAIL, name, ref, "" if ok else "; ".join(problems))
-
-    def _collect_json_separator_path_problems(self) -> list[str]:
-        """Collect a file under a `::`-named directory and check its triple.
-
-        A node id is `path::name`, and a path may itself contain `::` while a
-        test name never can, so the decomposition has to split at the LAST
-        separator. Splitting at the first one yields
-        `path="oddroot/od", name="d/test_odd.mojo::test_odd_one"` — a triple
-        that still concatenates back to the right `node_id`, so only the
-        name-has-no-`::` rule in the oracle rejects it.
-
-        The `::` directory is reached by naming its PARENT, never itself: an
-        operand containing `::` is read as a node id (`select`/`discover`
-        refuse anything but one separator), so such a file is discoverable by a
-        walk and not addressable directly. That is a pre-existing limitation of
-        the operand grammar, unrelated to this format.
-
-        Returns:
-            One problem string per violation, empty when the triple is right.
-            A setup failure is itself reported as a problem, never skipped.
-        """
-        odd_dir = self.root / "oddroot" / "od::d"
-        try:
-            odd_dir.mkdir(parents=True, exist_ok=True)
-            (odd_dir / "test_odd.mojo").write_text(
-                HEAD + "def test_odd_one() raises:\n    assert_equal(1, 1)\n" + MAIN
-            )
-        except OSError as exc:
-            return [f"could not scaffold a '::' path: {exc}"]
-
-        run = self.mtest(["collect", "--format", "json", "-I", "build", "oddroot"])
-        if run.returncode != 0:
-            return [f"collecting a '::' path exited {run.returncode}: {run.stderr}"]
-        try:
-            report = collect_stream_oracle.parse_collect_stream(run.stdout)
-        except collect_stream_oracle.CollectStreamError as exc:
-            return [f"the '::' path stream did not parse: {exc}"]
-
-        want_id = "oddroot/od::d/test_odd.mojo::test_odd_one"
-        if report.node_ids != [want_id]:
-            return [f"'::' path listed {report.node_ids}, want [{want_id!r}]"]
-        node = next(r for r in report.records if r.get("event") == "node")
-        problems = []
-        if node.get("path") != "oddroot/od::d/test_odd.mojo":
-            problems.append(f"'::' path decomposed to path={node.get('path')!r}")
-        if node.get("name") != "test_odd_one":
-            problems.append(f"'::' path decomposed to name={node.get('name')!r}")
-        return problems
 
     def _shuffled_file_order(self, seed: str) -> tuple[str, ...]:
         """The ordered `file_started` paths of one seeded shuffled run.
@@ -2009,6 +1968,69 @@ class Runner:
             pipe.unlink(missing_ok=True)
         ok = not bad
         self.record(PASS if ok else FAIL, name, ref, "" if ok else "; ".join(bad))
+
+    def check_separator_in_path(self) -> None:
+        """Assert `::` in a path is enforced, announced, and named honestly.
+
+        §5 always said `::` in a file path is unsupported, and nothing
+        enforced it. A walk discovered such a file, `collect` listed it, and a
+        run ran it — but no operand could reach it, because an operand splits
+        at its FIRST separator, so `mtest 'tests/co::l/test_x.mojo'` answered
+        `no such path 'tests/co'`: a path the caller never wrote, describing a
+        problem that was not theirs.
+
+        Three properties, one tree. The walk skips the file and says so with
+        the `skipped-unaddressable` warning §5 names, so the run cannot go
+        quietly green over a smaller set; `collect` lists files rather than
+        warnings, so it simply omits it; and the operand is refused with exit
+        4 quoting itself. The POISON test inside would FAIL if it ran, so a
+        walk that regressed flips the exit code rather than only the text.
+        """
+        ref = "§5/§9 `::` in a path is unsupported: skipped, unlisted, refused"
+        name = "path: a '::' path is skipped, never listed, and refused by name"
+        d = self.root / "probes_sep"
+        d.mkdir(exist_ok=True)
+        (d / "test_plain.mojo").write_text(
+            HEAD + "def test_sep_plain_ok() raises:\n"
+            '    assert_equal(reverse("ab"), "ba")\n' + MAIN
+        )
+        nested = d / "co::l"
+        nested.mkdir(exist_ok=True)
+        (nested / "test_x.mojo").write_text(
+            HEAD + "def test_sep_poison() raises:\n"
+            "    assert_equal(1, 2)  # POISON: an addressable file would run\n" + MAIN
+        )
+
+        probs: list[str] = []
+        run = self.mtest(["-I", "build", "probes_sep"])
+        both = run.stdout + run.stderr
+        warned = [ln for ln in both.splitlines() if "skipped-unaddressable" in ln]
+        if run.returncode != 0:
+            probs.append(f"run: exit {run.returncode} (want 0)")
+        if "1 passed" not in both:
+            probs.append("run: the addressable sibling did not pass alone")
+        if len(warned) != 1 or "co::l/test_x.mojo" not in warned[0]:
+            probs.append(f"run: warnings={warned}, want exactly one naming the file")
+
+        listed = self.mtest(["collect", "-I", "build", "probes_sep"])
+        if "co::l" in listed.stdout:
+            probs.append("collect: listed a node id nothing could address")
+        if "skipped-unaddressable" in listed.stdout + listed.stderr:
+            probs.append("collect: emitted a discovery warning")
+
+        for operand in ("probes_sep/co::l/test_x.mojo", "probes_sep/co::l"):
+            refused = self.mtest(["-I", "build", operand])
+            text = refused.stdout + refused.stderr
+            if refused.returncode != 4:
+                probs.append(f"{operand}: exit {refused.returncode} (want 4)")
+            if "unsupported path" not in text:
+                probs.append(f"{operand}: no unsupported-path diagnostic")
+            if operand not in text:
+                probs.append(f"{operand}: the refusal did not quote the operand")
+            if "no such path" in text:
+                probs.append(f"{operand}: still reports a truncated prefix")
+
+        self.record(PASS if not probs else FAIL, name, ref, "; ".join(probs))
 
     def check_integer_overflow_values(self) -> None:
         """Assert the decimal values `atol` wraps are refused, not accepted.
@@ -3113,6 +3135,8 @@ def main() -> int:
             runner.check_nonregular_walk_entry()
         if wanted("shape: an unsupported operand is refused with its real problem"):
             runner.check_unsupported_operand()
+        if wanted("path: a '::' path is skipped, never listed, and refused by name"):
+            runner.check_separator_in_path()
         if wanted("value: 2^63 refused for every non-negative integer flag"):
             runner.check_integer_overflow_values()
         if wanted("report: --json to a readerless FIFO fails fast, never blocks"):

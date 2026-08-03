@@ -284,7 +284,18 @@ project configuration (§29.2).
 - An **explicit file** operand runs regardless of the `test_*` pattern (the
   pattern gates directory walks only) — so `mtest path/to/my_checks.mojo` works.
 - A **node id** has the form `<path>::<test_name>` and selects a single test.
-  `::` in a file path is unsupported.
+  `::` in a file path is unsupported, and that is enforced rather than merely
+  discouraged. A directory walk **skips** a `test_*.mojo` file whose
+  root-relative path contains `::` and warns about it (kind
+  `skipped-unaddressable`, below); `collect` simply does not list it. An
+  **operand** whose path carries the separator is a usage error (exit 4)
+  naming the operand exactly as it was typed — never the prefix before the
+  separator, which is a path the caller never wrote. A genuine node id, with
+  one `::` and a real file before it, is unaffected. The rule is about
+  addressability, not runnability: such a file may compile and pass perfectly
+  well, but nothing could point at the result afterwards — not an operand, not
+  a node id in a report, not a `--lf` entry — so admitting it would put a test
+  in the run that the tool cannot name.
 - Positional PATHS replace `[run] paths` as a whole. With no positional PATHS,
   configured paths are used when present; otherwise the default is `tests/` if
   it exists, else `.`. Configured paths are files or directories, not node ids.
@@ -301,10 +312,16 @@ directory is never descended (lexical normalization cannot detect a cycle) and
 a `test_*.mojo` link that resolves to no usable file is refused. Any other
 test-named entry that is not a regular file — a directory wearing a
 `test_*.mojo` name, or a FIFO, socket, or device sitting where a test file is
-expected — is skipped and never descended. A **run** reports each such skip as
-a warning, once per entry: kind `skipped-symlink` for a refused link,
-`skipped-nonregular` for the rest. (`collect` lists files and emits no
-discovery warnings, for either kind.) An entry the walk cannot characterize at
+expected — is skipped and never descended. A `test_*.mojo` file whose
+root-relative path contains `::` is skipped for a different reason: it is
+perfectly runnable and simply cannot be named (above). A **run** reports each
+such skip as a warning, once per entry: kind `skipped-symlink` for a refused
+link, `skipped-unaddressable` for a path carrying the separator, and
+`skipped-nonregular` for the rest. A directory whose own name carries `::` is
+still descended, so each unaddressable file under it is announced on its own
+rather than as a subtree the reader would have to expand. (`collect` lists
+files and emits no discovery warnings, for any of the three kinds.) An entry
+the walk cannot characterize at
 all — the shape a directory this process may read but not search produces — is
 a usage error (exit 4, §9) rather than a subtree quietly reported as empty. A
 FIFO, socket, or device whose name does not match `test_*.mojo` cannot hide a
@@ -337,7 +354,9 @@ runs at most once.
 
 A nonexistent path, an explicit operand whose file type mtest cannot run (a
 FIFO, socket, or device — refused as `unsupported file type`, never as `no such
-path`), or a node id naming a file that exists but a test that does
+path`), an operand that spells a path with `::` (refused as `unsupported path`,
+never as `no such path` for the prefix before the separator), or a node id
+naming a file that exists but a test that does
 not, is a usage error (exit 4). That check happens **after** the file's
 `--skip-all` collection probe (§6) reports its universe of test names: an
 unknown node id is an exit-4 error raised post-probe, before any test body

@@ -427,6 +427,12 @@ def run_session[
     # than the tree suggests, so say so rather than exit 0 quietly.
     for entry in disc.skipped_nonregular:
         reporter.handle(Event.warning("skipped-nonregular", entry))
+    # And once more for a file that is perfectly runnable and simply cannot be
+    # named: `::` is the node-id separator, so a test under such a path has no
+    # operand, no node id, and no last-run entry. Running it would put a result
+    # in the report that nothing could ever point back at.
+    for entry in disc.skipped_unaddressable:
+        reporter.handle(Event.warning("skipped-unaddressable", entry))
     # A `--serial` glob matching no discovered run file is stale for the same
     # reason a `--exclude` glob is: the pattern names nothing, so the caller
     # almost certainly mistyped it. This is about the glob, not the worker count,
