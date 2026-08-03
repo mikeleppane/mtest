@@ -78,6 +78,13 @@ from mtest.report.report_md import (
     md_summary_row,
     md_summary_table_header,
 )
+from mtest.report.report_writer import (
+    REPORT_STYLE_CONCISE,
+    REPORT_STYLE_FULL,
+    ReportArtifact,
+    ReportFinalizeResult,
+    ReportWriter,
+)
 from mtest.report.report_html import (
     html_document_close,
     html_document_open,

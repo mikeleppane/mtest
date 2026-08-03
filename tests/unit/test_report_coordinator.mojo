@@ -22,7 +22,9 @@ from mtest.model import (
     TestCounts,
     TestResult,
 )
+from mtest.platform import create_unique_temp
 from mtest.report import (
+    REPORT_STYLE_CONCISE,
     AnnotationsReporter,
     CompositeReporter,
     ConsoleReporter,
@@ -30,9 +32,15 @@ from mtest.report import (
     JunitReporter,
     RecordingCoordinator,
     RecordingReporter,
+    ReportArtifact,
     ReportCoordinator,
+    ReportFinalizeContext,
+    ReportHeaderFacts,
+    ReportWriter,
     StandardReportCoordinator,
 )
+
+from tmptree import temp_root
 
 
 def _console() -> ConsoleReporter:
@@ -210,9 +218,10 @@ def test_standard_coordinator_reports_inert_lifecycle_channels() raises:
     assert_equal(coord.fence_token(), "")
 
 
-def test_standard_coordinator_note_not_run_records_is_a_no_op() raises:
-    # No report-writer sink is wired to these records yet: production accepts
-    # and discards them, and every other coordinator surface stays untouched.
+def test_standard_coordinator_note_not_run_records_reaches_an_inert_writer() raises:
+    # The records go to the report writer's slot and nowhere else: with the
+    # inert writer the old four-argument constructor installs, they are
+    # absorbed silently and every other coordinator surface stays untouched.
     var coord = StandardReportCoordinator(
         _console(),
         JsonStreamReporter.inert(),
@@ -224,6 +233,148 @@ def test_standard_coordinator_note_not_run_records_is_a_no_op() raises:
     )
     assert_equal(coord.console_output(), "")
     assert_false(coord.finalize_junit(0, 0).failed)
+    var fin = coord.finalize_reports(_report_ctx())
+    assert_false(fin.md_failed, "an inert writer finalizes clean")
+    assert_false(fin.html_failed, "an inert writer finalizes clean")
+
+
+def _report_ctx() -> ReportFinalizeContext:
+    """A run-wide report context whose every conditional fact is off."""
+    var counts = List[Int]()
+    for _ in range(Outcome.COUNT):
+        counts.append(0)
+    return ReportFinalizeContext(
+        counts^,
+        tests_passed=0,
+        tests_failed=0,
+        tests_skipped=0,
+        flaky_files=0,
+        built_files=0,
+        cached_files=0,
+        wall_seconds=0.5,
+        interrupted=False,
+        drift=False,
+        workers=1,
+        shuffle=False,
+        shuffle_seed=0,
+        shard_label="",
+    )
+
+
+def _md_writer(target: String) raises -> ReportWriter:
+    """A writer with only the Markdown sink active, publishing at `target`."""
+    var created = create_unique_temp(target + ".XXXXXX")
+    return ReportWriter(
+        ReportHeaderFacts("x.y.z", "linux-64"),
+        REPORT_STYLE_CONCISE,
+        Optional[ReportArtifact](
+            ReportArtifact(target, created.path, created.fd, False, "")
+        ),
+        Optional[ReportArtifact](None),
+        temp_root(),
+        "/run/root",
+    )
+
+
+def _published(path: String) raises -> String:
+    """Read a published report back."""
+    var body: String
+    with open(path, "r") as f:
+        body = f.read()
+    return body^
+
+
+def test_standard_coordinator_fans_events_and_records_to_the_writer() raises:
+    # The production coordinator drives the writer from the SAME event stream
+    # it fans everywhere else, and routes the classified not-run records to it.
+    var target = temp_root() + "/report.md"
+    var coord = StandardReportCoordinator(
+        _console(),
+        JsonStreamReporter.inert(),
+        JunitReporter.inert(),
+        AnnotationsReporter.inert(),
+        _md_writer(target),
+    )
+    var events = _stream()
+    _ = _drive(coord, events)
+    coord.note_not_run_records(
+        [NotRunRecord("tests/test_gamma.mojo", NotRunReason.LIMIT_REACHED)]
+    )
+    var fin = coord.finalize_reports(_report_ctx())
+
+    assert_false(fin.md_failed, "the markdown sink must publish")
+    assert_equal(fin.md_detail, "")
+    var body = _published(target)
+    assert_true(
+        "| tests/test_alpha.mojo | PASS |" in body, "no row for the passed file"
+    )
+    assert_true(
+        "| tests/test_beta.mojo | COMPILE_ERROR |" in body,
+        "no row for the failed file",
+    )
+    assert_true(
+        "| tests/test_gamma.mojo | NOT_RUN |" in body,
+        "the not-run record never reached the writer",
+    )
+
+
+def test_recording_coordinator_wires_a_report_writer() raises:
+    # The driver shape: a recorder stands in for the console while a REAL
+    # writer answers the report channel. The records still accumulate for the
+    # driver to read AND reach the writer.
+    var target = temp_root() + "/report.md"
+    var coord = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter())), _md_writer(target)
+    )
+    var events = _stream()
+    _ = _drive(coord, events)
+    coord.note_not_run_records(
+        [NotRunRecord("tests/test_gamma.mojo", NotRunReason.LIMIT_REACHED)]
+    )
+    var fin = coord.finalize_reports(_report_ctx())
+
+    assert_equal(coord.composite.reporters[0].count(), len(events))
+    assert_equal(len(coord.not_run_records), 1)
+    assert_false(fin.md_failed, "the markdown sink must publish")
+    var body = _published(target)
+    assert_true("| tests/test_alpha.mojo | PASS |" in body, "no summary row")
+    assert_true(
+        "| tests/test_gamma.mojo | NOT_RUN |" in body,
+        "the not-run record never reached the writer",
+    )
+
+
+def test_recording_coordinator_wires_every_lifecycle_channel_and_a_writer() raises:
+    # The widest overload: the pack plus all four lifecycle reporters.
+    var target = temp_root() + "/report.md"
+    var coord = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter())),
+        JsonStreamReporter.inert(),
+        JunitReporter.inert(),
+        AnnotationsReporter(active=True),
+        _md_writer(target),
+    )
+    var events = _stream()
+    _ = _drive(coord, events)
+    var fin = coord.finalize_reports(_report_ctx())
+
+    assert_false(fin.md_failed)
+    assert_true(len(coord.annotation_tail()) > 0, "the tail must still render")
+    assert_true(
+        "| tests/test_beta.mojo | COMPILE_ERROR |" in _published(target),
+        "the writer saw no events",
+    )
+
+
+def test_recording_coordinator_without_a_writer_finalizes_clean() raises:
+    var coord = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
+    var fin = coord.finalize_reports(_report_ctx())
+    assert_false(fin.md_failed, "an inert writer finalizes clean")
+    assert_equal(fin.md_detail, "")
+    assert_false(fin.html_failed, "an inert writer finalizes clean")
+    assert_equal(fin.html_detail, "")
 
 
 def test_recording_coordinator_records_not_run_records() raises:

@@ -32,6 +32,8 @@ from mtest.report.composite import CompositeReporter
 from mtest.report.console import ConsoleReporter
 from mtest.report.json_stream_reporter import JsonStreamReporter
 from mtest.report.junit_reporter import JunitFinalizeResult, JunitReporter
+from mtest.report.report_model import ReportFinalizeContext
+from mtest.report.report_writer import ReportFinalizeResult, ReportWriter
 from mtest.report.reporter import Reporter
 
 
@@ -120,6 +122,28 @@ trait ReportCoordinator:
         Returns:
             The finalize result, so the session can report a finalization
             failure. A no-op success when no JUnit reporter is composed.
+        """
+        ...
+
+    def finalize_reports(
+        mut self, ctx: ReportFinalizeContext
+    ) -> ReportFinalizeResult:
+        """Publish every active run-report sink: stream, close, atomic-rename.
+
+        The run-wide facts ride this call for the same reason the cache
+        counters ride `finalize_junit`: the writer has no `SESSION_FINISHED`
+        branch, so a terminal fact can only reach it through the finalize seam.
+        Each sink is independent — one format failing never stops the other
+        publishing, and neither ever replaces the report already at its target
+        unless its own document was written whole.
+
+        Args:
+            ctx: The run-wide facts the header and epilogue render from. Not
+                mutated.
+
+        Returns:
+            Both sinks' outcomes, so the session can report a failed report
+            artifact. A clean no-op success when no writer is composed.
         """
         ...
 
@@ -283,6 +307,9 @@ struct StandardReportCoordinator(ReportCoordinator):
     var annotations: AnnotationsReporter
     """Accumulates the stream and renders the workflow-command tail."""
 
+    var report: ReportWriter
+    """Spools per-file report sections and publishes the run report."""
+
     var state_tracker: _StateTracker
     """Folds the state delta from the same ordered event stream."""
 
@@ -293,7 +320,10 @@ struct StandardReportCoordinator(ReportCoordinator):
         var junit: JunitReporter,
         var annotations: AnnotationsReporter,
     ):
-        """Take ownership of the four reporters.
+        """Take ownership of the four reporters, with no run-report writer.
+
+        The report slot is filled with `ReportWriter.inert()`, so a caller that
+        composes no run report keeps writing exactly this call.
 
         Args:
             console: The console reporter. Consumed.
@@ -303,14 +333,43 @@ struct StandardReportCoordinator(ReportCoordinator):
             annotations: The annotations reporter, inert when resolved off.
                 Consumed.
         """
+        self = Self(
+            console^,
+            stream^,
+            junit^,
+            annotations^,
+            ReportWriter.inert(),
+        )
+
+    def __init__(
+        out self,
+        var console: ConsoleReporter,
+        var stream: JsonStreamReporter,
+        var junit: JunitReporter,
+        var annotations: AnnotationsReporter,
+        var report: ReportWriter,
+    ):
+        """Take ownership of the four reporters and the run-report writer.
+
+        Args:
+            console: The console reporter. Consumed.
+            stream: The machine-stream reporter, inert without `--json`.
+                Consumed.
+            junit: The JUnit reporter, inert without `--junit-xml`. Consumed.
+            annotations: The annotations reporter, inert when resolved off.
+                Consumed.
+            report: The run-report writer, inert when no report format was
+                requested. Consumed.
+        """
         self.console = console^
         self.stream = stream^
         self.junit = junit^
         self.annotations = annotations^
+        self.report = report^
         self.state_tracker = _StateTracker.empty()
 
     def handle(mut self, e: Event):
-        """Fan the event to all four reporters, console first.
+        """Fan the event to every composed reporter, console first.
 
         Args:
             e: The event to dispatch.
@@ -319,6 +378,7 @@ struct StandardReportCoordinator(ReportCoordinator):
         self.stream.handle(e)
         self.junit.handle(e)
         self.annotations.handle(e)
+        self.report.handle(e)
         self.state_tracker.handle(e)
 
     def stream_failed(self) -> Bool:
@@ -334,16 +394,18 @@ struct StandardReportCoordinator(ReportCoordinator):
         self.junit.note_not_run(selected_paths)
 
     def note_not_run_records(mut self, records: List[NotRunRecord]):
-        """Accept and discard the classified not-run records.
+        """Hand the classified not-run records to the run-report writer.
 
-        No report-writer sink is wired to these records yet, so production
-        drops every entry here without touching the console, machine stream,
-        or JUnit reporters.
+        A report-writer-only side channel, exactly as `note_not_run` is a
+        JUnit-only one: the console and the machine stream never receive
+        synthetic not-run events. The writer filters the records against its
+        own row index, so a file that DID produce a verdict is dropped there
+        rather than here. An inert writer absorbs them silently.
 
         Args:
-            records: One record per selected file. Discarded; not stored.
+            records: One record per selected file. Not mutated.
         """
-        pass
+        self.report.note_not_run_records(records)
 
     def finalize_junit(
         mut self, built_files: Int, cached_files: Int
@@ -355,6 +417,16 @@ struct StandardReportCoordinator(ReportCoordinator):
             cached_files: Cache-hit admissions.
         """
         return self.junit.finalize(built_files, cached_files)
+
+    def finalize_reports(
+        mut self, ctx: ReportFinalizeContext
+    ) -> ReportFinalizeResult:
+        """Publish the run report's active sinks.
+
+        Args:
+            ctx: The run-wide facts the header and epilogue render from.
+        """
+        return self.report.finalize_reports(ctx)
 
     def annotation_tail(self) -> List[String]:
         """Render the annotation tail. Allocates the returned list."""
@@ -440,6 +512,9 @@ struct RecordingCoordinator[*Rs: Reporter](ReportCoordinator):
     var annotations: AnnotationsReporter
     """The annotations reporter, inert unless the driver supplies one."""
 
+    var report: ReportWriter
+    """The run-report writer, inert unless the driver supplies one."""
+
     var state_tracker: _StateTracker
     """Folds the state delta from the same ordered event stream."""
 
@@ -452,10 +527,25 @@ struct RecordingCoordinator[*Rs: Reporter](ReportCoordinator):
         Args:
             composite: The reporter pack to fan events to. Consumed.
         """
+        self = Self(composite^, ReportWriter.inert())
+
+    def __init__(
+        out self,
+        var composite: CompositeReporter[*Self.Rs],
+        var report: ReportWriter,
+    ):
+        """Compose the pack with a real report writer, everything else inert.
+
+        Args:
+            composite: The reporter pack to fan events to. Consumed.
+            report: The run-report writer to spool into and finalize.
+                Consumed.
+        """
         self.composite = composite^
         self.stream = JsonStreamReporter.inert()
         self.junit = JunitReporter.inert()
         self.annotations = AnnotationsReporter.inert()
+        self.report = report^
         self.state_tracker = _StateTracker.empty()
         self.not_run_records = List[NotRunRecord]()
 
@@ -468,6 +558,9 @@ struct RecordingCoordinator[*Rs: Reporter](ReportCoordinator):
     ):
         """Compose the pack alongside real lifecycle reporters.
 
+        The report slot is filled with `ReportWriter.inert()`, so a driver that
+        exercises no run report keeps writing exactly this call.
+
         Args:
             composite: The reporter pack to fan events to. Consumed.
             stream: The machine-stream reporter to poll. Consumed.
@@ -476,10 +569,35 @@ struct RecordingCoordinator[*Rs: Reporter](ReportCoordinator):
             annotations: The annotations reporter to render the tail from.
                 Consumed.
         """
+        self = Self(
+            composite^, stream^, junit^, annotations^, ReportWriter.inert()
+        )
+
+    def __init__(
+        out self,
+        var composite: CompositeReporter[*Self.Rs],
+        var stream: JsonStreamReporter,
+        var junit: JunitReporter,
+        var annotations: AnnotationsReporter,
+        var report: ReportWriter,
+    ):
+        """Compose the pack alongside every real lifecycle reporter.
+
+        Args:
+            composite: The reporter pack to fan events to. Consumed.
+            stream: The machine-stream reporter to poll. Consumed.
+            junit: The JUnit reporter to synthesize into and finalize.
+                Consumed.
+            annotations: The annotations reporter to render the tail from.
+                Consumed.
+            report: The run-report writer to spool into and finalize.
+                Consumed.
+        """
         self.composite = composite^
         self.stream = stream^
         self.junit = junit^
         self.annotations = annotations^
+        self.report = report^
         self.state_tracker = _StateTracker.empty()
         self.not_run_records = List[NotRunRecord]()
 
@@ -493,6 +611,7 @@ struct RecordingCoordinator[*Rs: Reporter](ReportCoordinator):
         self.stream.handle(e)
         self.junit.handle(e)
         self.annotations.handle(e)
+        self.report.handle(e)
         self.state_tracker.handle(e)
 
     def stream_failed(self) -> Bool:
@@ -508,7 +627,11 @@ struct RecordingCoordinator[*Rs: Reporter](ReportCoordinator):
         self.junit.note_not_run(selected_paths)
 
     def note_not_run_records(mut self, records: List[NotRunRecord]):
-        """Append the classified not-run records for a test driver to read.
+        """Record the classified not-run records and hand them to the writer.
+
+        A driver reads the raw batches back; the composed writer receives the
+        same records production hands it, so a driver exercising a real writer
+        sees exactly what production would produce.
 
         Args:
             records: One record per selected file. Copied and appended to
@@ -516,6 +639,7 @@ struct RecordingCoordinator[*Rs: Reporter](ReportCoordinator):
                 once still finds every batch, in call order.
         """
         self.not_run_records.extend(records.copy())
+        self.report.note_not_run_records(records)
 
     def finalize_junit(
         mut self, built_files: Int, cached_files: Int
@@ -527,6 +651,16 @@ struct RecordingCoordinator[*Rs: Reporter](ReportCoordinator):
             cached_files: Cache-hit admissions.
         """
         return self.junit.finalize(built_files, cached_files)
+
+    def finalize_reports(
+        mut self, ctx: ReportFinalizeContext
+    ) -> ReportFinalizeResult:
+        """Publish the run report's active sinks.
+
+        Args:
+            ctx: The run-wide facts the header and epilogue render from.
+        """
+        return self.report.finalize_reports(ctx)
 
     def annotation_tail(self) -> List[String]:
         """Render the annotation tail. Allocates the returned list."""
