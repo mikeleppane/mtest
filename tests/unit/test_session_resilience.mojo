@@ -139,7 +139,6 @@ def test_reconcile_promotes_a_genuine_pass_to_flaky() raises:
     var payload = _reconcile(_valid_pass_report_bytes(), 0, True)
     assert_true(payload.outcome == Outcome.FLAKY)
     assert_true(payload.flaky)
-    assert_true(payload.flaky == (payload.outcome == Outcome.FLAKY))
 
 
 def test_reconcile_does_not_promote_without_a_prior_crash() raises:
@@ -148,18 +147,18 @@ def test_reconcile_does_not_promote_without_a_prior_crash() raises:
     var payload = _reconcile(_valid_pass_report_bytes(), 0, False)
     assert_true(payload.outcome == Outcome.PASS)
     assert_false(payload.flaky)
-    assert_true(payload.flaky == (payload.outcome == Outcome.FLAKY))
 
 
 def test_reconcile_does_not_promote_a_failing_outcome() raises:
     # `flaky_if_pass=True` promotes ONLY a genuine pass. A file that is still
-    # failing after the crash-class retry stays FAIL, never flaky -- the
-    # invariant `flaky == (outcome == FLAKY)` holds for the reachable
-    # non-PASS case too.
+    # failing after the crash-class retry stays FAIL, never flaky. Together
+    # with the two tests above this pins `flaky == (outcome == FLAKY)` over
+    # every reachable pair by naming both sides independently, which asserting
+    # the equation itself would not: after the two assertions above it, the
+    # equation compares True with True and holds however the code behaves.
     var payload = _reconcile(_valid_fail_report_bytes(), 1, True)
     assert_true(payload.outcome == Outcome.FAIL)
     assert_false(payload.flaky)
-    assert_true(payload.flaky == (payload.outcome == Outcome.FLAKY))
 
 
 # ---- Fix 5: the late-interrupt DOMINANCE now lives in the terminal protocol ----

@@ -39,6 +39,33 @@ from session_fixtures import (
 )
 
 
+def _session_started(rec: RecordingReporter) raises -> SessionStartedPayload:
+    """The stream's one `session_started` payload, located by event kind.
+
+    Never by position. Anything a later feature adds to the prelude shifts
+    index 0, and unpacking the wrong variant out of an event's payload union
+    aborts the process — which takes every other test in this binary with it
+    instead of failing one case.
+
+    Args:
+        rec: The recorder holding the run's whole event stream.
+
+    Returns:
+        A copy of the payload. Allocates it.
+
+    Raises:
+        Error: If the stream does not carry exactly one such event.
+    """
+    var found = -1
+    var seen = 0
+    for i in range(rec.count()):
+        if rec.kind_at(i) == EventKind.SESSION_STARTED:
+            seen += 1
+            found = i
+    assert_equal(seen, 1, "want exactly one SESSION_STARTED event")
+    return rec.event_at(found).data[SessionStartedPayload].copy()
+
+
 def test_flow_pass_fail_excluded_warning_exit1() raises:
     var root = temp_root()
     write_file(root, "tests/test_a_pass.mojo", SRC_PASS)
@@ -260,7 +287,7 @@ def test_seed_zero_is_a_seed_not_an_unset_sentinel() raises:
     )
     _ = run_session(config, _shuffle_tree(), comp)
     ref rec = comp.composite.reporters[0]
-    assert_equal(rec.event_at(0).data[SessionStartedPayload].shuffle_seed, 0)
+    assert_equal(_session_started(rec).shuffle_seed, 0)
     var started = List[String]()
     for i in range(rec.count()):
         if rec.kind_at(i) == EventKind.FILE_STARTED:
@@ -282,7 +309,7 @@ def test_unseeded_shuffle_resolves_a_seed_before_announcing_the_run() raises:
     )
     _ = run_session(config, _shuffle_tree(), comp)
     ref rec = comp.composite.reporters[0]
-    ref started = rec.event_at(0).data[SessionStartedPayload]
+    var started = _session_started(rec)
     assert_true(started.shuffle)
     assert_true(
         started.shuffle_seed >= 0, "an unseeded --shuffle must resolve a seed"
