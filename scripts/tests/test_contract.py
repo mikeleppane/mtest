@@ -604,6 +604,7 @@ class CheckRosterTests(unittest.TestCase):
                     "collect: a listing larger than the pipe buffer survives an"
                     " early close"
                 ),
+                "pipe: every direct-output command survives a closed stdout",
                 "collect: an interrupted --format json run agrees with its own exit",
                 "determinism: --shuffle --seed repeats its file order",
                 "help: --help -> stdout, exit 0",
@@ -702,6 +703,11 @@ class CheckRosterTests(unittest.TestCase):
                 self._perform(
                     "collect: a listing larger than the pipe buffer survives an"
                     " early close"
+                )
+
+            def check_direct_output_closed_pipe(self) -> None:
+                self._perform(
+                    "pipe: every direct-output command survives a closed stdout"
                 )
 
             def check_collect_interrupted_json(self) -> None:

@@ -76,6 +76,7 @@ One record per node id, in listing order.
 
 | field | type | notes |
 |---|---|---|
+| `event` | string | always `node` |
 | `node_id` | string | the canonical `path::name` identity, byte-identical to the line `--format lines` prints |
 | `path` | string | the test file's root-relative path, exactly as discovered |
 | `name` | string | the test function's bare name |
@@ -94,6 +95,7 @@ a producer that split at the first separator emits a `name` carrying `::`.
 
 | field | type | notes |
 |---|---|---|
+| `event` | string | always `collect_finished` |
 | `nodes` | int | how many `node` records the stream carries |
 | `exit_code` | int | **the final process exit code, teardown included** |
 
@@ -148,6 +150,12 @@ that does not parse — knows the listing was cut short, and should treat it as
 incomplete rather than as an empty test set. A write failure after some bytes
 were already emitted leaves complete lines plus at most one torn fragment: the
 stream goes silent rather than lying about how many nodes there were.
+
+Going silent is all that happens. `mtest` ignores `SIGPIPE` around every direct
+write, so a consumer that closes the stream early — `mtest collect --format
+json | head -1` — leaves the writer to absorb the `EPIPE` and exit with the
+code §9 gives the collection. Death at signal 13, which a shell reports as 141,
+is not a status this command can produce.
 
 ---
 

@@ -777,10 +777,12 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "served: --gh-annotations accepted (not exit 4)",
     "served: --json accepted (not exit 4)",
     "served: collect --shard partitions (not exit 4)",
+    "served: collect --serial accepted, inert (not exit 4)",
     "collect: exact node-id set for tests/",
     "determinism: collect byte-identical",
     "collect: --format json agrees with the lines listing and the exit",
     "collect: a listing larger than the pipe buffer survives an early close",
+    "pipe: every direct-output command survives a closed stdout",
     "collect: an interrupted --format json run agrees with its own exit",
     "determinism: --shuffle --seed repeats its file order",
     "help: --help -> stdout, exit 0",
@@ -1195,22 +1197,21 @@ class Runner:
     def check_collect_pipe_early_close(self) -> None:
         """Assert a cut stdout pipe never takes `collect` outside its exit domain.
 
-        §9 and §16 close `collect`'s exit domain at `{0, 1, 3, 4, 5}`. Death by
-        `SIGPIPE` is 141 — a status in none of them, and one a shell reports as
-        a failure for a run that in fact listed everything it was asked for.
+        §9 and §16 close `collect`'s exit domain at `{0, 1, 2, 3, 4, 5}`. Death
+        by `SIGPIPE` is 141 — a status in none of them, and one a shell reports
+        as a failure for a run that in fact listed everything it was asked for.
 
-        The defect this pins is an ordering one, not a missing handler. The
-        exec runtime ignores `SIGPIPE` for its lifetime so a broken destination
-        returns `EPIPE` to the write instead of killing the process, and
-        releasing that runtime restores the default disposition. Tearing it
-        down before writing the listing therefore hands exactly this write back
-        to the default, and `mtest collect | head -1` dies at 141. The listing
-        has to be larger than the pipe buffer for the write to still be in
-        progress when the reader goes away, which is what
-        `_write_oversized_listing_tree` is for.
+        This is the mid-write half of the property: the reader is still there
+        when the write starts and leaves partway through, so the listing has to
+        be larger than the pipe buffer for any of the write to still be
+        outstanding, which is what `_write_oversized_listing_tree` is for. The
+        already-gone half is `check_direct_output_closed_pipe`.
 
-        `--format json` is deliberately not covered: its terminal record must
-        carry the finalized exit code, so it tears down first by design.
+        Both formats are covered. `--format json` tears down before it renders,
+        because its terminal record must carry the finalized exit code, so its
+        write is the one that happens with the runtime's own `SIGPIPE`
+        carve-out already restored — which is exactly why the writer installs
+        its own.
         """
         ref = "§9/§16 collect's exit domain survives a consumer that stops reading"
         name = "collect: a listing larger than the pipe buffer survives an early close"
@@ -1225,29 +1226,40 @@ class Runner:
                 f"{len(probe.stdout)} bytes (need > 65536 and exit 0)",
             )
             return
-        statuses: list[int | str] = []
-        for _ in range(3):
-            reader = subprocess.Popen(
-                ["head", "-1"], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL
-            )
-            writer = subprocess.Popen(
-                [str(MTEST), "collect", "-I", "build", directory],
-                cwd=self.root,
-                env=self.env,
-                stdout=reader.stdin,
-                stderr=subprocess.DEVNULL,
-            )
-            # The parent's copy of the write end must go, or the pipe never
-            # reports a broken reader and this measures nothing.
-            if reader.stdin is not None:
-                reader.stdin.close()
-            try:
-                statuses.append(writer.wait(timeout=180))
-            except subprocess.TimeoutExpired:
-                writer.kill()
-                statuses.append("timeout")
-            reader.wait(timeout=30)
-        bad = [s for s in statuses if s != 0]
+        statuses: list[tuple[str, int | str]] = []
+        for fmt in ("lines", "json"):
+            for _ in range(3):
+                reader = subprocess.Popen(
+                    ["head", "-1"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                )
+                writer = subprocess.Popen(
+                    [
+                        str(MTEST),
+                        "collect",
+                        "--format",
+                        fmt,
+                        "-I",
+                        "build",
+                        directory,
+                    ],
+                    cwd=self.root,
+                    env=self.env,
+                    stdout=reader.stdin,
+                    stderr=subprocess.DEVNULL,
+                )
+                # The parent's copy of the write end must go, or the pipe never
+                # reports a broken reader and this measures nothing.
+                if reader.stdin is not None:
+                    reader.stdin.close()
+                try:
+                    statuses.append((fmt, writer.wait(timeout=180)))
+                except subprocess.TimeoutExpired:
+                    writer.kill()
+                    statuses.append((fmt, "timeout"))
+                reader.wait(timeout=30)
+        bad = [s for s in statuses if s[1] != 0]
         self.record(
             PASS if not bad else FAIL,
             name,
@@ -1256,6 +1268,72 @@ class Runner:
             if not bad
             else f"statuses {statuses}; a negative or 141 is death by SIGPIPE, "
             "which is outside the frozen exit domain",
+        )
+
+    def check_direct_output_closed_pipe(self) -> None:
+        """Assert every direct-output command survives a reader that is gone.
+
+        The sibling of `check_collect_pipe_early_close`, and the deterministic
+        one: the read end is closed before the child is even spawned, so the
+        very first write returns `EPIPE` and no output size, pipe capacity, or
+        scheduling luck is involved. Every command that writes straight to a
+        descriptor rather than through a reporter is here, because each one
+        publishes its own frozen exit domain and 141 is in none of them: help
+        and version (§19), `config show` and `doctor` (§27), `new` and `init`
+        (§29, which additionally promise the artifacts exist afterwards), and
+        `collect --format json` (§16).
+
+        Each command is asserted against the exact code its domain gives a
+        successful run, so a process that dies of `SIGPIPE` (a negative return
+        code from `subprocess`, 141 from a shell) fails here and names itself.
+        """
+        ref = "§19/§27/§28/§29 a closed stdout leaves each domain intact"
+        cases: list[tuple[str, list[str], int, str]] = [
+            ("help: --help", ["--help"], 0, ""),
+            ("help: version", ["version"], 0, ""),
+            ("config show", ["config", "show"], 0, ""),
+            ("doctor", ["doctor"], 0, ""),
+            ("new", ["new", "tests/test_pipe.mojo"], 0, "tests/test_pipe.mojo"),
+            ("init", ["init"], 0, "mtest.toml"),
+            (
+                "collect --format json",
+                ["collect", "--format", "json", "-I", "build", "tests"],
+                0,
+                "",
+            ),
+        ]
+        probs: list[str] = []
+        for label, argv, want, artifact in cases:
+            cwd = self.root
+            if artifact:
+                cwd = self.root / f"closed-pipe-{argv[0]}"
+                cwd.mkdir(exist_ok=True)
+            read_fd, write_fd = os.pipe()
+            os.close(read_fd)
+            try:
+                proc = subprocess.run(
+                    [str(MTEST), *argv],
+                    cwd=cwd,
+                    env=self.env,
+                    stdout=write_fd,
+                    stderr=subprocess.DEVNULL,
+                    timeout=180,
+                    check=False,
+                )
+                code: int | str = proc.returncode
+            except subprocess.TimeoutExpired:
+                code = "timeout"
+            finally:
+                os.close(write_fd)
+            if code != want:
+                probs.append(f"{label}: exit {code}, want {want}")
+            if artifact and not (cwd / artifact).exists():
+                probs.append(f"{label}: {artifact} was never created")
+        self.record(
+            PASS if not probs else FAIL,
+            "pipe: every direct-output command survives a closed stdout",
+            ref,
+            "; ".join(probs),
         )
 
     def check_collect_interrupted_json(self) -> None:
@@ -2038,11 +2116,19 @@ class Runner:
         if written != ["test_scaffolded.mojo"]:
             probs.append(f"the publication left litter beside the file: {written}")
         else:
+            # The oracle is a file created here the ordinary way, not a
+            # hard-coded bit pattern: "the mode an editor would have produced"
+            # is exactly the umask's answer, and pinning `0o044` instead makes
+            # this red under `umask 077` with no defect present.
+            ordinary = directory / "ordinary.probe"
+            ordinary.write_text("x")
+            want_mode = ordinary.stat().st_mode & 0o777
+            ordinary.unlink()
             mode = directory.joinpath("test_scaffolded.mojo").stat().st_mode & 0o777
-            if mode & 0o044 == 0:
+            if mode != want_mode:
                 probs.append(
-                    f"the file carries mkstemp's private mode {mode:#o}, not the "
-                    "umask-derived one an editor would have produced"
+                    f"the file carries mode {mode:#o}, not the {want_mode:#o} an "
+                    "ordinary create in this directory produces"
                 )
         self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
 
@@ -2757,6 +2843,20 @@ def build_matrix() -> list[Check]:
             any_absent=["v1 contract"],
         )
     )
+    # §4 marks `--serial` accepted-inert under `collect`, beside `-n`, and for
+    # the same reason: refusing a flag every earlier build accepted would break
+    # invocations that pass one flag set to both subcommands. Every other
+    # run-only flag is an exit-4 refusal there, so which side of that line this
+    # one sits on needs a gate rather than a table entry alone.
+    checks.append(
+        Check(
+            "served: collect --serial accepted, inert (not exit 4)",
+            "§4,§18,§24.1",
+            ["collect", *I, "--serial", "tests/*", "tests"],
+            0,
+            any_absent=["v1 contract", "run-only flag"],
+        )
+    )
     return checks
 
 
@@ -2845,6 +2945,8 @@ def main() -> int:
             "collect: a listing larger than the pipe buffer survives an early close"
         ):
             runner.check_collect_pipe_early_close()
+        if wanted("pipe: every direct-output command survives a closed stdout"):
+            runner.check_direct_output_closed_pipe()
         if wanted("collect: an interrupted --format json run agrees with its own exit"):
             runner.check_collect_interrupted_json()
         if wanted("determinism: --shuffle --seed repeats its file order"):

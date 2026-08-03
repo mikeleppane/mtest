@@ -21,7 +21,8 @@ their artifact lines directly to stdout and everything else to stderr;
 `--collect-only` writes its frozen node-id listing — plain lines, or the
 NDJSON collect stream under `--format json` — directly to stdout; and a
 post-close state-write failure goes to stderr after the terminal event already
-sealed the stream.
+sealed the stream. Every one of them goes through `_write_direct`, so a
+consumer that stops reading costs the write and nothing else.
 
 The parser owns argv syntax; config owns typed conversion, layering, and state
 bytes; the console resolves color from the inputs main supplies; the session
@@ -87,6 +88,7 @@ from mtest.platform import (
     close_checked_fd,
     create_unique_temp,
     exec_replace,
+    ignore_broken_pipe,
     process_id,
     read_bounded_regular_file,
     rename_path,
@@ -155,9 +157,33 @@ def _no_color_set() -> Bool:
     return getenv("NO_COLOR", "").byte_length() > 0
 
 
+def _write_direct(text: String, fd: Int):
+    """Write `text` verbatim to `fd`, flushed, surviving a departed reader.
+
+    The one path for every byte `main` writes outside a reporter: help,
+    version, the doctor lines, `new` and `init`'s artifact lines, the resolved
+    configuration, both `collect` listings, the `debug` plan, the annotation
+    epilogue, and every diagnostic. Ignoring `SIGPIPE` first is what keeps a
+    consumer that stops reading — `mtest collect --format json | head -1` —
+    from killing this process at signal 13, a status outside every documented
+    exit domain (§9, §16, §27, §28, §29). The write is lost instead, and the
+    command still exits with the code its own domain defines.
+
+    The one place this must NOT be used is between the exec runtime's release
+    and the `debug` handoff: the debuggee inherits this process's dispositions,
+    and a test that dies of a genuine broken pipe has to be able to say so.
+
+    Args:
+        text: The complete bytes to write, terminator included.
+        fd: The destination descriptor.
+    """
+    ignore_broken_pipe()
+    print(text, end="", file=FileDescriptor(fd), flush=True)
+
+
 def _eprintln(text: String):
     """Write `text` and a newline to standard error (fd 2), flushed."""
-    print(text, file=FileDescriptor(2), flush=True)
+    _write_direct(text + "\n", 2)
 
 
 def _normalize_absolute(path: String) -> String:
@@ -586,17 +612,17 @@ def main():
         exit(EXIT_USAGE_ERROR)
 
     if result.is_help():
-        print(help_text(), end="", flush=True)
+        _write_direct(help_text(), 1)
         exit(0)
     if result.is_version():
-        print(version_text(), flush=True)
+        _write_direct(version_text() + "\n", 1)
         exit(0)
     if result.is_doctor():
         var diagnosis = run_doctor(result, MTEST_VERSION)
         var rendered = String("")
         for line in diagnosis.lines:
             rendered += line + "\n"
-        print(rendered, end="", flush=True)
+        _write_direct(rendered, 1)
         exit(diagnosis.code)
 
     # Resolve the invocation root, then discover and layer project configuration
@@ -630,12 +656,7 @@ def main():
         # A refusal and an I/O failure are diagnostics and belong on stderr;
         # `created <path>` is the command's output and belongs on stdout.
         var destination = 1 if scaffolded.code == 0 else 2
-        print(
-            rendered,
-            end="",
-            file=FileDescriptor(destination),
-            flush=True,
-        )
+        _write_direct(rendered, destination)
         exit(scaffolded.code)
 
     # Beside `new`, and for the same reason: `init` writes the project file
@@ -652,12 +673,7 @@ def main():
         # what it did belongs with the diagnostic that stopped it rather than
         # split across two streams a reader would have to reassemble.
         var destination = 1 if bootstrapped.code == 0 else 2
-        print(
-            rendered,
-            end="",
-            file=FileDescriptor(destination),
-            flush=True,
-        )
+        _write_direct(rendered, destination)
         exit(bootstrapped.code)
 
     var loaded = _load_config(root, result.config_path, result.no_config)
@@ -696,11 +712,7 @@ def main():
     # and make a resolution-only command probe the filesystem.
     if result.is_config_show():
         var state_present = exists(_state_path(root))
-        print(
-            render_config_show(resolved, state_present),
-            end="",
-            flush=True,
-        )
+        _write_direct(render_config_show(resolved, state_present), 1)
         exit(0)
 
     var destination_error = _resolved_destination_error(resolved)
@@ -784,14 +796,16 @@ def main():
             for line in outcome.diagnostics:
                 _eprintln(line)
             exit(resources.close_into(outcome.code, rank_delivery=False))
-        # `flush=True` is load-bearing: `execv` does not flush stdio, so an
-        # unflushed pair would vanish with this process image.
-        print(
+        # The flush inside `_write_direct` is load-bearing here: `execv` does
+        # not flush stdio, so an unflushed pair would vanish with this process
+        # image.
+        _write_direct(
             "build: "
             + outcome.plan.build_line
             + "\nrun: "
-            + outcome.plan.run_line,
-            flush=True,
+            + outcome.plan.run_line
+            + "\n",
+            1,
         )
         # An interrupt that arrived during the preparation — or while the
         # marker write above was blocked on a reader that had stopped reading —
@@ -866,20 +880,23 @@ def main():
                 stream += collect_node_line(nid, node.path, node.name) + "\n"
             stream += collect_finished_line(len(collected.listing), final_code)
             stream += "\n"
-            print(stream, end="", flush=True)
+            # Written after the teardown restored SIGPIPE to its default, so
+            # the write needs `_write_direct`'s own guard to keep a consumer
+            # that closed early (`mtest collect --format json | head -1`) from
+            # killing mtest at 141 — a status outside the frozen {0,1,2,3,4,5}
+            # domain (§9, §16) for a listing that completed.
+            _write_direct(stream, 1)
             exit(final_code)
         # The plain listing carries no terminal record, so nothing in it depends
         # on the finalized code and the runtime deliberately stays up across the
-        # write. That ordering is load-bearing, not incidental: the runtime
-        # ignores SIGPIPE for its lifetime, so a consumer that closes early
-        # (`mtest collect | head`) returns EPIPE to this write instead of
-        # killing mtest at 141 — a status outside the frozen {0,1,3,4,5} domain
-        # (§9, §16). Tearing down first would put SIGPIPE back at its default
-        # for exactly this write.
+        # write. Both the runtime's own SIGPIPE carve-out and `_write_direct`'s
+        # cover this write, and neither is redundant: the runtime's holds for
+        # every reporter write in a session, and the guard holds for the writes
+        # that happen with no runtime at all.
         var listing = String("")
         for nid in collected.listing:
             listing += nid + "\n"
-        print(listing, end="", flush=True)
+        _write_direct(listing, 1)
         exit(resources.close_into(collected.code, rank_delivery=True))
 
     # Resolve the machine-stream destination and, with it, the console's own
@@ -1002,17 +1019,13 @@ def main():
     # resolved on (never beside `--json -`, refused at parse time).
     var fence_token = comp.fence_token()
     if gh_actions and fence_token != "":
-        print(
-            resume_delimiter(fence_token),
-            file=FileDescriptor(console_fd),
-            flush=True,
-        )
+        _write_direct(resume_delimiter(fence_token) + "\n", console_fd)
     if annotations_on:
         var tail = comp.annotation_tail()
         var rendered = String("")
         for line in tail:
             rendered += line + "\n"
-        print(rendered, end="", file=FileDescriptor(console_fd), flush=True)
+        _write_direct(rendered, console_fd)
 
     # The session has finalized (the JUnit report was renamed onto its target,
     # or left intact on failure), so the epilogue frees the spool directory and
