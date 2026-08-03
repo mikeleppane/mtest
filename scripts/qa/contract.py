@@ -2850,19 +2850,29 @@ class Runner:
             probs.append(f"exit {run.returncode}, want 0")
         # The published report must be an ordinary readable file, not the 0600
         # its `mkstemp` temp arrives as: it is written for a CI job, a reviewer,
-        # or a web server, none of which run as the runner's user. Two
-        # properties, both machine-independent:
+        # or a web server, none of which run as the runner's user (§15.5).
         #
-        #   * the mode is what any other tool would have produced here — the
-        #     0666 an `open(2)` asks for, minus this process's umask, which is
-        #     exactly what `mtest new` gives a scaffolded file; and
-        #   * it is readable wherever the JUnit artifact from the SAME run is,
-        #     so no report is the one artifact nobody else can open.
+        # The PRIMARY assertion is absolute and machine-independent: the mode is
+        # what any other tool would have produced here — the 0666 an `open(2)`
+        # asks for, minus this process's umask, which is exactly what `mtest new`
+        # gives a scaffolded file.
         #
-        # Only the READ bits are compared against JUnit. The two writers differ
-        # on the write bits by design: this one honors the umask and the JUnit
-        # path's `open` does not, so a byte-equal comparison would pin a
-        # world-writable report as correct.
+        # The second is a CROSS-CHECK and is deliberately weaker: it says the
+        # report is readable wherever the JUnit artifact from the SAME run is,
+        # EXCEPT where this process's umask withheld the bit from both. Three
+        # honest caveats. Only the READ bits are compared, because the two
+        # writers differ on the write bits by design — this one honors the umask
+        # and the JUnit path's `open` does not, so a byte-equal comparison would
+        # pin a world-writable report as correct. The `& ~previous` term is
+        # load-bearing for the same reason: without it a CORRECT report goes red
+        # under any umask that masks a read bit (0o007, 0o027, 0o037, 0o070,
+        # 0o077 — verified), precisely because the report honors the umask and
+        # its sibling does not. And its strength depends on the sibling's own
+        # mode, which this branch does not control: under a restrictive umask it
+        # can have nothing left to say, and the primary assertion above is what
+        # carries the pin there.
+        if not beside.is_file():
+            probs.append("no junit artifact was published to compare modes with")
         if green.is_file() and beside.is_file():
             previous = os.umask(0)
             os.umask(previous)
@@ -2871,10 +2881,11 @@ class Runner:
             expected = 0o666 & ~previous
             if report_mode != expected:
                 probs.append(f"report mode {report_mode:#o}, want {expected:#o}")
-            if junit_mode & 0o444 & ~report_mode:
+            if junit_mode & 0o444 & ~previous & ~report_mode:
                 probs.append(
                     f"report mode {report_mode:#o} is less readable than the "
-                    f"junit artifact's {junit_mode:#o}"
+                    f"junit artifact's {junit_mode:#o} allows under umask "
+                    f"{previous:#o}"
                 )
         if not green.is_file():
             probs.append("no markdown report was published")

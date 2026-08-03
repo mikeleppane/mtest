@@ -1426,6 +1426,12 @@ as the JUnit report is, never from a parse of the console text.
   cannot be written, closed, or renamed at finalization is a delivery failure
   that resolves the same way — a requested report that could not be produced is
   an error, so even a green run exits 3.
+- **Permissions.** A published report carries the mode an ordinary new file
+  would get here — the `0666` an `open(2)` asks for, minus the process umask —
+  and not the `0600` of the temporary it was assembled in. A report is written
+  to be read by a CI job, a reviewer, or a web server, none of which run as the
+  runner's user. The mode is set on the temp before the rename, so there is no
+  window in which the published path is owner-readable only.
 
 `--report` and `--report-style` are **run-only** flags in v1 (§4).
 
