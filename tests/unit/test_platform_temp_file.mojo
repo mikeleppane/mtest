@@ -1,5 +1,6 @@
 """Exclusive same-directory temporary-file regressions."""
 from std.os import link, listdir, remove, symlink
+from std.sys.info import CompilationTarget
 from std.os.path import exists, islink
 from std.testing import (
     assert_equal,
@@ -10,15 +11,18 @@ from std.testing import (
 )
 
 from mtest.platform import (
+    ECONNRESET,
     EPIPE,
     close_checked_fd,
     create_unique_temp,
+    departed_consumer,
     direct_write_failed,
     process_id,
     read_bounded_regular_file,
     rename_path,
     write_all_bytes_fd_status,
     write_all_fd,
+    write_errno_name,
 )
 
 from tmptree import remove_tree, temp_root
@@ -113,7 +117,7 @@ def test_write_status_reports_the_errno_a_failed_write_set() raises:
 
 
 def test_only_a_departed_consumer_survives_a_failed_direct_write() raises:
-    """`EPIPE` is the one write failure a command may exit successfully after.
+    """A departed consumer is the one failure a command may still succeed after.
 
     Every other errno means the bytes were never delivered, so the command's
     own success code would be a lie. `-1` is the no-errno short write, which
@@ -121,9 +125,36 @@ def test_only_a_departed_consumer_survives_a_failed_direct_write() raises:
     """
     assert_false(direct_write_failed(0))
     assert_false(direct_write_failed(EPIPE))
+    assert_false(direct_write_failed(ECONNRESET))
     assert_true(direct_write_failed(9))  # EBADF: the descriptor is closed
     assert_true(direct_write_failed(28))  # ENOSPC: the destination is full
     assert_true(direct_write_failed(-1))  # a write that made no progress
+
+
+def test_a_reset_socket_peer_is_a_departed_consumer_too() raises:
+    """One event, two transports: a closed pipe and a reset stream socket.
+
+    `ECONNRESET` is what a socket stdout reports where a pipe reports `EPIPE`,
+    so a command writing to a socket-activated or forwarded stdout must land in
+    §9's carve-out rather than exiting 3. Its value is NOT shared between
+    platforms, which is why it is selected at compile time.
+    """
+    assert_true(departed_consumer(EPIPE))
+    assert_true(departed_consumer(ECONNRESET))
+    assert_false(departed_consumer(0))
+    assert_false(departed_consumer(9))
+    comptime if CompilationTarget.is_macos():
+        assert_equal(ECONNRESET, 54)
+    else:
+        assert_equal(ECONNRESET, 104)
+
+
+def test_write_errnos_are_named_and_unknown_ones_stay_numeric() raises:
+    """A diagnostic decodes what it can and never invents words for the rest."""
+    assert_equal(write_errno_name(9), "bad file descriptor")
+    assert_equal(write_errno_name(28), "no space left on device")
+    assert_equal(write_errno_name(32), "broken pipe")
+    assert_equal(write_errno_name(4), "")
 
 
 def test_bounded_read_validates_the_opened_regular_file() raises:

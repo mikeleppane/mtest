@@ -24,7 +24,9 @@ The public surface is re-exported here so callers write
 `from mtest.platform import create_unique_temp, rename_path, ...`.
 """
 from mtest.platform.broken_pipe import (
+    ECONNRESET,
     EPIPE,
+    departed_consumer,
     direct_write_failed,
     ignore_broken_pipe,
 )
@@ -38,6 +40,7 @@ from mtest.platform.fs import (
     set_permissions,
 )
 from mtest.platform.process import process_id
+from mtest.platform.stream import write_errno_name
 from mtest.platform.regular_file import (
     BoundedRegularFileRead,
     PathFacts,
