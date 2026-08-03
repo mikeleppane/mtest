@@ -775,6 +775,10 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "run: --report relative-alias collision -> 4",
     "collect: --report rejected -> 4",
     "doctor: --report rejected -> 4",
+    "collect: --report-style rejected -> 4",
+    "doctor: --report-style rejected -> 4",
+    "value: --report-style bad value -> 4",
+    "run: --json collides with --junit-xml -> 4",
     "debug: --report rejected -> 4",
     "served: -n accepted (not exit 4)",
     "served: --workers accepted (not exit 4)",
@@ -2823,21 +2827,66 @@ class Runner:
         out = self.root / "reports"
         out.mkdir(exist_ok=True)
 
-        # (1) A green run: the document exists, is not empty, and names the
-        #     file it ran rather than being a shell of headings.
+        # (1) A green run: the document exists and carries a real summary ROW
+        #     for the file it ran. Anchored on the whole row rather than on the
+        #     path and the word PASS separately, because a document that merely
+        #     mentioned the path somewhere and the header's own "files: N PASS"
+        #     would satisfy those two independently while describing nothing.
         name = "report: --report md publishes a document for a green run"
         green = out / "green.md"
-        run = self.mtest([*I_FLAGS, "--report", f"md:{green}", "tests"])
+        beside = out / "green.xml"
+        run = self.mtest(
+            [
+                *I_FLAGS,
+                "--report",
+                f"md:{green}",
+                "--junit-xml",
+                f"{beside}",
+                "tests",
+            ]
+        )
         probs: list[str] = []
         if run.returncode != 0:
             probs.append(f"exit {run.returncode}, want 0")
+        # The published report must be an ordinary readable file, not the 0600
+        # its `mkstemp` temp arrives as: it is written for a CI job, a reviewer,
+        # or a web server, none of which run as the runner's user. Two
+        # properties, both machine-independent:
+        #
+        #   * the mode is what any other tool would have produced here — the
+        #     0666 an `open(2)` asks for, minus this process's umask, which is
+        #     exactly what `mtest new` gives a scaffolded file; and
+        #   * it is readable wherever the JUnit artifact from the SAME run is,
+        #     so no report is the one artifact nobody else can open.
+        #
+        # Only the READ bits are compared against JUnit. The two writers differ
+        # on the write bits by design: this one honors the umask and the JUnit
+        # path's `open` does not, so a byte-equal comparison would pin a
+        # world-writable report as correct.
+        if green.is_file() and beside.is_file():
+            previous = os.umask(0)
+            os.umask(previous)
+            report_mode = green.stat().st_mode & 0o777
+            junit_mode = beside.stat().st_mode & 0o777
+            expected = 0o666 & ~previous
+            if report_mode != expected:
+                probs.append(f"report mode {report_mode:#o}, want {expected:#o}")
+            if junit_mode & 0o444 & ~report_mode:
+                probs.append(
+                    f"report mode {report_mode:#o} is less readable than the "
+                    f"junit artifact's {junit_mode:#o}"
+                )
         if not green.is_file():
             probs.append("no markdown report was published")
         else:
             body = green.read_text()
             probs += [
                 f"the report omits {needed!r}"
-                for needed in ("# mtest report", "tests/test_reverse.mojo", "PASS")
+                for needed in (
+                    "# mtest report",
+                    "| tests/test_reverse.mojo | PASS |",
+                    "| tests/test_palindrome.mojo | PASS |",
+                )
                 if needed not in body
             ]
         self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
@@ -2859,17 +2908,26 @@ class Runner:
         probs = []
         if run.returncode != 1:
             probs.append(f"exit {run.returncode}, want 1")
-        for doc in (fail_md, fail_html):
+        # The NODE ID, not a substring of the path: `probes/test_fail.mojo`
+        # already contains "test_f", so a check for that would pass against a
+        # document that named no test at all. Only `::test_x` proves the report
+        # identified the failing TEST. The row and the assertion text prove it
+        # carried the verdict and the detail rather than a bare heading.
+        node = "probes/test_fail.mojo::test_x"
+        wanted_per_format = {
+            fail_md: (node, "| probes/test_fail.mojo | FAIL |", "comparison failed"),
+            fail_html: (node, "<td>FAIL</td>", "comparison failed", "<html"),
+        }
+        for doc, needed_all in wanted_per_format.items():
             if not doc.is_file():
                 probs.append(f"{doc.name} was not published")
                 continue
             body = doc.read_text()
-            if "test_f" not in body:
-                probs.append(f"{doc.name} does not name the failing test")
-            if "FAIL" not in body:
-                probs.append(f"{doc.name} does not carry the FAIL outcome")
-        if fail_html.is_file() and "<html" not in fail_html.read_text():
-            probs.append("the html report is not an html document")
+            probs += [
+                f"{doc.name} omits {needed!r}"
+                for needed in needed_all
+                if needed not in body
+            ]
         self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
 
         # (3) `full` sections a passing file; `concise` gives it a row only.
@@ -3488,7 +3546,37 @@ def build_matrix() -> list[Check]:
             "§4",
             ["doctor", "--report", "md:r.md"],
             4,
-            err_has=["doctor"],
+            err_has=["'--report' is a reporter flag and cannot be combined"],
+        ),
+        Check(
+            "collect: --report-style rejected -> 4",
+            "§4",
+            ["collect", *I, "--report-style", "full", "tests"],
+            4,
+            err_has=["'--report-style' is a run-only flag"],
+        ),
+        Check(
+            "doctor: --report-style rejected -> 4",
+            "§4",
+            ["doctor", "--report-style", "full"],
+            4,
+            err_has=["'--report-style' is a reporter flag and cannot be combined"],
+        ),
+        Check(
+            "value: --report-style bad value -> 4",
+            "§9,§15.5",
+            [*I, "--report-style", "loud", "tests"],
+            4,
+            err_has=["wants 'concise' or 'full'"],
+        ),
+        # The collision rule is not a --report rule: it governs every active
+        # file destination, so it must hold with no report flag in the argv.
+        Check(
+            "run: --json collides with --junit-xml -> 4",
+            "§15.2,§15.4,§15.5",
+            [*I, "--json", "shared.out", "--junit-xml", "./shared.out", "tests"],
+            4,
+            err_has=["same destination"],
         ),
         Check(
             "debug: --report rejected -> 4",

@@ -176,8 +176,9 @@ def default_file_mode() -> Int:
 
     `umask(2)` can only be read by replacing it, so this installs a mask and
     puts the old one straight back. That is safe here and only here: mtest
-    creates no file from another thread, and both callers of this run before
-    any concurrent work exists.
+    creates no file from another thread, and every caller of this runs before
+    any concurrent work exists — the scaffolders before a session exists at
+    all, and `main`'s report-destination setup before the first file is built.
 
     Returns:
         The permission bits, `0600` at worst. Allocates nothing, cannot fail,

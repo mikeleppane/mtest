@@ -554,8 +554,13 @@ def test_open_report_spool_is_named_apart_from_the_junit_spool() raises:
     var spool = open_report_spool()
     try:
         assert_true(
-            "/mtest-run report-" in spool,
+            "/mtest-run-report-" in spool,
             "the spool carries its own run-identifying prefix: " + spool,
+        )
+        # A space in a scratch path is a trap for every shell one-liner that
+        # ever has to clean these up, and the `mtest-junit-` sibling has none.
+        assert_true(
+            " " not in spool, "the spool path carries no space: " + spool
         )
     finally:
         remove_tree(spool)

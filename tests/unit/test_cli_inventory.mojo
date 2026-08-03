@@ -336,7 +336,7 @@ def frozen_inventory() -> List[InvRow]:
             True,
             "FORMAT:PATH",
             FlagGroup.REPORTING,
-            "Write a md or html run report (once each).",
+            "Write an md or html run report (once each).",
             "--report FORMAT:PATH",
         ),
         InvRow(

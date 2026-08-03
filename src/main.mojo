@@ -90,6 +90,7 @@ from mtest.platform import (
     BoundedRegularFileRead,
     close_checked_fd,
     create_unique_temp,
+    default_file_mode,
     destination_identity,
     direct_write_failed,
     exec_replace,
@@ -97,6 +98,7 @@ from mtest.platform import (
     process_id,
     read_bounded_regular_file,
     rename_path,
+    set_permissions,
     write_all_bytes_fd_status,
     write_all_fd,
     write_errno_name,
@@ -561,6 +563,34 @@ def _report_temp_template(destination: String) -> String:
     if target_dir == "":
         return leaf^
     return target_dir + "/" + leaf
+
+
+def _relax_report_temp_mode(temp_path: String):
+    """Give one report temp the mode the published report must appear with.
+
+    `create_unique_temp` is `mkstemp(3)`, so the file arrives `0600`: right for
+    a temporary, wrong for a report a CI job, a reviewer, or a web server is
+    meant to read. `--junit-xml`'s artifact is created through an ordinary
+    `open` and lands at the usual `0666 & ~umask`, so a report written beside it
+    would otherwise be the one artifact nobody but the runner's own user could
+    read.
+
+    Set BEFORE publication, not after: the rename makes the temp's inode the
+    published file, so the mode chosen here is the mode the report appears with
+    and there is no window in which it is owner-readable only.
+
+    Best-effort and non-raising by design. A mode this could not relax still
+    leaves a complete, correct report at the destination, so refusing the whole
+    run over it would trade a readable report for no report at all.
+
+    Args:
+        temp_path: The just-created unique temp that will be renamed onto the
+            report destination.
+    """
+    try:
+        set_permissions(temp_path, default_file_mode())
+    except:
+        pass
 
 
 def _report_style_code(style: ReportStyle) -> Int:
@@ -1374,6 +1404,7 @@ def main():
                 )
                 resources.report_md_temp = md.path.copy()
                 resources.report_md_fd = md.fd
+                _relax_report_temp_mode(md.path)
                 report_md = ReportArtifact(
                     config.report_md_dest.copy(),
                     md.path.copy(),
@@ -1387,6 +1418,7 @@ def main():
                 )
                 resources.report_html_temp = html.path.copy()
                 resources.report_html_fd = html.fd
+                _relax_report_temp_mode(html.path)
                 report_html = ReportArtifact(
                     config.report_html_dest.copy(),
                     html.path.copy(),

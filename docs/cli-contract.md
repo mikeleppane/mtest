@@ -1229,6 +1229,12 @@ events, never from a parse of the console text.
   nonexistent parent directory) is a pre-run usage error (exit 4, §9); a runtime
   creation or finalization failure (an unwritable or vanished target) is an
   internal error (exit 3, §9). Report destinations are not root-constrained.
+  A PATH that names the same file as another active destination — a `--json`
+  file destination or either `--report` path — is a pre-run usage error
+  (exit 4), because the other writer would replace this document or be replaced
+  by it depending only on finalization order. The comparison is by resolved
+  identity, so `out.xml` and `./out.xml` are one destination; the full rule is
+  stated once in §15.5.
 
 ### 15.3 GitHub annotations — `--gh-annotations MODE`
 
@@ -1355,6 +1361,12 @@ this section summarizes it.
   this differs from JUnit's atomic write, §15.2); report destinations are not
   root-constrained. A syntactically bad destination is a pre-run usage error
   (exit 4, §9); a runtime open failure is a pre-run internal error (exit 3, §9).
+  A `PATH` that names the same file as another active destination — `--junit-xml`
+  or either `--report` path — is a pre-run usage error (exit 4), because this
+  stream truncates at session start and would destroy whatever the other writer
+  was going to publish there. `--json -` is exempt: stdout has no filesystem
+  identity to collide with. The comparison is by resolved identity, so `out.json`
+  and `./out.json` are one destination; the full rule is stated once in §15.5.
 - **Versioning.** Version 1 freezes the framing, header, event names, field
   meanings, and vocabularies. Growth is additive (new fields and kinds);
   consumers **must ignore** unknown fields and kinds. A removal or
@@ -1929,6 +1941,9 @@ durations = 2  # (mtest.toml)
 # junit-xml = (unset)
 # json = (unset)
 gh-annotations = "auto"  # (default)
+# md = (unset)
+# html = (unset)
+style = "concise"  # (default)
 
 [[override]]
 files = "e2e/matrix/test_beta.mojo"  # (mtest.toml)

@@ -440,7 +440,7 @@ def flag_specs() -> List[FlagSpec]:
             FlagId.REPORT,
             1,
             True,
-            "Write a md or html run report (once each).",
+            "Write an md or html run report (once each).",
             "FORMAT:PATH",
             FlagGroup.REPORTING,
         ),

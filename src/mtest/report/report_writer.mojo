@@ -128,7 +128,7 @@ def open_report_spool() raises -> String:
     var spool = open_report_spool()
     ```
     """
-    return open_spool_dir("run report")
+    return open_spool_dir("run-report")
 
 
 @fieldwise_init
