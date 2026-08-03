@@ -258,10 +258,16 @@ def _from_build(rel: String, bo: _BuildOutcome) -> DebugOutcome:
             EXIT_INTERRUPTED, String("debug: interrupted during the build")
         )
     if bo.result.internal_error:
-        return DebugOutcome.refused(
-            EXIT_INTERNAL_ERROR,
-            "debug: " + escape_one_line(rel) + ": internal build failure",
+        # The machinery failure said something on the child's stderr — which
+        # program could not be spawned, and why. Dropping it left a bare
+        # "internal build failure" nobody can act on, and under `debug` there
+        # is no reporter anywhere else that would still echo those bytes.
+        var machinery = List[String]()
+        machinery.append(
+            "debug: " + escape_one_line(rel) + ": internal build failure"
         )
+        machinery += _captured(bo.result)
+        return DebugOutcome(EXIT_INTERNAL_ERROR, machinery^, DebugPlan.none())
     var lines = List[String]()
     lines.append(
         "debug: " + escape_one_line(rel) + ": " + _debug_phrase(bo.result)
@@ -402,12 +408,17 @@ def prepare_debug(
             pr = _run_precompile(
                 runtime, config, root, pc.src, pc.out, includes
             )
-        except:
+        except e:
+            # The caught error is the only account of what went wrong here:
+            # `_run_precompile` raises for machinery faults that produced no
+            # `PrecompileResult` to inspect, so discarding it leaves the step
+            # named and the failure unexplained.
             return DebugOutcome.refused(
                 EXIT_INTERNAL_ERROR,
                 "debug: precompile step '"
                 + escape_one_line(pc.src)
-                + "' failed; nothing was handed over",
+                + "' failed; nothing was handed over: "
+                + escape_one_line(String(e)),
             )
         if pr.interrupted:
             return DebugOutcome.refused(
