@@ -509,6 +509,7 @@ def _convert_document(
                 and key != "retries"
                 and key != "maxfail"
                 and key != "state"
+                and key != "fail-on-flaky"
             ):
                 var value = _get(table, key)
                 return _unknown(
@@ -517,7 +518,7 @@ def _convert_document(
                     key,
                     (
                         "paths, exclude, gates, serial, workers, timeout,"
-                        " retries, maxfail, or state"
+                        " retries, maxfail, state, or fail-on-flaky"
                     ),
                     _got(value),
                 )
@@ -605,6 +606,15 @@ def _convert_document(
                 )
             config.state = value.bool_value
             config.saw_state = True
+
+        if _contains(table, "fail-on-flaky"):
+            var value = _get(table, "fail-on-flaky")
+            if not value.is_bool():
+                return _invalid(
+                    source, "[run] key 'fail-on-flaky'", "boolean", _got(value)
+                )
+            config.fail_on_flaky = value.bool_value
+            config.saw_fail_on_flaky = True
 
     if _contains(document, "build"):
         var table = _get(document, "build")

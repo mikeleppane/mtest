@@ -100,16 +100,17 @@ and still passing.
 REFERENCE_PAGES = (
     Path("docs/cli-contract.md"),
     Path("docs/json-stream.md"),
+    Path("docs/collect-stream.md"),
     Path("docs/releasing.md"),
 )
 """Documents the site navigates to, which are originals rather than copies.
 
 Excluded from parity by this explicit rule, not by being forgotten: parity is
-agreement between a copy and the source it copied, and these three copy
+agreement between a copy and the source it copied, and these four copy
 nothing. Each is the surface that owns its own content — the frozen
 command-line contract (whose documented behaviors the contract gate executes),
-the event-stream specification, and the release runbook — and the contract is a
-version-transcript site in its own right.
+the two machine-format specifications, and the release runbook — and the
+contract is a version-transcript site in its own right.
 
 Naming them is what lets the sweep below invert the question. Without an
 explicit list, "not a site page" and "not gated at all" would be the same
@@ -250,11 +251,13 @@ PARITY_BLOCKS = (
     # The landing page's install block: the channel and package commands, and
     # the version the installed binary prints back.
     ParityBlock(Path("docs/index.md"), 0, "Installation", 0),
-    # The five-minute path: the test file a reader saves, the passing run, and
-    # the compile error a wrong import produces.
+    # The five-minute path: the test file a reader saves, the command that
+    # writes it for them, the passing run, and the compile error a wrong
+    # import produces.
     ParityBlock(Path("docs/getting-started.md"), 0, "Your first test", 0),
     ParityBlock(Path("docs/getting-started.md"), 1, "Your first test", 1),
     ParityBlock(Path("docs/getting-started.md"), 2, "Your first test", 2),
+    ParityBlock(Path("docs/getting-started.md"), 3, "Your first test", 3),
     # The workflow to paste, the sharded variant of it, and the composite
     # action that replaces the invocation step in either.
     ParityBlock(Path("docs/ci.md"), 0, "Run it in CI", 0),

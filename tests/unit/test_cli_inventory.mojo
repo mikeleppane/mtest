@@ -242,6 +242,16 @@ def frozen_inventory() -> List[InvRow]:
             "Retry crash-class outcomes N times.",
             "--retries N",
         ),
+        # `--fail-on-flaky`: valueless; a FLAKY file turns a would-be 0 into 1.
+        InvRow(
+            "--fail-on-flaky",
+            0,
+            False,
+            "",
+            FlagGroup.EXECUTION,
+            "Exit 1 when any file passed only after retries.",
+            "--fail-on-flaky",
+        ),
         # `--compile-timeout SECS`: non-negative int; 0 disables.
         InvRow(
             "--compile-timeout",
@@ -281,6 +291,25 @@ def frozen_inventory() -> List[InvRow]:
             "Run matching files serially (repeatable).",
             "--serial GLOB",
         ),
+        # CLI-only: never read from mtest.toml (order randomization).
+        InvRow(
+            "--shuffle",
+            0,
+            False,
+            "",
+            FlagGroup.EXECUTION,
+            "Randomize run-file order (gates keep theirs).",
+            "--shuffle",
+        ),
+        InvRow(
+            "--seed",
+            1,
+            False,
+            "N",
+            FlagGroup.EXECUTION,
+            "Fix the --shuffle order to a reproducible seed.",
+            "--seed N",
+        ),
         # CLI-only: never read from mtest.toml (build cache).
         InvRow(
             "--no-cache",
@@ -309,6 +338,16 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.REPORTING,
             "Choose off|on|auto GitHub annotations.",
             "--gh-annotations MODE",
+        ),
+        # `--format lines|json`: collect-only; `lines` is the default.
+        InvRow(
+            "--format",
+            1,
+            False,
+            "FORMAT",
+            FlagGroup.REPORTING,
+            "Collect output format: lines (default) or json.",
+            "--format FORMAT",
         ),
         # `--json PATH|-`: now served.
         InvRow(
@@ -488,8 +527,8 @@ def test_help_renders_every_option_once_with_values_and_aligned_help() raises:
     for line_slice in rendered.split("\n"):
         if String(line_slice).startswith("  -"):
             option_rows += 1
-    # Five two-spelling aliases collapse 38 spellings into 33 physical rows.
-    assert_equal(option_rows, 33)
+    # Five two-spelling aliases collapse 42 spellings into 37 physical rows.
+    assert_equal(option_rows, 37)
     for row in frozen_inventory():
         var expected_line = "  " + row.help_label
         for _ in range(30 - expected_line.count_codepoints()):
@@ -514,6 +553,9 @@ def test_help_has_grouped_sections_and_clear_subcommands() raises:
     assert_true("  collect [PATHS...] [flags]" in rendered)
     assert_true("  config show [PATHS...]" in rendered)
     assert_true("  doctor [flags]" in rendered)
+    assert_true("  debug PATH::TEST" in rendered)
+    assert_true("  new PATH" in rendered)
+    assert_true("  init [--ci github]" in rendered)
     var previous_group_position = -1
     for group in [
         "Selection",

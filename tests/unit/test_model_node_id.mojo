@@ -4,10 +4,20 @@ NodeId's identity is BOTH path and name -- a real regression here would compare
 only one field and silently merge two distinct tests. `split_node_token` is
 pure and policy-free: these tests pin its behavior across every separator count
 the session's classifier depends on (0/1/2/3, plus the empty-part edges).
+
+`split_rendered_node_id` is the inverse of `render()` and splits at the LAST
+separator instead, so a path that itself contains `::` round-trips. The
+round-trip property is pinned directly, since that is the whole reason the two
+splitters differ.
 """
 from std.testing import assert_equal, assert_true, assert_false, TestSuite
 
-from mtest.model import NodeId, NodeIdSplit, split_node_token
+from mtest.model import (
+    NodeId,
+    NodeIdSplit,
+    split_node_token,
+    split_rendered_node_id,
+)
 
 
 def test_render_joins_path_and_name_with_double_colon() raises:
@@ -76,6 +86,44 @@ def test_split_trailing_separator_yields_empty_name_part() raises:
     assert_equal(s.sep_count, 1)
     assert_equal(s.file_part, "a")
     assert_equal(s.name_part, "")
+
+
+def test_rendered_split_recovers_an_ordinary_node_id() raises:
+    var n = split_rendered_node_id("tests/test_a.mojo::test_foo")
+    assert_equal(n.path, "tests/test_a.mojo")
+    assert_equal(n.name, "test_foo")
+
+
+def test_rendered_split_keeps_a_path_that_contains_the_separator() raises:
+    # The defect this pins: splitting at the FIRST `::` reports the path as
+    # `we` and folds the rest of the path into the test name.
+    var n = split_rendered_node_id("we::ird/test_x.mojo::test_x_one")
+    assert_equal(n.path, "we::ird/test_x.mojo")
+    assert_equal(n.name, "test_x_one")
+
+
+def test_rendered_split_round_trips_every_render() raises:
+    for path in [
+        "tests/test_a.mojo",
+        "we::ird/test_x.mojo",
+        "::/test_y.mojo",
+        "a::b::c/test_z.mojo",
+    ]:
+        var original = NodeId(path, "test_one")
+        var recovered = split_rendered_node_id(original.render())
+        assert_true(recovered == original, "round-trip drift for path: " + path)
+
+
+def test_rendered_split_of_a_bare_path_leaves_the_name_empty() raises:
+    var n = split_rendered_node_id("tests/test_a.mojo")
+    assert_equal(n.path, "tests/test_a.mojo")
+    assert_equal(n.name, "")
+
+
+def test_rendered_split_trailing_separator_yields_empty_name() raises:
+    var n = split_rendered_node_id("a::")
+    assert_equal(n.path, "a")
+    assert_equal(n.name, "")
 
 
 def main() raises:

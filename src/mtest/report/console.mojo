@@ -601,11 +601,14 @@ def _sort_slowest(mut files: List[_FileDuration]):
             files[best] = tmp^
 
 
-def _worst_color(s: Summary, tc: TestCounts) -> StaticString:
+def _worst_color(
+    s: Summary, tc: TestCounts, flaky_failing: Bool
+) -> StaticString:
     """The summary-band color.
 
-    Red-bold if any crash-class file ran, otherwise red if any test failed or
-    any file is a FAIL, otherwise green.
+    Red-bold if any crash-class file ran, otherwise red if any test failed, any
+    file is a FAIL, or `--fail-on-flaky` is failing the run over a FLAKY file,
+    otherwise green.
     """
     if (
         s.count_of(Outcome.CRASH) > 0
@@ -616,7 +619,7 @@ def _worst_color(s: Summary, tc: TestCounts) -> StaticString:
         or s.count_of(Outcome.PRECOMPILE_ERROR) > 0
     ):
         return _RED_BOLD
-    if s.count_of(Outcome.FAIL) > 0 or tc.failed > 0:
+    if s.count_of(Outcome.FAIL) > 0 or tc.failed > 0 or flaky_failing:
         return _RED
     return _GREEN
 
@@ -711,6 +714,12 @@ struct ConsoleReporter(Reporter):
     """`--durations N`: how many slowest-running files to list after the summary
     band; `0`, or the flag being absent, renders nothing extra. Independent of
     `verbosity`, so an explicit `--durations` survives `-q`."""
+    var fail_on_flaky: Bool
+    """Whether `--fail-on-flaky` is in effect, so a FLAKY file fails the run.
+
+    Presentation only: it names the flag beside a nonzero flaky tally and turns
+    the band red. The exit code is the session's, resolved from the same fact,
+    and is never read back from here."""
     var _head: String
     """The streamed header, warnings, banners, and verdict/excluded lines."""
     var _head_flushed: Int
@@ -731,6 +740,10 @@ struct ConsoleReporter(Reporter):
     for the slowest-files list. Only files that reached the run step
     (`duration_seconds > 0.0`) are recorded; a COMPILE_ERROR, EXCLUDED or
     NOT_RUN file carries `0.0` and is never added."""
+    var _shuffle: Bool
+    """Whether SESSION_STARTED said run-file order was randomized."""
+    var _shuffle_seed: Int
+    """The seed that order was drawn from, for the reproduce note."""
     var _run_root: String
     """The run root from SESSION_STARTED, for root-relativizing `At` lines."""
     var _toolchain: String
@@ -770,6 +783,7 @@ struct ConsoleReporter(Reporter):
         var mtest_build_flags: String,
         durations: Int,
         gh_actions: Bool = False,
+        fail_on_flaky: Bool = False,
     ):
         """Construct a reporter and resolve color once.
 
@@ -795,6 +809,8 @@ struct ConsoleReporter(Reporter):
             gh_actions: Whether the run is inside GitHub Actions
                 (`GITHUB_ACTIONS=true`). When True, echoed captured child output
                 is wrapped in collision-proof stop-commands fencing.
+            fail_on_flaky: Whether `--fail-on-flaky` is in effect, so a nonzero
+                flaky tally names the flag on the band and paints it red.
 
         Examples:
 
@@ -821,10 +837,13 @@ struct ConsoleReporter(Reporter):
         self.show_output = show_output
         self.mtest_build_flags = mtest_build_flags^
         self.durations = durations
+        self.fail_on_flaky = fail_on_flaky
         self._head = String("")
         self._head_flushed = 0
         self._sections = String("")
         self._summary = String("")
+        self._shuffle = False
+        self._shuffle_seed = 0
         self._run_root = String("")
         self._toolchain = String("")
         self._file_tests = List[TestResult]()
@@ -1144,6 +1163,10 @@ struct ConsoleReporter(Reporter):
         """
         self._run_root = e.root.copy()
         self._toolchain = e.toolchain.copy()
+        # Latched before the quiet return: the summary band and its epilogue
+        # render under `-q` too, and the note quotes this seed.
+        self._shuffle = e.shuffle
+        self._shuffle_seed = e.shuffle_seed
         if self.verbosity == Verbosity.QUIET:
             return
         self._head += (
@@ -1166,6 +1189,8 @@ struct ConsoleReporter(Reporter):
         # count above one surfaces the token.
         if e.workers > 1:
             counts += "   workers: " + String(e.workers)
+        if e.shuffle:
+            counts += "   shuffle seed: " + String(e.shuffle_seed)
         self._head += counts + "\n\n"
 
     def _on_warning(mut self, e: WarningPayload):
@@ -1678,6 +1703,10 @@ struct ConsoleReporter(Reporter):
 
         So passed + failed + skipped is the number of tests run, and the file
         abnormals plus excluded plus not-run cover every file with no test rows.
+
+        The band's epilogue follows it: the slowest-files list when
+        `--durations` asked for one, then the `--shuffle` reproduce note when a
+        randomized run ended on any nonzero code.
         """
         var s = e.summary.copy()
         var tc = e.test_counts
@@ -1696,6 +1725,14 @@ struct ConsoleReporter(Reporter):
         body += _extra_count(s, Outcome.COMPILE_TIMEOUT, "compile timeout")
         body += _extra_count(s, Outcome.PRECOMPILE_ERROR, "precompile error")
         body += _extra_count(s, Outcome.FLAKY, "flaky")
+        # Under `--fail-on-flaky` the tally is the reason the run failed, so the
+        # band names the flag rather than leaving a green-looking count beside a
+        # nonzero exit. Derived from the flag and the tally, never from the exit
+        # code: a real failure beside a flaky file with the flag off must not
+        # pick up the suffix.
+        var flaky_failing = self.fail_on_flaky and s.count_of(Outcome.FLAKY) > 0
+        if flaky_failing:
+            body += " (failing: --fail-on-flaky)"
         # The build-cache accounting, on the same band as the outcome counts and
         # only when the cache actually admitted something: `builds` counts
         # first-attempt compiles (failures included), `cached` counts store
@@ -1729,8 +1766,23 @@ struct ConsoleReporter(Reporter):
             + _fmt_fixed(e.wall_time_seconds, 1)
             + "s ====="
         )
-        self._summary = "\n" + self._paint(_worst_color(s, tc), band) + "\n"
+        self._summary = (
+            "\n" + self._paint(_worst_color(s, tc, flaky_failing), band) + "\n"
+        )
         self._summary += self._render_slowest_files()
+        # A randomized order is worth reproducing whenever the run did not end
+        # clean — a failure, an interrupt, or an internal error all leave a user
+        # wanting that order back, and under `-q` this note is the only place
+        # the seed appears at all. The seed is the whole of what mtest can
+        # promise here: it never saw the argv, so it names the two flags to add
+        # rather than inventing a command line it cannot know.
+        if self._shuffle and e.exit_code != 0:
+            self._summary += (
+                "\nnote: file order was randomized; rerun the same command"
+                + " with: --shuffle --seed "
+                + String(self._shuffle_seed)
+                + "\n"
+            )
 
     def _render_slowest_files(self) -> String:
         """The after-band slowest-files list, or `""` when it says nothing.

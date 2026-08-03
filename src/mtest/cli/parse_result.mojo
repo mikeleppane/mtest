@@ -1,10 +1,10 @@
 """`ParseResult`: what a successful parse produces.
 
-Parsing either yields a configured run, `config show`, or `doctor` request with
-both its typed argv overlay and defaults-folded compatibility config, or a
-non-error directive to print help or the version. A usage error is not a
-`ParseResult`: it is raised. `main` handles each result; this layer never
-prints or exits.
+Parsing either yields a configured run, `config show`, `doctor`, or `debug`
+request with both its typed argv overlay and defaults-folded compatibility
+config, a `new` or `init` scaffolding request, or a non-error directive to
+print help or the version. A usage error is not a `ParseResult`: it is raised.
+`main` handles each result; this layer never prints or exits.
 """
 from mtest.config import CliOverlay, RunnerConfig
 
@@ -13,10 +13,12 @@ from mtest.config import CliOverlay, RunnerConfig
 struct ParseResult(Copyable, Movable):
     """The outcome of a successful parse.
 
-    A tagged union over `kind`. For `RUN`, `CONFIG_SHOW`, and `DOCTOR`,
-    `overlay` holds argv presence and values while `config` holds their
-    defaults-folded compatibility view. Only help and version carry
-    placeholder fields.
+    A tagged union over `kind`. For `RUN`, `CONFIG_SHOW`, `DOCTOR`, and
+    `DEBUG`, `overlay` holds argv presence and values while `config` holds
+    their defaults-folded compatibility view. `DEBUG` additionally carries the
+    one node id it was given in `operand`, `NEW` carries the one path it was
+    given there, and `INIT` carries its `--ci` value in `ci`. Help, version,
+    `NEW`, and `INIT` carry placeholder fields.
 
     Examples:
 
@@ -45,11 +47,30 @@ struct ParseResult(Copyable, Movable):
     var no_config: Bool
     """Whether configuration-file discovery is explicitly disabled."""
 
+    var operand: String
+    """The one path-shaped operand `DEBUG` and `NEW` name; empty otherwise.
+
+    It is kept out of `config.paths` on purpose: both commands own their
+    operand and resolve it against a projection in which a project file's own
+    path list never participates — under `NEW` there is no configuration at
+    all, since the file is scaffolded before any is loaded."""
+
+    var ci: String
+    """The `--ci` provider `INIT` names, or empty; empty for every other kind.
+
+    `--ci` has no row in the flag-spec table and no place in the overlay,
+    because a row there is a `run` flag by construction: `mtest --ci github
+    tests` would parse as a run carrying a value nothing reads. `init` parses
+    it in its own walk, and it lands here."""
+
     comptime RUN = 0
     comptime SHOW_HELP = 1
     comptime SHOW_VERSION = 2
     comptime CONFIG_SHOW = 3
     comptime DOCTOR = 4
+    comptime DEBUG = 5
+    comptime NEW = 6
+    comptime INIT = 7
 
     @staticmethod
     def run(
@@ -77,6 +98,8 @@ struct ParseResult(Copyable, Movable):
             overlay=overlay^,
             config_path=config_path,
             no_config=no_config,
+            operand=String(""),
+            ci=String(""),
         )
 
     @staticmethod
@@ -88,6 +111,8 @@ struct ParseResult(Copyable, Movable):
             overlay=CliOverlay.default(),
             config_path="",
             no_config=False,
+            operand=String(""),
+            ci=String(""),
         )
 
     @staticmethod
@@ -99,6 +124,8 @@ struct ParseResult(Copyable, Movable):
             overlay=CliOverlay.default(),
             config_path="",
             no_config=False,
+            operand=String(""),
+            ci=String(""),
         )
 
     @staticmethod
@@ -125,6 +152,8 @@ struct ParseResult(Copyable, Movable):
             overlay=overlay^,
             config_path=config_path,
             no_config=no_config,
+            operand=String(""),
+            ci=String(""),
         )
 
     @staticmethod
@@ -151,6 +180,86 @@ struct ParseResult(Copyable, Movable):
             overlay=overlay^,
             config_path=config_path,
             no_config=no_config,
+            operand=String(""),
+            ci=String(""),
+        )
+
+    @staticmethod
+    def debug(
+        var config: RunnerConfig,
+        var overlay: CliOverlay,
+        var operand: String,
+        config_path: String = "",
+        no_config: Bool = False,
+    ) -> ParseResult:
+        """A result asking `main` to prepare one test and hand over the terminal.
+
+        Args:
+            config: The parsed build configuration. Consumed.
+            overlay: The typed argv overlay. Consumed.
+            operand: The `PATH::TEST` node id to debug. Consumed.
+            config_path: The explicit configuration path, or empty to discover.
+            no_config: Whether to skip configuration discovery.
+
+        Returns:
+            A result whose `kind` is `DEBUG`.
+        """
+        return ParseResult(
+            kind=Self.DEBUG,
+            config=config^,
+            overlay=overlay^,
+            config_path=config_path,
+            no_config=no_config,
+            operand=operand^,
+            ci=String(""),
+        )
+
+    @staticmethod
+    def scaffold(var operand: String) -> ParseResult:
+        """A result asking `main` to scaffold one test file.
+
+        Its config and overlay are placeholders: the file is created before any
+        project configuration is discovered, so none of it applies.
+
+        Args:
+            operand: The path to create. Consumed.
+
+        Returns:
+            A result whose `kind` is `NEW`.
+        """
+        return ParseResult(
+            kind=Self.NEW,
+            config=RunnerConfig.default(),
+            overlay=CliOverlay.default(),
+            config_path="",
+            no_config=False,
+            operand=operand^,
+            ci=String(""),
+        )
+
+    @staticmethod
+    def bootstrap(var ci: String) -> ParseResult:
+        """A result asking `main` to bootstrap a project in the invocation root.
+
+        Its config and overlay are placeholders for the same reason `NEW`'s
+        are: the artifacts are written before any project configuration exists
+        to be discovered, and one of them is that configuration.
+
+        Args:
+            ci: The `--ci` provider to write a workflow for, or empty for
+                none. Consumed.
+
+        Returns:
+            A result whose `kind` is `INIT`.
+        """
+        return ParseResult(
+            kind=Self.INIT,
+            config=RunnerConfig.default(),
+            overlay=CliOverlay.default(),
+            config_path="",
+            no_config=False,
+            operand=String(""),
+            ci=ci^,
         )
 
     def is_run(self) -> Bool:
@@ -172,3 +281,15 @@ struct ParseResult(Copyable, Movable):
     def is_doctor(self) -> Bool:
         """Whether this result asks to diagnose the local mtest environment."""
         return self.kind == Self.DOCTOR
+
+    def is_debug(self) -> Bool:
+        """Whether this result asks to hand the terminal to one test."""
+        return self.kind == Self.DEBUG
+
+    def is_new(self) -> Bool:
+        """Whether this result asks to scaffold one test file."""
+        return self.kind == Self.NEW
+
+    def is_init(self) -> Bool:
+        """Whether this result asks to bootstrap a project."""
+        return self.kind == Self.INIT

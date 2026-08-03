@@ -64,6 +64,9 @@ def test_doctor_refuses_run_and_build_flags() raises:
     var build_flag: List[String] = ["doctor", "--mojo", "mojo"]
     with assert_raises(contains="--mojo"):
         _ = parse_args(build_flag)
+    var verdict_flag: List[String] = ["doctor", "--fail-on-flaky"]
+    with assert_raises(contains="--fail-on-flaky"):
+        _ = parse_args(verdict_flag)
 
 
 def test_doctor_refuses_selection_and_state_flags() raises:

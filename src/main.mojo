@@ -3,19 +3,26 @@
 `main` is the only place that reads the process argv and environment, talks to
 the terminal, and calls `exit`. It parses argv and resolves project config.
 `doctor` runs its contained environment checks before main acquires the
-invocation root or exec runtime. A `config show` request renders its resolution
-and exits before state loading or run resources. Otherwise main loads last-run
+invocation root or exec runtime. `new` scaffolds one test file, and `init`
+bootstraps a whole project, just after the root and before any configuration is
+read, because nothing in a project file can change what either one writes — and
+`init` writes that project file itself. A `config show` request renders its
+resolution and exits before state loading or run resources. Otherwise main loads last-run
 state, constructs the exec runtime, resolves report destinations, composes
 reporters into the `StandardReportCoordinator` interface the session drives,
 runs the session, closes every resource, conditionally promotes the next state
 file, and exits with the session's resolved code.
 
-Five output classes bypass the event seam by design: pre-session diagnostics
-go straight to stderr; `config show` writes its resolution-only TOML directly
-to stdout; doctor writes its fixed check lines directly to stdout;
-`--collect-only` writes its frozen node-id listing directly to stdout; and a
+Several output classes bypass the event seam by design, all of them from
+commands that never open a session: pre-session diagnostics go straight to
+stderr; `config show` writes its resolution-only TOML directly to stdout;
+doctor writes its fixed check lines directly to stdout; `new` and `init` write
+their artifact lines directly to stdout and everything else to stderr;
+`--collect-only` writes its frozen node-id listing — plain lines, or the
+NDJSON collect stream under `--format json` — directly to stdout; and a
 post-close state-write failure goes to stderr after the terminal event already
-sealed the stream.
+sealed the stream. Every one of them goes through `_write_direct`, so a
+consumer that stops reading costs the write and nothing else.
 
 The parser owns argv syntax; config owns typed conversion, layering, and state
 bytes; the console resolves color from the inputs main supplies; the session
@@ -39,10 +46,18 @@ from mtest.cli import (
     help_text,
     parse_args,
     run_doctor,
+    run_init,
+    run_new,
     version_text,
 )
-from mtest.exec import ExecRuntime, stderr_isatty, stdout_isatty
+from mtest.exec import (
+    ExecRuntime,
+    interrupt_requested,
+    stderr_isatty,
+    stdout_isatty,
+)
 from mtest.config import (
+    ActiveConfigKeys,
     ConfigEnvironment,
     FileConfig,
     LastRunState,
@@ -52,6 +67,7 @@ from mtest.config import (
     StateDelta,
     TOML_SOURCE_MAX_BYTES,
     annotations_resolved_on,
+    cli_only_resolution_defaults,
     encode_last_run_state,
     merge_last_run_state,
     parse_toml,
@@ -62,13 +78,17 @@ from mtest.config import (
 )
 from mtest.model import (
     EXIT_INTERNAL_ERROR,
+    EXIT_INTERRUPTED,
     TerminalFacts,
     resolve_exit_code,
+    split_rendered_node_id,
 )
 from mtest.platform import (
     BoundedRegularFileRead,
     close_checked_fd,
     create_unique_temp,
+    exec_replace,
+    ignore_broken_pipe,
     process_id,
     read_bounded_regular_file,
     rename_path,
@@ -81,6 +101,9 @@ from mtest.report import (
     JunitReporter,
     StandardReportCoordinator,
     close_json_fd,
+    collect_finished_line,
+    collect_node_line,
+    collect_stream_header,
     open_json_fd,
     open_junit_artifact,
     open_junit_spool,
@@ -88,7 +111,10 @@ from mtest.report import (
 )
 from mtest.session import (
     CollectResult,
+    DebugOutcome,
+    DebugPlan,
     SessionResult,
+    prepare_debug,
     run_collect,
     run_session_with_state,
 )
@@ -131,9 +157,33 @@ def _no_color_set() -> Bool:
     return getenv("NO_COLOR", "").byte_length() > 0
 
 
+def _write_direct(text: String, fd: Int):
+    """Write `text` verbatim to `fd`, flushed, surviving a departed reader.
+
+    The one path for every byte `main` writes outside a reporter: help,
+    version, the doctor lines, `new` and `init`'s artifact lines, the resolved
+    configuration, both `collect` listings, the `debug` plan, the annotation
+    epilogue, and every diagnostic. Ignoring `SIGPIPE` first is what keeps a
+    consumer that stops reading — `mtest collect --format json | head -1` —
+    from killing this process at signal 13, a status outside every documented
+    exit domain (§9, §16, §27, §28, §29). The write is lost instead, and the
+    command still exits with the code its own domain defines.
+
+    The one place this must NOT be used is between the exec runtime's release
+    and the `debug` handoff: the debuggee inherits this process's dispositions,
+    and a test that dies of a genuine broken pipe has to be able to say so.
+
+    Args:
+        text: The complete bytes to write, terminator included.
+        fd: The destination descriptor.
+    """
+    ignore_broken_pipe()
+    print(text, end="", file=FileDescriptor(fd), flush=True)
+
+
 def _eprintln(text: String):
     """Write `text` and a newline to standard error (fd 2), flushed."""
-    print(text, file=FileDescriptor(2), flush=True)
+    _write_direct(text + "\n", 2)
 
 
 def _normalize_absolute(path: String) -> String:
@@ -345,21 +395,6 @@ def _load_config(
     return ConfigLoad(parsed.config.copy(), representation, "", 0)
 
 
-def _resolution_defaults(parsed: RunnerConfig) -> RunnerConfig:
-    var defaults = RunnerConfig.default()
-    defaults.exitfirst = parsed.exitfirst
-    defaults.keyword = parsed.keyword.copy()
-    defaults.collect = parsed.collect
-    defaults.last_failed = parsed.last_failed
-    defaults.failed_first = parsed.failed_first
-    defaults.shard_mode = parsed.shard_mode
-    defaults.shard_m = parsed.shard_m
-    defaults.shard_n = parsed.shard_n
-    defaults.no_cache = parsed.no_cache
-    defaults.cache_clear = parsed.cache_clear
-    return defaults^
-
-
 @fieldwise_init
 struct StateLoad(Copyable, Movable):
     """The previous last-run records plus contained nonfatal read diagnostics.
@@ -535,6 +570,10 @@ struct RunResources:
         """
         self._discard_junit_scratch()
         var resolved = code
+        # `flaky_failed` is False here on purpose: the session already applied
+        # it, so a flaky-forced failure arrives as `outcome_code=1` and survives
+        # this re-resolution. Re-stating the fact could only demote a 0 that the
+        # session had already decided was not one.
         if self.json_owns_fd:
             var delivery_failed = close_json_fd(self.json_fd)
             self.json_owns_fd = False
@@ -547,6 +586,7 @@ struct RunResources:
                         precompile_failed=False,
                         outcome_code=code,
                         delivery_failed=delivery_failed,
+                        flaky_failed=False,
                     )
                 )
         try:
@@ -572,17 +612,17 @@ def main():
         exit(EXIT_USAGE_ERROR)
 
     if result.is_help():
-        print(help_text(), end="", flush=True)
+        _write_direct(help_text(), 1)
         exit(0)
     if result.is_version():
-        print(version_text(), flush=True)
+        _write_direct(version_text() + "\n", 1)
         exit(0)
     if result.is_doctor():
         var diagnosis = run_doctor(result, MTEST_VERSION)
         var rendered = String("")
         for line in diagnosis.lines:
             rendered += line + "\n"
-        print(rendered, end="", flush=True)
+        _write_direct(rendered, 1)
         exit(diagnosis.code)
 
     # Resolve the invocation root, then discover and layer project configuration
@@ -597,6 +637,45 @@ def main():
         exit(EXIT_INTERNAL_ERROR)
         return
 
+    # Scaffolding needs the root to resolve a relative path and nothing else:
+    # no configuration layer can change which file is created or what goes in
+    # it, so a malformed project file must not stop someone from writing their
+    # first test. That is why this sits between the root and the config load
+    # rather than beside `config show` below.
+    if result.is_new():
+        # No `try` around this call, and the compiler is what makes that safe
+        # rather than optimistic: `run_new` is declared without `raises`, so a
+        # raise that escaped its own containment would not compile. The
+        # {0, 3, 4} exit domain is therefore closed structurally — an escaping
+        # error cannot leave the process on the uncaught-error exit 1, the one
+        # code that would read as "your test failed".
+        var scaffolded = run_new(root, result.operand)
+        var rendered = String("")
+        for line in scaffolded.lines:
+            rendered += line + "\n"
+        # A refusal and an I/O failure are diagnostics and belong on stderr;
+        # `created <path>` is the command's output and belongs on stdout.
+        var destination = 1 if scaffolded.code == 0 else 2
+        _write_direct(rendered, destination)
+        exit(scaffolded.code)
+
+    # Beside `new`, and for the same reason: `init` writes the project file
+    # that configuration discovery would read, so it has to run before that
+    # discovery rather than after resolving against a file it is about to
+    # create. `run_init` is declared without `raises` too, which closes its
+    # {0, 3, 4} exit domain structurally.
+    if result.is_init():
+        var bootstrapped = run_init(root, result.ci)
+        var rendered = String("")
+        for line in bootstrapped.lines:
+            rendered += line + "\n"
+        # A failed `init` may already have created something, and the record of
+        # what it did belongs with the diagnostic that stopped it rather than
+        # split across two streams a reader would have to reassemble.
+        var destination = 1 if bootstrapped.code == 0 else 2
+        _write_direct(rendered, destination)
+        exit(bootstrapped.code)
+
     var loaded = _load_config(root, result.config_path, result.no_config)
     if loaded.error_code != 0:
         _eprintln(loaded.error)
@@ -607,12 +686,21 @@ def main():
         no_color=_no_color_set(),
     )
     var resolved = resolve_config(
-        _resolution_defaults(result.config),
+        cli_only_resolution_defaults(result.config),
         loaded.file,
         environment,
         result.overlay,
     )
     resolved.config_file = loaded.config_file.copy()
+    # The projection is chosen from the parsed command, and `resolve_config`
+    # sees only a `RunnerConfig` — which carries collect mode but not the debug
+    # subcommand — so the one command whose kind it cannot see is applied here,
+    # before any validation reads an active key. Under debug the report keys are
+    # inactive, which is what makes a project file's `[report]` destinations
+    # neither validated nor opened for a command that will leave no reporter
+    # behind to write them.
+    if result.is_debug():
+        resolved.active_keys = ActiveConfigKeys.debug()
     var validation = validate_resolved_config(resolved)
     if validation:
         _eprintln(validation.value())
@@ -624,11 +712,7 @@ def main():
     # and make a resolution-only command probe the filesystem.
     if result.is_config_show():
         var state_present = exists(_state_path(root))
-        print(
-            render_config_show(resolved, state_present),
-            end="",
-            flush=True,
-        )
+        _write_direct(render_config_show(resolved, state_present), 1)
         exit(0)
 
     var destination_error = _resolved_destination_error(resolved)
@@ -691,12 +775,80 @@ def main():
     # recorded the moment it is actually opened.
     var resources = RunResources(runtime^, -1, False, String(""), String(""))
 
+    # Debug: prepare one test under ordinary supervision, print the two
+    # commands, and then BECOME the test binary. Every refusal is made here,
+    # while this process still owns its exit code; after the exec there is no
+    # mtest left to report anything, so nothing below the handoff renders a
+    # summary or claims a verdict over what the binary goes on to do.
+    if result.is_debug():
+        var outcome = DebugOutcome(0, List[String](), DebugPlan.none())
+        try:
+            outcome = prepare_debug(
+                resources.runtime, resolved, root, result.operand
+            )
+        except e:
+            # An unclassifiable machinery failure. Caught rather than allowed to
+            # escape: an uncaught raise exits 1, which is exactly the code that
+            # would read as "your test failed".
+            _eprintln("mtest: internal error: " + String(e))
+            exit(resources.close_into(EXIT_INTERNAL_ERROR, rank_delivery=False))
+        if outcome.code != 0:
+            for line in outcome.diagnostics:
+                _eprintln(line)
+            exit(resources.close_into(outcome.code, rank_delivery=False))
+        # The flush inside `_write_direct` is load-bearing here: `execv` does
+        # not flush stdio, so an unflushed pair would vanish with this process
+        # image.
+        _write_direct(
+            "build: "
+            + outcome.plan.build_line
+            + "\nrun: "
+            + outcome.plan.run_line
+            + "\n",
+            1,
+        )
+        # An interrupt that arrived during the preparation — or while the
+        # marker write above was blocked on a reader that had stopped reading —
+        # is an interrupt of MTEST, and mtest is the only process that can
+        # still report it as one. Sampled on both sides of the close, as
+        # doctor's is: the first sample sees what the runtime's handler
+        # latched, and the second covers restoration itself. Execing on a
+        # latched interrupt would hand the terminal over anyway and return the
+        # debuggee's own status, which reads as though nothing was interrupted.
+        if interrupt_requested():
+            exit(resources.close_into(EXIT_INTERRUPTED, rank_delivery=False))
+        var handoff_code = resources.close_into(0, rank_delivery=False)
+        if handoff_code != 0:
+            # A failed restoration is exactly the state in which the debuggee
+            # would inherit `SIGPIPE=SIG_IGN` from the runtime and a genuine
+            # broken-pipe death could read as a pass. Refuse the handoff.
+            exit(handoff_code)
+        if interrupt_requested():
+            exit(EXIT_INTERRUPTED)
+        try:
+            # The exec target is absolute, so the handoff never depends on the
+            # process cwd; the printed line keeps the rerunnable relative form,
+            # and `run_argv` carries it as argv[0] for the same reason.
+            exec_replace(
+                root + "/" + outcome.plan.binary, outcome.plan.run_argv
+            )
+        except e:
+            _eprintln("mtest: internal error: " + String(e))
+            exit(EXIT_INTERNAL_ERROR)
+        # Unreachable: `exec_replace` either never returns or raises. Stated
+        # anyway because `exit` is not noreturn to the compiler, so without it
+        # a debug invocation would fall through into the run path below and
+        # execute a whole session nobody asked for.
+        exit(EXIT_INTERNAL_ERROR)
+
     # Collect mode: probe every discovered file for its node ids and print the
     # SORTED listing to STDOUT, byte-clean, running no test body. This print is
     # the SECOND sanctioned exception to the event seam (usage errors are the
     # first): the listing is a frozen machine-readable contract, so it is written
     # OUTSIDE any reporter, STDOUT carries ONLY the listing, and every diagnostic
-    # goes to STDERR. A discover: usage error still routes to exit 4.
+    # goes to STDERR. A discover: usage error still routes to exit 4. `--format
+    # json` renders the same listing as the NDJSON collect stream; the
+    # diagnostics stay identical stderr text under either format.
     if config.collect:
         var collected = CollectResult(List[String](), List[String](), 0)
         try:
@@ -709,10 +861,42 @@ def main():
             exit(resources.close_into(EXIT_USAGE_ERROR, rank_delivery=False))
         for line in collected.diagnostics:
             _eprintln(line)
+        if config.collect_json:
+            # Teardown FIRST, and for this format only: the terminal record
+            # carries the code the process exits with, and releasing the
+            # runtime can still escalate a collection to 3. Rendering first and
+            # resolving after would let the record and `$?` disagree, which is
+            # the one thing `collect_finished` promises cannot happen.
+            var final_code = resources.close_into(
+                collected.code, rank_delivery=True
+            )
+            var stream = collect_stream_header(MTEST_VERSION) + "\n"
+            for nid in collected.listing:
+                # Both formats re-split the ONE sorted listing, so a node line
+                # and its plain-text twin cannot describe different tests. The
+                # split is `render()`'s inverse, at the LAST separator: a test
+                # name never contains `::` but a file path can.
+                var node = split_rendered_node_id(nid)
+                stream += collect_node_line(nid, node.path, node.name) + "\n"
+            stream += collect_finished_line(len(collected.listing), final_code)
+            stream += "\n"
+            # Written after the teardown restored SIGPIPE to its default, so
+            # the write needs `_write_direct`'s own guard to keep a consumer
+            # that closed early (`mtest collect --format json | head -1`) from
+            # killing mtest at 141 — a status outside the frozen {0,1,2,3,4,5}
+            # domain (§9, §16) for a listing that completed.
+            _write_direct(stream, 1)
+            exit(final_code)
+        # The plain listing carries no terminal record, so nothing in it depends
+        # on the finalized code and the runtime deliberately stays up across the
+        # write. Both the runtime's own SIGPIPE carve-out and `_write_direct`'s
+        # cover this write, and neither is redundant: the runtime's holds for
+        # every reporter write in a session, and the guard holds for the writes
+        # that happen with no runtime at all.
         var listing = String("")
         for nid in collected.listing:
             listing += nid + "\n"
-        print(listing, end="", flush=True)
+        _write_direct(listing, 1)
         exit(resources.close_into(collected.code, rank_delivery=True))
 
     # Resolve the machine-stream destination and, with it, the console's own
@@ -763,6 +947,7 @@ def main():
         build_flags^,
         config.durations,
         gh_actions,
+        config.fail_on_flaky,
     )
     # Resolve the JUnit report destination. Unlike `--json`, the destination is
     # NEVER opened for live truncation: a unique temp file is created in the
@@ -799,7 +984,7 @@ def main():
     var junit = JunitReporter(
         junit_spool, junit_active, junit_target, junit_temp
     )
-    var annotations = AnnotationsReporter(annotations_on)
+    var annotations = AnnotationsReporter(annotations_on, config.fail_on_flaky)
     var comp = StandardReportCoordinator(
         console^, stream^, junit^, annotations^
     )
@@ -834,17 +1019,13 @@ def main():
     # resolved on (never beside `--json -`, refused at parse time).
     var fence_token = comp.fence_token()
     if gh_actions and fence_token != "":
-        print(
-            resume_delimiter(fence_token),
-            file=FileDescriptor(console_fd),
-            flush=True,
-        )
+        _write_direct(resume_delimiter(fence_token) + "\n", console_fd)
     if annotations_on:
         var tail = comp.annotation_tail()
         var rendered = String("")
         for line in tail:
             rendered += line + "\n"
-        print(rendered, end="", file=FileDescriptor(console_fd), flush=True)
+        _write_direct(rendered, console_fd)
 
     # The session has finalized (the JUnit report was renamed onto its target,
     # or left intact on failure), so the epilogue frees the spool directory and

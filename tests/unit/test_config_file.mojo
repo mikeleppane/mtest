@@ -101,6 +101,7 @@ def test_documented_schema_fits_the_parser_budgets() raises:
         "retries = 0\n"
         "maxfail = 0\n"
         "state = true\n"
+        "fail-on-flaky = false\n"
         "\n[build]\n"
         'mojo = "mojo"\n'
         'include = ["vendor"]\n'
@@ -137,6 +138,7 @@ def test_empty_document_has_no_present_values() raises:
     assert_false(config.saw_timeout)
     assert_false(config.saw_retries)
     assert_false(config.saw_maxfail)
+    assert_false(config.saw_fail_on_flaky)
     assert_false(config.saw_state)
     assert_false(config.saw_mojo)
     assert_false(config.saw_include)
@@ -165,6 +167,7 @@ def test_full_document_converts_every_key_to_typed_values() raises:
         "retries = 2\n"
         "maxfail = 3\n"
         "state = false\n"
+        "fail-on-flaky = true\n"
         "\n"
         "[build]\n"
         'mojo = "/opt/mojo"\n'
@@ -212,6 +215,8 @@ def test_full_document_converts_every_key_to_typed_values() raises:
     assert_equal(config.maxfail, 3)
     assert_true(config.saw_state)
     assert_false(config.state)
+    assert_true(config.saw_fail_on_flaky)
+    assert_true(config.fail_on_flaky)
 
     assert_true(config.saw_mojo)
     assert_equal(config.mojo_path, "/opt/mojo")
@@ -297,6 +302,15 @@ def test_unknown_tables_and_keys_fail_closed() raises:
         InvalidCase(
             text="[run]\ntimout = 1\n",
             expected="[run] key 'timout': unknown key",
+        ),
+        # The legal-key list a `[run]` typo is measured against, spelled out so
+        # a key added to the schema without joining the message is caught here.
+        InvalidCase(
+            text="[run]\nfail-on-flake = true\n",
+            expected=(
+                "expected paths, exclude, gates, serial, workers, timeout,"
+                " retries, maxfail, state, or fail-on-flaky"
+            ),
         ),
         InvalidCase(
             text='[build]\noutput = "x"\n',
@@ -428,6 +442,14 @@ def test_every_key_family_rejects_wrong_types_and_domains() raises:
         InvalidCase(
             text="[run]\nstate = 1\n",
             expected="[run] key 'state': expected boolean",
+        ),
+        InvalidCase(
+            text='[run]\nfail-on-flaky = "yes"\n',
+            expected="[run] key 'fail-on-flaky': expected boolean",
+        ),
+        InvalidCase(
+            text="[run]\nfail-on-flaky = 1\n",
+            expected="[run] key 'fail-on-flaky': expected boolean",
         ),
         InvalidCase(
             text="[build]\nmojo = 1\n",

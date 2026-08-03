@@ -1,8 +1,9 @@
 """The hand-rolled full-contract argument parser.
 
 `parse_args` turns an argument vector into a `ParseResult`: a configured run, a
-resolved-config display request, a doctor request, or a help/version directive.
-Anything it refuses becomes a `cli:`-prefixed usage error instead.
+resolved-config display request, a doctor request, a scaffolding or bootstrap
+request, or a help/version directive. Anything it refuses becomes a
+`cli:`-prefixed usage error instead.
 
 The parser is hand-rolled by decision. The `prism` argument-parsing library was
 evaluated and rejected on source evidence: it has no `--` pass-through, and
@@ -22,6 +23,7 @@ from mtest.cli.flag_spec import (
     flag_specs,
 )
 from mtest.cli.parse_result import ParseResult
+from mtest.model import split_node_token
 from mtest.config import (
     AnnotationsMode,
     CliOverlay,
@@ -74,11 +76,15 @@ def help_text() -> String:
     var rendered = String(
         "mtest — a pytest-like test runner for Mojo\n\n",
         "usage: mtest [run] [PATHS...] [flags] [-- BUILD-ARGS...]\n",
+        "       mtest collect [PATHS...] [--format lines|json] [flags]\n",
         "       mtest config show [PATHS...] [flags] [-- BUILD-ARGS...]\n",
         (
             "       mtest doctor [--config PATH | --no-config]"
-            " [--color WHEN] [-q | -v]\n\n"
+            " [--color WHEN] [-q | -v]\n"
         ),
+        "       mtest debug PATH::TEST [build flags] [-- BUILD-ARGS...]\n",
+        "       mtest new PATH\n",
+        "       mtest init [--ci github]\n\n",
         "Subcommands:\n",
     )
     rendered += _help_row(
@@ -93,6 +99,13 @@ def help_text() -> String:
     )
     rendered += _help_row(
         "doctor [flags]", "Diagnose the environment without running tests."
+    )
+    rendered += _help_row(
+        "debug PATH::TEST", "Run one test with the terminal handed over."
+    )
+    rendered += _help_row("new PATH", "Create one runnable test file.")
+    rendered += _help_row(
+        "init [--ci github]", "Bootstrap a project in this directory."
     )
     rendered += _help_row("help", "Show this help and exit.")
     rendered += _help_row("version", "Show the version and exit.")
@@ -160,6 +173,14 @@ def _parse_retries(value: String) raises -> Int:
     return parsed.value()
 
 
+def _parse_seed(value: String) raises -> Int:
+    """Parse a `--seed` value: a non-negative integer."""
+    var parsed = parse_nonnegative_decimal(value)
+    if not parsed:
+        raise _err("'--seed' wants an integer >= 0, got '" + value + "'")
+    return parsed.value()
+
+
 def _parse_workers(value: String) raises -> Int:
     """Parse a `-n`/`--workers` value into a worker count.
 
@@ -194,6 +215,27 @@ def _parse_compile_timeout(value: String) raises -> Int:
             "'--compile-timeout' wants an integer >= 0, got '" + value + "'"
         )
     return parsed.value()
+
+
+def _parse_format(value: String) raises -> Bool:
+    """Parse a `--format` value into "render the collect stream".
+
+    Args:
+        value: The flag's value: `lines` (the plain listing) or `json` (the
+            NDJSON collect stream).
+
+    Returns:
+        True for `json`, False for `lines`.
+
+    Raises:
+        Error: A usage error (exit 4) naming the offending value for anything
+            else, an empty value included.
+    """
+    if value == "lines":
+        return False
+    if value == "json":
+        return True
+    raise _err("'--format' wants 'lines' or 'json', got '" + value + "'")
 
 
 def _parse_show_output(value: String) raises -> ShowOutput:
@@ -366,13 +408,380 @@ def _lookup(name: String) -> Optional[FlagSpec]:
     return Optional[FlagSpec](None)
 
 
+def _debug_refusal(name: String, id: Int) -> Error:
+    """The usage error for a flag `debug` does not accept.
+
+    Two refusals carry their reason, because the reason is not guessable from
+    the flag: a command that replaces the mtest process leaves nothing behind
+    to write a report with, and nothing to color.
+
+    Args:
+        name: The offending flag spelling, as typed.
+        id: Its `FlagId`, which decides whether a reason is attached.
+
+    Returns:
+        The complete `cli:`-prefixed usage error.
+    """
+    var body = "'" + name + "' cannot be combined with 'debug'"
+    if (
+        id == FlagId.JSON
+        or id == FlagId.JUNIT_XML
+        or id == FlagId.GH_ANNOTATIONS
+    ):
+        return _err(
+            body
+            + ": debug replaces the mtest process, so no terminal record could"
+            " be written"
+        )
+    if id == FlagId.COLOR:
+        return _err(
+            body
+            + ": debug replaces the mtest process, so there is no reporter to"
+            " color"
+        )
+    return _err(body)
+
+
+def _debug_accepts(id: Int) -> Bool:
+    """Whether `debug`'s grammar accepts this flag identity.
+
+    The single gate, consulted before a flag's value is consumed. Deciding it
+    inside the arity branches instead let `debug NODE --json` report a missing
+    value and never state why the flag is refused at all, which is exactly the
+    explanation the refusal exists to give.
+
+    Args:
+        id: The matched `FlagId`.
+
+    Returns:
+        True for `--help`, the configuration controls, `-q`/`-v`, and the three
+        build controls; False for every other flag.
+    """
+    return (
+        id == FlagId.HELP
+        or id == FlagId.NO_CONFIG
+        or id == FlagId.QUIET
+        or id == FlagId.VERBOSE
+        or id == FlagId.CONFIG
+        or id == FlagId.INCLUDE
+        or id == FlagId.BUILD_ARG
+        or id == FlagId.MOJO
+    )
+
+
+def _err_debug_operand() -> Error:
+    """The usage error for anything but exactly one node-id operand."""
+    return _err("'debug' wants exactly one PATH::TEST node id")
+
+
+def _parse_debug(argv: List[String]) raises -> ParseResult:
+    """Parse the `debug` tail: one node id plus the build controls.
+
+    `debug` prepares one test and then becomes it, so its grammar is the
+    narrowest in the parser: exactly one `PATH::TEST` operand, the flags that
+    decide how that file is compiled (`--mojo`, `-I`, `--build-arg`, and
+    post-`--` passthrough), the configuration controls, and `-q`/`-v`.
+    Everything else is refused rather than accepted-and-ignored, because a
+    silently dropped `--retries` or `--json` would promise something the
+    handoff cannot deliver.
+
+    Args:
+        argv: The complete argument vector; the `debug` head token is skipped.
+
+    Returns:
+        A result whose `kind` is `DEBUG`, or the help directive when `--help`
+        appears anywhere in the tail.
+
+    Raises:
+        Error: A `cli:`-prefixed usage error for a missing, malformed, plain,
+            or repeated operand, an unknown flag, a missing value, a forbidden
+            build argument, `-q` with `-v`, `--config` with `--no-config`, or
+            any flag outside the accepted set.
+    """
+    var operand = String("")
+    var saw_operand = False
+    var include_paths = List[String]()
+    var saw_include = False
+    var build_args = List[String]()
+    var saw_build_args = False
+    var mojo_flag = Optional[String](None)
+    var saw_mojo = False
+    var config_path = String("")
+    var saw_config = False
+    var no_config = False
+    var saw_quiet = False
+    var saw_verbose = False
+    var passthrough = False
+
+    var i = 1
+    while i < len(argv):
+        var tok = argv[i]
+
+        if passthrough:
+            _check_build_arg(tok)
+            build_args.append(tok)
+            saw_build_args = True
+            i += 1
+            continue
+
+        if tok == "--":
+            passthrough = True
+            i += 1
+            continue
+
+        if not tok.startswith("-") or tok == "-":
+            var split = split_node_token(tok)
+            if (
+                saw_operand
+                or split.sep_count != 1
+                or split.file_part == ""
+                or split.name_part == ""
+            ):
+                raise _err_debug_operand()
+            operand = tok
+            saw_operand = True
+            i += 1
+            continue
+
+        var name = tok
+        var has_inline = False
+        var inline_val = String("")
+        if tok.find("=") != -1:
+            var parts = tok.split("=", 1)
+            name = String(parts[0])
+            inline_val = String(parts[1])
+            has_inline = True
+
+        if (
+            not name.startswith("--")
+            and name.byte_length() > 2
+            and not has_inline
+        ):
+            raise _err(
+                "short flags cannot be bundled: '"
+                + tok
+                + "'; pass them separately like '-q -I src'"
+            )
+
+        var spec = _lookup(name)
+        if not spec:
+            raise _err("unknown flag '" + name + "'")
+        var s = spec.value().copy()
+        # Before the value: a refused flag's message must say WHY it is
+        # refused, and a `--json` with no value would otherwise be reported as
+        # a missing value instead.
+        if not _debug_accepts(s.id):
+            raise _debug_refusal(name, s.id)
+
+        if s.arity == 0:
+            if has_inline:
+                raise _err(
+                    "flag '"
+                    + s.spelling
+                    + "' takes no value, got '"
+                    + tok
+                    + "'"
+                )
+            if s.id == FlagId.HELP:
+                return ParseResult.show_help()
+            if s.id == FlagId.NO_CONFIG:
+                no_config = True
+            elif s.id == FlagId.QUIET:
+                saw_quiet = True
+            elif s.id == FlagId.VERBOSE:
+                saw_verbose = True
+            else:
+                raise _debug_refusal(name, s.id)
+            i += 1
+            continue
+
+        var value: String
+        if has_inline:
+            value = inline_val
+        else:
+            if i + 1 >= len(argv):
+                raise _err("'" + name + "' requires a value")
+            value = argv[i + 1]
+            i += 1
+        i += 1
+
+        if s.id == FlagId.INCLUDE:
+            _check_build_arg(value)
+            include_paths.append(value)
+            saw_include = True
+        elif s.id == FlagId.BUILD_ARG:
+            _check_build_arg(value)
+            build_args.append(value)
+            saw_build_args = True
+        elif s.id == FlagId.MOJO:
+            mojo_flag = value
+            saw_mojo = True
+        elif s.id == FlagId.CONFIG:
+            if value == "":
+                raise _err("'--config' requires a non-empty path")
+            config_path = value
+            saw_config = True
+        else:
+            raise _debug_refusal(name, s.id)
+
+    if not saw_operand:
+        raise _err_debug_operand()
+    if saw_config and no_config:
+        raise _err("'--config' and '--no-config' are mutually exclusive")
+    if saw_quiet and saw_verbose:
+        raise _err("'-q' and '-v' are mutually exclusive")
+
+    var verbosity = Verbosity.NORMAL
+    if saw_quiet:
+        verbosity = Verbosity.QUIET
+    elif saw_verbose:
+        verbosity = Verbosity.VERBOSE
+
+    var overlay_mojo = String("mojo")
+    if mojo_flag:
+        overlay_mojo = mojo_flag.value()
+    var overlay = CliOverlay.default()
+    overlay.mojo_path = overlay_mojo^
+    overlay.saw_mojo = saw_mojo
+    overlay.include_paths = include_paths^
+    overlay.saw_include = saw_include
+    overlay.build_args = build_args^
+    overlay.saw_build_args = saw_build_args
+    overlay.verbosity = verbosity
+    overlay.saw_verbosity = saw_quiet or saw_verbose
+
+    var defaults = RunnerConfig.default()
+    defaults.mojo_path = resolve_mojo_path(Optional[String](None), _env_mojo())
+    var cfg = overlay.fold(defaults)
+    return ParseResult.debug(cfg^, overlay^, operand^, config_path^, no_config)
+
+
+def _err_new_operand() -> Error:
+    """The usage error for anything but exactly one path operand."""
+    return _err("'new' wants exactly one PATH")
+
+
+def _parse_new(argv: List[String]) raises -> ParseResult:
+    """Parse the `new` tail: one path, and nothing else.
+
+    Scaffolding a file reads no configuration, builds nothing, and runs
+    nothing, so there is no flag whose value could reach it. Every one is
+    refused by name rather than accepted and ignored. `--help` is the
+    exception, because it describes a command rather than acting on one.
+
+    Args:
+        argv: The complete argument vector; the `new` head token is skipped.
+
+    Returns:
+        A result whose `kind` is `NEW`, or the help directive when `--help`
+        appears anywhere in the tail.
+
+    Raises:
+        Error: A `cli:`-prefixed usage error for a missing or repeated
+            operand, or for any flag other than `-h`/`--help`.
+    """
+    var operand = String("")
+    var saw_operand = False
+    var i = 1
+    while i < len(argv):
+        var tok = argv[i]
+        if not tok.startswith("-") or tok == "-":
+            if saw_operand:
+                raise _err_new_operand()
+            operand = tok
+            saw_operand = True
+            i += 1
+            continue
+        var name = tok
+        var has_inline = False
+        if tok.find("=") != -1:
+            name = String(tok.split("=", 1)[0])
+            has_inline = True
+        if name == "-h" or name == "--help":
+            if has_inline:
+                raise _err(
+                    "flag '" + name + "' takes no value, got '" + tok + "'"
+                )
+            return ParseResult.show_help()
+        raise _err("'" + name + "' cannot be combined with 'new'")
+    if not saw_operand:
+        raise _err_new_operand()
+    return ParseResult.scaffold(operand^)
+
+
+def _parse_init(argv: List[String]) raises -> ParseResult:
+    """Parse the `init` tail: `--ci VALUE` and nothing else.
+
+    `--ci` is read here rather than from the flag-spec table on purpose. A row
+    in that table is a `run` flag by construction, so `mtest --ci github tests`
+    would parse as a run carrying a value nothing acts on. Keeping the flag
+    local means the general loop refuses it, and the usage line and the
+    subcommand row are where a reader learns it exists.
+
+    The provider value is a closed enum and is refused here like every other
+    one, so an unknown provider reads as the usage error it is and carries the
+    pointer at `--help`. `run_init` refuses it a second time, because it is
+    also reachable as a library call.
+
+    Args:
+        argv: The complete argument vector; the `init` head token is skipped.
+
+    Returns:
+        A result whose `kind` is `INIT`, or the help directive when `--help`
+        appears anywhere in the tail.
+
+    Raises:
+        Error: A `cli:`-prefixed usage error for a path operand, an empty or
+            unrecognized `--ci` value, or any flag but `--ci`, `-h`, and
+            `--help`.
+    """
+    var ci = String("")
+    var i = 1
+    while i < len(argv):
+        var tok = argv[i]
+        if not tok.startswith("-") or tok == "-":
+            raise _err("'init' takes no PATH operand; it writes into the root")
+        var name = tok
+        var value = String("")
+        var has_inline = False
+        if tok.find("=") != -1:
+            var parts = tok.split("=", 1)
+            name = String(parts[0])
+            value = String(parts[1])
+            has_inline = True
+        if name == "-h" or name == "--help":
+            if has_inline:
+                raise _err(
+                    "flag '" + name + "' takes no value, got '" + tok + "'"
+                )
+            return ParseResult.show_help()
+        if name != "--ci":
+            raise _err("'" + name + "' cannot be combined with 'init'")
+        if not has_inline:
+            if i + 1 >= len(argv):
+                raise _err("'--ci' requires a provider name")
+            value = argv[i + 1]
+            i += 1
+        if value == "":
+            raise _err("'--ci' requires a provider name")
+        if value != "github":
+            raise _err(
+                "'--ci' wants 'github', got '" + safe_path_label(value) + "'"
+            )
+        ci = value
+        i += 1
+    return ParseResult.bootstrap(ci^)
+
+
 def parse_args(argv: List[String]) raises -> ParseResult:
-    """Parse `argv` into a run, config-display, doctor, help, or version result.
+    """Parse `argv` into a run, inspection, scaffolding, or directive result.
 
     A leading `help` or `version` token returns that directive immediately. A
     leading `run`, `collect`, or `doctor` token is consumed as a subcommand,
-    with `collect` equivalent to `--collect-only`. A leading `config show` pair
-    requests resolution-only display while reusing the run grammar. Any other
+    with `collect` equivalent to `--collect-only`. A leading `debug`, `new`, or
+    `init` token hands the rest of the vector to that subcommand's own narrow
+    walk, and a leading `config show` pair requests resolution-only display
+    while reusing the run grammar. Any other
     first token is left to the general token loop, which reads it as a flag
     when it starts with `-` (a bare `-` excepted) and as a path operand
     otherwise, so an argument vector may open with a flag. Everything after a
@@ -386,16 +795,21 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         argv: The argument tokens, excluding the program name.
 
     Returns:
-        A configured run, config-display request, doctor request, or
-        help/version directive.
+        A configured run, config-display request, doctor request, debug
+        request, scaffolding or bootstrap request, or help/version directive.
 
     Raises:
         Error: A `cli:`-prefixed usage error, raised for an unknown flag, a
             missing or malformed value, a forbidden build argument, a bundled
             short-flag group, `-q` and `-v` together, `--config` with
             `--no-config`, `--lf` with `--ff`, either of those with `--shard`,
-            a run-only flag combined with collect mode, or a run, build, or
-            reporter flag combined with doctor.
+            `--seed` without `--shuffle`, `--shuffle` with `--lf`/`--ff`,
+            `--format` outside collect mode,
+            a run-only flag combined with collect mode, a run, build, or
+            reporter flag combined with doctor, under `new` anything but
+            exactly one path operand and any flag but `-h`/`--help`, or —
+            under `init` — a path operand, an empty or unrecognized `--ci`
+            value, and any flag but `--ci`/`-h`/`--help`.
 
     Examples:
 
@@ -427,6 +841,19 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         if head == "doctor":
             doctor = True
             start = 1
+        if head == "debug":
+            # `debug` owns its own tail walk: its grammar accepts a handful of
+            # build controls and refuses everything else by name, which the
+            # general loop would have to unlearn flag by flag.
+            return _parse_debug(argv)
+        if head == "new":
+            # `new` owns its tail for the opposite reason: it accepts no flag
+            # at all, so the general loop's whole table is wrong for it.
+            return _parse_new(argv)
+        if head == "init":
+            # `init` owns its tail because its one flag is deliberately not in
+            # the table: a `--ci` row there would also make it a `run` flag.
+            return _parse_init(argv)
         if head == "config":
             if len(argv) < 2 or argv[1] != "show":
                 raise _err(
@@ -489,6 +916,14 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     var failed_first = False
     var no_cache = False
     var cache_clear = False
+    var fail_on_flaky = False
+    var saw_fail_on_flaky = False
+    var shuffle = False
+    # `-1` is the parser's "no seed given" sentinel; the session derives one.
+    var shuffle_seed = -1
+    var saw_seed = False
+    var collect_json = False
+    var saw_format = False
     var saw_select = False
     var saw_shard = False
     var saw_passthrough = False
@@ -543,7 +978,6 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         if not spec:
             raise _err("unknown flag '" + name + "'")
         var s = spec.value().copy()
-
         if s.arity == 0:
             if has_inline:
                 raise _err(
@@ -578,6 +1012,11 @@ def parse_args(argv: List[String]) raises -> ParseResult:
                 no_cache = True
             elif s.id == FlagId.CACHE_CLEAR:
                 cache_clear = True
+            elif s.id == FlagId.FAIL_ON_FLAKY:
+                fail_on_flaky = True
+                saw_fail_on_flaky = True
+            elif s.id == FlagId.SHUFFLE:
+                shuffle = True
             i += 1
             continue
 
@@ -645,9 +1084,15 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         elif s.id == FlagId.RETRIES:
             retries = _parse_retries(value)
             saw_retries = True
+        elif s.id == FlagId.SEED:
+            shuffle_seed = _parse_seed(value)
+            saw_seed = True
         elif s.id == FlagId.WORKERS:
             workers = _parse_workers(value)
             saw_workers = True
+        elif s.id == FlagId.FORMAT:
+            collect_json = _parse_format(value)
+            saw_format = True
         elif s.id == FlagId.JSON:
             json_dest = _validate_json_dest(
                 value, not config_show and not doctor
@@ -679,6 +1124,18 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             "'--lf'/'--last-failed' and '--ff'/'--failed-first' cannot be"
             " combined with '--shard'"
         )
+    if saw_seed and not shuffle:
+        raise _err("'--seed' requires '--shuffle'")
+    if shuffle and (last_failed or failed_first):
+        raise _err(
+            "'--shuffle' and '--lf'/'--ff' choose conflicting orders; pick one"
+        )
+    # `--format` shapes a listing, so it is refused wherever there is no
+    # listing. Checked here rather than in the doctor and collect blocks below
+    # because those refuse run flags under collect, and this is the mirror
+    # image: the one flag collect alone accepts.
+    if saw_format and not collect:
+        raise _err("'--format' is a collect-only flag")
 
     if doctor:
         if saw_paths:
@@ -717,6 +1174,18 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         if saw_durations:
             raise _err(
                 "'--durations' is a run flag and cannot be combined with doctor"
+            )
+        if saw_fail_on_flaky:
+            raise _err(
+                "'--fail-on-flaky' is a run flag and cannot be combined with"
+                " doctor"
+            )
+        # `--seed` alone was already refused above for wanting `--shuffle`, so
+        # gating on `shuffle` covers the pair.
+        if shuffle:
+            raise _err(
+                "'--shuffle' and '--seed' are run flags and cannot be combined"
+                " with doctor"
             )
         if saw_retries:
             raise _err(
@@ -822,6 +1291,18 @@ def parse_args(argv: List[String]) raises -> ParseResult:
                 "'--durations' is a run-only flag and cannot be combined"
                 " with collect mode"
             )
+        if saw_fail_on_flaky:
+            raise _err(
+                "'--fail-on-flaky' is a run-only flag and cannot be combined"
+                " with collect mode"
+            )
+        # `--seed` alone was already refused above for wanting `--shuffle`, so
+        # gating on `shuffle` covers the pair.
+        if shuffle:
+            raise _err(
+                "'--shuffle' and '--seed' are run-only flags and cannot be"
+                " combined with collect mode"
+            )
         if saw_retries:
             raise _err(
                 "'--retries' is a run-only flag and cannot be combined with"
@@ -871,6 +1352,8 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         saw_retries=saw_retries,
         maxfail=maxfail,
         saw_maxfail=saw_maxfail,
+        fail_on_flaky=fail_on_flaky,
+        saw_fail_on_flaky=saw_fail_on_flaky,
         state=True,
         saw_state=False,
         mojo_path=overlay_mojo^,
@@ -903,11 +1386,14 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     defaults.exitfirst = exitfirst
     defaults.keyword = keyword^
     defaults.collect = collect
+    defaults.collect_json = collect_json
     defaults.last_failed = last_failed
     defaults.failed_first = failed_first
     defaults.shard_mode = shard_mode
     defaults.shard_m = shard_m
     defaults.shard_n = shard_n
+    defaults.shuffle = shuffle
+    defaults.shuffle_seed = shuffle_seed
     defaults.no_cache = no_cache
     defaults.cache_clear = cache_clear
     var cfg = overlay.fold(defaults)

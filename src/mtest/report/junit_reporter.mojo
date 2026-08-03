@@ -13,11 +13,13 @@ parse of the human console text and never a session side channel. The sentinel
 matrix is decided from `attempts_used`, the file outcome, and whether any
 per-test row carries a failing outcome:
 
-- `[attempts]` exists exactly when `attempts_used > 1`. It carries the whole
-  attempt story: a flaky pass's `flakyFailure`s, a rerun-exhausted failure's
-  Surefire chronology with the first failed attempt as the primary and every
-  later attempt as a rerun, or a retried per-test failure's prior attempts as
-  reruns.
+- `[attempts]` exists when `attempts_used > 1` and the file's outcome is FLAKY
+  or failing — the two verdicts a crash-class retry can still reach here, since
+  a `NOT_RUN` drift is answered earlier with `[not-run]` and never gets this
+  far. It carries the whole attempt story: a flaky pass's `flakyFailure`s, a
+  rerun-exhausted failure's Surefire chronology with the first failed attempt
+  as the primary and every later attempt as a rerun, or a retried per-test
+  failure's prior attempts as reruns.
 - `[build]` exists exactly when `attempts_used <= 1` and the failing outcome is
   file-level, meaning no per-test row carries it.
 - The two are mutually exclusive by construction: exactly one outcome sentinel
@@ -871,12 +873,23 @@ struct JunitReporter(Reporter):
             cases.append(_case_for_test(t, cn))
 
         if e.attempts_used > 1:
-            if not e.outcome.is_failing():
+            if e.outcome == Outcome.FLAKY:
                 cases.append(self._attempts_flaky(cn, accum_idx))
-            elif failing_test_rows > 0:
-                cases.append(self._attempts_pertest(cn, accum_idx))
-            else:
-                cases.append(self._attempts_filelevel(cn, accum_idx, e))
+            elif e.outcome.is_failing():
+                if failing_test_rows > 0:
+                    cases.append(self._attempts_pertest(cn, accum_idx))
+                else:
+                    cases.append(self._attempts_filelevel(cn, accum_idx, e))
+            # Else: a retried file whose final outcome is neither FLAKY nor
+            # failing. Nothing reaches this today and the reasons are worth
+            # naming, because the obvious candidate is wrong: `attempt`
+            # advances only on a crash-class retry, never on a stale-name
+            # recovery, which spends a budget of its own and leaves the counter
+            # alone. A retried pass is promoted to FLAKY before this event is
+            # built, and a retried drift returned above as `[not-run]`. The
+            # branch stays a closed default rather than a claim about a case:
+            # inventing a sentinel for an outcome nobody can produce would put
+            # a guess in the report as though it were a fact.
         elif e.outcome.is_failing() and failing_test_rows == 0:
             var d = _outcome_diag(e, bounded_text_from_bytes(e.captured_stderr))
             cases.append(

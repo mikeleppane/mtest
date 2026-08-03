@@ -49,6 +49,7 @@ import contextlib
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import subprocess
@@ -56,6 +57,9 @@ import sys
 import tempfile
 import time
 from typing import TYPE_CHECKING, NoReturn
+
+from scripts.checks.reports import collect_stream as collect_stream_oracle
+from scripts.checks.reports import json_stream as json_stream_oracle
 
 
 if TYPE_CHECKING:
@@ -619,6 +623,23 @@ def scaffold(root: Path) -> None:
         HEAD + "def test_smoke() raises:\n    assert_equal(0, 1)\n" + MAIN,
     )
 
+    # -- retry: crashes on its first attempt and passes once the marker exists,
+    #    so `--retries 1` yields a FLAKY file with nothing else failing. The
+    #    marker is written in the invocation root, which is the working
+    #    directory every test binary is spawned in.
+    w(
+        "retry/test_crash_once.mojo",
+        "from std.os import abort\n"
+        "from std.os.path import exists\n"
+        "from std.testing import assert_equal, TestSuite\n\n\n"
+        "def test_eventually_passes() raises:\n"
+        '    if not exists("retry.marker"):\n'
+        '        with open("retry.marker", "w") as f:\n'
+        '            f.write("1")\n'
+        '        abort("POISON: the first attempt always aborts")\n'
+        "    assert_equal(1, 1)\n" + MAIN,
+    )
+
     # -- probe outcomes.
     w(
         "probes/test_fail.mojo",
@@ -723,6 +744,13 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "collect: --json rejected in collect -> 4",
     "collect: --junit-xml rejected in collect -> 4",
     "collect: --gh-annotations rejected in collect -> 4 (even off)",
+    "collect: --fail-on-flaky rejected in collect -> 4",
+    "run: --fail-on-flaky green run stays 0",
+    "run: --seed without --shuffle -> 4",
+    "run: --shuffle with --ff -> 4",
+    "collect: --shuffle rejected -> 4",
+    "collect: --format bogus -> 4",
+    "run: --format is collect-only -> 4",
     "collect: -k ignored with a loud notice (\u00a724.3 deviation)",
     "collect: node-id operand lists whole file (\u00a724.3 deviation)",
     "build-arg: -o forbidden -> 4, and the test never ran (pre-run, \u00a79)",
@@ -736,6 +764,10 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "value: --color bad mode -> 4",
     "value: -q and -v mutually exclusive -> 4",
     "precompile: failure -> PRECOMPILE-ERROR, casualties listed, exit 1",
+    "debug: plain path operand -> 4",
+    "debug: unknown test -> 4",
+    "debug: reporter flag refused -> 4",
+    "debug: --retries refused -> 4",
     "served: -n accepted (not exit 4)",
     "served: --workers accepted (not exit 4)",
     "served: --serial accepted (not exit 4)",
@@ -745,8 +777,14 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "served: --gh-annotations accepted (not exit 4)",
     "served: --json accepted (not exit 4)",
     "served: collect --shard partitions (not exit 4)",
+    "served: collect --serial accepted, inert (not exit 4)",
     "collect: exact node-id set for tests/",
     "determinism: collect byte-identical",
+    "collect: --format json agrees with the lines listing and the exit",
+    "collect: a listing larger than the pipe buffer survives an early close",
+    "pipe: every direct-output command survives a closed stdout",
+    "collect: an interrupted --format json run agrees with its own exit",
+    "determinism: --shuffle --seed repeats its file order",
     "help: --help -> stdout, exit 0",
     "usage error: -V -> stderr, exit 4",
     "collect: streams split, listing continues past a bad probe",
@@ -758,6 +796,17 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "value: 2^63 refused for every non-negative integer flag",
     "report: --json to a readerless FIFO fails fast, never blocks",
     "path: a long-but-legal path builds, never a false COMPILE-ERROR",
+    "flaky: --fail-on-flaky turns a FLAKY-only run's 0 into 1",
+    "debug: the handoff is the test's own exit, with no mtest verdict",
+    "new: scaffolds a discoverable file",
+    "new: refuses to overwrite -> 4",
+    "new: non-discoverable name -> 4",
+    "new: node-id-shaped path -> 4",
+    "new: the scaffolded file runs green",
+    "new: a hostile basename still compiles and passes",
+    "init: --ci github bootstraps a runnable project",
+    "init: a second run skips every artifact, still 0",
+    "init: --ci gitlab -> 4",
     "interrupt: SIGINT frees the owned process group",
 )
 """Every check `main` must perform, in order, on an unfiltered run.
@@ -771,12 +820,17 @@ SIGINT clause untested. Same shape as `package_consumption.GATE_STAGE_IDS`
 against its stage ledger.
 
 `check_help_stream` records two entries from one dispatch (`--help`, then
-`-V`), so those names are adjacent here and move together.
+`-V`), so those names are adjacent here and move together, and
+`check_init_scaffold` records three the same way.
 """
 
 
 class ContractRosterError(Exception):
     """The gate did not perform the checks it reports."""
+
+
+class ContractStreamExitError(Exception):
+    """A run whose stream was to be compared did not exit as the check needs."""
 
 
 def verify_every_check_ran(performed: tuple[str, ...], filtered: bool) -> None:
@@ -817,6 +871,100 @@ def verify_every_check_ran(performed: tuple[str, ...], filtered: bool) -> None:
         )
 
 
+# Two fields of a summary line are properties of the machine and the store
+# rather than of any behavior under test: the wall time, and the build-cache
+# counters, which depend on what the store held when the run started. Both are
+# elided before an exact comparison, so a warm scaffold cannot flap a check.
+_RUN_SPECIFICS = re.compile(r", builds: \d+, cached: \d+| in \d+\.\d+s")
+
+
+def _first_yaml_fence(page: Path) -> bytes:
+    """The body of the first ```yaml block on `page`, byte for byte.
+
+    Extracted at check time rather than copied into this file, so the page and
+    the runner cannot drift apart without something going red. The FIRST fence
+    is the one that counts because the page carries a second, sharded variant
+    further down, and anchoring on a heading would anchor on prose that can be
+    reworded.
+
+    Bytes, not text. Reading either side in text mode normalizes CRLF to LF, so
+    a page with Windows line endings compares equal to a scaffold with Unix
+    ones while the two files genuinely differ — a byte-parity gate that cannot
+    see a difference in bytes.
+
+    Args:
+        page: The Markdown document to read.
+
+    Returns:
+        Every byte between the opening ```yaml fence line and its closing
+        fence line, its own terminators included. A page with no such block is
+        a setup failure (exit 2), because a missing oracle must be loud rather
+        than a silently-passing comparison against an empty string.
+    """
+    lines = page.read_bytes().splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        if line.rstrip(b"\r\n") != b"```yaml" or not line.endswith(b"\n"):
+            continue
+        for close in range(index + 1, len(lines)):
+            if lines[close].rstrip(b"\r\n") == b"```":
+                return b"".join(lines[index + 1 : close])
+        break
+    _die(f"{page} has no closed ```yaml block to compare the scaffold against")
+
+
+def _sole_line(lines: list[str], prefix: str) -> str | None:
+    """The one line starting with `prefix`, or None when there is not exactly one."""
+    matched = [ln for ln in lines if ln.startswith(prefix)]
+    return matched[0] if len(matched) == 1 else None
+
+
+def _flaky_surface_problems(
+    label: str,
+    result: subprocess.CompletedProcess[str],
+    want_exit: int,
+    want_body: str,
+) -> list[str]:
+    """Check one half of the fail-on-flaky pair on all three of its surfaces.
+
+    The exit code, the console summary band, and the annotation `::notice` are
+    produced by three separate paths, so all three are asserted. The band and
+    the notice are compared as WHOLE lines against the same expected body: a
+    substring would pass against duplicated or malformed rendering, and
+    checking only one of the two would miss a reporter that lost its wiring.
+
+    Args:
+        label: Which half this is, for the failure detail.
+        result: The completed `mtest` run.
+        want_exit: The exit code the contract freezes for this half.
+        want_body: The exact summary text both surfaces must carry, with the
+            wall time and cache counters removed.
+
+    Returns:
+        One string per property that did not hold; empty when the half passed.
+    """
+    probs: list[str] = []
+    if result.returncode != want_exit:
+        probs.append(f"{label}: exit {result.returncode}, want {want_exit}")
+    lines = result.stdout.splitlines()
+
+    band = _sole_line(lines, "===== ")
+    if band is None:
+        probs.append(f"{label}: expected exactly one console summary band")
+    else:
+        got = _RUN_SPECIFICS.sub("", band.removeprefix("===== ").removesuffix(" ====="))
+        if got != want_body:
+            probs.append(f"{label}: band is {got!r}, want {want_body!r}")
+
+    notice = _sole_line(lines, "::notice::")
+    if notice is None:
+        probs.append(f"{label}: expected exactly one ::notice line")
+    else:
+        got = _RUN_SPECIFICS.sub("", notice.removeprefix("::notice::"))
+        if got != want_body:
+            probs.append(f"{label}: notice is {got!r}, want {want_body!r}")
+    return probs
+
+
 class Runner:
     """Drives the built binary against one scaffold and records each verdict."""
 
@@ -834,7 +982,7 @@ class Runner:
         self.results: list[tuple[str, str, str, str]] = []
 
     def mtest(
-        self, argv: list[str], timeout: int = 180
+        self, argv: list[str], timeout: int = 180, cwd: Path | None = None
     ) -> subprocess.CompletedProcess[str]:
         """Run the binary under test inside the scaffold, capturing both streams.
 
@@ -842,13 +990,17 @@ class Runner:
             argv: Arguments passed after the binary path.
             timeout: Seconds to wait before `subprocess.TimeoutExpired` is
                 raised; callers turn that into a FAIL, never a pass.
+            cwd: A working directory other than the scaffold. The invocation
+                root is the working directory (§2), so a check about a command
+                that writes into that root needs one of its own rather than
+                the shared scaffold whose contents other checks pin exactly.
 
         Returns:
             The completed process, with both streams decoded as text.
         """
         return subprocess.run(
             [str(MTEST), *argv],
-            cwd=self.root,
+            cwd=cwd if cwd is not None else self.root,
             env=self.env,
             capture_output=True,
             text=True,
@@ -954,6 +1106,445 @@ class Runner:
             ref,
             "" if ok else "two collect runs differed or were empty",
         )
+
+    def check_collect_json(self) -> None:
+        """Assert the collect stream agrees with the listing it replaces.
+
+        Four properties, each catching a different lie. The node ids must equal
+        the `--format lines` run's stdout lines IN ORDER, so the stream cannot
+        list a different set or a different order from the format it mirrors.
+        Every record must satisfy the oracle's frozen schema, which is what
+        catches a `node` whose triple does not decompose — a defect counts and
+        ordering cannot see. A directory named with `::` is collected too,
+        because `node_id` must then be split at its LAST separator and a
+        first-separator split produces a wrong `path`/`name` pair that is
+        otherwise well-formed. And two runs must be byte-identical, the same
+        determinism the listing itself promises.
+
+        **What this does NOT cover.** `terminal.exit_code == returncode` is
+        asserted, but that equality alone does not prove the runner resolves
+        the code BEFORE printing: in collect mode nothing owns a `--json` or
+        JUnit descriptor, so the only thing teardown can still escalate is a
+        `runtime.close()` failure, and the fault-injection symbols that would
+        force one live in the test-only native object that `build/mtest` never
+        links. Both orderings therefore pass this check. The ordering is
+        argued in `src/main.mojo` and unproven by any gate.
+        """
+        ref = "§16/§17 collect --format json: same nodes, same exit, byte-stable"
+        name = "collect: --format json agrees with the lines listing and the exit"
+        lines = self.mtest(["collect", "-I", "build", "tests"])
+        first = self.mtest(["collect", "--format", "json", "-I", "build", "tests"])
+        again = self.mtest(["collect", "--format", "json", "-I", "build", "tests"])
+        try:
+            report = collect_stream_oracle.parse_collect_stream(first.stdout)
+        except collect_stream_oracle.CollectStreamError as exc:
+            self.record(FAIL, name, ref, f"stream did not parse: {exc}")
+            return
+        problems = []
+        if lines.returncode != 0 or first.returncode != 0:
+            problems.append(
+                f"lines exited {lines.returncode}, json exited {first.returncode}"
+            )
+        expected = lines.stdout.splitlines()
+        if not expected:
+            problems.append("the lines listing was empty, so it proves nothing")
+        if report.node_ids != expected:
+            problems.append(f"node ids {report.node_ids} != listing {expected}")
+        if report.nodes != len(expected):
+            problems.append(f"terminal nodes={report.nodes}, listed {len(expected)}")
+        if report.exit_code != first.returncode:
+            problems.append(
+                f"terminal exit_code={report.exit_code} but the process exited "
+                f"{first.returncode}"
+            )
+        if report.torn_tail:
+            problems.append("a complete run produced a torn tail")
+        if first.stdout != again.stdout:
+            problems.append("two identical runs produced different streams")
+        problems += self._collect_json_separator_path_problems()
+        ok = not problems
+        self.record(PASS if ok else FAIL, name, ref, "" if ok else "; ".join(problems))
+
+    def _write_oversized_listing_tree(self) -> str:
+        """Scaffold one file whose node-id listing exceeds the pipe buffer.
+
+        A pipe holds 64 KiB before a write blocks, and the listing goes out in
+        a single write, so a listing under that ceiling is delivered whole no
+        matter what the reader does — the check below would pass against a
+        binary with the defect. Length is bought with long names rather than
+        many files because every file costs a compile: one file with 500 tests
+        under a long directory and a long basename yields roughly 108 KB.
+
+        Returns:
+            The directory operand, relative to the scaffold root.
+        """
+        directory = "collect_pipe_" + "x" * 60
+        stem = "test_" + "n" * 60
+        target = self.root / directory
+        target.mkdir(exist_ok=True)
+        body = ["from std.testing import TestSuite, assert_equal\n\n"]
+        body.extend(
+            f"def {stem}_{i:04d}() raises:\n    assert_equal(1, 1)\n\n\n"
+            for i in range(500)
+        )
+        body.append(
+            "def main() raises:\n"
+            "    TestSuite.discover_tests[__functions_in_module()]().run()\n"
+        )
+        (target / f"{stem}.mojo").write_text("".join(body))
+        return directory
+
+    def check_collect_pipe_early_close(self) -> None:
+        """Assert a cut stdout pipe never takes `collect` outside its exit domain.
+
+        §9 and §16 close `collect`'s exit domain at `{0, 1, 2, 3, 4, 5}`. Death
+        by `SIGPIPE` is 141 — a status in none of them, and one a shell reports
+        as a failure for a run that in fact listed everything it was asked for.
+
+        This is the mid-write half of the property: the reader is still there
+        when the write starts and leaves partway through, so the listing has to
+        be larger than the pipe buffer for any of the write to still be
+        outstanding, which is what `_write_oversized_listing_tree` is for. The
+        already-gone half is `check_direct_output_closed_pipe`.
+
+        Both formats are covered. `--format json` tears down before it renders,
+        because its terminal record must carry the finalized exit code, so its
+        write is the one that happens with the runtime's own `SIGPIPE`
+        carve-out already restored — which is exactly why the writer installs
+        its own.
+        """
+        ref = "§9/§16 collect's exit domain survives a consumer that stops reading"
+        name = "collect: a listing larger than the pipe buffer survives an early close"
+        directory = self._write_oversized_listing_tree()
+        probe = self.mtest(["collect", "-I", "build", directory])
+        if probe.returncode != 0 or len(probe.stdout) <= 65536:
+            self.record(
+                FAIL,
+                name,
+                ref,
+                f"the fixture proves nothing: exit {probe.returncode}, "
+                f"{len(probe.stdout)} bytes (need > 65536 and exit 0)",
+            )
+            return
+        statuses: list[tuple[str, int | str]] = []
+        for fmt in ("lines", "json"):
+            for _ in range(3):
+                reader = subprocess.Popen(
+                    ["head", "-1"],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                )
+                writer = subprocess.Popen(
+                    [
+                        str(MTEST),
+                        "collect",
+                        "--format",
+                        fmt,
+                        "-I",
+                        "build",
+                        directory,
+                    ],
+                    cwd=self.root,
+                    env=self.env,
+                    stdout=reader.stdin,
+                    stderr=subprocess.DEVNULL,
+                )
+                # The parent's copy of the write end must go, or the pipe never
+                # reports a broken reader and this measures nothing.
+                if reader.stdin is not None:
+                    reader.stdin.close()
+                try:
+                    statuses.append((fmt, writer.wait(timeout=180)))
+                except subprocess.TimeoutExpired:
+                    writer.kill()
+                    statuses.append((fmt, "timeout"))
+                reader.wait(timeout=30)
+        bad = [s for s in statuses if s[1] != 0]
+        self.record(
+            PASS if not bad else FAIL,
+            name,
+            ref,
+            ""
+            if not bad
+            else f"statuses {statuses}; a negative or 141 is death by SIGPIPE, "
+            "which is outside the frozen exit domain",
+        )
+
+    def check_direct_output_closed_pipe(self) -> None:
+        """Assert every direct-output command survives a reader that is gone.
+
+        The sibling of `check_collect_pipe_early_close`, and the deterministic
+        one: the read end is closed before the child is even spawned, so the
+        very first write returns `EPIPE` and no output size, pipe capacity, or
+        scheduling luck is involved. Every command that writes straight to a
+        descriptor rather than through a reporter is here, because each one
+        publishes its own frozen exit domain and 141 is in none of them: help
+        and version (§19), `config show` and `doctor` (§27), `new` and `init`
+        (§29, which additionally promise the artifacts exist afterwards), and
+        `collect --format json` (§16).
+
+        Each command is asserted against the exact code its domain gives a
+        successful run, so a process that dies of `SIGPIPE` (a negative return
+        code from `subprocess`, 141 from a shell) fails here and names itself.
+        """
+        ref = "§19/§27/§28/§29 a closed stdout leaves each domain intact"
+        cases: list[tuple[str, list[str], int, str]] = [
+            ("help: --help", ["--help"], 0, ""),
+            ("help: version", ["version"], 0, ""),
+            ("config show", ["config", "show"], 0, ""),
+            ("doctor", ["doctor"], 0, ""),
+            ("new", ["new", "tests/test_pipe.mojo"], 0, "tests/test_pipe.mojo"),
+            ("init", ["init"], 0, "mtest.toml"),
+            (
+                "collect --format json",
+                ["collect", "--format", "json", "-I", "build", "tests"],
+                0,
+                "",
+            ),
+        ]
+        probs: list[str] = []
+        for label, argv, want, artifact in cases:
+            cwd = self.root
+            if artifact:
+                cwd = self.root / f"closed-pipe-{argv[0]}"
+                cwd.mkdir(exist_ok=True)
+            read_fd, write_fd = os.pipe()
+            os.close(read_fd)
+            try:
+                proc = subprocess.run(
+                    [str(MTEST), *argv],
+                    cwd=cwd,
+                    env=self.env,
+                    stdout=write_fd,
+                    stderr=subprocess.DEVNULL,
+                    timeout=180,
+                    check=False,
+                )
+                code: int | str = proc.returncode
+            except subprocess.TimeoutExpired:
+                code = "timeout"
+            finally:
+                os.close(write_fd)
+            if code != want:
+                probs.append(f"{label}: exit {code}, want {want}")
+            if artifact and not (cwd / artifact).exists():
+                probs.append(f"{label}: {artifact} was never created")
+        self.record(
+            PASS if not probs else FAIL,
+            "pipe: every direct-output command survives a closed stdout",
+            ref,
+            "; ".join(probs),
+        )
+
+    def check_collect_interrupted_json(self) -> None:
+        """Assert an interrupted collect stream reports the code it exits with.
+
+        Exit 2 is reachable under `collect` — `run_collect` resolves it the
+        moment the interrupt latch is set — and the stream's whole promise is
+        that `collect_finished.exit_code` is the code the process really ends
+        with. An interrupt is the one path where the two could most easily
+        drift apart, because the code is decided by a latch rather than by the
+        collection's own outcome.
+
+        The interrupt goes to the process group so the in-flight compiler
+        child dies with it, and it is timed to land inside the collection
+        rather than after it: the terminal must say `2`, not the `0` the
+        finished collection would have produced. `--no-cache` is what makes
+        that timing reliable — the check above leaves the build store warm, and
+        a cached collection of this tree finishes well inside the delay, which
+        would quietly turn this into an assertion about an uninterrupted run.
+        """
+        ref = "§9/§16 an interrupted collect exits 2 and its terminal says so"
+        name = "collect: an interrupted --format json run agrees with its own exit"
+        directory = self._write_oversized_listing_tree()
+        proc = subprocess.Popen(
+            [
+                str(MTEST),
+                "collect",
+                "--format",
+                "json",
+                "--no-cache",
+                "-I",
+                "build",
+                directory,
+            ],
+            cwd=self.root,
+            env=self.env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        time.sleep(0.4)
+        try:
+            os.killpg(proc.pid, signal.SIGINT)
+        except ProcessLookupError:
+            proc.kill()
+            self.record(FAIL, name, ref, "the collection finished before the SIGINT")
+            return
+        try:
+            out, _ = proc.communicate(timeout=180)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            self.record(FAIL, name, ref, "mtest ignored the SIGINT; killed at 180s")
+            return
+        problems = []
+        if proc.returncode != 2:
+            problems.append(f"exit {proc.returncode}, want 2")
+        try:
+            report = collect_stream_oracle.parse_collect_stream(out)
+        except collect_stream_oracle.CollectStreamError as exc:
+            problems.append(f"stream did not parse: {exc}")
+        else:
+            if report.torn_tail:
+                problems.append("the stream was torn, so it carries no terminal")
+            elif report.exit_code != proc.returncode:
+                problems.append(
+                    f"terminal exit_code={report.exit_code} but the process "
+                    f"exited {proc.returncode}"
+                )
+        ok = not problems
+        self.record(PASS if ok else FAIL, name, ref, "" if ok else "; ".join(problems))
+
+    def _collect_json_separator_path_problems(self) -> list[str]:
+        """Collect a file under a `::`-named directory and check its triple.
+
+        A node id is `path::name`, and a path may itself contain `::` while a
+        test name never can, so the decomposition has to split at the LAST
+        separator. Splitting at the first one yields
+        `path="oddroot/od", name="d/test_odd.mojo::test_odd_one"` — a triple
+        that still concatenates back to the right `node_id`, so only the
+        name-has-no-`::` rule in the oracle rejects it.
+
+        The `::` directory is reached by naming its PARENT, never itself: an
+        operand containing `::` is read as a node id (`select`/`discover`
+        refuse anything but one separator), so such a file is discoverable by a
+        walk and not addressable directly. That is a pre-existing limitation of
+        the operand grammar, unrelated to this format.
+
+        Returns:
+            One problem string per violation, empty when the triple is right.
+            A setup failure is itself reported as a problem, never skipped.
+        """
+        odd_dir = self.root / "oddroot" / "od::d"
+        try:
+            odd_dir.mkdir(parents=True, exist_ok=True)
+            (odd_dir / "test_odd.mojo").write_text(
+                HEAD + "def test_odd_one() raises:\n    assert_equal(1, 1)\n" + MAIN
+            )
+        except OSError as exc:
+            return [f"could not scaffold a '::' path: {exc}"]
+
+        run = self.mtest(["collect", "--format", "json", "-I", "build", "oddroot"])
+        if run.returncode != 0:
+            return [f"collecting a '::' path exited {run.returncode}: {run.stderr}"]
+        try:
+            report = collect_stream_oracle.parse_collect_stream(run.stdout)
+        except collect_stream_oracle.CollectStreamError as exc:
+            return [f"the '::' path stream did not parse: {exc}"]
+
+        want_id = "oddroot/od::d/test_odd.mojo::test_odd_one"
+        if report.node_ids != [want_id]:
+            return [f"'::' path listed {report.node_ids}, want [{want_id!r}]"]
+        node = next(r for r in report.records if r.get("event") == "node")
+        problems = []
+        if node.get("path") != "oddroot/od::d/test_odd.mojo":
+            problems.append(f"'::' path decomposed to path={node.get('path')!r}")
+        if node.get("name") != "test_odd_one":
+            problems.append(f"'::' path decomposed to name={node.get('name')!r}")
+        return problems
+
+    def _shuffled_file_order(self, seed: str) -> tuple[str, ...]:
+        """The ordered `file_started` paths of one seeded shuffled run.
+
+        Reads the byte-pure `--json -` stream through the stream oracle rather
+        than the console, because §17 excludes the wall clock and the
+        build-cache counters from byte identity: two console outputs of the same
+        run legitimately differ, so comparing them proves nothing either way.
+
+        Args:
+            seed: The `--seed` value to run under.
+
+        Returns:
+            The paths in the order the run announced them.
+
+        Raises:
+            StreamError: If the stream is corrupt.
+            ContractStreamExitError: If the run did not exit 0, so its order is not
+                evidence about ordering.
+        """
+        run = self.mtest(
+            [
+                "-I",
+                "build",
+                "--shuffle",
+                "--seed",
+                seed,
+                "-n",
+                "1",
+                "--json",
+                "-",
+                "--gh-annotations",
+                "off",
+                "tests",
+            ]
+        )
+        if run.returncode != 0:
+            raise ContractStreamExitError(
+                f"--shuffle --seed {seed} exited {run.returncode}: {run.stderr}"
+            )
+        report = json_stream_oracle.parse_stream(run.stdout)
+        return tuple(
+            str(record.get("path", ""))
+            for record in report.records
+            if record.get("event") == "file_started"
+        )
+
+    def check_shuffle_determinism(self) -> None:
+        """Assert a seed repeats its order and another seed really moves files.
+
+        Two same-seed runs agreeing is necessary but nowhere near sufficient: a
+        `--shuffle` that never reordered anything agrees with itself too. A run
+        under a different seed is what separates a working shuffle from a no-op
+        — and comparing the two orders' SETS first separates "the order moved"
+        from "a different set of files ran", which would be a far worse defect
+        wearing the same symptom.
+
+        The alternative seeds are TRIED IN TURN rather than fixed at one value.
+        Over a small file set two particular seeds can legitimately draw the
+        same permutation, and a scaffold edit could make the pair collide, which
+        would report a working shuffle as broken. Only every candidate agreeing
+        is evidence of a no-op.
+
+        What this check cannot see: WHERE the shuffle sits relative to the
+        `--shard` partition. Nothing here is sharded, so a shuffle moved above
+        the partition would pass every assertion below.
+        `test_shard_membership_is_chosen_before_the_shuffle` owns that property.
+        """
+        ref = "§17/§18 a seed reproduces its order; another seed changes it"
+        name = "determinism: --shuffle --seed repeats its file order"
+        reference, candidates = "7", ("9", "2", "3")
+        try:
+            first = self._shuffled_file_order(reference)
+            again = self._shuffled_file_order(reference)
+            others = {seed: self._shuffled_file_order(seed) for seed in candidates}
+        except (json_stream_oracle.StreamError, ContractStreamExitError) as exc:
+            self.record(FAIL, name, ref, str(exc))
+            return
+        problems = []
+        if len(first) < 3:
+            problems.append(f"too few files ran to carry an order: {first}")
+        if first != again:
+            problems.append(f"one seed drew two orders: {first} then {again}")
+        wrong_set = {s: o for s, o in others.items() if sorted(o) != sorted(first)}
+        if wrong_set:
+            problems.append(f"a second seed ran a different SET: {wrong_set}")
+        elif all(order == first for order in others.values()):
+            problems.append(
+                f"no seed in {candidates} reordered {first}, so nothing was randomized"
+            )
+        ok = not problems
+        self.record(PASS if ok else FAIL, name, ref, "" if ok else "; ".join(problems))
 
     def check_help_stream(self) -> None:
         """Assert help goes to stdout and a usage error goes to stderr.
@@ -1295,9 +1886,14 @@ class Runner:
             "--maxfail",
             "--retries",
             "--durations",
+            "--seed",
         ):
+            # `--seed` is refused outright without `--shuffle`, so it is passed
+            # with it: otherwise this check would pass on the wrong refusal and
+            # say nothing about the wrapped value.
+            prefix = ["-I", "build"] + (["--shuffle"] if flag == "--seed" else [])
             for value in ("9223372036854775808", "9223372036854775809"):
-                r = self.mtest(["-I", "build", flag, value, "tests/"])
+                r = self.mtest([*prefix, flag, value, "tests/"])
                 if r.returncode != 4:
                     bad.append(f"{flag} {value} -> exit {r.returncode}")
         # The neighbour below the wrap must still be ACCEPTED: the guard must
@@ -1393,6 +1989,374 @@ class Runner:
             else f"exit {r.returncode} for a {len(rel)}-byte path "
             f"(PATH_MAX 4096); stderr={r.stderr[:200]!r}",
         )
+
+    def check_fail_on_flaky(self) -> None:
+        """Assert a FLAKY-only run exits 0, and 1 once `--fail-on-flaky` is set.
+
+        A paired run over one scaffold, with the crash-once marker reset between
+        halves so the two differ only in the flag. The exit codes alone are not
+        an oracle: a runner that never retried at all would also exit 0 on the
+        first half, so each half is held to the exact summary text on BOTH
+        independently composed surfaces (§15.1's console band and §15.3's
+        `::notice`). `--gh-annotations on` is what makes the tail render outside
+        GitHub Actions at all; without it the notice never appears and this
+        check would silently stop covering the reporter it names.
+        """
+        ref = "§13/§15.3 --fail-on-flaky demotes a would-be 0 and says why"
+        name = "flaky: --fail-on-flaky turns a FLAKY-only run's 0 into 1"
+        marker = self.root / "retry.marker"
+        argv = [
+            "-I",
+            "build",
+            "--retries",
+            "1",
+            "--gh-annotations",
+            "on",
+            "retry/test_crash_once.mojo",
+        ]
+
+        try:
+            marker.unlink(missing_ok=True)
+            off = self.mtest(argv)
+            marker.unlink(missing_ok=True)
+            on = self.mtest([*argv, "--fail-on-flaky"])
+        except subprocess.TimeoutExpired:
+            self.record(FAIL, name, ref, "timed out running the retry probe")
+            return
+        finally:
+            marker.unlink(missing_ok=True)
+
+        bare = "1 passed, 0 failed, 0 skipped, 1 flaky (0 excluded, 0 not run)"
+        named = (
+            "1 passed, 0 failed, 0 skipped, 1 flaky (failing: --fail-on-flaky)"
+            " (0 excluded, 0 not run)"
+        )
+        probs = _flaky_surface_problems("without the flag", off, 0, bare)
+        probs += _flaky_surface_problems("with the flag", on, 1, named)
+        if probs:
+            self.record(FAIL, name, ref, "; ".join(probs))
+        else:
+            self.record(PASS, name, ref)
+
+    def check_debug_handoff(self) -> None:
+        """Assert `debug` hands the terminal over and claims nothing afterwards.
+
+        Two halves over the same surface, one passing node and one failing one.
+        Each asserts the two marker lines, then the test binary's OWN report
+        text after them, then the exit code the binary itself produced. The
+        third assertion is the load-bearing one and applies to both halves: no
+        summary band anywhere. A zero from a handed-over run is the binary's
+        statement, and a band would be mtest claiming a verdict it is in no
+        position to have — there is deliberately no machinery that could
+        produce one, so its absence is what proves the handoff was real.
+        """
+        ref = "§28 debug prepares, prints two lines, then becomes the test"
+        name = "debug: the handoff is the test's own exit, with no mtest verdict"
+        halves = [
+            ("passing", "tests/test_reverse.mojo::test_reverse_ab", 0),
+            ("failing", "probes/test_fail.mojo::test_x", 1),
+        ]
+        probs: list[str] = []
+        for label, node, want_exit in halves:
+            try:
+                r = self.mtest(["debug", "-I", "build", node])
+            except subprocess.TimeoutExpired:
+                probs.append(f"{label}: timed out")
+                continue
+            if r.returncode != want_exit:
+                probs.append(f"{label}: exit {r.returncode}, want {want_exit}")
+            lines = r.stdout.splitlines()
+            if not lines or not lines[0].startswith("build: "):
+                probs.append(f"{label}: first stdout line is not the build line")
+            elif "build/bin/" not in lines[0]:
+                probs.append(f"{label}: the build line names no build/bin/ output")
+            selector = "--only " + node.rpartition("::")[2]
+            if len(lines) < 2 or not lines[1].startswith("run: "):
+                probs.append(f"{label}: second stdout line is not the run line")
+            elif not lines[1].endswith(selector):
+                probs.append(f"{label}: the run line does not end in {selector!r}")
+            # The binary's own report, produced after the exec, on the same
+            # descriptor mtest was writing to a moment earlier.
+            if "tests run:" not in r.stdout:
+                probs.append(f"{label}: the test binary's own report never arrived")
+            if "=====" in r.stdout or "=====" in r.stderr:
+                probs.append(f"{label}: an mtest summary band survived the handoff")
+        if probs:
+            self.record(FAIL, name, ref, "; ".join(probs))
+        else:
+            self.record(PASS, name, ref)
+
+    # -- new (§29). Each of these builds its OWN directory, never `tests/`,
+    #    whose node-id set `EXPECTED_TESTS` pins exactly. Independent setup is
+    #    the point: an earlier version chained them, and `-k 'refuses to
+    #    overwrite'` then passed by creating the file it meant to find already
+    #    there, which is the failure mode a filtered run exists to expose.
+    def _new_dir(self, name: str) -> Path:
+        """A fresh, empty directory under the scaffold for one `new` check."""
+        directory = self.root / name
+        if directory.exists():
+            shutil.rmtree(directory)
+        directory.mkdir()
+        return directory
+
+    def check_new_creates(self) -> None:
+        """Assert `mtest new` writes the file and says so, into an empty dir."""
+        ref = "§29 new PATH creates one discoverable file, exit 0 on stdout"
+        name = "new: scaffolds a discoverable file"
+        directory = self._new_dir("new_ok")
+        r = self.mtest(["new", "new_ok/test_scaffolded.mojo"])
+        probs: list[str] = []
+        if r.returncode != 0:
+            probs.append(f"exit {r.returncode}, want 0")
+        if r.stdout != "created new_ok/test_scaffolded.mojo\n":
+            probs.append(f"stdout is not the frozen success line: {r.stdout!r}")
+        if r.stderr:
+            probs.append(f"a successful scaffold wrote diagnostics: {r.stderr!r}")
+        written = sorted(p.name for p in directory.iterdir())
+        if written != ["test_scaffolded.mojo"]:
+            probs.append(f"the publication left litter beside the file: {written}")
+        else:
+            # The oracle is a file created here the ordinary way, not a
+            # hard-coded bit pattern: "the mode an editor would have produced"
+            # is exactly the umask's answer, and pinning `0o044` instead makes
+            # this red under `umask 077` with no defect present.
+            ordinary = directory / "ordinary.probe"
+            ordinary.write_text("x")
+            want_mode = ordinary.stat().st_mode & 0o777
+            ordinary.unlink()
+            mode = directory.joinpath("test_scaffolded.mojo").stat().st_mode & 0o777
+            if mode != want_mode:
+                probs.append(
+                    f"the file carries mode {mode:#o}, not the {want_mode:#o} an "
+                    "ordinary create in this directory produces"
+                )
+        self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
+
+    def check_new_refuses_to_overwrite(self) -> None:
+        """Assert an occupied target is refused with its bytes untouched.
+
+        The exit code alone would pass against an implementation that
+        truncated the file and then failed, so the surviving content and the
+        absence of a leftover temporary are asserted beside it.
+        """
+        ref = "§29 an existing target is refused (4), never modified"
+        name = "new: refuses to overwrite -> 4"
+        directory = self._new_dir("new_taken")
+        target = directory / "test_taken.mojo"
+        mine = "# hand-written, and not to be replaced\n"
+        target.write_text(mine)
+        r = self.mtest(["new", "new_taken/test_taken.mojo"])
+        probs: list[str] = []
+        if r.returncode != 4:
+            probs.append(f"exit {r.returncode}, want 4")
+        if "refusing to overwrite" not in r.stderr:
+            probs.append(f"the refusal does not name itself: {r.stderr!r}")
+        if r.stdout:
+            probs.append(f"a refused scaffold wrote to stdout: {r.stdout!r}")
+        if target.read_text() != mine:
+            probs.append(f"the target's bytes changed: {target.read_text()!r}")
+        left = sorted(p.name for p in directory.iterdir())
+        if left != ["test_taken.mojo"]:
+            probs.append(f"the refusal left a temporary behind: {left}")
+        self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
+
+    def check_new_refuses_unusable_names(self) -> None:
+        """Assert the two name refusals, each against an untouched directory.
+
+        A basename no walk would collect, and a path carrying `::`, which the
+        node-id grammar reserves — mtest would be unable to address the file
+        afterwards, so it declines to create it in the first place.
+        """
+        cases = [
+            (
+                "new: non-discoverable name -> 4",
+                "§5,§29 a scaffold must be a file a directory walk collects",
+                "new_bad/helper.mojo",
+                "test_*.mojo",
+            ),
+            (
+                "new: node-id-shaped path -> 4",
+                "§5,§29 `::` is the node-id separator and cannot name a path",
+                "new_colon/test_a::b.mojo",
+                "contains '::'",
+            ),
+        ]
+        for name, ref, operand, wanted_text in cases:
+            directory = self.root / operand.split("/")[0]
+            if directory.exists():
+                shutil.rmtree(directory)
+            r = self.mtest(["new", operand])
+            probs: list[str] = []
+            if r.returncode != 4:
+                probs.append(f"exit {r.returncode}, want 4")
+            if wanted_text not in r.stderr:
+                probs.append(f"the refusal does not say {wanted_text!r}: {r.stderr!r}")
+            if directory.exists():
+                probs.append(
+                    "the refusal created the parent directory of a file it "
+                    "declined to write"
+                )
+            self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
+
+    def check_new_scaffold_runs(self) -> None:
+        """Assert the file `mtest new` wrote actually compiles and passes.
+
+        The exit-code checks above prove the refusals; this proves the point.
+        A scaffold a reader has to repair before it runs is worse than no
+        scaffold at all, and nothing about its exit code would say so — only
+        building and running the bytes it wrote can. The second half runs the
+        same gauntlet through a basename carrying the two characters that end
+        a Mojo string literal, because the stem is interpolated into the
+        file's own docstring: unescaped, `new` reports success and emits a
+        file that does not compile.
+        """
+        ref = "§29 the scaffolded file is runnable as written, any legal name"
+        halves = [
+            ("new: the scaffolded file runs green", "new_run", "test_scaffolded.mojo"),
+            (
+                "new: a hostile basename still compiles and passes",
+                "new_hostile",
+                'test_a"""b\\.mojo',
+            ),
+        ]
+        for name, directory_name, basename in halves:
+            directory = self._new_dir(directory_name)
+            operand = f"{directory_name}/{basename}"
+            probs: list[str] = []
+            created = self.mtest(["new", operand])
+            if created.returncode != 0:
+                probs.append(f"new exited {created.returncode}: {created.stderr!r}")
+            elif not (directory / basename).is_file():
+                probs.append("new reported success but wrote no file")
+            else:
+                try:
+                    r = self.mtest([operand])
+                except subprocess.TimeoutExpired:
+                    probs.append("timed out running the scaffolded file")
+                    r = None
+                if r is not None:
+                    if r.returncode != 0:
+                        probs.append(f"exit {r.returncode}, want 0")
+                    if "1 passed" not in r.stdout:
+                        probs.append(
+                            f"the summary does not report the one scaffolded "
+                            f"test: {r.stdout!r}{r.stderr!r}"
+                        )
+            self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
+
+    # -- init (§29.2). Its invocation root is where it writes, so every run
+    #    below gets its own directory rather than the shared scaffold, whose
+    #    `tests/` node-id set `EXPECTED_TESTS` pins exactly.
+    def check_init_scaffold(self) -> None:
+        """Assert `init` bootstraps a runnable project, twice, and refuses once.
+
+        Three claims, in the order they can be settled. First that the
+        artifacts are what §29.2 says: the workflow is compared byte-for-byte
+        against the first YAML block of `docs/ci.md`, extracted here rather
+        than copied, so the page stays the one place it is written down and a
+        drifted pin reds this gate through the real binary. Then that the
+        scaffolded project runs — the `mtest.toml` it wrote is what makes a
+        bare `mtest` find the test file it wrote beside it, so running with no
+        operands tests both at once. Then that a second `init` changes nothing
+        and still succeeds, and that an unknown provider is refused before any
+        artifact exists.
+        """
+        ref = "§29.2 init bootstraps a project; artifacts are never replaced"
+        name = "init: --ci github bootstraps a runnable project"
+        directory = self._new_dir("init_ok")
+        probs: list[str] = []
+        first = self.mtest(["init", "--ci", "github"], cwd=directory)
+        if first.returncode != 0:
+            probs.append(f"exit {first.returncode}, want 0: {first.stderr!r}")
+        if first.stderr:
+            probs.append(f"a successful init wrote diagnostics: {first.stderr!r}")
+        wanted_lines = [
+            "created tests/test_example.mojo",
+            "created mtest.toml",
+            "created .github/workflows/test.yml",
+            "created .gitignore",
+            "next: pixi init .",
+            "next: pixi workspace channel add https://conda.modular.com/max/",
+            (
+                "next: pixi workspace channel add "
+                "https://repo.prefix.dev/modular-community"
+            ),
+            "next: pixi add mtest",
+            "next: mtest",
+            ("next: commit pixi.toml and pixi.lock, which the workflow installs from"),
+        ]
+        if first.stdout.splitlines() != wanted_lines:
+            probs.append(f"stdout is not the §29.2 report: {first.stdout!r}")
+        written = directory / ".github" / "workflows" / "test.yml"
+        if not written.is_file():
+            probs.append("no workflow was written under --ci github")
+        else:
+            # Both sides read as bytes: text mode would fold CRLF into LF and
+            # report two genuinely different files as identical.
+            documented = _first_yaml_fence(REPO / "docs" / "ci.md")
+            emitted = written.read_bytes()
+            if emitted != documented:
+                probs.append(
+                    "the scaffolded workflow is not byte-identical to the "
+                    f"first yaml block of docs/ci.md ({len(emitted)} bytes "
+                    f"emitted, {len(documented)} documented)"
+                )
+        ignore = directory / ".gitignore"
+        if not ignore.is_file() or ".mtest-cache/" not in ignore.read_text(
+            encoding="utf-8"
+        ):
+            probs.append("the build cache was not added to .gitignore")
+        if not probs:
+            # No operands: the `[run] paths` it just wrote is what has to make
+            # this find the test file it just wrote.
+            try:
+                ran = self.mtest([], cwd=directory)
+            except subprocess.TimeoutExpired:
+                probs.append("timed out running the bootstrapped project")
+                ran = None
+            if ran is not None:
+                if ran.returncode != 0:
+                    probs.append(
+                        f"the bootstrapped project exited {ran.returncode}: "
+                        f"{ran.stdout!r}{ran.stderr!r}"
+                    )
+                if "1 passed" not in ran.stdout:
+                    probs.append(
+                        f"the scaffolded suite did not report its one test: "
+                        f"{ran.stdout!r}"
+                    )
+        self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
+
+        name = "init: a second run skips every artifact, still 0"
+        probs = []
+        before = ignore.read_text(encoding="utf-8") if ignore.is_file() else ""
+        second = self.mtest(["init", "--ci", "github"], cwd=directory)
+        if second.returncode != 0:
+            probs.append(f"exit {second.returncode}, want 0")
+        skipped = [ln for ln in second.stdout.splitlines() if ln.startswith("skipped ")]
+        if len(skipped) != 4:
+            probs.append(f"not every artifact was skipped: {second.stdout!r}")
+        if "created " in second.stdout:
+            probs.append(f"a second init created something: {second.stdout!r}")
+        if ignore.is_file() and ignore.read_text(encoding="utf-8") != before:
+            probs.append("a second init rewrote .gitignore")
+        self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
+
+        name = "init: --ci gitlab -> 4"
+        ref = "§29.2 an unknown --ci provider is refused before anything exists"
+        probs = []
+        untouched = self._new_dir("init_refused")
+        refused = self.mtest(["init", "--ci", "gitlab"], cwd=untouched)
+        if refused.returncode != 4:
+            probs.append(f"exit {refused.returncode}, want 4")
+        if "gitlab" not in refused.stderr:
+            probs.append(f"the refusal does not name the value: {refused.stderr!r}")
+        if refused.stdout:
+            probs.append(f"a refused init wrote to stdout: {refused.stdout!r}")
+        left = sorted(p.name for p in untouched.iterdir())
+        if left:
+            probs.append(f"the refusal created artifacts anyway: {left}")
+        self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
 
     # -- interrupt: signal ONLY mtest, so the child's survival tests mtest's own
     #    process-group teardown (§18/§24.2) rather than a signal the child caught.
@@ -1685,6 +2649,53 @@ def build_matrix() -> list[Check]:
             4,
         ),
         Check(
+            "collect: --fail-on-flaky rejected in collect -> 4",
+            "§4",
+            ["collect", *I, "--fail-on-flaky", "tests"],
+            4,
+        ),
+        # The flag alone never moves a clean run: only a FLAKY file does.
+        Check(
+            "run: --fail-on-flaky green run stays 0",
+            "§13",
+            [*I, "--fail-on-flaky", "tests"],
+            0,
+        ),
+        # Ordering flags: a seed without the flag it seeds, and two flags that
+        # each choose an order, are both refused pre-run (§18).
+        Check(
+            "run: --seed without --shuffle -> 4",
+            "§4",
+            [*I, "--seed", "1", "tests"],
+            4,
+        ),
+        Check(
+            "run: --shuffle with --ff -> 4",
+            "§4",
+            [*I, "--shuffle", "--ff", "tests"],
+            4,
+        ),
+        Check(
+            "collect: --shuffle rejected -> 4",
+            "§4",
+            ["collect", *I, "--shuffle", "tests"],
+            4,
+        ),
+        # `--format` is the mirror image of the rows above: the one flag that
+        # belongs to collect alone, refused everywhere else.
+        Check(
+            "collect: --format bogus -> 4",
+            "§16",
+            ["collect", *I, "--format", "xml", "tests"],
+            4,
+        ),
+        Check(
+            "run: --format is collect-only -> 4",
+            "§4",
+            [*I, "--format", "json", "tests"],
+            4,
+        ),
+        Check(
             "collect: -k ignored with a loud notice (§24.3 deviation)",
             "§24.3",
             ["collect", *I, "-k", "reverse", "tests"],
@@ -1769,6 +2780,36 @@ def build_matrix() -> list[Check]:
             any_has=["PRECOMPILE-ERROR", "tests/test_reverse.mojo"],
             any_absent=["PRECOMPILE-FAILED"],
         ),
+        # debug (§28): every refusal is made BEFORE the handoff, so each of
+        # these exits 4 with mtest still owning its own exit code.
+        Check(
+            "debug: plain path operand -> 4",
+            "§28",
+            ["debug", *I, "tests/test_reverse.mojo"],
+            4,
+            err_has=["PATH::TEST"],
+        ),
+        Check(
+            "debug: unknown test -> 4",
+            "§28",
+            ["debug", *I, "tests/test_reverse.mojo::nope"],
+            4,
+            err_has=["unknown test"],
+        ),
+        Check(
+            "debug: reporter flag refused -> 4",
+            "§28",
+            ["debug", *I, "--json", "-", "tests/test_reverse.mojo::test_reverse_ab"],
+            4,
+            err_has=["no terminal record could be written"],
+        ),
+        Check(
+            "debug: --retries refused -> 4",
+            "§28",
+            ["debug", *I, "--retries", "1", "tests/test_reverse.mojo::test_reverse_ab"],
+            4,
+            err_has=["cannot be combined with 'debug'"],
+        ),
     ]
     # Refused v1 flags (§24.1): each names the flag and states it is the v1 contract.
     for flag, val, _cap in refused:
@@ -1800,6 +2841,20 @@ def build_matrix() -> list[Check]:
             ["collect", *I, "--shard", "1/2", "tests"],
             0,
             any_absent=["v1 contract"],
+        )
+    )
+    # §4 marks `--serial` accepted-inert under `collect`, beside `-n`, and for
+    # the same reason: refusing a flag every earlier build accepted would break
+    # invocations that pass one flag set to both subcommands. Every other
+    # run-only flag is an exit-4 refusal there, so which side of that line this
+    # one sits on needs a gate rather than a table entry alone.
+    checks.append(
+        Check(
+            "served: collect --serial accepted, inert (not exit 4)",
+            "§4,§18,§24.1",
+            ["collect", *I, "--serial", "tests/*", "tests"],
+            0,
+            any_absent=["v1 contract", "run-only flag"],
         )
     )
     return checks
@@ -1884,6 +2939,18 @@ def main() -> int:
             runner.check_collect_exact()
         if wanted("determinism: collect byte-identical"):
             runner.check_determinism()
+        if wanted("collect: --format json agrees with the lines listing and the exit"):
+            runner.check_collect_json()
+        if wanted(
+            "collect: a listing larger than the pipe buffer survives an early close"
+        ):
+            runner.check_collect_pipe_early_close()
+        if wanted("pipe: every direct-output command survives a closed stdout"):
+            runner.check_direct_output_closed_pipe()
+        if wanted("collect: an interrupted --format json run agrees with its own exit"):
+            runner.check_collect_interrupted_json()
+        if wanted("determinism: --shuffle --seed repeats its file order"):
+            runner.check_shuffle_determinism()
         if wanted("help: --help -> stdout, exit 0") or wanted(
             "usage error: -V -> stderr, exit 4"
         ):
@@ -1908,6 +2975,28 @@ def main() -> int:
             runner.check_json_fifo_does_not_block()
         if wanted("path: a long-but-legal path builds, never a false COMPILE-ERROR"):
             runner.check_long_path_builds()
+        if wanted("flaky: --fail-on-flaky turns a FLAKY-only run's 0 into 1"):
+            runner.check_fail_on_flaky()
+        if wanted("debug: the handoff is the test's own exit, with no mtest verdict"):
+            runner.check_debug_handoff()
+        if wanted("new: scaffolds a discoverable file"):
+            runner.check_new_creates()
+        if wanted("new: refuses to overwrite -> 4"):
+            runner.check_new_refuses_to_overwrite()
+        if wanted("new: non-discoverable name -> 4") or wanted(
+            "new: node-id-shaped path -> 4"
+        ):
+            runner.check_new_refuses_unusable_names()
+        if wanted("new: the scaffolded file runs green") or wanted(
+            "new: a hostile basename still compiles and passes"
+        ):
+            runner.check_new_scaffold_runs()
+        if (
+            wanted("init: --ci github bootstraps a runnable project")
+            or wanted("init: a second run skips every artifact, still 0")
+            or wanted("init: --ci gitlab -> 4")
+        ):
+            runner.check_init_scaffold()
         if wanted("interrupt: SIGINT frees the owned process group"):
             if args.no_interrupt:
                 # Recorded rather than bypassed: testing --no-interrupt BEFORE

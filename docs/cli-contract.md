@@ -1,19 +1,43 @@
 # mtest command-line contract
 
 **Status: FROZEN for the 1.x series.** This document specifies the v1
-command-line interface of `mtest`. It is the public API of the tool, frozen as
-of the 1.0.0 release.
+command-line interface of `mtest`. It is the public API of the tool. A surface
+freezes on the release that first **serves** it, not on 1.0.0: the inventory
+1.0.0 shipped froze there, and a surface added by a later 1.x minor freezes
+when that minor ships it. Nothing is retroactively frozen and nothing is
+retroactively promised — a surface that was never served carried no promise to
+break.
 
-The amendment rule, so the freeze means something concrete. §20 sorts every
-surface into three tiers and they carry different promises:
+The amendment rule, so the freeze means something concrete. Within 1.x the
+surface inventory may grow: a minor release may add subcommands, flags, and
+machine-format fields, additively. What FROZEN means is that nothing served
+ever changes meaning, is removed, or has its exit domain, grammar, or format
+altered within 1.x — those changes are what a major version is for.
+
+**The one compatibility exception, stated rather than buried.** Additive growth
+is not free, and the place it costs something is the leading token. `run` is the
+default subcommand, so a first argument that is not a known subcommand is a path
+(§3). Serving a *new* subcommand therefore reserves that word: `mtest init` ran
+a directory named `init` before 1.1 and bootstraps a project after it, and
+`mtest new` and `mtest debug` changed from running a path to refusing an
+argument list. This is a real change of meaning for those invocations and is
+permitted only because the alternative — never adding a subcommand within 1.x —
+was judged the worse trade. **The bare subcommand vocabulary is therefore not
+frozen; every other served surface is.** A path whose name collides is still
+reachable, spelled `./name`, and that spelling is stable: it can never be read
+as a subcommand. Scripts that pass a path as the first operand should spell it
+`./name` for exactly this reason.
+
+§20 sorts every surface into three tiers and they carry different promises:
 
 - **FROZEN** surfaces — the subcommands, flag names and semantics, exit codes,
   the node-id grammar, `mtest.toml` key names and semantics, the JUnit mapping,
-  the annotation shapes, the `--json` event stream, the `collect` format, and
-  the test-module contract — do not change, are not removed, and are not added
-  to within 1.x. The one exception is the one §20 states itself: the `--json`
-  stream grows additively at schema `version` 1, gaining event kinds and fields,
-  while a removal or a meaning change bumps the header version.
+  the annotation shapes, the `--json` event stream, the `collect` formats, and
+  the test-module contract — never change meaning and are never removed or
+  narrowed within 1.x. The inventory grows only by addition, and a machine
+  format grows only at its stated schema `version`: the `--json` event stream
+  and the `collect --format json` stream both gain event kinds and fields at
+  `version` 1, while a removal or a meaning change bumps the header version.
 - **STABLE-INTENT** surfaces carry a weaker promise on purpose. Default values —
   timeouts, `auto` worker sizing — may be tuned in a minor release, and the
   `.mtest-cache/lastrun` format changes only by taking a new format version.
@@ -22,9 +46,39 @@ surface into three tiers and they carry different promises:
   `config show` output — carry no compatibility promise at all. Read the
   `--json` event stream rather than the console rendering if you need stability.
 
-New command-line grammar is a major version. The subcommand set and the flag
-inventory are frozen above, and §21 lists what the next major version is
-reserved to add; none of it can land in a 1.x release whatever its size.
+New grammar for a surface that is already served is a major version: changing
+how an existing flag parses, what it means, or which codes it can exit with.
+§21 lists what is planned and not served; the additive entries there may land
+in a future minor, and anything that would move a served surface waits for a
+major.
+
+**What 1.1 adds.** Six served command-line surfaces:
+
+- `--fail-on-flaky` demotes a would-be exit `0` to `1` when at least one file
+  passed only after a crash-class retry (§13).
+- `--shuffle` and `--seed N` randomize the order run files execute in and print
+  the seed that reproduces the order (§18).
+- `collect --format json` renders the listing as a versioned stream beside the
+  plain one, at collect-stream `version` 1 (§16, `docs/collect-stream.md`).
+- `mtest debug PATH::TEST` prepares one test and hands it the terminal, exiting
+  only before the handoff (§28).
+- `mtest new PATH` writes one runnable test file and never overwrites (§29.1).
+- `mtest init [--ci github]` bootstraps a project in the invocation root and
+  replaces nothing that already exists (§29.2).
+
+Two additions are not command-line surfaces and are easy to miss, so they are
+named too:
+
+- the `[run] fail-on-flaky` project-configuration key, which resolves through
+  the ordinary layer precedence like every other key (§25);
+- the `session_started.shuffle_seed` field on the `--json` event stream, which
+  is present only under `--shuffle`. Its absence on an unshuffled run is what
+  keeps that record byte-identical to a stream written before the flag existed
+  (§15.4, `docs/json-stream.md`).
+
+No previously served surface changed meaning. The one exception is deliberate,
+declared above, and confined to the leading token: `new`, `init`, and `debug`
+are now subcommands where a bare path of that name used to be an operand.
 
 The rule binds the interface, not the prose: sharpening this document's
 description of a surface that does not itself move is not an amendment.
@@ -47,16 +101,24 @@ means `mtest`.
 
 ```text
 mtest [run] [PATHS...] [flags] [-- BUILD-ARGS...]   # run is the default subcommand
-mtest collect [PATHS...] [flags]                    # list node ids, one per line
-mtest config show [PATHS...] [flags]                # render resolved configuration
+mtest collect [PATHS...] [--format lines|json] [flags]   # list node ids
+mtest config show [PATHS...] [flags] [-- BUILD-ARGS...] # resolved configuration
 mtest doctor [--config PATH | --no-config] [--color WHEN] [-q | -v]
+mtest debug PATH::TEST [build flags] [-- BUILD-ARGS...]  # hand over the terminal
+mtest new PATH                                      # scaffold one test file
+mtest init [--ci github]                            # bootstrap a project
 mtest version
 mtest --help | mtest help
 ```
 
 `run` is the default: `mtest tests/` means `mtest run tests/`. A leading token
-that is not a known subcommand is treated as a path or flag for `run`.
-`config show` is the sole two-token subcommand.
+that is not a known subcommand is treated as a path or flag for `run` — so a
+path whose name *is* a subcommand is shadowed by it and must be spelled
+`./name` (see the compatibility exception at the top of this document).
+`config show` is the sole two-token subcommand. `debug` is the only one that
+does not end by reporting: it prepares a single test and then replaces the
+mtest process with it (§28). `new` and `init` are the two that write source
+files rather than reading them (§29).
 
 ---
 
@@ -80,6 +142,13 @@ single **invocation root**. In v1 the root is the **current working directory**.
 
 ## 3. Argument grammar
 
+- The **first** token is read as a subcommand when it matches one, and as a
+  path or flag for `run` otherwise. The match is exact and unabbreviated, and
+  it wins over the filesystem: `mtest new` is the scaffolding subcommand even
+  in a directory that contains one called `new`. Spell such a path `./new` —
+  a token beginning `./` is never a subcommand, which makes that spelling
+  stable across every release. Only the leading token is read this way, so
+  `mtest run new` and `mtest collect new` need no prefix at all.
 - Flags may be written `--flag value` or `--flag=value`. Both spellings are
   accepted everywhere a flag takes a value.
 - Short flags that take no value may not be bundled in v1 (`-x -q`, not `-xq`).
@@ -102,59 +171,107 @@ single **invocation root**. In v1 the root is the **current working directory**.
 
 ## 4. Subcommands and flag applicability
 
-| Flag | `run` | `collect` | `doctor` |
-|------|:-----:|:---------:|:--------:|
-| `PATHS...` | ✓ | ✓ | — |
-| `--config PATH`, `--no-config` | ✓ | ✓ | ✓ |
-| `-k STR` | ✓ | ✓ | — |
-| `--exclude GLOB` | ✓ | ✓ | — |
-| `-I PATH` | ✓ | ✓ | — |
-| `--build-arg ARG`, `-- ARGS` | ✓ | ✓ | — |
-| `--precompile SRC[:OUT]` | ✓ | ✓ | — |
-| `--mojo PATH` | ✓ | ✓ | — |
-| `-x`, `--maxfail N` | ✓ | — | — |
-| `-n, --workers N\|auto` | ✓ | accepted, inert | — |
-| `--shard M/N` | ✓ | ✓ | — |
-| `--lf`, `--last-failed`, `--ff`, `--failed-first` | ✓ | — | — |
-| `--serial GLOB` | ✓ | — | — |
-| `--timeout`, `--compile-timeout` | ✓ | ✓ (compile only) | — |
-| `--retries N` | ✓ | — | — |
-| `--no-cache`, `--cache-clear` | ✓ | ✓ | — |
-| `--gate PATH` | ✓ | — | — |
-| `-s`, `--show-output MODE` | ✓ | — | — |
-| `--durations N` | ✓ | — | — |
-| `--junit-xml PATH`, `--gh-annotations` | ✓ | — | — |
-| `--json PATH\|-` | ✓ | — | — |
-| `-q`, `-v`, `--color WHEN` | ✓ | ✓ | ✓ |
-| `--collect-only` | ✓ (→ behaves as `collect`) | n/a | — |
+`new` and `init` are absent from the table below because there is nothing to
+tabulate: `new` accepts no flag at all except `-h`/`--help`, and `init` accepts
+only `--ci VALUE` beside them (§29).
+
+| Flag | `run` | `collect` | `doctor` | `debug` |
+|------|:-----:|:---------:|:--------:|:-------:|
+| `PATHS...` | ✓ | ✓ | — | one node id |
+| `--config PATH`, `--no-config` | ✓ | ✓ | ✓ | ✓ |
+| `-k STR` | ✓ | ✓ | — | — |
+| `--exclude GLOB` | ✓ | ✓ | — | — |
+| `-I PATH` | ✓ | ✓ | — | ✓ |
+| `--build-arg ARG`, `-- ARGS` | ✓ | ✓ | — | ✓ |
+| `--precompile SRC[:OUT]` | ✓ | ✓ | — | — |
+| `--mojo PATH` | ✓ | ✓ | — | ✓ |
+| `-x`, `--maxfail N` | ✓ | — | — | — |
+| `-n, --workers N\|auto` | ✓ | accepted, inert | — | — |
+| `--shard M/N` | ✓ | ✓ | — | — |
+| `--lf`, `--last-failed`, `--ff`, `--failed-first` | ✓ | — | — | — |
+| `--serial GLOB` | ✓ | accepted, inert | — | — |
+| `--timeout`, `--compile-timeout` | ✓ | ✓ (compile only) | — | — |
+| `--retries N` | ✓ | — | — | — |
+| `--fail-on-flaky` | ✓ | — | — | — |
+| `--shuffle`, `--seed N` | ✓ | — | — | — |
+| `--no-cache`, `--cache-clear` | ✓ | ✓ | — | — |
+| `--gate PATH` | ✓ | — | — | — |
+| `-s`, `--show-output MODE` | ✓ | — | — | — |
+| `--durations N` | ✓ | — | — | — |
+| `--junit-xml PATH`, `--gh-annotations` | ✓ | — | — | — |
+| `--json PATH\|-` | ✓ | — | — | — |
+| `--format lines\|json` | — | ✓ | — | — |
+| `-q`, `-v` | ✓ | ✓ | ✓ | accepted, inert |
+| `--color WHEN` | ✓ | ✓ | ✓ | — |
+| `--collect-only` | ✓ (→ behaves as `collect`) | n/a | — | — |
 
 `collect` compiles files to enumerate their tests, so it honors the build and
 selection flags; it does not schedule test execution, so run-time flags
-(`-x`, `--maxfail`, `--retries`, `--durations`, `--serial`, `--lf`, `--ff`,
-reporters) do not apply. The failure-selection flags are refused based on CLI
-presence under either `collect` spelling. `--timeout` is the one exception:
-unlike the other run-only flags above, it is applicable in `collect` mode too,
-because it also bounds each file's `--skip-all` collection probe (§5, §6) — a
-probe is a real process spawn with the same hang risk as a run.
+(`-x`, `--maxfail`, `--retries`, `--fail-on-flaky`, `--durations`, `--serial`,
+`--shuffle`, `--seed`, `--lf`, `--ff`, reporters) do not apply. The
+failure-selection flags are refused based on CLI presence under either
+`collect` spelling. `--timeout` is
+the one exception: unlike the other run-only flags above, it is applicable in
+`collect` mode too, because it also bounds each file's `--skip-all` collection
+probe (§5, §6) — a probe is a real process spawn with the same hang risk as a
+run.
 
-`-n`/`--workers` is marked **accepted, inert** under `collect` because that is
-what this build does: the flag parses and is not refused, but collection probes
-files one at a time, so the value changes nothing. It is recorded rather than
-turned into a refusal because refusing a flag that earlier builds accepted
-would break invocations that pass a uniform flag set to both subcommands.
-Parallel collection is not reserved — it is simply not implemented yet, and
-whichever way it is resolved, this row moves with it.
+`--format lines|json` runs the other way: it shapes a listing, so it is the one
+flag that belongs to `collect` alone, and supplying it to `run`, to
+`config show`, or to `doctor` is an applicability error (exit 4). `lines` is
+the default and is the plain one-node-id-per-line listing this section
+describes; `json` selects the machine-readable stream specified in §16.
+
+`-n`/`--workers` and `--serial GLOB` are marked **accepted, inert** under
+`collect` because that is what this build does: both parse and neither is
+refused, but collection probes files one at a time, so neither value changes
+anything — and with no parallel pass there is nothing for `--serial` to pin a
+file outside of. They are recorded rather than turned into refusals because
+refusing a flag that earlier builds accepted would break invocations that pass
+a uniform flag set to both subcommands. Parallel collection is not reserved —
+it is simply not implemented yet, and whichever way it is resolved, both rows
+move with it.
 
 `config show` accepts the full `run` grammar, including selection and
 per-invocation flags. It resolves the same default, project-file, environment,
 and CLI layers as `run`, then renders and exits without discovery, builds,
 execution, reporter setup, or state parsing or writes.
 
+`debug` is the narrowest grammar of the five. It takes exactly one `PATH::TEST`
+node id — never a plain path, never a second operand — plus the flags that
+decide how that one file is compiled, the configuration controls, and `-q`/`-v`.
+Every other flag is an applicability error (exit 4), including `--retries` and
+`--timeout`, which are refused rather than silently overridden, and including
+`--color`: after the handoff there is no reporter left to color. The reporter
+flags name the reason in their refusal, because a command that replaces the
+mtest process can leave no terminal record behind. `-q` and `-v` are accepted
+for command-line consistency and change nothing, since the only output is the
+two handover lines. Project-file `[report]` keys and last-run state are
+inactive under `debug`: their values are never acted on, though the document
+they live in is still validated as a whole (§28).
+
 `doctor` accepts only the configuration controls and ordinary human-output
 controls shown in the table. A path operand, passthrough token, or any other
 run, build, selection, state, or reporter flag is an argv applicability error
 (exit 4). Malformed values, unknown flags, `-q` with `-v`, and `--config` with
 `--no-config` retain their ordinary usage refusals.
+
+`new` is narrower still, and for a different reason: it discovers nothing,
+builds nothing, and runs nothing, so no flag has anything to act on. It takes
+exactly one `PATH` operand and, beside it, only `-h`/`--help`. Every other
+token — a second operand, a passthrough `--`, or any flag, the configuration
+controls included — is an applicability error (exit 4). It reads no project
+configuration at all, so a malformed `mtest.toml` neither changes nor prevents
+the file it writes (§29.1).
+
+`init` has the same shape and one flag of its own. It takes no operand at all —
+it writes into the invocation root — and accepts `--ci VALUE` beside
+`-h`/`--help`. Every other token is an applicability error (exit 4). `--ci`
+belongs to `init` alone and is not a general flag: supplying it to any other
+subcommand is an unknown-flag usage error (exit 4), which is what keeps
+`mtest --ci github tests` from parsing as a run whose `--ci` value nothing
+reads. Like `new`, `init` reads no project configuration — it writes the
+project configuration (§29.2).
 
 ---
 
@@ -171,6 +288,11 @@ run, build, selection, state, or reporter flag is an argv applicability error
 - Positional PATHS replace `[run] paths` as a whole. With no positional PATHS,
   configured paths are used when present; otherwise the default is `tests/` if
   it exists, else `.`. Configured paths are files or directories, not node ids.
+- A path named after a subcommand is only ambiguous in the **leading** position,
+  where the subcommand wins (§3). Write `./collect`, `./debug`, `./new`, or
+  `./init` to run one, and note that `[run] paths` and every non-leading
+  operand are unaffected — nothing there is ever read as a subcommand, so a
+  configured `paths = ["init"]` means the directory.
 
 **Walk totality.** A directory walk characterizes every entry it lists, and no
 `test_*.mojo` entry it cannot run is dropped in silence. A symlink to a regular
@@ -659,7 +781,10 @@ is safe to delete by hand at any time: it holds nothing that cannot be rebuilt.
 ## 9. Run and collect exit codes
 
 Exit domains are per subcommand. This table and precedence govern `run` and
-`collect`; §27 defines the narrower domains for `config show` and `doctor`.
+`collect`; §27 defines the narrower domains for `config show` and `doctor`,
+§29 defines the `{0, 3, 4}` domains of `new` and `init`, and §28 defines
+`debug`'s pre-handoff domain — past the handoff the exit status is the test
+binary's own and mtest has no code left to define.
 The meanings and precedence within each command domain are **FROZEN**.
 Exit-4's enumerated run/collect triggers grow only as served pre-run surfaces
 grow:
@@ -667,17 +792,27 @@ grow:
 | Code | Meaning |
 |------|---------|
 | 0 | the session ran; every selected test's outcome is PASS or SKIP (exclusions allowed) |
-| 1 | at least one selected outcome is FAIL, CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT, MALFORMED-SUITE, or PRECOMPILE-ERROR |
+| 1 | at least one selected outcome is FAIL, CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT, MALFORMED-SUITE, or PRECOMPILE-ERROR; or the session would otherwise exit 0 and, under `--fail-on-flaky` (§13), counted at least one FLAKY file |
 | 2 | interrupted (SIGINT/SIGTERM); a partial summary is printed |
 | 3 | internal `mtest` error — including protocol drift (a report present but off-grammar) and an environment/I-O failure such as a runtime report-destination open/write failure (a `--json` destination that cannot be opened at session start, or whose stream write later fails — a fatal abort; or a `--junit-xml` target that cannot be created at session start, or whose report cannot be finalized and renamed onto PATH) |
-| 4 | pre-run usage error (unknown flag, bad value, nonexistent path, an explicit operand of a file type mtest cannot run (a FIFO, socket, or device, §5), a path discovery cannot inspect (§5), unknown node id, forbidden build argument, mutually exclusive `--config`/`--no-config`, a selected project config that is missing, unreadable, malformed, or has an invalid key/value, a syntactically invalid `--json` or `--junit-xml` report destination — an empty value or a nonexistent parent directory, the machine-stdout conflict — `--json -` without an explicit `--gh-annotations off`, since the byte-pure stream and the annotation tail cannot share stdout, or a `--cache-clear` target mtest can see and cannot prove it owns, or can prove and cannot delete, §8.5 — a target it cannot characterize at all is treated as absent and exits `0`) — detected **before any test runs** |
+| 4 | pre-run usage error (unknown flag, bad value, nonexistent path, an explicit operand of a file type mtest cannot run (a FIFO, socket, or device, §5), a path discovery cannot inspect (§5), unknown node id, forbidden build argument, mutually exclusive `--config`/`--no-config`, `--seed` without `--shuffle`, `--shuffle` beside `--lf`/`--ff` (§18), a flag applied to a subcommand it does not belong to (§4) — a run-only flag `collect` marks `—`, `--format` outside `collect`, or any run, build, selection, state, or reporter flag under `doctor` — a `--format` value that is neither `lines` nor `json`, a selected project config that is missing, unreadable, malformed, or has an invalid key/value, a syntactically invalid `--json` or `--junit-xml` report destination — an empty value or a nonexistent parent directory, the machine-stdout conflict — `--json -` without an explicit `--gh-annotations off`, since the byte-pure stream and the annotation tail cannot share stdout, or a `--cache-clear` target mtest can see and cannot prove it owns, or can prove and cannot delete, §8.5 — a target it cannot characterize at all is treated as absent and exits `0`) — detected **before any test runs** |
 | 5 | no tests collected (empty walk, `-k` matched nothing, everything excluded) |
 
 **Precedence** when outcomes mix. A usage error aborts before the run with 4.
 Otherwise: an interrupt dominates (→ 2); else an internal error (→ 3); else any
-failing outcome (→ 1); else nothing collected (→ 5); else 0. A user interrupt
-outranks an internal error because the run was truncated on purpose and its
-result is no longer authoritative.
+failing outcome (→ 1); else nothing collected (→ 5); else, under
+`--fail-on-flaky` with at least one FLAKY file, 1 (§13); else 0. A user
+interrupt outranks an internal error because the run was truncated on purpose
+and its result is no longer authoritative. The flaky rung sits at the bottom on
+purpose: it can only ever move a 0, never displace a code some other fact
+already decided.
+
+**A domain is closed against a departed consumer.** `mtest` ignores `SIGPIPE`
+around every write it makes to a descriptor, so a reader that closes early —
+`mtest collect --format json | head -1`, `mtest --help | head -1` — costs the
+rest of that write and nothing else. Death at signal 13, which a shell reports
+as 141, is a status no subcommand produces, and every command exits with a code
+from its own domain whether or not anyone was still reading.
 
 A `--shard` (§18) that owns no run files reaches exit 5 by the same
 nothing-collected rule — but only when nothing else ran: a shard whose gates ran
@@ -799,8 +934,17 @@ rebuilt.
   `--compile-timeout` budget as the first.
 - Every attempt's diagnostics are retained in the report. The **last** attempt's
   outcome is authoritative. A test that passes only after a retry is reported
-  **FLAKY** and, being a pass, exits 0 and by default passes CI
-  (`--fail-on-flaky` is reserved).
+  **FLAKY** and, being a pass, exits 0 and by default passes CI.
+- Under `--fail-on-flaky` (or `[run] fail-on-flaky`), a session whose outcome
+  tier would be 0 and whose summary counts at least one FLAKY file exits 1
+  instead. Terminal verdict only: retry behavior, `--maxfail` counting (a flaky
+  pass still counts 0), and last-run state (a FLAKY file still clears a prior
+  failure — it passed) are unchanged. The report artifacts are unchanged too,
+  and the `--junit-xml` document is the one to know about: a FLAKY file is a
+  pass with a `flakyFailure` child, so the document still reports
+  `failures="0"` beside a process that exits 1. The console band, the
+  `--json` stream's `exit_code`, and the `::notice` all carry the demotion;
+  a CI that renders JUnit alone sees green.
 
 Retries apply to precompile, build, and run steps on both ordinary and
 selection (`-k` or node-id) paths.
@@ -891,9 +1035,13 @@ could otherwise drive the terminal through the very message that rejects it.
 **Which** code points are neutralized is one definition shared by all of these
 surfaces; only the spelling differs.
 
-The `--collect` listing (§16) is the one terminal-reachable output that is
-**not** escaped, deliberately: it is a byte-exact machine listing of node ids,
-specified for tooling to consume, and escaping it would break that contract.
+The `collect` listing under `--format lines` (§16) is the one
+terminal-reachable output that is **not** escaped, deliberately: it is a
+byte-exact machine listing of node ids, specified for tooling to consume, and
+escaping it would break that contract. Under `--format json` the same ids are
+carried as JSON strings and are escaped by that encoding
+(`docs/collect-stream.md`), which is a transport rule rather than this
+display boundary.
 
 This boundary is **display-only**. It does not change what mtest captures, what
 its parser reads, or what the JUnit report (§15.2) or the machine event stream
@@ -1159,8 +1307,10 @@ this section summarizes it.
 
 ## 16. `collect`
 
-`mtest collect [PATHS] [flags]` (and `mtest --collect-only`) lists node ids, one
-per line, sorted **lexicographically**. The runner imposes its own order so the
+`mtest collect [PATHS] [flags]` (and `mtest --collect-only`) lists node ids
+sorted **lexicographically**, in one of two formats: `--format lines`, the
+default, prints one node id per line, and `--format json` prints the versioned
+NDJSON collect stream described below. The runner imposes its own order so the
 frozen output format never couples to TestSuite's discovery order (execution
 still uses discovery order internally). `collect` accepts the selection and
 build flags because it compiles files to enumerate them.
@@ -1179,11 +1329,27 @@ Per file, the build-then-probe (§5, §6) resolves one of four ways:
 - An internal/machinery failure (e.g. an unspawnable build) **aborts** the
   listing outright at **exit 3**.
 
-The session exit code is **3** if any drift or internal failure occurred, else
+The session exit code is **2** if the collection was interrupted, else **3** if
+any drift or internal failure occurred, else
 **1** if any file failed to collect (compile error, crash, timeout, or
 MALFORMED-SUITE), else **5** if nothing was collectable, else **0** —
-consistent with the §9 precedence, under which an internal error (→ 3)
+consistent with the §9 precedence, under which an interrupt (→ 2) dominates an
+internal error (→ 3), which
 dominates a failing outcome (→ 1), which dominates "nothing collected" (→ 5).
+An interrupt reaches `collect` for the same reason it reaches a run: a
+collection probes real child processes, and a `SIGINT` that arrives partway
+through ends it where it stands rather than completing a listing nobody waited
+for.
+
+`--format json` renders that same listing as a versioned NDJSON stream instead
+of plain lines: a header, one `node` record per node id in the identical order,
+and a `collect_finished` terminal carrying the node count and the exit code.
+Both formats are derived from the one sorted listing, so they can never
+describe different test sets, and the diagnostics above stay identical stderr
+text under either. The terminal's `exit_code` is the **final process exit
+code**, teardown included, so a consumer may gate on the record alone.
+`docs/collect-stream.md` is the normative specification; `--format lines` (the
+default) is byte-identical to the listing this section describes.
 
 ---
 
@@ -1216,6 +1382,16 @@ each below states its actual promise, scoped precisely:
   flags, casualty lists, totals, and the final exit code — never byte order and
   never a duration or byte-payload field. Two runs' raw streams may differ line
   for line while still agreeing on that projection.
+
+**`--shuffle` randomizes execution order and nothing else.** It reorders the
+run files a session executes; every reported surface above stays node-id
+sorted, exactly as it does under `-n`, so no listing, document, or summary
+moves because the order did. The promises in this section are promises about
+the same inputs, and a seed is one of those inputs: `--shuffle --seed N` holds
+all of them run to run, while a bare `--shuffle` draws a fresh seed per
+invocation, which is a different input each time. The resolved seed is printed
+on the console header and, under `--json`, carried on `session_started`, so the
+order a run actually took is always attributable and repeatable.
 
 The build cache is the one thing that varies with history rather than with
 inputs, and both projections carve it out:
@@ -1303,6 +1479,20 @@ this shard does not own is not this shard's to reject. Sharded-out files are
 **counted, not listed** (§10.2), and a shard that owns no run files falls under
 the empty-collection exit code (§9).
 
+**`--shuffle` and `--seed N`.** `--shuffle` randomizes the order the RUN files
+execute in, to surface a test file that only passes because another ran first.
+Gate files are never shuffled: they keep their listed order and still run
+first. `--seed N` fixes that order to a reproducible draw and requires
+`--shuffle` (exit 4 otherwise, as is `--seed` with a value that is not an
+integer `>= 0`). Without `--seed` the runner draws a seed itself and reports
+it, so any randomized run can be replayed. The seed-to-order mapping is frozen
+for 1.x: one seed names one order over one file list, on every platform.
+`--shuffle` is refused beside `--lf`/`--ff` (exit 4), because those choose an
+order too. It composes with `--shard`: the partition is applied first, over the
+sorted list, so shard membership is unchanged and only the order within a
+shard's own files moves. It is a run-only flag (§4) and is never read from
+`mtest.toml`.
+
 **`--serial GLOB` (repeatable).** Pins every file matching `GLOB` to run outside
 the parallel pool, one at a time, for suites with a shared resource (a port, a
 device) that cannot tolerate concurrent access. Each occurrence adds one glob
@@ -1334,43 +1524,89 @@ file's result line carries an informal `SERIAL` marker (§15.1).
 
 ## 20. Stability tiers
 
-- **FROZEN at v1.0, and frozen now** — subcommands; flag names and semantics;
+- **FROZEN, each from the release that first served it** — the bulk of this
+  list shipped in 1.0.0 and froze there; the entries marked below as 1.1's are
+  frozen from 1.1. The bare subcommand *vocabulary* is the one declared
+  exception (see the header): reserving a new leading token is permitted, while
+  every subcommand already served keeps its name, grammar, and meaning. The
+  list: subcommands; flag names and semantics;
   exit codes; the node-id grammar; `mtest.toml` key names and semantics (§25);
   `--lf`/`--last-failed` and `--ff`/`--failed-first` semantics (§26);
+  *(from 1.1)* `--shuffle`/`--seed` semantics, including what shuffling
+  reorders and what it leaves node-id sorted, and the **seed-to-order
+  mapping**: one seed names one permutation of one file list, byte-identically
+  on every platform, so a printed seed reproduces the order that produced a
+  failure (§18); *(from 1.1)* `--fail-on-flaky` semantics and its position in
+  the exit precedence (§13, §9); *(from 1.1)* the `--format` value set and
+  which subcommand it belongs to (§4, §16);
   the JUnit mapping; the annotation shapes; the `--json` event stream schema
   (§15.4; normatively `docs/json-stream.md`) — its framing, header, event and
   field names, and token vocabularies, frozen at stream `version` 1 and
   growing only additively (new fields and kinds; a removal or a meaning-change
-  bumps the header version); the `collect` format; the test-module contract.
+  bumps the header version); the `collect` format — the plain listing, and
+  *(from 1.1)* the `--format json` collect stream (§16; normatively
+  `docs/collect-stream.md`), whose framing, header, event names and field names
+  are frozen at collect-stream `version` 1 and grow only additively under that
+  same rule; *(from 1.1)* `debug`'s preparation semantics and refusal set, and
+  the presence and order of its two `build:`/`run:` lines (§28); *(from 1.1)*
+  the refusal rules and exit domains of `new` and `init` (§29); the
+  test-module contract.
 - **STABLE-INTENT** — default values (timeouts, `auto` worker sizing) may be
   tuned in minor versions; the self-versioned `.mtest-cache/lastrun` format
-  (§26), whose incompatible changes require a new format version.
+  (§26), whose incompatible changes require a new format version; the contents
+  of every file `new` and `init` scaffold (§29). Those templates may improve in
+  a minor release: what is promised is the §29 refusal rules — the no-replace
+  publication and the exit domains above — and, for the workflow, byte-parity
+  with the first YAML block of [the continuous-integration page](ci.md). That
+  parity includes pinning each third-party action to the same commit the
+  documentation pins, so a pin that moves in the documentation moves in the
+  scaffold — which is what makes those commits a deliberate choice rather than
+  a copy that quietly went stale.
 - **INFORMAL** — console text layout and colors; the human-facing
-  `config show` TOML output (§27.1).
+  `config show` TOML output (§27.1); the wording of the per-artifact and
+  next-step status lines `new` and `init` print (§29); the exact quoting style
+  of `debug`'s two lines, whose presence and order are frozen above while the
+  shell-quoting that makes them pasteable is not (§28).
 - TestSuite invocation details are an internal seam, never public API.
 
 ---
 
-## 21. Reserved (documented as reserved, not in v1)
+## 21. Planned, not served
 
-The following are out of scope for v1 and reserved for the next major version.
-Under the amendment rule at the top of this document, none of them can land in
-a 1.x release: adding one is what a major version is for. Each is either
-unrecognized by the parser, or recognized-but-refused as noted:
+The following are not served by any build in the 1.x line so far. Nothing here
+is a commitment to a release, and each is either unrecognized by the parser or
+recognized-but-refused as noted. They do **not** share one release rule, so the
+list is split by which one applies: whether serving the item would only add to
+the inventory, or would change what something already served means.
 
-`--root`; boolean `-k` expressions; `--pattern`; a **per-test** granularity for
-`--durations` (the slowest individual *tests*, not just files — blocked on the
-same upstream per-test timing gap that blocks per-test attribution elsewhere;
-the file-level `--durations N` is itself served now, §15.1); markers /
-`xfail`; `--asan`; `--shuffle` (file-order randomization to surface order
-dependencies); `--fail-on-flaky`; watch mode; a **relocatable** build-cache
-directory (`--cache-dir`); and a
-machine-readable `config show` format (the served TOML display is informal
-human output, §27.1). The build cache itself is served (§8.5), but only as a
-per-checkout store at the fixed path `.mtest-cache/build-v1/`: choosing where it
-lives, sharing it between checkouts or machines, and saving and restoring it in
-CI are separate deliverables, each of which needs a key that survives leaving
-the machine it was computed on.
+**Additive — may land in a future minor.** `--root`; `--pattern`; markers /
+`xfail`; `--asan`; watch mode; and a **relocatable** build-cache directory
+(`--cache-dir`). Each of these is a new flag whose absence today means "off",
+so serving one leaves every existing invocation reading exactly as it does now.
+The build cache itself is served (§8.5), but only as a per-checkout store at
+the fixed path `.mtest-cache/build-v1/`: choosing where it lives, sharing it
+between checkouts or machines, and saving and restoring it in CI are separate
+deliverables, each of which needs a key that survives leaving the machine it
+was computed on.
+
+**Not additive — these wait for a major**, because serving them would move a
+surface that is already frozen:
+
+- **Boolean `-k` expressions.** `-k` is served as a case-insensitive substring
+  filter (§5), so today `-k "a and b"` matches node ids containing that literal
+  text. Giving `and`, `or`, and `not` meaning would silently change what an
+  existing, currently-valid `-k` value selects — a meaning change to a served
+  flag, not an addition beside it.
+- **A per-test granularity for `--durations`** (the slowest individual *tests*,
+  not just files). The file-level `--durations N` is served (§15.1), so this is
+  a redefinition of what `N` counts rather than a new surface. It is
+  additionally blocked on the same upstream per-test timing gap that blocks
+  per-test attribution elsewhere.
+- **A machine-readable `config show` format.** §20 freezes the `--format` value
+  set *and which subcommand it belongs to*: `--format` is `collect`'s alone,
+  and supplying it anywhere else is a usage error (§4). Serving
+  `config show --format json` would change that frozen applicability. The
+  served TOML display stays informal human output in the meantime (§27.1).
 
 ---
 
@@ -1554,6 +1790,7 @@ timeout = 30  # (cli)
 retries = 1  # (mtest.toml)
 maxfail = 0  # (default)
 state = true  # (default)
+fail-on-flaky = false  # (default)
 
 [build]
 mojo = "mojo"  # (default)
@@ -1708,23 +1945,28 @@ above — it only reports which of those surfaces are wired up yet.
 `--config`, `--no-config`, `-I`, `--build-arg` (and post-`--` passthrough),
 `--precompile`, `--mojo`,
 `-x`/`--exitfirst`, `--maxfail`, `--timeout`, `--compile-timeout`, `--retries`,
+`--fail-on-flaky`,
 `--shard`, `--lf`/`--last-failed`, `--ff`/`--failed-first`,
-`-n`/`--workers`, `--serial`, `--no-cache`, `--cache-clear`, `--gate`,
+`-n`/`--workers`, `--serial`, `--shuffle`/`--seed`,
+`--no-cache`, `--cache-clear`, `--gate`,
 `-s`/`--show-output`,
-`--durations`, `-q`/`-v`, `--color`,
+`--durations`, `-q`/`-v`, `--color`, `--format`,
 `-h`/`--help`, `--version`, and the `run`, `collect`, `config show`, `doctor`,
-`version`, and `help` subcommands (`--collect-only` too, as an alias that
-behaves as `collect`).
+`debug`, `new`, `init`, `version`, and `help` subcommands (`--collect-only`
+too, as an alias that behaves as `collect`), plus `init`'s own `--ci VALUE`.
 `--shard` applies under both `run` and `collect`. `--json` (the machine event
 stream, §15.4), `--junit-xml` (the JUnit report, §15.2), and `--gh-annotations`
 (the CI annotation tail, §15.3) are served too — see §24.2 for how they are now
-reached. `--no-cache`/`--cache-clear` act on the persistent build-artifact
+reached. `--format lines|json` is served under `collect` and refused everywhere
+else (§4), with `lines` the default.
+`--no-cache`/`--cache-clear` act on the persistent build-artifact
 store described in §8.5, which this build reads and writes by default.
 
 Every flag and subcommand in the frozen contract above is now served: nothing is
 refused for being unavailable. For `run` and `collect`, exit 4 therefore covers
 exactly the frozen §9 causes. `Config show` and `doctor` use the applicability
-rules and command-specific exit domains in §27.
+rules and command-specific exit domains in §27; `debug` uses §28's, and `new`
+and `init` use §29's.
 
 ### 24.2 Run and collect exit codes reachable in this build
 
@@ -1736,19 +1978,27 @@ code exist today. Section 27 separately covers the reachable `config show` and
 - **1** — reachable for FAIL, CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT,
   MALFORMED-SUITE, and PRECOMPILE-ERROR. FLAKY (a pass produced only after a
   crash-class retry) is also emitted now, and, being a pass, does **not** raise
-  the exit code — a FLAKY-only session exits 0.
+  the exit code — a FLAKY-only session exits 0. It is additionally reachable
+  from a FLAKY-only session under `--fail-on-flaky` (or `[run] fail-on-flaky`),
+  which demotes that would-be 0 to 1 (§13).
 - **2** — reachable for both the sequential and the parallel path. An interrupt
   (SIGINT/SIGTERM) prints a partial summary, reports the files that had not yet
   started as NOT-RUN, and cleans up every in-flight child's process group with a
   two-pass terminate-then-kill sweep; a second interrupt escalates to an
   immediate hard kill of every group, leaving no survivor. The exit is 2
-  regardless of any failing outcome already accounted.
+  regardless of any failing outcome already accounted. It is reachable under
+  `collect` too, where a probe is an ordinary child process: the listing ends
+  where the interrupt found it, and under `--format json` the terminal record
+  carries the same 2 the process exits with.
 - **3** — reachable via a spawn failure (the runner could not spawn `mojo` or
   a built binary), via protocol drift (a report present but off-grammar, §6)
   in both `run` and `collect`, and via runtime `--json` or `--junit-xml`
   report-destination failures (§9).
 - **4** — reachable under `run` and `collect` for every served cause in §9 —
-  including mutually exclusive config controls; a selected config that is
+  including mutually exclusive config controls; `--seed` without `--shuffle`
+  and `--shuffle` beside `--lf`/`--ff`; a `--format` value that is neither
+  `lines` nor `json`, and `--format` outside `collect` at all; a selected
+  config that is
   missing, unreadable, malformed, or invalid; a syntactically invalid `--json`
   or `--junit-xml` destination; the `--json -`/annotations stdout conflict; and
   a `--cache-clear` target that is a symlink, carries no deletion-authorization
@@ -1779,6 +2029,48 @@ resolved-on. Beside `--json -` it must be explicitly `off` — the default `auto
 and an explicit `on` are usage errors (exit 4) detected by pre-run resolved
 validation (§9). The stop-commands fencing of echoed child output is active whenever
 `GITHUB_ACTIONS=true`, independent of the mode.
+
+**`debug` reachability.** `mtest debug PATH::TEST` is served (§28). Its whole
+exit domain is pre-handoff and is `{1, 2, 3, 4}` plus whatever the test binary
+itself exits with: 4 for a malformed node id, an unknown path, a node id whose
+path is not a runnable file, an unknown test name, or any flag outside its
+grammar; 2 for an interrupt during the build or the probe; 3 for a spawn or
+machinery failure, for protocol drift, and for a failed exec or a failed
+runtime restoration; and 1 for a failed precompile step, a compile error, a
+build killed at `--compile-timeout`, or a probe that crashed, timed out,
+overflowed its capture, or did not read as a collection listing. Once the
+handoff happens mtest is gone, so the process's exit status is the binary's own
+statement and no code in this section applies to it.
+
+**`new` reachability.** `mtest new PATH` is served (§29.1). Its whole exit
+domain is `{0, 3, 4}`: 0 with `created PATH` on stdout, 4 for a target carrying
+`::`, a target that is not Mojo source, a basename no directory walk would
+collect, a target that already exists, or anything in argv but one operand and
+`-h`/`--help`, and 3 for a filesystem failure while creating the directories or
+the file. There is no other code, because nothing is discovered, built, or run.
+
+**`init` reachability.** `mtest init [--ci github]` is served (§29.2). Its
+whole exit domain is `{0, 3, 4}`: 0 for a run that created every artifact, one
+that skipped every artifact, or any mixture — an all-skip is a success, because
+the promise is that the artifacts exist, not that this run made them — 4 for a
+`--ci` value other than `github`, for an artifact name held by a symlink or
+anything else that is not a regular file, and for anything in argv beyond
+`--ci VALUE` and `-h`/`--help`, and 3 for a filesystem failure while creating a
+directory, writing an artifact, or rewriting `.gitignore`, for a `.gitignore`
+past the 1 MiB rewrite ceiling, and for a `.gitignore` that appeared after the
+pre-run observation and is not a regular file. Every exit-4 cause is decided
+before the first artifact is created, so a refused `init` leaves the directory
+as it found it. There is no other code, because nothing is discovered, built,
+or run.
+
+**`--format` reachability.** `--format lines|json` is served under `collect`
+(§16): `lines` is the default and leaves the listing byte-identical to a run
+without the flag, while `json` renders the collect stream specified in
+`docs/collect-stream.md`. Both refusals are pre-run usage errors (exit 4): an
+unrecognized value, and the flag supplied to anything but `collect`. Because
+the terminal record carries the teardown-adjusted exit code, none of the codes
+above becomes unreachable or changes meaning under `json`; the stream reports
+whichever one the collection resolves.
 - **5** — reachable via an empty walk, via the everything-excluded case, and
   via deselection (`-k` matched nothing, §9).
 
@@ -1807,7 +2099,8 @@ the node-id grammar, and both converge to the contract as the runner matures.
   does not yet reject a repeated single-valued option (`-k`, `--shard`,
   `--maxfail`, `--timeout`, `--retries`, `-n`/`--workers`, `--mojo`,
   `--compile-timeout`, `-s`/`--show-output`, `--durations`, `--color`,
-  `--json`, `--junit-xml`, `--gh-annotations`, `--config`): it silently uses
+  `--format`, `--json`, `--junit-xml`, `--gh-annotations`, `--config`,
+  `--seed`, `init`'s `--ci`): it silently uses
   the **last** occurrence (so `-k a -k b` filters by `b`, not `a or b`). Until
   the at-most-one check is enforced (a usage error, exit 4), do not rely on
   repeating these flags. The mutually-exclusive `-q`/`-v` pair is already
@@ -1840,6 +2133,7 @@ timeout = 300                    # integer seconds >= 0
 retries = 0                      # integer >= 0
 maxfail = 0                      # integer >= 0
 state = true
+fail-on-flaky = false            # exit 1 on a FLAKY-only session
 
 [build]
 mojo = "mojo"
@@ -2014,7 +2308,17 @@ diagnostic as `run`.
 The human-facing output is valid, copy-pasteable TOML in fixed `[run]`,
 `[build]`, `[report]`, then ordered `[[override]]` table order. Every set
 configuration key carries one trailing source label: `default`, `mtest.toml`,
-`env MTEST_MOJO`, or `cli`. Unset optional destinations are comments.
+`env MTEST_MOJO`, or `cli`.
+
+**The rendering grows with the configuration schema, and that is not a
+compatibility event.** A minor that adds a configuration key adds its line
+here — 1.1 added `fail-on-flaky = false  # (default)` under `[run]`, so the
+same project renders one more line than it did under 1.0. This output is
+INFORMAL (§20) precisely so the display can track the schema without every new
+key becoming a breaking change; a tool that needs a stable answer should read
+the `--json` event stream rather than parse this.
+
+Unset optional destinations are comments.
 `workers = "auto"` represents the automatic worker sentinel. Strings and
 arrays are TOML basic strings, precompile entries use canonical `SRC` or
 `SRC:OUT` form, and enum values use their accepted lowercase spellings.
@@ -2111,3 +2415,306 @@ the other commands refuse them as usage errors and exit 4.
 fixed inventory is completeness-critical: these controls never suppress,
 duplicate, or add check lines. Doctor output is uncolored; verbosity does not
 alter its one-line details.
+
+---
+
+## 28. Handing the terminal to one test
+
+`mtest debug PATH::TEST` exists for the moment a report is not what you want.
+It prepares exactly one test the way a run would, prints the two commands it
+used, and then **replaces the mtest process** with the test binary, so the test
+owns the raw terminal: its stdin, its stdout and stderr connected directly to
+the ones mtest was given rather than to a capture pipe, its signals, its
+debugger, and its exit status, with nothing in between. What the replacement
+process then does with those descriptors — line buffering, full buffering, none
+— is its own runtime's choice, which `execv` cannot constrain.
+
+**Preparation.** Everything before the handoff is ordinary supervised work. The
+node id is resolved against the invocation root exactly as a `run` operand is
+(§2, §5); the project file's precompile steps run — the flag itself is outside
+the grammar below, but `[build] precompile` stays active, because a file that
+imports a precompiled package cannot be built without them; the file is built;
+and the built binary is probed with `--skip-all` (§6) to learn which tests it
+actually collects. The requested name is validated against that listing, so a
+typo is refused here rather than discovered later by a binary that would have
+run nothing. The build cache is off for the whole preparation and `retries` is
+zero, which is what makes the printed `build:` line reproducible by hand: the
+output is the deterministic `build/bin/` path, not a content-addressed store
+artifact (§8.5).
+
+**Grammar.** Exactly one operand, carrying exactly one `::`. Beside it,
+`--mojo PATH`, `-I PATH`, `--build-arg ARG` and post-`--` passthrough,
+`--config PATH` or `--no-config`, and `-q`/`-v`. Every other flag is an
+applicability error (exit 4, §4). `--retries` and `--timeout` are refused
+rather than silently overridden, and `--color` and the reporter flags are
+refused because the handoff leaves nothing behind to render or write with; each
+reporter refusal says so.
+
+**Inactive configuration.** Under `debug` the project file's `[report]`
+destinations and the last-run state are inactive, which means their values are
+never acted on: no report destination is resolved, checked, created, opened or
+written, and `.mtest-cache/lastrun` is neither read nor written. A
+`[report] junit-xml = "r.xml"` therefore produces no file and no diagnostic,
+and an existing `lastrun` is left byte-for-byte as it was. The build keys and
+both deadlines stay active, so a per-file `[[override]]` still bounds the build
+and the probe.
+
+Inactive is not the same as unparsed, and the difference is worth stating
+plainly. The selected configuration file is still parsed and validated as a
+document before any command projection exists, so a malformed value in *any*
+table — `[report] color = "not-a-color"`, `[run] state = "not-a-boolean"` — is
+a usage error (exit 4) under `debug` exactly as it is under `run` and
+`collect`. A configuration file is well-formed or it is not, and that question
+does not depend on which subcommand happens to read it.
+
+**Captured output.** A refusal that came from a child carries what that child
+wrote. A build that failed to compile prints the compiler's own banner beneath
+its diagnostic, a crashing or malformed probe prints what the binary wrote to
+stderr, and a failed precompile step prints the compiler output for that step —
+all on stderr, bounded, with control characters escaped and a note when the
+tail was dropped. There is no reporter under `debug` to echo them through, so
+they travel on the diagnostic channel instead of being lost.
+
+**Exit codes, all decided before the handoff.**
+
+| Code | Cause |
+|------|-------|
+| 4 | a malformed node id, an unknown path, a node id whose path is not a runnable file, an unknown test name, a flag outside the grammar above, or a selected project config that is missing, unreadable, malformed, or invalid |
+| 2 | interrupted during the build or the probe, or an interrupt latched at any point before the handoff — including while the two lines below were still being written |
+| 3 | a spawn or machinery failure, protocol drift (§6), a failed exec, or a failed exec-runtime restoration |
+| 1 | a failed precompile step, a compile error, a build killed at `--compile-timeout`, or a probe that crashed, timed out, overflowed its capture, or did not read as a collection listing |
+
+**The handoff.** On success mtest writes exactly two lines to stdout,
+shell-quoted so they can be pasted back:
+
+```text
+build: mojo build tests/test_thing.mojo -o build/bin/tests_stest_uthing
+run: build/bin/tests_stest_uthing --only test_case
+```
+
+It flushes them, samples the interrupt latch, closes the exec runtime, samples
+it once more, and — **only if the close succeeded and neither sample was set**
+— replaces itself with the binary. The samples are what stop an interrupt that
+arrived during the preparation, or while that write was blocked on a reader
+that had stopped reading, from being answered with the debuggee's exit status
+as though nothing had been interrupted. A failed close is refused as a
+handoff (exit 3) rather than pressed through: restoration is what returns
+`SIGPIPE` to its default disposition, and a debuggee that inherited `SIG_IGN`
+would survive a broken pipe that should have killed it, so a genuine crash
+could read as a pass.
+
+From the exec on there is no mtest. The process id, the process group, the
+controlling terminal, the signal routing, and every descriptor not marked
+close-on-exec are the test binary's; **mtest renders no summary and makes no
+verdict claim**. A post-handoff exit `0` is the binary's statement, not an
+mtest PASS, and there is deliberately no machinery that could turn it into one.
+
+Like doctor's restoration (§27.2), the close-to-exec window is disclosed rather
+than papered over: restoration puts each signal back one at a time, so a signal
+arriving between the first restored disposition and the exec follows the
+restored disposition rather than being guaranteed a `debug` exit code. The
+window is the price of handing over a process whose signal state is the default
+one.
+
+---
+
+## 29. Writing source: `new` and `init`
+
+Two subcommands produce source rather than consuming it. They share one
+publication rule and one promise: an artifact is written under a temporary name
+in its own destination directory and published with a hard link, so an existing
+file is refused by the filesystem itself and its bytes are never opened,
+truncated, appended to, or renamed onto. `init`'s `.gitignore` handling is the
+one documented departure, specified in §29.2.
+
+Both words are now reserved in the leading position, which is the compatibility
+exception declared at the top of this document: `mtest new` and `mtest init`
+are these subcommands even in a directory holding files by those names, where
+earlier builds would have run them. Spell the path `./new` or `./init` to get
+the old behavior back; the prefix is never read as a subcommand.
+
+### 29.1 One test file — `mtest new PATH`
+
+`mtest new PATH` writes a single runnable test file and stops. It is the
+narrower of the two subcommands that produce source rather than consuming it —
+`init` (§29.2) writes a whole project, this one writes exactly one file — and
+it exists because the shape of a Mojo test file is not guessable: `test_*` functions are only half
+of it, and a file without the `main()` that hands them to `TestSuite` builds
+into a program that runs nothing (§6).
+
+**Grammar.** Exactly one `PATH` operand, plus `-h`/`--help` and nothing else
+(§4). No configuration is read, no toolchain is resolved, and no file is
+discovered, built, or run. `PATH` is not root-constrained — it names a file to
+create rather than a test to select, so the §2 rule for operands does not
+apply to it, exactly as it does not apply to a report destination (§15.2).
+
+**What it writes.** A file whose basename a directory walk would collect
+(§5) — so `test_*.mojo`, and any other spelling is refused rather than written
+somewhere the runner will never look again. A `PATH` containing `::` is refused
+for the same reason from the other direction: `::` separates a path from a test
+name (§5), so a file created under such a name is one mtest could never be
+pointed at afterwards. Missing parent directories are created. The file is
+created with the permissions any other tool would give it — `0666` minus the
+process umask — not the private mode a temporary file carries.
+
+The file's subject is its own basename with the `test_` prefix and the `.mojo`
+suffix removed, so `tests/test_math.mojo` is a file of tests for `math`. That
+name is escaped for the docstring it lands in, so every legal basename yields a
+file that compiles. It carries a module docstring, the `std.testing` import,
+one passing example test, and the `main()` that discovers and runs them, and it
+passes as written:
+
+```console
+$ mtest new tests/test_math.mojo
+created tests/test_math.mojo
+$ mtest tests/test_math.mojo; echo "EXIT=$?"
+...
+EXIT=0
+```
+
+**Scaffold targets are never overwritten.** An existing target is refused, and
+that refusal is a property of the filesystem rather than of a check: the file
+is written under a temporary name in the target's own directory and published
+with a hard link, which fails when the destination name is taken. A file
+created by anything else between the decision and the publication is therefore
+refused too, and its bytes are left exactly as they were. No path through this
+subcommand opens, truncates, appends to, or renames onto an existing file.
+
+**Exit codes.**
+
+| Code | Cause |
+|------|-------|
+| 0 | the file was created; `created PATH` is written to stdout |
+| 4 | a target containing `::`, a target that does not end in `.mojo`, a basename no directory walk would collect, a target that already exists, or anything in argv beyond one operand and `-h`/`--help` |
+| 3 | a filesystem failure: the parent directories could not be created, or the file could not be written or published |
+
+Nothing else is reachable. Every diagnostic goes to stderr and the success line
+goes to stdout (§19), and the diagnostics themselves are informal text (§20) —
+the exit code and the file's presence are what this section freezes.
+
+### 29.2 A whole project — `mtest init [--ci github]`
+
+`mtest init` writes the files a project needs before a first run means
+anything, into the invocation root, and stops. It runs before configuration
+discovery for the same reason `new` does, and one better: the configuration it
+writes is the file that discovery would have read.
+
+**Grammar.** No operand — the destination is the invocation root — plus
+`--ci VALUE` and `-h`/`--help`, and nothing else (§4). No configuration is
+read, no toolchain is resolved, and no file is discovered, built, or run.
+
+**What it writes**, in this order:
+
+| Artifact | Content |
+|----------|---------|
+| `tests/test_example.mojo` | the §29.1 test file, for the subject `example` |
+| `mtest.toml` | `[run] paths = ["tests"]`, so a bare `mtest` runs the suite |
+| `.github/workflows/test.yml` | under `--ci github` only |
+| `.gitignore` | `.mtest-cache/` and `build/bin/` entries, added rather than replaced |
+
+The workflow is byte-identical to the first YAML block of
+[the continuous-integration page](ci.md), which is therefore the single place
+it is written down; a gate extracts that block and compares it against what the
+runner emits, so the two cannot drift. Its `--ci` value is closed: `github` is
+the one provider this build writes a workflow for, and any other value is a
+usage error (exit 4) raised before anything is created.
+
+**Nothing is replaced.** Each artifact goes through §29's no-replace
+publication, so an artifact that already exists is reported and left alone. A
+second `init` is therefore an all-skip that still exits 0: the command promises
+the artifacts exist, not that this run created them. `skipped` means an
+ordinary file is already there and, for `.gitignore`, that the cache is
+genuinely ignored — never merely that the name is taken. A name held by a
+symlink, a directory, or anything else that is not a regular file is a refusal
+(exit 4) decided before the first artifact is created, because reporting it as
+`skipped` would claim a file exists that does not. One line is emitted per
+artifact —
+
+```text
+created <path>
+skipped <path> (exists)
+updated .gitignore
+```
+
+— followed by the prerequisites the project still needs, which are output
+rather than decoration. Every one of them is load-bearing and they are ordered:
+the workspace has to exist before a channel can be added to it (`pixi workspace
+channel add` fails outright without a `pixi.toml`), the package has to be in
+the workspace before `mtest` resolves at all, and under `--ci github` the
+workflow installs from the lock file, which only exists once `pixi add` has
+run. The trailing commit line is emitted under `--ci github` alone, because
+without a workflow nothing here needs a committed lock.
+
+```console
+$ mtest init --ci github
+created tests/test_example.mojo
+created mtest.toml
+created .github/workflows/test.yml
+created .gitignore
+next: pixi init .
+next: pixi workspace channel add https://conda.modular.com/max/
+next: pixi workspace channel add https://repo.prefix.dev/modular-community
+next: pixi add mtest
+next: mtest
+next: commit pixi.toml and pixi.lock, which the workflow installs from
+```
+
+`pixi init .` is listed unconditionally rather than conditionally: `init`
+writes no `pixi.toml` and reads none, so it cannot tell a fresh directory from
+an existing workspace, and the command is a no-op to skip rather than a step to
+guess at. In a workspace that already exists, skip it.
+
+**`.gitignore` is the one file `init` edits.** Adding a line to a file means
+rewriting it, so this artifact alone is read, appended to, and renamed over —
+and the content written back is the content read followed by the added lines,
+which is what makes replacing it correct rather than destructive.
+
+Two entries are written, each under its own comment line and each added only
+when it is missing: `.mtest-cache/` for the build cache and last-run state
+(§8), and `build/bin/` for the binaries every run and every `mtest debug`
+compile from the project's test files (§28). `build/` itself is deliberately
+not claimed — the rest of that tree belongs to whatever else the project
+builds there.
+
+It is read and written as **bytes**. Git accepts a `.gitignore` that is not
+valid UTF-8, so decoding one in order to write it back would turn a legal file
+into a failed bootstrap; only ASCII is ever compared. A file larger than
+1 MiB is refused rather than read to that ceiling and written back truncated.
+
+Whether an entry is already ignored is decided by git's own rules, not by a
+substring search: leading whitespace is part of a pattern (so `  .mtest-cache/`
+ignores nothing and the entry is still added), trailing whitespace is not, a
+`#` comment ignores nothing, a pattern naming an ancestor directory counts (a
+project already ignoring `build/` needs no `build/bin/` line), and the **last**
+matching pattern decides — a `!.mtest-cache/` after a positive pattern puts the
+directory back, so the entry is added again. Wildcards are not expanded, so a
+pattern that would only match through a glob reads as no match and the entry is
+added. `skipped .gitignore (exists)` therefore means `git check-ignore` would
+agree, not merely that some line looked right.
+
+The permission bits of an existing `.gitignore` survive the rewrite, including
+a read-only mode: the replacement is a rename in the containing directory, so
+the file's own write bit never governs it and a `0444` `.gitignore` is updated
+and comes back `0444`. A `.gitignore` whose name is held by a symlink or
+anything else that is not a regular file is refused (exit 4) before any
+artifact is created, rather than followed or replaced.
+
+The window between that read and the rename is a lost update: a concurrent
+writer's change to `.gitignore` inside it is overwritten. This is stated rather
+than solved, and the bound on the damage is what makes that acceptable — it is
+one file, in a directory a person is looking at, in a command run by hand once
+per project.
+
+**Exit codes.**
+
+| Code | Cause |
+|------|-------|
+| 0 | every artifact exists; the per-artifact lines and the next steps go to stdout |
+| 4 | a `--ci` value other than `github`, any artifact name held by a symlink or anything else that is not a regular file, or anything in argv beyond `--ci VALUE` and `-h`/`--help` — each detected before the first artifact is created |
+| 3 | a filesystem failure while creating a directory, writing an artifact, or rewriting `.gitignore`; a `.gitignore` larger than 1 MiB; or a `.gitignore` that appeared between the pre-run observation and its publication and is not a regular file |
+
+Nothing else is reachable. A successful run writes to stdout; a failed one
+writes what it did and what stopped it to stderr, because the record of a
+partial bootstrap belongs with the diagnostic rather than split across two
+streams. As in §29.1, the diagnostics are informal text (§20) — the exit code
+and the artifacts' presence are what this section freezes.

@@ -371,8 +371,9 @@ def run_collect(
     # produced: a file that failed to yield node ids is failing, an empty
     # listing means nothing was collectable, else success. The control-flow
     # facts rank above it in the model resolver, exactly as they do for a run.
-    # A collect probe precompiles nothing and publishes no terminal artifact, so
-    # those two facts are false by construction rather than by omission.
+    # A collect probe precompiles nothing, publishes no terminal artifact, and
+    # runs no test (so nothing can be flaky), which is why those three facts are
+    # false by construction rather than by omission.
     var outcome_code: Int
     if any_failing:
         outcome_code = EXIT_FAILURE
@@ -388,6 +389,7 @@ def run_collect(
             precompile_failed=False,
             outcome_code=outcome_code,
             delivery_failed=False,
+            flaky_failed=False,
         )
     )
     return CollectResult(node_ids^, diags^, code)

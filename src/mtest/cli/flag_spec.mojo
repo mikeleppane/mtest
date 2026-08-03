@@ -54,6 +54,10 @@ struct FlagId:
     comptime FAILED_FIRST = 30
     comptime NO_CACHE = 31
     comptime CACHE_CLEAR = 32
+    comptime FAIL_ON_FLAKY = 33
+    comptime SHUFFLE = 34
+    comptime SEED = 35
+    comptime FORMAT = 36
 
 
 struct FlagGroup:
@@ -229,6 +233,15 @@ def flag_specs() -> List[FlagSpec]:
             FlagGroup.EXECUTION,
         ),
         FlagSpec(
+            "--fail-on-flaky",
+            FlagId.FAIL_ON_FLAKY,
+            0,
+            False,
+            "Exit 1 when any file passed only after retries.",
+            "",
+            FlagGroup.EXECUTION,
+        ),
+        FlagSpec(
             "-n",
             FlagId.WORKERS,
             1,
@@ -253,6 +266,24 @@ def flag_specs() -> List[FlagSpec]:
             True,
             "Run matching files serially (repeatable).",
             "GLOB",
+            FlagGroup.EXECUTION,
+        ),
+        FlagSpec(
+            "--shuffle",
+            FlagId.SHUFFLE,
+            0,
+            False,
+            "Randomize run-file order (gates keep theirs).",
+            "",
+            FlagGroup.EXECUTION,
+        ),
+        FlagSpec(
+            "--seed",
+            FlagId.SEED,
+            1,
+            False,
+            "Fix the --shuffle order to a reproducible seed.",
+            "N",
             FlagGroup.EXECUTION,
         ),
         # CLI-only, exempt from mtest.toml by design (build cache).
@@ -373,6 +404,15 @@ def flag_specs() -> List[FlagSpec]:
             False,
             "Choose auto|always|never color output.",
             "WHEN",
+            FlagGroup.REPORTING,
+        ),
+        FlagSpec(
+            "--format",
+            FlagId.FORMAT,
+            1,
+            False,
+            "Collect output format: lines (default) or json.",
+            "FORMAT",
             FlagGroup.REPORTING,
         ),
         FlagSpec(

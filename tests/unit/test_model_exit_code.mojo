@@ -7,7 +7,7 @@ any number of passing ones. Assertions are exact integer comparisons.
 
 `resolve_exit_code` is total over `TerminalFacts` and decides the code the
 process actually exits with. Its whole domain is enumerated below — every
-combination of the five boolean facts against every code the outcome tier can
+combination of the six boolean facts against every code the outcome tier can
 present — because this is the product contract, and an exit code is right or it
 is a lie. The named tests beside the table pin each individual rule at literal
 values, so the table's expectation ladder is never the only witness.
@@ -53,12 +53,14 @@ def _resolved(
     precompile_failed: Bool,
     outcome_code: Int,
     delivery_failed: Bool,
+    flaky_failed: Bool = False,
 ) -> Int:
     """Resolve one fact combination, spelled positionally for the tables below.
 
     Keeps every assertion in this file a single readable line and lets the
-    exhaustive table drive the six facts from loop variables. Does not mutate or
-    raise.
+    exhaustive table drive the seven facts from loop variables. `flaky_failed`
+    defaults to False so every case that predates it keeps reading as one line.
+    Does not mutate or raise.
     """
     return resolve_exit_code(
         TerminalFacts(
@@ -68,6 +70,7 @@ def _resolved(
             precompile_failed=precompile_failed,
             outcome_code=outcome_code,
             delivery_failed=delivery_failed,
+            flaky_failed=flaky_failed,
         )
     )
 
@@ -152,10 +155,10 @@ def test_multiple_failing_outcomes_still_one() raises:
 
 
 def test_resolver_precedence_table_is_exhaustive() raises:
-    # The WHOLE domain: every combination of the five boolean facts (32) against
+    # The WHOLE domain: every combination of the six boolean facts (64) against
     # every code the outcome tier can present (5) — 0, 1 and 5 from
     # `exit_code_for`, plus 2 and 3 for the caller that re-applies the delivery
-    # precedence to a code the session already resolved. 160 cases, none sampled.
+    # precedence to a code the session already resolved. 320 cases, none sampled.
     #
     # The expectation is written as a SINGLE-PASS ladder with the delivery fact
     # hoisted above the 3-tier and the 1-tier, deliberately a different shape
@@ -163,12 +166,13 @@ def test_resolver_precedence_table_is_exhaustive() raises:
     # one shows up as a disagreement rather than cancelling out.
     var codes = [0, 1, 2, 3, 5]
     var seen = 0
-    for bits in range(32):
+    for bits in range(64):
         var interrupted = (bits & 1) != 0
         var internal_error = (bits & 2) != 0
         var drift = (bits & 4) != 0
         var precompile_failed = (bits & 8) != 0
         var delivery_failed = (bits & 16) != 0
+        var flaky_failed = (bits & 32) != 0
         for c in codes:
             var expected: Int
             if interrupted:
@@ -189,6 +193,9 @@ def test_resolver_precedence_table_is_exhaustive() raises:
                 expected = 3
             elif precompile_failed:
                 expected = 1
+            elif flaky_failed and c == 0:
+                # The lowest rung of all: only a would-be 0 is demoted.
+                expected = 1
             else:
                 expected = c
             assert_equal(
@@ -199,12 +206,13 @@ def test_resolver_precedence_table_is_exhaustive() raises:
                     precompile_failed,
                     c,
                     delivery_failed,
+                    flaky_failed,
                 ),
                 expected,
                 "facts bits=" + String(bits) + " outcome_code=" + String(c),
             )
             seen += 1
-    assert_equal(seen, 160, "the table must enumerate the whole domain")
+    assert_equal(seen, 320, "the table must enumerate the whole domain")
 
 
 def test_clean_run_resolves_to_the_outcome_code() raises:
@@ -296,6 +304,49 @@ def test_delivery_precedence_reapplied_to_an_already_resolved_code() raises:
     assert_equal(_resolved(False, False, False, False, 5, True), 3)
     assert_equal(_resolved(False, False, False, False, 2, True), 2)
     assert_equal(_resolved(False, False, False, False, 3, True), 3)
+
+
+def test_flaky_failed_turns_success_into_failure() raises:
+    # Under `--fail-on-flaky` a session whose outcome tier would be 0 and whose
+    # summary counts at least one FLAKY file exits 1 instead.
+    var facts = TerminalFacts(
+        interrupted=False,
+        internal_error=False,
+        drift=False,
+        precompile_failed=False,
+        outcome_code=EXIT_SUCCESS,
+        delivery_failed=False,
+        flaky_failed=True,
+    )
+    assert_equal(resolve_exit_code(facts), EXIT_FAILURE)
+
+
+def test_flaky_failed_never_outranks_interrupt() raises:
+    # The flaky demotion is the lowest rung: an interrupt still resolves to 2.
+    var facts = TerminalFacts(
+        interrupted=True,
+        internal_error=False,
+        drift=False,
+        precompile_failed=False,
+        outcome_code=EXIT_SUCCESS,
+        delivery_failed=False,
+        flaky_failed=True,
+    )
+    assert_equal(resolve_exit_code(facts), EXIT_INTERRUPTED)
+
+
+def test_flaky_failed_does_not_touch_nothing_ran() raises:
+    # Only a would-be 0 is demoted: an empty run has no flaky file, so 5 stands.
+    var facts = TerminalFacts(
+        interrupted=False,
+        internal_error=False,
+        drift=False,
+        precompile_failed=False,
+        outcome_code=EXIT_NOTHING_RAN,
+        delivery_failed=False,
+        flaky_failed=True,
+    )
+    assert_equal(resolve_exit_code(facts), EXIT_NOTHING_RAN)
 
 
 def main() raises:

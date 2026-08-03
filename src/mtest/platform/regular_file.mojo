@@ -21,6 +21,7 @@ adds the binary's only `fsync` declaration.
 """
 from std.ffi import external_call
 from std.memory import Span, alloc, memset_zero
+from std.os import lstat
 from std.sys.info import CompilationTarget, is_triple
 
 from mtest.platform.cstring import c_string_bytes
@@ -28,12 +29,92 @@ from mtest.platform.stream import close_fd, errno_now, read_fd
 
 
 comptime _EINTR = 4
+comptime _ENOENT = 2
+comptime _ENOTDIR = 20
+"""The two errnos that mean a name is genuinely free rather than unreadable.
+Both carry these values on Linux and on Darwin, so no per-target branch is
+needed to read them."""
 comptime _STAT_BYTES = 144
 comptime _S_IFMT = 0o170000
 comptime _S_IFREG = 0o100000
 comptime _READ_CHUNK = 1 << 16
 """The staging buffer's size, in bytes. Bounds resident memory independently of
 the caller's ceiling: a 512 MiB cap and a 4 KiB file must not cost a gigabyte."""
+
+
+@fieldwise_init
+struct PathFacts(Copyable, Movable):
+    """What one path names, observed without following a final symlink."""
+
+    var present: Bool
+    """Whether anything was there to observe. False only when the name is
+    genuinely free: an observation that FAILED reports `present` False and a
+    nonzero `error`, so read `error` before believing this."""
+
+    var is_regular: Bool
+    """Whether it is a regular file. False for a symlink, whose target is
+    deliberately not consulted: a caller about to replace a name wants to know
+    about the name, not about whatever it points at."""
+
+    var mode: Int
+    """Its permission bits, or zero when nothing was observed."""
+
+    var error: Int
+    """The `errno` that stopped the observation, or `0` when it succeeded or
+    the name is genuinely absent. Nonzero means "unknown", never "free": a
+    caller that treats it as absence would go on to create through a name it
+    could not inspect."""
+
+
+def observe_path(path: String) -> PathFacts:
+    """Observe what `path` names right now, never following a final symlink.
+
+    The observation a caller makes before deciding whether it may create or
+    replace a name. `lstat(2)` rather than `stat(2)` is the whole point: a
+    symlink must report as "not a regular file" so a publisher refuses it
+    instead of writing through it.
+
+    Absence and unreadability are separated rather than folded together.
+    `ENOENT` and `ENOTDIR` are the two errnos that mean the name is free — no
+    final component, or a non-directory somewhere along the way — and only
+    those two report absence. Every other failure (`EACCES` on an unsearchable
+    parent, `ELOOP`, `EIO`, `ENAMETOOLONG`) reports `error` instead, because
+    "I could not look" and "nothing is there" lead a publisher to opposite
+    decisions: the first must stop, the second may create.
+
+    The errno is read through `errno_now` as the first operation after the
+    failure, before anything else in this function runs. The pinned stdlib's
+    `lstat` leaves the slot alone while it builds the error it raises, and
+    `test_observe_path_reports_unreadable` is what would notice if that ever
+    stopped being true.
+
+    Args:
+        path: The pathname to observe.
+
+    Returns:
+        Presence, regular-file-ness, the permission bits, and the errno that
+        stopped the observation. Allocates nothing and cannot fail.
+
+    Examples:
+
+    ```mojo
+    from mtest.platform import observe_path
+
+    var facts = observe_path(".gitignore")
+    if facts.error != 0:
+        raise Error("could not inspect .gitignore")
+    if facts.present and not facts.is_regular:
+        raise Error("refusing to replace a non-regular .gitignore")
+    ```
+    """
+    try:
+        var raw = Int(lstat(path).st_mode)
+        return PathFacts(True, raw & _S_IFMT == _S_IFREG, raw & 0o777, 0)
+    except:
+        var failed = errno_now()
+        if failed == _ENOENT or failed == _ENOTDIR:
+            return PathFacts(False, False, 0, 0)
+        return PathFacts(False, False, 0, failed)
 
 
 @fieldwise_init

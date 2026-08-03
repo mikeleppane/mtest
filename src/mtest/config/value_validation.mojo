@@ -229,20 +229,21 @@ def build_arg_rejection(token: String) -> Optional[String]:
     return Optional[String](None)
 
 
-def safe_path_label(path: String) -> String:
-    """Render a user-supplied path safely inside a one-line diagnostic.
+def escape_control_characters(path: String) -> String:
+    """Render a user-supplied path as one line, escaping nothing else.
 
-    Control characters are escaped so a crafted path cannot emit a terminal
-    escape sequence or split one diagnostic into two, and the result is
-    truncated so a very long path cannot bury the message. Shared by every
-    layer that names a path back to the user, so the escaping cannot hold on
-    one path and be forgotten on another.
+    Control characters become their printable escapes so a crafted path cannot
+    emit a terminal escape sequence or split one line into two. Nothing is
+    truncated, which is what separates this from `safe_path_label`: output
+    whose format is frozen — a path a caller is meant to read back — must
+    survive whole, while a diagnostic may be shortened so the path cannot bury
+    the message.
 
     Args:
-        path: The user-supplied path to label.
+        path: The user-supplied path to render.
 
     Returns:
-        A newly allocated single-line label of at most 240 codepoints.
+        A newly allocated single-line rendering of the complete path.
     """
     var escaped = String("")
     comptime HEX = "0123456789abcdef"
@@ -260,6 +261,25 @@ def safe_path_label(path: String) -> String:
             escaped += String(HEX[byte=value % 16])
         else:
             escaped += String(cp)
+    return escaped^
+
+
+def safe_path_label(path: String) -> String:
+    """Render a user-supplied path safely inside a one-line diagnostic.
+
+    Control characters are escaped so a crafted path cannot emit a terminal
+    escape sequence or split one diagnostic into two, and the result is
+    truncated so a very long path cannot bury the message. Shared by every
+    layer that names a path back to the user, so the escaping cannot hold on
+    one path and be forgotten on another.
+
+    Args:
+        path: The user-supplied path to label.
+
+    Returns:
+        A newly allocated single-line label of at most 240 codepoints.
+    """
+    var escaped = escape_control_characters(path)
     if escaped.count_codepoints() <= 240:
         return escaped
     var shortened = String("")

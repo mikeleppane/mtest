@@ -308,6 +308,83 @@ def test_exactly_one_notice_from_session_finished() raises:
     )
 
 
+def _flaky_session_finished(flaky: Int, failed: Int) -> Event:
+    """A terminal payload with `flaky` FLAKY files and `failed` failing tests.
+    """
+    var s = Summary.zeros()
+    s.counts[Outcome.PASS.code] = 1
+    s.counts[Outcome.FLAKY.code] = flaky
+    s.counts[Outcome.FAIL.code] = failed
+    return Event.session_finished(
+        s^,
+        1.0,
+        1 if failed > 0 else 0,
+        test_counts=TestCounts(
+            passed=2, failed=failed, skipped=0, deselected=0
+        ),
+    )
+
+
+def _flaky_notice(
+    flaky: Int, failed: Int, fail_on_flaky: Bool
+) raises -> String:
+    """The one line a lone terminal event renders, asserted to be alone.
+
+    Only `SessionFinished` is fed, so the whole tail is the single `::notice`
+    and each case below can compare complete bytes rather than a substring.
+    """
+    var events = List[Event]()
+    events.append(_flaky_session_finished(flaky, failed))
+    var out = render_annotations(events, fail_on_flaky=fail_on_flaky)
+    assert_equal(len(out), 1, "expected exactly one annotation line")
+    return out[0]
+
+
+def test_notice_flaky_tally_is_bare_without_fail_on_flaky() raises:
+    assert_equal(
+        _flaky_notice(flaky=1, failed=0, fail_on_flaky=False),
+        (
+            "::notice::2 passed, 0 failed, 0 skipped, 1 flaky (0 excluded, 0"
+            " not run) in 1.0s"
+        ),
+    )
+
+
+def test_notice_names_the_flag_under_fail_on_flaky() raises:
+    assert_equal(
+        _flaky_notice(flaky=1, failed=0, fail_on_flaky=True),
+        (
+            "::notice::2 passed, 0 failed, 0 skipped, 1 flaky (failing:"
+            " --fail-on-flaky) (0 excluded, 0 not run) in 1.0s"
+        ),
+    )
+
+
+def test_notice_says_nothing_when_the_flag_is_on_and_nothing_was_flaky() raises:
+    # The suffix is conjoined with a nonzero tally. A mutant dropping that
+    # conjunct would announce a failure cause on a run with no flaky file at
+    # all, and every other case here would still pass.
+    assert_equal(
+        _flaky_notice(flaky=0, failed=0, fail_on_flaky=True),
+        (
+            "::notice::2 passed, 0 failed, 0 skipped (0 excluded, 0 not run) in"
+            " 1.0s"
+        ),
+    )
+
+
+def test_notice_flaky_suffix_is_never_inferred_from_the_exit_code() raises:
+    # A real failure beside a flaky file with the flag OFF: exit 1 comes from
+    # the FAIL, and the notice must not blame the flaky file for it.
+    assert_equal(
+        _flaky_notice(flaky=1, failed=1, fail_on_flaky=False),
+        (
+            "::notice::2 passed, 1 failed, 0 skipped, 1 flaky (0 excluded, 0"
+            " not run) in 1.0s"
+        ),
+    )
+
+
 def test_no_session_finished_yields_no_notice() raises:
     var events = List[Event]()
     var out = render_annotations(events)
@@ -348,6 +425,21 @@ def test_active_reporter_matches_the_pure_renderer() raises:
     assert_equal(len(got), len(want), "reporter and renderer disagree on count")
     for i in range(len(want)):
         assert_equal(got[i], want[i], "reporter line differs from renderer")
+
+
+def test_reporter_threads_fail_on_flaky_into_its_accumulator() raises:
+    # The reporter owns no rendering of its own, so this pins the one thing it
+    # must do with the flag: hand it to the accumulator it constructs.
+    var events = List[Event]()
+    events.append(_flaky_session_finished(flaky=1, failed=0))
+    var rep = AnnotationsReporter(active=True, fail_on_flaky=True)
+    _feed(rep, events)
+    var got = rep.render()
+    var want = render_annotations(events, fail_on_flaky=True)
+    assert_equal(len(got), len(want))
+    for i in range(len(want)):
+        assert_equal(got[i], want[i])
+    assert_true("(failing: --fail-on-flaky)" in got[0])
 
 
 def test_inactive_reporter_renders_nothing() raises:

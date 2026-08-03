@@ -8,6 +8,7 @@ import shutil
 import tempfile
 from typing import Any
 
+from scripts.checks.reports import collect_stream as collect_stream_oracle
 from scripts.e2e.assertions import (
     expect,
     expect_accounting,
@@ -142,6 +143,93 @@ def s_collect(context: ScenarioContext) -> str:
         "byte-clean sorted listing; --collect-only == collect; "
         "crash/hang/malformed -> stderr + continue (exit 1); drift exit 3; "
         "empty exit 5"
+    )
+
+
+def s_collect_json_stream(context: ScenarioContext) -> str:
+    """`collect --format json` is the listing's machine twin, terminal included.
+
+    The stream is read through the strict consumer rather than by eye, and its
+    node ids are compared against the plain listing of the SAME tree, so the
+    two formats cannot describe different test sets. The compile-broken half
+    adds the second exit code: a failing collection exits 1, contributes no
+    nodes, and its terminal has to say 1 rather than 0.
+
+    **What this does NOT cover.** `terminal.exit_code == returncode` holding at
+    both 0 and 1 does not prove the runner resolves the code BEFORE it prints.
+    In collect mode nothing owns a `--json` or JUnit descriptor, so the only
+    escalation teardown can still apply is a `runtime.close()` failure, and the
+    native fault-injection symbols that would force one are absent from the
+    production object `build/mtest` links. Both orderings pass this scenario.
+    """
+    lines = context.runner.run_mtest(["collect", "e2e/matrix"])
+    expect_exit(lines, 0)
+    stream = context.runner.run_mtest(["collect", "--format", "json", "e2e/matrix"])
+    expect_exit(stream, 0)
+
+    try:
+        report = collect_stream_oracle.parse_collect_stream(stream.stdout)
+    except collect_stream_oracle.CollectStreamError as exc:
+        raise ScenarioError(f"the collect stream did not parse: {exc}") from exc
+
+    expect(
+        report.version == collect_stream_oracle.COLLECT_STREAM_VERSION,
+        f"header version is {report.version}",
+    )
+    expect(not report.torn_tail, "a complete collection produced a torn tail")
+    expect(
+        report.node_ids == COLLECT_MATRIX_EXPECTED,
+        f"stream node ids {report.node_ids} != {COLLECT_MATRIX_EXPECTED}",
+    )
+    expect(
+        report.node_ids == lines.stdout.splitlines(),
+        "the two formats listed different node ids for the same tree",
+    )
+    expect(
+        report.nodes == len(COLLECT_MATRIX_EXPECTED),
+        f"terminal counts {report.nodes} nodes, listed {len(report.node_ids)}",
+    )
+    expect(
+        report.exit_code == stream.returncode,
+        f"terminal says exit {report.exit_code}, the process exited "
+        f"{stream.returncode}",
+    )
+    expect(
+        stream.stderr.strip() == "",
+        f"an all-qualifying collect must keep stderr empty:\n{stream.stderr}",
+    )
+
+    # A file that cannot be probed: the diagnostics stay stderr TEXT under both
+    # formats, and the terminal carries the failing exit rather than a 0.
+    broken = context.runner.run_mtest(
+        ["collect", "--format", "json", "e2e/suite/test_compile_error.mojo"],
+        timeout=SHORT_TIMEOUT,
+    )
+    expect_exit(broken, 1)
+    try:
+        broken_report = collect_stream_oracle.parse_collect_stream(broken.stdout)
+    except collect_stream_oracle.CollectStreamError as exc:
+        raise ScenarioError(f"the failing collect stream did not parse: {exc}") from exc
+    expect(
+        broken_report.node_ids == [],
+        f"a file that never compiled contributed nodes: {broken_report.node_ids}",
+    )
+    expect(
+        broken_report.exit_code == 1,
+        f"terminal says exit {broken_report.exit_code}, want 1",
+    )
+    expect(
+        "test_compile_error.mojo" in broken.stderr,
+        f"the broken probe had no STDERR diagnostic:\n{broken.stderr}",
+    )
+    expect(
+        '{"event":' not in broken.stderr,
+        f"stream bytes leaked onto STDERR:\n{broken.stderr!r}",
+    )
+
+    return (
+        "stream parses at version 1; node ids equal the lines listing; "
+        "terminal exit_code == process exit, 0 and 1 alike"
     )
 
 

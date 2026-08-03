@@ -84,6 +84,45 @@ serves one toolchain; accepting a report the runner does not fully understand
 is how a runner produces a false green, and this one exits 3 on protocol drift
 instead.
 
+## Starting a project
+
+`mtest init` writes the files a project needs before any of the rest of this is
+useful, into the current directory:
+
+```console
+$ pixi run mtest init --ci github
+created tests/test_example.mojo
+created mtest.toml
+created .github/workflows/test.yml
+created .gitignore
+next: pixi init .
+next: pixi workspace channel add https://conda.modular.com/max/
+next: pixi workspace channel add https://repo.prefix.dev/modular-community
+next: pixi add mtest
+next: mtest
+next: commit pixi.toml and pixi.lock, which the workflow installs from
+```
+
+Drop `--ci github` and neither the workflow nor the commit line appears. The
+`next:` lines are prerequisites rather than suggestions, and they are ordered:
+`pixi workspace channel add` fails outright without a `pixi.toml`, `mtest` does
+not resolve until the package is in the workspace, and the workflow just
+written installs from the lock file, which `pixi add` is what produces. They
+repeat the [Installation](#installation) sequence because `init` cannot see
+whether you have run it — in a workspace that already has mtest, every line
+before `next: mtest` is already done and `pixi init .` would fail if you ran
+it again.
+
+**Nothing existing is replaced.** Every artifact is published without
+overwriting, so a second `init` reports each one as `skipped` and still exits
+`0`, and a file you have already edited is left exactly as it was.
+`.gitignore` is the one file `init` edits rather than creates: the
+`.mtest-cache/` and `build/bin/` entries — mtest's working state, and the
+binaries it compiles your test files into — are appended to whatever is already
+there, and only the ones actually missing are added. A `.gitignore` that is a
+symlink or not a regular file is refused (exit `4`) before any artifact is
+written.
+
 ## Your first test
 
 A test file is an ordinary Mojo program: `test_*` functions plus a `main()`
@@ -108,6 +147,18 @@ def test_multiplication() raises:
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
 ```
+
+`mtest new` writes exactly that shape, so the first file is one command rather
+than a page to copy:
+
+```console
+$ pixi run mtest new tests/test_math.mojo
+created tests/test_math.mojo
+```
+
+It creates missing parent directories, refuses a basename no directory walk
+would collect, and **never overwrites an existing file** — a second `mtest new`
+on the same path exits `4` and leaves your bytes alone.
 
 `mtest` builds each test file and runs the resulting binary, so `mojo` has to
 be reachable from the workspace — which it is, because `pixi add mtest` pulled
@@ -295,7 +346,8 @@ with one binary. What it does differently:
   `-I` include paths.
 - Per-test outcomes parsed from each file's `TestSuite` report: `-k`
   substring selection, `path::test` node ids, `--maxfail N`, and
-  `mtest collect` to list node ids without running any test body.
+  `mtest collect` to list node ids without running any test body — as plain
+  lines, or as a versioned NDJSON stream with `--format json`.
 - A full outcome model: PASS, FAIL, SKIP, CRASH, TIMEOUT, COMPILE-ERROR,
   COMPILE-TIMEOUT, MALFORMED-SUITE, and PRECOMPILE-ERROR, plus a FLAKY
   annotation for a pass that needed retries. A file that builds and exits
@@ -305,7 +357,8 @@ with one binary. What it does differently:
   words (`signal 11 — SIGSEGV, segmentation fault`).
 - Crash-class retries (`--retries N`) with an explicit FLAKY verdict for a
   late pass. Deterministic failures, such as an ordinary compile error or a
-  failing assertion, are never retried.
+  failing assertion, are never retried. `--fail-on-flaky` turns a FLAKY-only
+  session's `0` into a `1` for a pipeline that will not tolerate one.
 - Bounded crash attribution: after a CRASH, a strictly bounded pass re-runs
   that file's tests one at a time to name a culprit, and reports honestly
   when it cannot. It never changes the verdict or the exit code.
@@ -314,7 +367,9 @@ with one binary. What it does differently:
   run timeout that had to go past the polite terminate says so on its
   verdict line (`escalated to SIGKILL`).
 - Deterministic sharding (`--shard`) for spreading one suite across a CI
-  matrix.
+  matrix, and `--shuffle` for the opposite question: run the files in a random
+  order to surface a suite that only passes in one. The seed is printed, and
+  `--seed N` replays it.
 - Three machine reporters: an NDJSON event stream (`--json`),
   schema-validated JUnit XML (`--junit-xml`), and GitHub Actions annotations
   (`--gh-annotations`).
@@ -330,6 +385,12 @@ with one binary. What it does differently:
 - `mtest doctor`: ten read-only environment checks (toolchain identity,
   configuration, last-run state, temp, report destinations) without building
   or running a test.
+- `mtest debug path::test`: prepare one test the way a run would, print the
+  build and run commands it used, then hand the terminal to the binary and get
+  out of the way — no capture pipe, no summary, no mtest verdict.
+- `mtest new` and `mtest init`: write the first test file, or the whole
+  starting project (a test, an `mtest.toml`, a `.gitignore` entry, and
+  optionally a CI workflow). Neither ever overwrites what is already there.
 - Gate files (`--gate`), precompiled package dependencies (`--precompile`),
   a slowest-files list (`--durations`), quiet and verbose modes, and color
   control (`--color`, `NO_COLOR`).
@@ -482,7 +543,8 @@ and is counted `not run`. A `-k` that empties the whole session exits `5`.
 
 `mtest collect` (and `--collect-only`) compiles each file, enumerates its
 tests through a probe that skips every test body, and lists node ids in
-plain lexicographic order:
+lexicographic order — as plain lines by default, or as a versioned NDJSON
+stream under `--format json` ([below](#machine-readable-collection)):
 
 ```console
 $ pixi run bash -c 'build/mtest collect e2e/matrix'
@@ -501,6 +563,26 @@ exit at the end. Per-test narrowing is a `run` behavior in this build:
 under `collect`, `-k` prints a loud ignored notice and a `path::test`
 operand contributes its whole file to the listing.
 
+#### Machine-readable collection
+
+`--format json` prints the same listing as a versioned NDJSON stream, for a CI
+job or an editor integration that would otherwise split the plain lines
+([docs/collect-stream.md](docs/collect-stream.md) is the normative spec):
+
+```console
+$ pixi run bash -c 'build/mtest collect --format json e2e/matrix'
+{"event":"collect","version":1,"generator":"mtest 1.0.0"}
+{"event":"node","node_id":"e2e/matrix/test_alpha.mojo::test_alpha_one","path":"e2e/matrix/test_alpha.mojo","name":"test_alpha_one"}
+[...one node record per test, in the same order as the plain listing...]
+{"event":"collect_finished","nodes":5,"exit_code":0}
+```
+
+The terminal's `exit_code` is the exit code the process really ends with,
+teardown included, so a consumer can gate on the record without also reading
+`$?`. Diagnostics stay on stderr under either format, and `--format lines` is
+the default. Collection compiles and probes every file it lists, so this is a
+command to run when the test set changes, not one to run per keystroke.
+
 ### Retries and FLAKY
 
 `--retries N` grants up to `N` extra attempts, and only to crash-class
@@ -512,7 +594,10 @@ pass with a visible history, never a plain PASS:
 
 ![A real retry run: a yellow TRY line naming the crashed first attempt, then a FLAKY verdict and a green summary band](docs/assets/mtest-flaky.svg)
 
-A FLAKY-only session exits `0`. Without `--retries`, the same crash stands
+A FLAKY-only session exits `0`, unless `--fail-on-flaky` is set: that turns a
+would-be `0` into `1` and changes nothing else — the same tests run, the same
+retries happen, and the summary band names the flag beside the flaky count.
+Without `--retries`, the same crash stands
 as the file's final outcome, and every CRASH triggers the bounded
 attribution pass:
 
@@ -730,6 +815,7 @@ timeout = 120  # (mtest.toml)
 retries = 1  # (mtest.toml)
 maxfail = 0  # (default)
 state = true  # (default)
+fail-on-flaky = false  # (default)
 
 [build]
 mojo = "mojo"  # (default)
@@ -876,6 +962,61 @@ runs, and `[run] state = false`.
 specifies the format, the outcome-to-record mapping, and the merge rule that
 preserves a failure you have not retested yet.
 
+### Random order: `--shuffle` and `--seed`
+
+A suite that passes only in one order is a suite with a hidden dependency
+between its files — shared state on disk, a fixture one file leaves behind for
+the next. `--shuffle` runs the files in a random order to surface it. The seed
+is printed in the header, because the whole point of a random order is being
+able to run it again:
+
+```console
+$ pixi run bash -c 'build/mtest --shuffle --show-output none e2e/matrix e2e/suite/test_passing.mojo'
+mtest 1.0.0 (mojo)
+root: /home/mikko/dev/mtest   selected: 3 files   excluded: 0   shuffle seed: 4039837840016826
+
+PASS           e2e/suite/test_passing.mojo     0.02s
+PASS           e2e/matrix/test_beta.mojo       0.02s
+PASS           e2e/matrix/test_alpha.mojo      0.04s
+
+===== 8 passed, 0 failed, 0 skipped, builds: 0, cached: 3 (0 excluded, 0 not run) in 1.0s =====
+```
+
+Hand that number back with `--seed N` and the same file list runs in the same
+order, on any platform: one seed names one order, and that mapping is frozen
+for 1.x. So a shuffled CI failure is reproducible from its own log, which is
+the only thing that makes randomizing safe to leave on.
+
+```console
+$ pixi run bash -c 'build/mtest --shuffle --seed 4039837840016826 --show-output none e2e/matrix e2e/suite/test_passing.mojo'
+mtest 1.0.0 (mojo)
+root: /home/mikko/dev/mtest   selected: 3 files   excluded: 0   shuffle seed: 4039837840016826
+
+PASS           e2e/suite/test_passing.mojo     0.02s
+PASS           e2e/matrix/test_beta.mojo       0.03s
+PASS           e2e/matrix/test_alpha.mojo      0.04s
+
+===== 8 passed, 0 failed, 0 skipped, builds: 0, cached: 3 (0 excluded, 0 not run) in 1.0s =====
+```
+
+Only the **execution** order moves. Gates keep the order they were listed in
+and still run first, `--shard` partitions the sorted list before the shuffle so
+shard membership never changes, and every report — the summary band, the JUnit
+document, the `collect` listing — stays sorted by node id. `--seed` without
+`--shuffle` is a usage error, and so is asking for two orders at once:
+
+```console
+$ pixi run bash -c 'build/mtest --shuffle --lf e2e/matrix'
+cli: '--shuffle' and '--lf'/'--ff' choose conflicting orders; pick one (see mtest --help)
+$ echo $?
+4
+```
+
+`--shuffle` is a command-line flag only — it is never read from `mtest.toml`,
+because a randomized order is something you ask for on an invocation rather
+than something a project should silently impose — and it is refused under
+`collect`, whose listing is specified to be sorted.
+
 ### Diagnosing the environment: `mtest doctor`
 
 `mtest doctor` answers "is this machine set up to run tests?" without running
@@ -927,6 +1068,56 @@ malformed selected config is a `FAIL`ed check and exit `1`, not the usage error
 `run` and `config show` raise, because a diagnostic tool that refuses to
 diagnose is useless. Its exit domain is `{0, 1, 2, 4}`, and `WARN` never fails
 the command.
+
+### Debugging one test: `mtest debug`
+
+Sometimes a report is the wrong tool. `mtest debug PATH::TEST` prepares exactly
+one test the way a run would — precompiles, builds, and probes the file to
+check the name really exists — prints the two commands it used, and then
+**becomes** the test binary:
+
+```console
+$ pixi run bash -c 'build/mtest debug e2e/suite/test_passing.mojo::test_two_passes'
+build: mojo build e2e/suite/test_passing.mojo -o build/bin/e2e_ssuite_stest_upassing
+run: build/bin/e2e_ssuite_stest_upassing --only test_two_passes
+
+Running 3 tests for /home/mikko/dev/mtest/e2e/suite/test_passing.mojo
+    SKIP [ 0.001 ] test_one_passes
+    PASS [ 0.001 ] test_two_passes
+    SKIP [ 0.001 ] test_three_passes
+--------
+Summary [ 0.001 ] 3 tests run: 1 passed , 0 failed , 2 skipped
+
+$ echo $?
+0
+```
+
+Everything after those two lines is the test binary talking to your terminal
+directly. mtest is gone — it replaced its own process image — so the test owns
+stdin, stdout and stderr connected straight through rather than to a capture
+pipe, the signals, the debugger you attached, and the exit status. There is no summary band and no mtest verdict, on purpose:
+that `0` is the binary's statement about itself, not an mtest PASS. Run the
+printed `run:` line under `gdb`, `lldb`, `strace`, or `valgrind` and you are
+debugging exactly what mtest just ran.
+
+Because there is no reporter left afterwards, the grammar is narrow: one node
+id, the build flags (`--mojo`, `-I`, `--build-arg`, `--`), `--config`/
+`--no-config`, and `-q`/`-v`. Everything else is refused before anything is
+built, and so is a bare path — a debug session needs one test, not a file:
+
+```console
+$ pixi run bash -c 'build/mtest debug e2e/suite/test_passing.mojo; echo "EXIT=$?"'
+cli: 'debug' wants exactly one PATH::TEST node id (see mtest --help)
+EXIT=4
+```
+
+Every refusal happens while mtest still owns its exit code: `4` for a bad node
+id, an unknown test name, a flag outside the grammar, or a broken `mtest.toml`;
+`1` when the file will not compile or its probe crashes — with the compiler's
+own banner or the binary's stderr printed beneath the diagnostic, since there
+is no reporter left to echo them; `3` for a spawn failure or protocol drift;
+and `2` for an interrupt, which is checked right up to the handover. Once the
+handover happens, the code you get is the test's own.
 
 ## Assertion diagnostics
 
@@ -1366,14 +1557,21 @@ drift from that output:
 mtest — a pytest-like test runner for Mojo
 
 usage: mtest [run] [PATHS...] [flags] [-- BUILD-ARGS...]
+       mtest collect [PATHS...] [--format lines|json] [flags]
        mtest config show [PATHS...] [flags] [-- BUILD-ARGS...]
        mtest doctor [--config PATH | --no-config] [--color WHEN] [-q | -v]
+       mtest debug PATH::TEST [build flags] [-- BUILD-ARGS...]
+       mtest new PATH
+       mtest init [--ci github]
 
 Subcommands:
   run [PATHS...] [flags]      Run tests (the default subcommand).
   collect [PATHS...] [flags]  List node ids without running tests.
   config show [PATHS...]      Show resolved configuration.
   doctor [flags]              Diagnose the environment without running tests.
+  debug PATH::TEST            Run one test with the terminal handed over.
+  new PATH                    Create one runnable test file.
+  init [--ci github]          Bootstrap a project in this directory.
   help                        Show this help and exit.
   version                     Show the version and exit.
 
@@ -1388,8 +1586,11 @@ Execution:
   --maxfail N                 Stop after N failed tests (0 disables).
   --timeout SECS              Set per-file run timeout (0 disables).
   --retries N                 Retry crash-class outcomes N times.
+  --fail-on-flaky             Exit 1 when any file passed only after retries.
   -n, --workers N|auto        Set worker count (default: 1).
   --serial GLOB               Run matching files serially (repeatable).
+  --shuffle                   Randomize run-file order (gates keep theirs).
+  --seed N                    Fix the --shuffle order to a reproducible seed.
   --no-cache                  Build without reading/writing the build cache.
   --cache-clear               Delete .mtest-cache (cache/last-run state), run.
 
@@ -1407,6 +1608,7 @@ Reporting:
   -q                          Suppress passing file rows.
   -v                          Show build commands and step timings.
   --color WHEN                Choose auto|always|never color output.
+  --format FORMAT             Collect output format: lines (default) or json.
   --json PATH|-               Write NDJSON events to PATH or stdout.
   --junit-xml PATH            Write a JUnit XML report.
   --gh-annotations MODE       Choose off|on|auto GitHub annotations.
@@ -1436,6 +1638,9 @@ General:
 | `--config PATH`, `--no-config` | select one project config or disable config discovery |
 | `config show [PATHS...] [flags]` | render the fully resolved configuration without running tests |
 | `doctor [flags]` | run ten contained environment checks without starting a test session |
+| `debug PATH::TEST` | build and probe one test, print the `build:`/`run:` commands, then replace mtest with the binary; no summary and no mtest verdict |
+| `new PATH` | scaffold one runnable test file at `PATH`, creating parent directories; never overwrites (exit `4`) |
+| `init [--ci github]` | bootstrap a project in the current directory: a first test, an `mtest.toml`, a `.gitignore` entry, and with `--ci github` a workflow; nothing existing is replaced |
 | `--lf`, `--last-failed` | run only tests recorded as failed in the last completed state |
 | `--ff`, `--failed-first` | run last-failed tests first, then the remaining selection |
 | `-x`, `--exitfirst` | stop scheduling new files after the first failing file |
@@ -1443,6 +1648,7 @@ General:
 | `--timeout SECS` | bound a single file's run (default `300`, `0` disables); exceeding it yields TIMEOUT |
 | `--compile-timeout SECS` | bound a single file's build (default `600`, `0` disables); exceeding it yields COMPILE-TIMEOUT |
 | `--retries N` | crash-class-only retries, `N` extra attempts (default `0`); a late pass is reported FLAKY |
+| `--fail-on-flaky` | exit `1` when the run would otherwise exit `0` and at least one file is FLAKY |
 | `-s`, `--show-output MODE` | `failures` (default), `all`, or `none`: which outcomes show captured output |
 | `--durations N` | print the `N` slowest files by run-only wall-clock after the summary (`0`, the default, disables); survives `-q` |
 | `-q` | quiet: omit PASS lines |
@@ -1451,14 +1657,26 @@ General:
 | `--shard [hash:\|slice:]M/N` | run (or collect) only shard `M` of `N`; `hash:` (default, stable over the path) or `slice:` (sorted round-robin) |
 | `-n`, `--workers N\|auto` | run files across a pool of `N` worker processes; `auto` is half the logical cores (default `1`, sequential; ignored under `-k`/node-id selection) |
 | `--serial GLOB` | (repeatable) pin matching files to a final one-at-a-time pass after the parallel batch |
+| `--shuffle` | randomize the order run files execute in, to surface order dependencies; gates keep their listed order and every report stays node-id sorted; CLI-only, never read from `mtest.toml` |
+| `--seed N` | fix the `--shuffle` order to a reproducible seed (requires `--shuffle`); without it the runner draws one and prints it |
 | `--no-cache` | build without reading or writing the build cache; CLI-only, never read from `mtest.toml` |
 | `--cache-clear` | delete `.mtest-cache` (build cache and last-run state), then run; CLI-only, never read from `mtest.toml` |
 | `--json PATH\|-` | write the versioned NDJSON event stream to `PATH`, or to stdout with `-` |
 | `--junit-xml PATH` | write a schema-validated JUnit XML report, renamed atomically onto `PATH` |
 | `--gh-annotations MODE` | `off\|on\|auto` (default `auto`); `--json -` requires an explicit `--gh-annotations off` |
 | `collect [PATHS] [flags]`, `--collect-only` | list node ids, sorted lexicographically, instead of running anything |
+| `--format lines\|json` | `collect` only: the plain listing (default) or the versioned NDJSON collect stream |
 | `-h`, `--help` | print the usage text and exit `0` |
 | `--version` | print the version and exit `0` |
+
+**The first argument is read as a subcommand when it names one.** `mtest new`
+is the scaffolding command even in a directory that contains a `new/`, and the
+same holds for `collect`, `debug`, `init`, `doctor`, `config`, `version`, and
+`help`. Spell the path `./new` to run it instead — a token starting `./` is
+never a subcommand, so that spelling keeps working as more subcommands are
+added. Only the leading token is affected: `mtest run new` and
+`mtest collect new` need no prefix, and neither does `[run] paths` in an
+`mtest.toml`.
 
 `-n`/`--workers N` runs discovered files across a pool of `N` worker
 processes; `-n auto` sizes the pool to half the machine's logical cores. The
@@ -1503,7 +1721,7 @@ and `doctor` have command-specific exit domains in
 | Code | Meaning |
 |------|---------|
 | `0` | every selected test's outcome is PASS or SKIP |
-| `1` | at least one failing outcome (FAIL, CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT, MALFORMED-SUITE, PRECOMPILE-ERROR) |
+| `1` | at least one failing outcome (FAIL, CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT, MALFORMED-SUITE, PRECOMPILE-ERROR); or a would-be `0` under `--fail-on-flaky` with at least one FLAKY file |
 | `2` | interrupted (SIGINT/SIGTERM); a partial summary is printed |
 | `3` | internal mtest error, including protocol drift and a report-destination I/O failure |
 | `4` | CLI usage error, detected before any test runs |

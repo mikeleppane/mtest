@@ -51,7 +51,10 @@ from mtest.config.resolve import (
     resolve_config,
     validate_resolved_config,
 )
-from mtest.config.runner_config import RunnerConfig
+from mtest.config.runner_config import (
+    RunnerConfig,
+    cli_only_resolution_defaults,
+)
 from mtest.config.show import render_config_show
 from mtest.config.shell_quote import shell_join, shell_quote
 from mtest.config.shard_mode import ShardMode
@@ -66,6 +69,7 @@ from mtest.config.toml_bridge import (
 from mtest.config.verbosity import Verbosity
 from mtest.config.value_validation import (
     build_arg_rejection,
+    escape_control_characters,
     parse_annotations_value,
     parse_color_value,
     parse_nonnegative_decimal,

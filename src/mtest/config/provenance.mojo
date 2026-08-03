@@ -58,6 +58,9 @@ struct ConfigProvenance(Copyable, Movable):
     var maxfail: Provenance
     """Source of `[run] maxfail`."""
 
+    var fail_on_flaky: Provenance
+    """Source of `[run] fail-on-flaky`."""
+
     var state: Provenance
     """Source of `[run] state`."""
 
@@ -113,6 +116,7 @@ struct ConfigProvenance(Copyable, Movable):
             timeout_secs=Provenance.DEFAULT,
             retries=Provenance.DEFAULT,
             maxfail=Provenance.DEFAULT,
+            fail_on_flaky=Provenance.DEFAULT,
             state=Provenance.DEFAULT,
             mojo_path=Provenance.DEFAULT,
             include_paths=Provenance.DEFAULT,

@@ -1,4 +1,5 @@
-"""Node identifiers: `NodeId` and the raw selection-token splitter.
+"""Node identifiers: `NodeId`, the raw selection-token splitter, and `render`'s
+inverse.
 
 A `NodeId` is a test's lexical identity: the file's root-relative path as
 discovered or as the user typed it, plus the test function name. It is
@@ -12,6 +13,10 @@ repro lines.
 nothing further. The caller turns a `sep_count` of 0, 1, or 2-or-more into
 "plain file operand", "node id", or "malformed", because that policy differs by
 call site.
+
+`split_rendered_node_id` is the other direction and splits at the LAST `::`,
+because it undoes `render()` on an id the runner itself produced rather than
+parsing something a user typed.
 """
 
 
@@ -99,4 +104,41 @@ def split_node_token(token: String) -> NodeIdSplit:
         sep_count=sep_count,
         file_part=String(first[0]),
         name_part=String(first[1]),
+    )
+
+
+def split_rendered_node_id(node_id: String) -> NodeId:
+    """Recover the `NodeId` behind a string `render()` produced.
+
+    Splits at the LAST `::`, which is what makes this the exact inverse of
+    `render()`: a test name is a Mojo identifier and can never contain `::`,
+    while a file path can, so only the final separator reconstructs the pair.
+    `split_node_token` splits at the FIRST one on purpose — its callers parse
+    raw user operands, where a second separator means a malformed node id they
+    refuse rather than a path to keep whole.
+
+    Args:
+        node_id: A rendered `path::name` string produced by this runner.
+
+    Returns:
+        The recovered identity, freshly allocated. A string carrying no `::`
+        at all is not a rendered node id; it comes back whole as `path` with an
+        empty `name`, mirroring `split_node_token`'s degenerate case rather
+        than trapping.
+
+    Examples:
+
+    ```mojo
+    from mtest.model import split_rendered_node_id
+
+    var node = split_rendered_node_id("we::ird/test_a.mojo::test_foo")
+    var path = node.path  # "we::ird/test_a.mojo"
+    var name = node.name  # "test_foo"
+    ```
+    """
+    var last = node_id.rfind("::")
+    if last == -1:
+        return NodeId(node_id, "")
+    return NodeId(
+        String(node_id[byte=:last]), String(node_id[byte = last + 2 :])
     )

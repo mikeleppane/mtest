@@ -7,6 +7,14 @@ and come back.
 
 ## Save a test file
 
+In a directory with nothing in it yet, `mtest init` is the one command that
+writes all of this at once — a first test file, an `mtest.toml` pointing at
+`tests/`, a `.gitignore`, and with `--ci github` a workflow — and prints the
+prerequisites still to run. The
+[Starting a project section of the README](https://github.com/mikeleppane/mtest#starting-a-project)
+walks through it. The rest of this page builds the same thing a piece at a
+time, so you can see what each one is for.
+
 A test file is an ordinary Mojo program. It declares test functions and a
 `main()` that hands them to the standard library's suite, which keeps owning
 discovery and the report format inside the file. Save this as
@@ -29,6 +37,19 @@ def test_multiplication() raises:
 def main() raises:
     TestSuite.discover_tests[__functions_in_module()]().run()
 ```
+
+Or let the runner write it, which is one command instead of a page to copy:
+
+```console
+$ pixi run mtest new tests/test_math.mojo
+created tests/test_math.mojo
+```
+
+`mtest new` creates missing parent directories, refuses a basename no directory
+walk would collect, and never overwrites an existing file — a second one on the
+same path exits `4` and leaves your bytes alone. What it writes is one example
+test rather than the two above, so follow the saved file if you are reading the
+counts in the next section.
 
 The import line matters more than it looks. The standard library's testing
 module resolves under its full name on the supported toolchain, and the bare

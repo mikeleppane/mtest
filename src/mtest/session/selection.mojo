@@ -52,7 +52,11 @@ from mtest.model import (
 from mtest.protocol import ParsedReport, ParsedRow, ReportVerdict
 from mtest.report import ReportCoordinator
 from mtest.select import FileIntent, OperandParse, select_from
-from mtest.session.attempt import _AttemptResult, _make_attempt_finished
+from mtest.session.attempt import (
+    _AttemptResult,
+    _make_attempt_finished,
+    flaky_eligible,
+)
 from mtest.session.build import (
     _BuildOutcome,
     _ProbeOutcome,
@@ -440,12 +444,18 @@ def _reconcile_and_classify(
 
     # A late pass after a crash-class retry is FLAKY (not PASS): promote the
     # outcome while keeping the passing per-test exit multiset, so a flaky
-    # selection pass counts 0 toward --maxfail and exit 0. A crash-then-FAIL
-    # stays FAIL (still failing), never flaky.
+    # selection pass counts 0 toward --maxfail and exit 0. Only PASS or FAIL
+    # ever reach this point -- every other verdict (CRASH, TIMEOUT, drift,
+    # capture overflow, an absent/ambiguous report) returns earlier in this
+    # function -- so a crash-then-FAIL final attempt simply keeps FAIL, never
+    # flaky. Keying on the shared predicate, rather than a local expression,
+    # keeps this driver in lockstep with the other two even if a future
+    # change ever widens what reaches here. The event flag is derived from
+    # the promoted outcome so the two can never disagree.
     var file_out = cls.file_outcome
-    var flaky = flaky_if_pass and not cls.file_outcome.is_failing()
-    if flaky:
+    if flaky_if_pass and flaky_eligible(cls.file_outcome):
         file_out = Outcome.FLAKY
+    var flaky = file_out == Outcome.FLAKY
 
     var ev = Event.file_finished(
         rel,

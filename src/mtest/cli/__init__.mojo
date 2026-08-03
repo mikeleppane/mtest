@@ -5,7 +5,10 @@ plus its defaults-folded `RunnerConfig`, tagged as a run, config-display, or
 doctor request, or a directive to print help or the version. A usage error is
 raised as a `cli:`-prefixed `Error` for `main` to print to stderr before
 exiting 4. The doctor runner owns its fixed, contained Layer-5 diagnostics and
-returns lines to `main`; it never enters a session or reporter.
+returns lines to `main`; it never enters a session or reporter. The scaffold
+runners behind `mtest new` and `mtest init` have the same shape: they write
+source — one test file, or the handful of files a project starts from — and
+return lines and a code rather than printing or exiting.
 
 The parser is table-driven. `flag_specs()` is the single source of truth for
 every accepted spelling: its arity, whether it repeats, and its owned help text,
@@ -37,4 +40,13 @@ from mtest.cli.parser import (
     help_text,
     parse_args,
     version_text,
+)
+from mtest.cli.scaffold import (
+    ScaffoldReport,
+    gitignore_update,
+    render_github_workflow,
+    render_mtest_toml,
+    render_test_file,
+    run_init,
+    run_new,
 )

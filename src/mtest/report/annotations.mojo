@@ -382,11 +382,19 @@ def _fmt_one_decimal(x: Float64) -> String:
     return String(whole) + "." + String(frac)
 
 
-def _notice_message(e: SessionFinishedPayload) -> String:
+def _notice_message(e: SessionFinishedPayload, fail_on_flaky: Bool) -> String:
     """The one-line run summary for the `::notice`.
 
     Carries the same facts as `console.mojo`'s summary band, composed
     independently of it: no shared state, no ANSI, no framing.
+
+    Args:
+        e: The terminal payload the summary is composed from. Not mutated.
+        fail_on_flaky: Whether `--fail-on-flaky` is in effect, so a nonzero
+            flaky tally names the flag as the reason the run failed.
+
+    Returns:
+        A freshly allocated one-line summary.
     """
     var tc = e.test_counts
     var s = e.summary.copy()
@@ -407,6 +415,11 @@ def _notice_message(e: SessionFinishedPayload) -> String:
         s.count_of(Outcome.PRECOMPILE_ERROR), "precompile error"
     )
     body += _extra_count(s.count_of(Outcome.FLAKY), "flaky")
+    # Derived from the flag and the tally, never from the payload's exit code:
+    # a real failure beside a flaky file with the flag off must not pick up the
+    # suffix. Mirrors the console band, composed independently of it.
+    if fail_on_flaky and s.count_of(Outcome.FLAKY) > 0:
+        body += " (failing: --fail-on-flaky)"
 
     var parenthetical = (
         "("
@@ -593,14 +606,21 @@ struct AnnotationAccumulator(Copyable, Movable):
     var _has_notice: Bool
     var _notice_message: String
     var _pending_attempts_planned: Int
+    var _fail_on_flaky: Bool
 
-    def __init__(out self):
-        """An empty accumulator."""
+    def __init__(out self, fail_on_flaky: Bool = False):
+        """An empty accumulator.
+
+        Args:
+            fail_on_flaky: Whether `--fail-on-flaky` is in effect, so the
+                terminal notice names the flag beside a nonzero flaky tally.
+        """
         self._error_rows = List[_AnnotationRow]()
         self._warning_rows = List[_AnnotationRow]()
         self._has_notice = False
         self._notice_message = String("")
         self._pending_attempts_planned = -1
+        self._fail_on_flaky = fail_on_flaky
 
     def observe(mut self, e: Event):
         """Extract this event's annotation rows, then drop the event.
@@ -641,7 +661,7 @@ struct AnnotationAccumulator(Copyable, Movable):
         elif e.kind == EventKind.SESSION_FINISHED:
             self._has_notice = True
             self._notice_message = _notice_message(
-                e.data[SessionFinishedPayload]
+                e.data[SessionFinishedPayload], self._fail_on_flaky
             )
 
     def render(self) -> List[String]:
@@ -678,7 +698,9 @@ struct AnnotationAccumulator(Copyable, Movable):
         return total
 
 
-def render_annotations(events: List[Event]) -> List[String]:
+def render_annotations(
+    events: List[Event], fail_on_flaky: Bool = False
+) -> List[String]:
     """The complete, ordered GitHub Actions annotation lines for one run.
 
     Feeds the whole stream through an `AnnotationAccumulator` in emission order
@@ -687,6 +709,8 @@ def render_annotations(events: List[Event]) -> List[String]:
 
     Args:
         events: The run's event stream, in emission order.
+        fail_on_flaky: Whether `--fail-on-flaky` is in effect, so the terminal
+            notice names the flag beside a nonzero flaky tally.
 
     Returns:
         The ordered workflow-command lines, ready to print one per line.
@@ -702,7 +726,7 @@ def render_annotations(events: List[Event]) -> List[String]:
     var lines = render_annotations(events)  # one "::notice::..." line
     ```
     """
-    var acc = AnnotationAccumulator()
+    var acc = AnnotationAccumulator(fail_on_flaky)
     for e in events:
         acc.observe(e)
     return acc.render()

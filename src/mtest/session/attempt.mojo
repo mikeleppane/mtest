@@ -784,7 +784,7 @@ def _compile_crash_residual(
     )
 
 
-def _flaky_eligible(file_outcome: Outcome) -> Bool:
+def flaky_eligible(file_outcome: Outcome) -> Bool:
     """Whether a post-retry final attempt counts as a flaky-eligible pass.
 
     A file is flaky only when a retry followed a crash-class failure and the
@@ -1115,7 +1115,7 @@ def _run_one(
             rc = retry_classify("build", att.bterm, False, att.build_stderr)
         else:
             rc = retry_classify("run", att.rterm, False, att.run_stderr)
-            attempt_passed = _flaky_eligible(att.cls.file_outcome)
+            attempt_passed = flaky_eligible(att.cls.file_outcome)
 
         var more_attempts = attempt_index < attempts_planned
         if rc.retry_eligible and more_attempts:

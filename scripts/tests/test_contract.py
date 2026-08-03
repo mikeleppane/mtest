@@ -599,6 +599,14 @@ class CheckRosterTests(unittest.TestCase):
             [
                 "collect: exact node-id set for tests/",
                 "determinism: collect byte-identical",
+                "collect: --format json agrees with the lines listing and the exit",
+                (
+                    "collect: a listing larger than the pipe buffer survives an"
+                    " early close"
+                ),
+                "pipe: every direct-output command survives a closed stdout",
+                "collect: an interrupted --format json run agrees with its own exit",
+                "determinism: --shuffle --seed repeats its file order",
                 "help: --help -> stdout, exit 0",
                 "usage error: -V -> stderr, exit 4",
                 "collect: streams split, listing continues past a bad probe",
@@ -610,6 +618,17 @@ class CheckRosterTests(unittest.TestCase):
                 "value: 2^63 refused for every non-negative integer flag",
                 "report: --json to a readerless FIFO fails fast, never blocks",
                 "path: a long-but-legal path builds, never a false COMPILE-ERROR",
+                "flaky: --fail-on-flaky turns a FLAKY-only run's 0 into 1",
+                "debug: the handoff is the test's own exit, with no mtest verdict",
+                "new: scaffolds a discoverable file",
+                "new: refuses to overwrite -> 4",
+                "new: non-discoverable name -> 4",
+                "new: node-id-shaped path -> 4",
+                "new: the scaffolded file runs green",
+                "new: a hostile basename still compiles and passes",
+                "init: --ci github bootstraps a runnable project",
+                "init: a second run skips every artifact, still 0",
+                "init: --ci gitlab -> 4",
                 "interrupt: SIGINT frees the owned process group",
             ],
         )
@@ -675,6 +694,30 @@ class CheckRosterTests(unittest.TestCase):
             def check_determinism(self) -> None:
                 self._perform("determinism: collect byte-identical")
 
+            def check_collect_json(self) -> None:
+                self._perform(
+                    "collect: --format json agrees with the lines listing and the exit"
+                )
+
+            def check_collect_pipe_early_close(self) -> None:
+                self._perform(
+                    "collect: a listing larger than the pipe buffer survives an"
+                    " early close"
+                )
+
+            def check_direct_output_closed_pipe(self) -> None:
+                self._perform(
+                    "pipe: every direct-output command survives a closed stdout"
+                )
+
+            def check_collect_interrupted_json(self) -> None:
+                self._perform(
+                    "collect: an interrupted --format json run agrees with its own exit"
+                )
+
+            def check_shuffle_determinism(self) -> None:
+                self._perform("determinism: --shuffle --seed repeats its file order")
+
             def check_help_stream(self) -> None:
                 self._perform("help: --help -> stdout, exit 0")
                 self._perform("usage error: -V -> stderr, exit 4")
@@ -718,6 +761,35 @@ class CheckRosterTests(unittest.TestCase):
                 self._perform(
                     "path: a long-but-legal path builds, never a false COMPILE-ERROR"
                 )
+
+            def check_fail_on_flaky(self) -> None:
+                self._perform(
+                    "flaky: --fail-on-flaky turns a FLAKY-only run's 0 into 1"
+                )
+
+            def check_debug_handoff(self) -> None:
+                self._perform(
+                    "debug: the handoff is the test's own exit, with no mtest verdict"
+                )
+
+            def check_new_creates(self) -> None:
+                self._perform("new: scaffolds a discoverable file")
+
+            def check_new_refuses_to_overwrite(self) -> None:
+                self._perform("new: refuses to overwrite -> 4")
+
+            def check_new_refuses_unusable_names(self) -> None:
+                self._perform("new: non-discoverable name -> 4")
+                self._perform("new: node-id-shaped path -> 4")
+
+            def check_new_scaffold_runs(self) -> None:
+                self._perform("new: the scaffolded file runs green")
+                self._perform("new: a hostile basename still compiles and passes")
+
+            def check_init_scaffold(self) -> None:
+                self._perform("init: --ci github bootstraps a runnable project")
+                self._perform("init: a second run skips every artifact, still 0")
+                self._perform("init: --ci gitlab -> 4")
 
             def check_interrupt(self, _strict: bool) -> None:
                 self._perform("interrupt: SIGINT frees the owned process group")

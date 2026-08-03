@@ -29,7 +29,8 @@ The session does not decide the exit code: it states the facts it observed and
 `resolve_exit_code` in the model layer ranks them. The precedence, high to low:
 an interrupt is 2; an internal error (spawn failure or machinery raise) is 3; a
 report that drifted off the pinned grammar is also 3; a precompile failure is 1;
-otherwise `exit_code_for` over the run outcomes decides 1, 5, or 0. A terminal
+otherwise `exit_code_for` over the run outcomes decides 1, 5, or 0, and under
+`--fail-on-flaky` a 0 with at least one FLAKY file becomes 1. A terminal
 artifact that could not be delivered then escalates anything below 2 to 3. The
 selection, probe, and gate paths route non-valid reports through the same
 `resolve_report`/`classify` machinery as the default path, so a forged or
@@ -52,8 +53,10 @@ from mtest.model import (
     exit_code_for,
     resolve_exit_code,
 )
+from mtest.platform import process_id
 from mtest.report import ReportCoordinator
 from mtest.select import NamedTarget, parse_operands, selection_active
+from mtest.select.shuffle import shuffle_strings
 from mtest.session.attempt import _run_one
 from mtest.session.attribution_run import _run_crash_attribution
 from mtest.session.effective_settings import (
@@ -235,6 +238,29 @@ def run_session[
         sharded_out_count = before - len(disc.run_files)
         shard_label = String(config.shard_m) + "/" + String(config.shard_n)
 
+    # This shard's run files in discovery's sorted order, captured before any
+    # execution-order rewrite below (`--failed-first`, `--shuffle`). Every
+    # surface that REPORTS the run set rather than driving it reads this one, so
+    # a listing stays node-id sorted no matter what order the files execute in.
+    var reportable_run_files = disc.run_files.copy()
+
+    # Randomized order applies AFTER the shard partition (shard membership is a
+    # cross-machine contract over the sorted list) and only to run files: gates
+    # keep their listed order. The seed resolves here so the header can always
+    # print it; an unseeded --shuffle mixes the clock with the pid, which
+    # separates two shards launched in the same tick on one host. Two hosts at
+    # equal uptime handing out equal pids can still collide, so `--seed` is the
+    # only way to guarantee distinct or identical orders across machines.
+    var shuffle_seed = 0
+    if config.shuffle:
+        shuffle_seed = config.shuffle_seed
+        if shuffle_seed < 0:
+            shuffle_seed = Int(
+                (perf_counter_ns() ^ UInt(process_id() << 20))
+                & 0x7FFF_FFFF_FFFF_FFFF
+            )
+        shuffle_strings(disc.run_files, UInt64(shuffle_seed))
+
     # Resolve the worker count before announcing the run: `1` (the default)
     # stays the sequential path and never queries the descriptor cap; any other
     # value resolves the pool's capacity against the cores and the effective
@@ -251,7 +277,7 @@ def run_session[
     if config.last_failed:
         sel_active = True
     var state_files = disc.gate_files.copy()
-    state_files.extend(disc.run_files.copy())
+    state_files.extend(reportable_run_files.copy())
     var ff_has_match = (
         config.failed_first
         and resolved.state
@@ -290,6 +316,8 @@ def run_session[
             sharded_out_count=sharded_out_count,
             workers=resolved_workers,
             config_file=resolved.config_file,
+            shuffle=config.shuffle,
+            shuffle_seed=shuffle_seed,
         )
     )
     for warning in resolved.state_warnings:
@@ -400,7 +428,7 @@ def run_session[
     # almost certainly mistyped it. This is about the glob, not the worker count,
     # so it fires on every run — even the sequential one, where serial pinning
     # has no execution effect.
-    for pat in stale_serials(disc.run_files, config.serial_globs):
+    for pat in stale_serials(reportable_run_files, config.serial_globs):
         reporter.handle(Event.warning("stale-serial", pat))
 
     var run_outcomes = List[Outcome]()
@@ -443,9 +471,11 @@ def run_session[
     var includes = config.include_paths.copy()
     # Every selected file (gates first, then the run set) depends on the
     # precompiled packages, so a precompile failure makes all of them casualties
-    # — named individually in the banner (§8.3), not merely counted.
+    # — named individually in the banner (§8.3), not merely counted. Built from
+    # the sorted snapshot: this list is a report about files that never ran, so
+    # it must not inherit the order they would have run in.
     var casualty_files = disc.gate_files.copy()
-    for f in disc.run_files:
+    for f in reportable_run_files:
         casualty_files.append(String(f))
     # Every earlier step's package is an input to the next one, so the key of a
     # step carries them explicitly. Skipped steps land here too: their output is
@@ -988,6 +1018,13 @@ def run_session[
     # the model ranks them, so the precedence lives in one place for every caller
     # that reaches an exit code. A stream death or a failed JUnit finalization is
     # the same fact to the resolver: a terminal artifact was not delivered.
+    # A file that passed only after a crash-class retry tallied under FLAKY; that
+    # run-wide count rides the SessionFinished summary line, and under
+    # `--fail-on-flaky` it is also a terminal fact the model ranks. Derived once,
+    # ahead of the resolve, so both resolutions below rank the same fact.
+    var flaky_files = summary.count_of(Outcome.FLAKY)
+    var flaky_failed = config.fail_on_flaky and flaky_files > 0
+
     var code = resolve_exit_code(
         TerminalFacts(
             interrupted=interrupt_latched,
@@ -996,13 +1033,11 @@ def run_session[
             precompile_failed=precompile_failed,
             outcome_code=outcome_code,
             delivery_failed=stream_dead or finalize_failed,
+            flaky_failed=flaky_failed,
         )
     )
 
     var wall = Float64(perf_counter_ns() - started_ns) / 1.0e9
-    # A file that passed only after a crash-class retry tallied under FLAKY; that
-    # run-wide count rides the SessionFinished summary line.
-    var flaky_files = summary.count_of(Outcome.FLAKY)
     reporter.handle(
         Event.session_finished(
             summary^,
@@ -1029,7 +1064,7 @@ def run_session[
     # could not have seen, because it did not exist yet. Re-poll the SAME
     # latch Phase 1 already polls; if it is now set and was not already
     # folded into `stream_dead`, re-resolve with the pure function again,
-    # passing the SAME interrupt/error/drift/precompile/outcome facts (a
+    # passing the SAME interrupt/error/drift/precompile/outcome/flaky facts (a
     # finalization-phase interrupt still must not move the code — only the
     # delivery outcome does) and `delivery_failed=True`. The same
     # precedence applies: a resolved 2 still stands, a resolved 3 stays 3, a
@@ -1046,6 +1081,7 @@ def run_session[
                 precompile_failed=precompile_failed,
                 outcome_code=outcome_code,
                 delivery_failed=True,
+                flaky_failed=flaky_failed,
             )
         )
     return code
