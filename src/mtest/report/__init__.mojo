@@ -55,3 +55,9 @@ from mtest.report.junit_reporter import (
     open_junit_spool,
 )
 from mtest.report.annotations_reporter import AnnotationsReporter
+from mtest.report.report_text import (
+    md_code_fence,
+    md_code_span,
+    md_escape_cell,
+    normalize_detail,
+)

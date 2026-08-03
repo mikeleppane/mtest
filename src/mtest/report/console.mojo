@@ -64,6 +64,7 @@ from mtest.report.console_text import (
     prefix_lines,
 )
 from mtest.report.fencing import fence_region, select_collision_free_token
+from mtest.report.report_text import normalize_detail
 from mtest.report.reporter import Reporter
 from mtest.report.signals import signal_name_for_target
 
@@ -451,89 +452,6 @@ def _slow_note(e: FileFinishedPayload) -> String:
             + "s"
         )
     return ""
-
-
-def _common_indent(lines: List[String]) -> Int:
-    """The count of leading spaces shared by every non-empty line, or 0.
-
-    Empty lines are ignored; a non-empty line with no leading space forces 0.
-    """
-    var m = -1
-    for ref ln in lines:
-        if ln.byte_length() == 0:
-            continue
-        var c = 0
-        for cp in ln.codepoint_slices():
-            if String(cp) == " ":
-                c += 1
-            else:
-                break
-        if c == 0:
-            return 0
-        if m < 0 or c < m:
-            m = c
-    if m < 0:
-        return 0
-    return m
-
-
-def _strip_at_root_prefix(ln: String, root: String) -> String:
-    """Strip the run-root prefix from a line that is a backtrace pointer.
-
-    The anchored form of `_transform_detail`'s second transformation. If `ln`,
-    after any leading spaces, starts with `At <root>/`, that single occurrence
-    of `root + "/"` immediately after `At ` is removed. Every other byte on the
-    line rides through untouched, including any later occurrence of the root
-    path, such as one inside an assertion message. A line that merely contains
-    `"At "` somewhere without being anchored there is left alone.
-    """
-    if root.byte_length() == 0:
-        return ln
-    var lead = String("")
-    for cp in ln.codepoint_slices():
-        if String(cp) == " ":
-            lead += " "
-        else:
-            break
-    var marker = lead + "At " + root + "/"
-    if not ln.startswith(marker):
-        return ln
-    return lead + "At " + String(ln.removeprefix(marker))
-
-
-def _transform_detail(detail: String, root: String) -> String:
-    """A FAIL's verbatim detail with the two permitted transformations applied.
-
-    First, strip the common leading-whitespace prefix TestSuite bakes into the
-    detail block: a uniform dedent that preserves the relative shape. Second, on
-    a line that is a backtrace pointer (`At <path>:<line>:<col>: ...`,
-    optionally indented), render the compiler-baked absolute path root-relative
-    by stripping the single run-root prefix (`root + "/"`) that immediately
-    follows `At `.
-
-    Nothing else is rewritten. A later occurrence of the run root elsewhere on
-    the same line, such as inside the assertion message, is untouched, and every
-    other byte rides through verbatim.
-    """
-    if detail.byte_length() == 0:
-        return String("")
-    var lines = List[String]()
-    for ln in detail.split("\n"):
-        lines.append(String(ln))
-    var indent = _common_indent(lines)
-    var prefix = String("")
-    for _ in range(indent):
-        prefix += " "
-    var out = String("")
-    for i in range(len(lines)):
-        var ln = lines[i].copy()
-        if indent > 0 and ln.byte_length() >= indent:
-            ln = String(ln.removeprefix(prefix))
-        ln = _strip_at_root_prefix(ln, root)
-        if i > 0:
-            out += "\n"
-        out += ln
-    return out^
 
 
 def _extra_count(s: Summary, outcome: Outcome, label: String) -> String:
@@ -1648,7 +1566,7 @@ struct ConsoleReporter(Reporter):
         """
         var node = t.node.render()
         var out = String("--- FAIL ") + escape_scalar(node) + " ---\n"
-        var d = _transform_detail(t.detail, self._run_root)
+        var d = normalize_detail(t.detail, self._run_root)
         if d.byte_length() > 0:
             out += _ensure_trailing_newline(self._fence(_safe_block(d)))
         out += self._repro_line(node) + "\n\n"
