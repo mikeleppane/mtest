@@ -4,9 +4,16 @@ Each builds a real temp tree, runs `discover`, and asserts the exact result
 (run files, gate files, excluded entries, stale patterns) or the exact raise.
 Covers explicit-file bypass, operand dedup, gate-overlap promotion, exclusion
 (and its win over gates), stale excludes, the default-path rule, and the exit-4
-raises for a node id, a nonexistent path, and a root escape.
+raises for a node id, an operand spelling a path with `::`, a nonexistent path,
+and a root escape.
 """
-from std.testing import assert_equal, assert_raises, TestSuite
+from std.testing import (
+    assert_equal,
+    assert_false,
+    assert_raises,
+    assert_true,
+    TestSuite,
+)
 
 from mtest.config import RunnerConfig
 from mtest.discover import discover
@@ -186,6 +193,85 @@ def test_node_id_naming_a_directory_raises() raises:
             _cfg(["tests::test_a"], List[String](), List[String]()),
             root,
         )
+    remove_tree(root)
+
+
+def test_a_path_operand_carrying_the_separator_names_itself() raises:
+    """`tests/co::l/test_x.mojo` reported `no such path 'tests/co'` — a lie.
+
+    An operand splits at its FIRST `::`, so the token became a node id whose
+    file was a directory prefix the caller never wrote and whose test name was
+    the rest of the path. The refusal now states the real rule and quotes the
+    operand as typed.
+    """
+    var root = temp_root()
+    touch(root, "tests/co::l/test_x.mojo")
+    var message = String("")
+    try:
+        _ = discover(
+            _cfg(["tests/co::l/test_x.mojo"], List[String](), List[String]()),
+            root,
+        )
+    except e:
+        message = String(e)
+    assert_true("unsupported path" in message, message)
+    assert_true("'tests/co::l/test_x.mojo'" in message, message)
+    assert_true("reserved for node ids" in message, message)
+    assert_false("'tests/co'" in message, message)
+    remove_tree(root)
+
+
+def test_a_directory_operand_carrying_the_separator_names_itself() raises:
+    """The same refusal when the name part could have passed for a test name.
+
+    `tests/co::l` splits into a missing `tests/co` and the identifier `l`, so
+    nothing lexical gives it away. What does is that the operand as typed is a
+    real path — which makes it a path spelled with `::`, not a node id.
+    """
+    var root = temp_root()
+    touch(root, "tests/co::l/test_x.mojo")
+    var message = String("")
+    try:
+        _ = discover(
+            _cfg(["tests/co::l"], List[String](), List[String]()), root
+        )
+    except e:
+        message = String(e)
+    assert_true("unsupported path" in message, message)
+    assert_true("'tests/co::l'" in message, message)
+    remove_tree(root)
+
+
+def test_a_real_node_id_for_a_missing_file_keeps_its_own_message() raises:
+    """The `::` rule must not swallow the diagnostic it sits next to."""
+    var root = temp_root()
+    touch(root, "tests/test_a.mojo")
+    with assert_raises(contains="no such path 'tests/test_gone.mojo'"):
+        _ = discover(
+            _cfg(
+                ["tests/test_gone.mojo::test_foo"],
+                List[String](),
+                List[String](),
+            ),
+            root,
+        )
+    remove_tree(root)
+
+
+def test_a_gate_carrying_the_separator_is_refused_the_same_way() raises:
+    """Gates go through the same classifier, so they get the same rule."""
+    var root = temp_root()
+    touch(root, "tests/test_a.mojo")
+    touch(root, "gates/g::1/test_gate.mojo")
+    var message = String("")
+    try:
+        _ = discover(
+            _cfg(["tests"], List[String](), ["gates/g::1/test_gate.mojo"]),
+            root,
+        )
+    except e:
+        message = String(e)
+    assert_true("unsupported path" in message, message)
     remove_tree(root)
 
 

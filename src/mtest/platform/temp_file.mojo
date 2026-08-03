@@ -4,7 +4,15 @@ Part of the narrow platform-I/O boundary. `create_unique_temp` wraps POSIX
 `mkstemp(3)` so a caller receives the exact same-directory path and the already
 open mode-0600 descriptor atomically, without ever reopening an attacker-
 replaceable pathname. The write and close helpers preserve the descriptor
-lifecycle needed before an atomic rename.
+lifecycle needed before an atomic rename, and serve any descriptor the caller
+already owns — a console or a pipe as readily as a temporary file.
+
+The complete write comes in two shapes over one loop. `write_all_bytes_fd`
+raises a named error, for a caller whose failure path is an ordinary `except`.
+`write_all_bytes_fd_status` returns the failing `errno` instead, for a caller
+that must BRANCH on the reason: a departed consumer is ignorable where an
+unwritable destination is not, and telling them apart from an error message
+would be classification across a seam.
 """
 from std.ffi import external_call
 from std.memory import Span
@@ -129,6 +137,39 @@ def write_all_bytes_fd(fd: Int, data: Span[UInt8, _]) raises:
         Error: On a non-interrupted error or zero/impossible progress. The
             descriptor stays owned by the caller and must still be closed.
     """
+    var status = write_all_bytes_fd_status(fd, data)
+    if status > 0:
+        raise Error(
+            "platform: write failed for temporary file descriptor (errno "
+            + String(status)
+            + ")"
+        )
+    if status < 0:
+        raise Error(
+            "platform: write failed for temporary file descriptor:"
+            " impossible progress"
+        )
+
+
+def write_all_bytes_fd_status(fd: Int, data: Span[UInt8, _]) -> Int:
+    """Write every byte of `data` to `fd`; report what stopped it, if anything.
+
+    The non-raising core both `write_all_fd` and `write_all_bytes_fd` are built
+    on, for a caller that must branch on the reason a write failed rather than
+    on the text of an error. `EINTR` is retried inside the loop and is never
+    reported: a signal that lands mid-write interrupted nothing the caller can
+    act on.
+
+    Args:
+        fd: An open descriptor owned by the caller.
+        data: The complete bytes to write. Not mutated.
+
+    Returns:
+        `0` once every byte is written; the failing write's `errno`, always
+        positive, when one reported an error; or `-1` when a write reported
+        zero or impossible progress, which sets no `errno`. Allocates nothing,
+        and leaves the descriptor owned by the caller on every path.
+    """
     var total = len(data)
     var offset = 0
     while offset < total:
@@ -142,18 +183,16 @@ def write_all_bytes_fd(fd: Int, data: Span[UInt8, _]) raises:
             var err = errno_now()
             if err == _EINTR:
                 continue
-            raise Error(
-                "platform: write failed for temporary file descriptor (errno "
-                + String(err)
-                + ")"
-            )
+            _ = data
+            # A negative `write` always sets `errno`; a zero slot would read
+            # back as success, so it is reported as the no-errno failure.
+            return err if err > 0 else -1
         if count == 0 or count > total - offset:
-            raise Error(
-                "platform: write failed for temporary file descriptor:"
-                " impossible progress"
-            )
+            _ = data
+            return -1
         offset += count
     _ = data
+    return 0
 
 
 def close_checked_fd(fd: Int) raises:

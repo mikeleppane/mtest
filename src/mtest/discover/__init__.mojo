@@ -21,9 +21,18 @@ Two policies are load-bearing and documented at their definitions:
   so an entry that cannot be inspected refuses discovery rather than folding
   into an empty subtree, and a test-named entry that is not a runnable file is
   reported rather than dropped.
+- Addressability. `::` separates a file from a test name in a node id, so a
+  path carrying one names a test nothing could point at afterwards. A walk
+  refuses such a file loudly and an operand that spells one is a usage error
+  quoting what the caller actually typed.
 """
 from mtest.discover.discover import discover
 from mtest.discover.fnmatch import fnmatch
 from mtest.discover.normalize import normalize_operand, normalize_root
 from mtest.discover.result import DiscoveryResult, ExcludedEntry
-from mtest.discover.walk import is_discovered_test_name, walk_dir
+from mtest.discover.walk import (
+    NODE_ID_SEPARATOR,
+    is_discovered_test_name,
+    path_is_addressable,
+    walk_dir,
+)

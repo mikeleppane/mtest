@@ -270,6 +270,146 @@ def test_an_entry_the_walk_cannot_inspect_refuses_discovery() raises:
     remove_tree(root)
 
 
+def test_a_test_file_under_a_separator_path_is_skipped_and_announced() raises:
+    """`::` in a path costs the file its identity, so the walk refuses it.
+
+    The separator is reserved for node ids (§5), so nothing could name this
+    file afterwards: not an operand, not a node id, not a last-run entry.
+    Collecting it put a test in the run that the runner could not be pointed
+    at, and refusing it silently would shrink the run with no trace — so it
+    joins the loud channels the refused symlinks and non-regular entries use.
+    """
+    var root = temp_root()
+    touch(root, "tests/test_plain.mojo")
+    touch(root, "tests/co::l/test_x.mojo")
+    var result = discover(_config_paths(["tests"]), root)
+    assert_paths(result.run_files, ["tests/test_plain.mojo"])
+    assert_paths(result.skipped_unaddressable, ["tests/co::l/test_x.mojo"])
+    assert_equal(len(result.skipped_nonregular), 0)
+    assert_equal(len(result.skipped_links), 0)
+    remove_tree(root)
+
+
+def test_a_separator_in_the_file_name_itself_is_refused_too() raises:
+    """The rule is about the whole path, not only its directory components."""
+    var root = temp_root()
+    touch(root, "tests/test_plain.mojo")
+    touch(root, "tests/test_a::b.mojo")
+    var result = discover(_config_paths(["tests"]), root)
+    assert_paths(result.run_files, ["tests/test_plain.mojo"])
+    assert_paths(result.skipped_unaddressable, ["tests/test_a::b.mojo"])
+    remove_tree(root)
+
+
+def test_every_unaddressable_entry_is_announced_once_and_sorted() raises:
+    """One warning per file, never one per subtree, and never doubled.
+
+    A directory carrying the separator is still descended: reporting the
+    directory alone would leave the reader to work out which tests it held,
+    and overlapping operands would otherwise announce each of them twice.
+    """
+    var root = temp_root()
+    touch(root, "tests/z::z/test_z.mojo")
+    touch(root, "tests/a::a/test_a.mojo")
+    touch(root, "tests/a::a/deep/test_deep.mojo")
+    touch(root, "tests/test_plain.mojo")
+    var result = discover(_config_paths(["tests", "tests"]), root)
+    assert_paths(result.run_files, ["tests/test_plain.mojo"])
+    assert_paths(
+        result.skipped_unaddressable,
+        [
+            "tests/a::a/deep/test_deep.mojo",
+            "tests/a::a/test_a.mojo",
+            "tests/z::z/test_z.mojo",
+        ],
+    )
+    remove_tree(root)
+
+
+def test_an_unsearchable_separator_directory_refuses_discovery() raises:
+    """Addressability is decided AFTER the entry is characterized, not before.
+
+    A directory this process may read but not search lists its names while
+    every child `stat` fails. Refusing those children for their names first
+    would answer a question the walk never asked — it never established they
+    were runnable files — and would turn the contract's exit-4 inspection
+    failure into a green run over a subtree nobody looked inside.
+    """
+    var root = temp_root()
+    touch(root, "tests/test_plain.mojo")
+    touch(root, "tests/co::l/test_hidden.mojo")
+    set_permissions(root + "/tests/co::l", 0o644)
+    var message = String("")
+    try:
+        _ = discover(_config_paths(["tests"]), root)
+    except e:
+        message = String(e)
+    set_permissions(root + "/tests/co::l", 0o755)
+    assert_true("cannot inspect" in message, message)
+    remove_tree(root)
+
+
+def test_a_nonregular_entry_under_a_separator_path_keeps_its_own_channel() raises:
+    """Each kind reports what it IS, never merely that it cannot be named.
+
+    A directory wearing a test file's name is a tree accident whatever path it
+    sits under, and saying `skipped-unaddressable` about it would describe the
+    lesser of its two problems.
+    """
+    var root = temp_root()
+    touch(root, "tests/test_plain.mojo")
+    touch(root, "tests/a::a/test_shape.mojo/test_inside.mojo")
+    var result = discover(_config_paths(["tests"]), root)
+    assert_paths(result.run_files, ["tests/test_plain.mojo"])
+    assert_paths(result.skipped_nonregular, ["tests/a::a/test_shape.mojo"])
+    assert_equal(len(result.skipped_unaddressable), 0)
+    remove_tree(root)
+
+
+def test_a_dangling_link_under_a_separator_path_keeps_its_own_channel() raises:
+    """The same for a link that resolves to nothing: it is a broken link."""
+    var root = temp_root()
+    touch(root, "tests/test_plain.mojo")
+    touch(root, "tests/a::a/keep.txt")
+    link_broken(root, "tests/a::a/test_gone.mojo")
+    var result = discover(_config_paths(["tests"]), root)
+    assert_paths(result.run_files, ["tests/test_plain.mojo"])
+    assert_paths(result.skipped_links, ["tests/a::a/test_gone.mojo"])
+    assert_equal(len(result.skipped_unaddressable), 0)
+    remove_tree(root)
+
+
+def test_a_symlinked_test_file_under_a_separator_path_is_unaddressable() raises:
+    """A link the walk WOULD have collected is refused for its path, though.
+
+    That is the one shape the rule governs: an entry already characterized as a
+    usable test file, which the walk would otherwise put in the run under a
+    name nothing could point back at.
+    """
+    var root = temp_root()
+    touch(root, "tests/test_plain.mojo")
+    touch(root, "real/test_shared.mojo")
+    touch(root, "tests/a::a/keep.txt")
+    link_dir(root, "real/test_shared.mojo", "tests/a::a/test_linked.mojo")
+    var result = discover(_config_paths(["tests"]), root)
+    assert_paths(result.run_files, ["tests/test_plain.mojo"])
+    assert_paths(result.skipped_unaddressable, ["tests/a::a/test_linked.mojo"])
+    assert_equal(len(result.skipped_links), 0)
+    remove_tree(root)
+
+
+def test_a_clean_walk_reports_nothing_unaddressable() raises:
+    var root = temp_root()
+    touch(root, "tests/test_a.mojo")
+    touch(root, "tests/helpers/test_b.mojo")
+    var result = discover(_config_paths(["tests"]), root)
+    assert_paths(
+        result.run_files, ["tests/helpers/test_b.mojo", "tests/test_a.mojo"]
+    )
+    assert_equal(len(result.skipped_unaddressable), 0)
+    remove_tree(root)
+
+
 def main() raises:
     """Run this module's tests through the stdlib suite."""
     TestSuite.discover_tests[__functions_in_module()]().run()

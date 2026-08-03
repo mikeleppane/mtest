@@ -36,7 +36,6 @@ selection, probe, and gate paths route non-valid reports through the same
 `resolve_report`/`classify` machinery as the default path, so a forged or
 off-grammar report resolves identically either way.
 """
-from std.io import FileDescriptor
 from std.sys import num_logical_cores
 from std.time import perf_counter_ns
 
@@ -53,7 +52,11 @@ from mtest.model import (
     exit_code_for,
     resolve_exit_code,
 )
-from mtest.platform import process_id
+from mtest.platform import (
+    direct_write_failed,
+    process_id,
+    write_all_bytes_fd_status,
+)
 from mtest.report import ReportCoordinator
 from mtest.select import NamedTarget, parse_operands, selection_active
 from mtest.select.shuffle import shuffle_strings
@@ -91,14 +94,25 @@ from mtest.session.store import (
 
 def _flush_console[
     C: ReportCoordinator
-](mut reporter: C, console_fd: Int, closing: Bool):
+](mut reporter: C, console_fd: Int, closing: Bool) -> Bool:
     """Drain the coordinator's pending console bytes to the borrowed handle.
 
     The driver owns no console destination of its own: `main` resolves it and
     lends the descriptor, keeping close and teardown. A negative handle (a
     library caller that lent none, or a recording driver) or an empty drain
-    writes nothing. The write is best-effort: a dead destination is not a new
-    exit cause, so a failed incremental write is not distinguished here.
+    writes nothing.
+
+    The console report is the run's PRIMARY output, so a destination that
+    cannot take it is a delivery failure the session latches and the model
+    ranks — the same fact a dead `--json` destination presents. A run that
+    printed nothing has not reported, and its own verdict is no longer the
+    honest answer. A departed consumer is the carve-out and is not latched:
+    `mtest tests | head -1` still exits by its outcomes (§9).
+
+    A raw `write(2)` rather than a `FileDescriptor`: constructing one takes
+    ownership of a descriptor the session only borrowed, and its teardown
+    closes it — which faults outright when the borrowed descriptor is already
+    closed, killing a run that had otherwise finished.
 
     Args:
         reporter: The coordinator to drain. A recording coordinator drains
@@ -107,13 +121,19 @@ def _flush_console[
             lent.
         closing: Whether this is the terminal drain, which also emits the
             framed sections and the summary band.
+
+    Returns:
+        Whether this drain failed to deliver its bytes for a reason other than
+        a departed consumer. False when nothing was written.
     """
     if console_fd < 0:
-        return
+        return False
     var chunk = reporter.drain_console(closing)
     if chunk.byte_length() == 0:
-        return
-    print(chunk, end="", file=FileDescriptor(console_fd), flush=True)
+        return False
+    return direct_write_failed(
+        write_all_bytes_fd_status(console_fd, chunk.as_bytes())
+    )
 
 
 def _warn_cache_off[
@@ -423,6 +443,12 @@ def run_session[
     # than the tree suggests, so say so rather than exit 0 quietly.
     for entry in disc.skipped_nonregular:
         reporter.handle(Event.warning("skipped-nonregular", entry))
+    # And once more for a file that is perfectly runnable and simply cannot be
+    # named: `::` is the node-id separator, so a test under such a path has no
+    # operand, no node id, and no last-run entry. Running it would put a result
+    # in the report that nothing could ever point back at.
+    for entry in disc.skipped_unaddressable:
+        reporter.handle(Event.warning("skipped-unaddressable", entry))
     # A `--serial` glob matching no discovered run file is stale for the same
     # reason a `--exclude` glob is: the pattern names nothing, so the caller
     # almost certainly mistyped it. This is about the glob, not the worker count,
@@ -434,6 +460,10 @@ def run_session[
     var run_outcomes = List[Outcome]()
     var test_totals = TestCounts.zeros()
     var ran_files = 0
+    # The console report is the run's primary output, so a destination
+    # that would not take it is a delivery failure the model ranks —
+    # latched across every drain, both drivers, and never cleared.
+    var console_dead = False
     var interrupted = False
     # A descriptor-ceiling fault while resolving the worker plan is a machinery
     # fault: resolve it as an internal error (exit 3), the same as any other.
@@ -603,6 +633,7 @@ def run_session[
         # here rather than counted there: the gate, parallel, and serial batches
         # each account for themselves, and every fold happens long before the
         # terminal artifacts read the totals.
+        console_dead = console_dead or gb.console_dead
         ctx.built_files += gb.built_files
         ctx.cached_files += gb.cached_files
         run_outcomes.extend(gb.run_outcomes.copy())
@@ -767,6 +798,7 @@ def run_session[
             console_fd,
             ctx,
         )
+        console_dead = console_dead or rb.console_dead
         ctx.built_files += rb.built_files
         ctx.cached_files += rb.cached_files
         run_outcomes.extend(rb.run_outcomes.copy())
@@ -813,6 +845,7 @@ def run_session[
                 serial=True,
                 initial_failing=_failing_count(rb.run_outcomes),
             )
+            console_dead = console_dead or sb.console_dead
             ctx.built_files += sb.built_files
             ctx.cached_files += sb.cached_files
             run_outcomes.extend(sb.run_outcomes.copy())
@@ -887,7 +920,8 @@ def run_session[
                 # raise can follow before the run returns; a leaked partial
                 # flush ahead of a usage-error raise is therefore impossible on
                 # this path.
-                _flush_console(reporter, console_fd, closing=False)
+                if _flush_console(reporter, console_fd, closing=False):
+                    console_dead = True
                 test_totals.passed += fr.test_counts.passed
                 test_totals.failed += fr.test_counts.failed
                 test_totals.skipped += fr.test_counts.skipped
@@ -926,7 +960,8 @@ def run_session[
     # returned normally, so it never fires ahead of a selection usage-error
     # raise — matching the old terminal flush, which `main` performed only on a
     # normal return.
-    _flush_console(reporter, console_fd, closing=False)
+    if _flush_console(reporter, console_fd, closing=False):
+        console_dead = True
 
     # Every selected file that did not produce a tallied verdict is NOT_RUN — a
     # gate casualty, an -x/--maxfail/gate-abort/interrupt skip, a precompile
@@ -1025,6 +1060,12 @@ def run_session[
     var flaky_files = summary.count_of(Outcome.FLAKY)
     var flaky_failed = config.fail_on_flaky and flaky_files > 0
 
+    # One delivery fact, three ways to earn it: a dead machine stream, a JUnit
+    # report that could not be published, and a console that would not take the
+    # run's report. The model does not distinguish them, and neither should
+    # this — each means a terminal artifact the caller asked for never arrived.
+    var delivery_failed = stream_dead or finalize_failed or console_dead
+
     var code = resolve_exit_code(
         TerminalFacts(
             interrupted=interrupt_latched,
@@ -1032,7 +1073,7 @@ def run_session[
             drift=drift,
             precompile_failed=precompile_failed,
             outcome_code=outcome_code,
-            delivery_failed=stream_dead or finalize_failed,
+            delivery_failed=delivery_failed,
             flaky_failed=flaky_failed,
         )
     )
@@ -1055,15 +1096,17 @@ def run_session[
     # driver makes; `main` renders the fence-restoration epilogue and the
     # annotation tail after this returns, so both still land AFTER the final
     # console bytes exactly as before.
-    _flush_console(reporter, console_fd, closing=True)
+    if _flush_console(reporter, console_fd, closing=True):
+        console_dead = True
 
-    # The dispatch just above is ITSELF a stream write, and can latch a NEW
-    # failure during that very write (a `--json -` consumer that closes its
-    # read end right after `file_finished`; a file destination that hits
-    # ENOSPC exactly on the terminal line) — a failure `stream_dead` above
-    # could not have seen, because it did not exist yet. Re-poll the SAME
-    # latch Phase 1 already polls; if it is now set and was not already
-    # folded into `stream_dead`, re-resolve with the pure function again,
+    # Both of the last two writes can latch a NEW delivery failure the resolve
+    # above could not have seen, because neither had happened yet: the dispatch
+    # is ITSELF a stream write (a `--json -` consumer that closes its read end
+    # right after `file_finished`; a file destination that hits ENOSPC exactly
+    # on the terminal line), and the closing flush is the one carrying the
+    # framed sections and the summary band — the part of the console report a
+    # reader most needs. Re-poll both; if either is now set and neither was
+    # already folded in, re-resolve with the pure function again,
     # passing the SAME interrupt/error/drift/precompile/outcome/flaky facts (a
     # finalization-phase interrupt still must not move the code — only the
     # delivery outcome does) and `delivery_failed=True`. The same
@@ -1072,7 +1115,7 @@ def run_session[
     # (torn or absent on the now-dead stream) is the consumer's truncation
     # signal; the EXIT CODE is the out-of-band signal and must not lie about
     # it by returning the code resolved before the stream died.
-    if not stream_dead and reporter.stream_failed():
+    if not delivery_failed and (reporter.stream_failed() or console_dead):
         code = resolve_exit_code(
             TerminalFacts(
                 interrupted=interrupt_latched,

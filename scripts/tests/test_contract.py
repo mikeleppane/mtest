@@ -605,6 +605,8 @@ class CheckRosterTests(unittest.TestCase):
                     " early close"
                 ),
                 "pipe: every direct-output command survives a closed stdout",
+                "io: an unwritable output descriptor exits 3, never a crash",
+                "io: an undelivered report still releases the JUnit spool",
                 "collect: an interrupted --format json run agrees with its own exit",
                 "determinism: --shuffle --seed repeats its file order",
                 "help: --help -> stdout, exit 0",
@@ -615,6 +617,7 @@ class CheckRosterTests(unittest.TestCase):
                 "symlink: a symlinked test file is collected and run, never dropped",
                 "shape: a test-named non-file walk entry is announced, never dropped",
                 "shape: an unsupported operand is refused with its real problem",
+                "path: a '::' path is skipped, never listed, and refused by name",
                 "value: 2^63 refused for every non-negative integer flag",
                 "report: --json to a readerless FIFO fails fast, never blocks",
                 "path: a long-but-legal path builds, never a false COMPILE-ERROR",
@@ -710,6 +713,16 @@ class CheckRosterTests(unittest.TestCase):
                     "pipe: every direct-output command survives a closed stdout"
                 )
 
+            def check_unwritable_output_descriptor(self) -> None:
+                self._perform(
+                    "io: an unwritable output descriptor exits 3, never a crash"
+                )
+
+            def check_undelivered_output_releases_its_resources(self) -> None:
+                self._perform(
+                    "io: an undelivered report still releases the JUnit spool"
+                )
+
             def check_collect_interrupted_json(self) -> None:
                 self._perform(
                     "collect: an interrupted --format json run agrees with its own exit"
@@ -747,6 +760,11 @@ class CheckRosterTests(unittest.TestCase):
             def check_unsupported_operand(self) -> None:
                 self._perform(
                     "shape: an unsupported operand is refused with its real problem"
+                )
+
+            def check_separator_in_path(self) -> None:
+                self._perform(
+                    "path: a '::' path is skipped, never listed, and refused by name"
                 )
 
             def check_integer_overflow_values(self) -> None:

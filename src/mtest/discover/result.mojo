@@ -2,11 +2,12 @@
 
 `DiscoveryResult` is pure data: the ordered gate and run file sets, the
 excluded files each paired with the pattern that removed it, the stale exclude
-patterns that matched nothing, and the two loud channels a walk fills — the
-symlinks it refused and the test-named entries that are not runnable files. The
-session turns this into events: a loud skip line per excluded file and a
-warning per stale pattern, refused symlink, and non-regular entry. This module
-reads and prints nothing.
+patterns that matched nothing, and the three loud channels a walk fills — the
+symlinks it refused, the test-named entries that are not runnable files, and
+the test files no node id could address. The session turns this into events: a
+loud skip line per excluded file and a warning per stale pattern, refused
+symlink, non-regular entry, and unaddressable path. This module reads and
+prints nothing.
 """
 
 
@@ -65,3 +66,9 @@ struct DiscoveryResult(Copyable, Movable):
     and sorted: a directory wearing a `test_*.mojo` name, or a FIFO, socket, or
     device sitting where a test file is expected. The session warns once per
     entry, for the same reason it warns about a refused symlink."""
+
+    var skipped_unaddressable: List[String]
+    """Every test file a walk found under a path carrying `::`, root-relative
+    and sorted. The separator is reserved for node ids (§5), so such a file has
+    no name the runner could be pointed at afterwards. The session warns once
+    per entry; `collect` simply does not list it."""

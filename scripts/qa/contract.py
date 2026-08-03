@@ -63,7 +63,7 @@ from scripts.checks.reports import json_stream as json_stream_oracle
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
 
 # --------------------------------------------------------------------------- #
@@ -783,6 +783,8 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "collect: --format json agrees with the lines listing and the exit",
     "collect: a listing larger than the pipe buffer survives an early close",
     "pipe: every direct-output command survives a closed stdout",
+    "io: an unwritable output descriptor exits 3, never a crash",
+    "io: an undelivered report still releases the JUnit spool",
     "collect: an interrupted --format json run agrees with its own exit",
     "determinism: --shuffle --seed repeats its file order",
     "help: --help -> stdout, exit 0",
@@ -793,6 +795,7 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "symlink: a symlinked test file is collected and run, never dropped",
     "shape: a test-named non-file walk entry is announced, never dropped",
     "shape: an unsupported operand is refused with its real problem",
+    "path: a '::' path is skipped, never listed, and refused by name",
     "value: 2^63 refused for every non-negative integer flag",
     "report: --json to a readerless FIFO fails fast, never blocks",
     "path: a long-but-legal path builds, never a false COMPILE-ERROR",
@@ -965,6 +968,21 @@ def _flaky_surface_problems(
     return probs
 
 
+def _close_stdout() -> None:
+    """Close descriptor 1 in the forked child, exactly as `>&-` does.
+
+    `subprocess` performs its own `dup2` redirection before it calls this, so
+    closing here leaves the child with no descriptor 1 at all rather than one
+    pointing at a sink. That is the state a write must report `EBADF` for.
+    """
+    os.close(1)
+
+
+def _close_stderr() -> None:
+    """Close descriptor 2 in the forked child, exactly as `2>&-` does."""
+    os.close(2)
+
+
 class Runner:
     """Drives the built binary against one scaffold and records each verdict."""
 
@@ -1110,16 +1128,23 @@ class Runner:
     def check_collect_json(self) -> None:
         """Assert the collect stream agrees with the listing it replaces.
 
-        Four properties, each catching a different lie. The node ids must equal
-        the `--format lines` run's stdout lines IN ORDER, so the stream cannot
-        list a different set or a different order from the format it mirrors.
-        Every record must satisfy the oracle's frozen schema, which is what
-        catches a `node` whose triple does not decompose — a defect counts and
-        ordering cannot see. A directory named with `::` is collected too,
-        because `node_id` must then be split at its LAST separator and a
-        first-separator split produces a wrong `path`/`name` pair that is
-        otherwise well-formed. And two runs must be byte-identical, the same
+        Three properties, each catching a different lie. The node ids must
+        equal the `--format lines` run's stdout lines IN ORDER, so the stream
+        cannot list a different set or a different order from the format it
+        mirrors. Every record must satisfy the oracle's frozen schema, which is
+        what catches a `node` whose triple does not decompose — a defect counts
+        and ordering cannot see. And two runs must be byte-identical, the same
         determinism the listing itself promises.
+
+        A fourth once collected a file under a `::`-named directory, to prove
+        `node_id` was split at its LAST separator rather than its first. §5 is
+        enforced now, so no such file is ever listed and the scenario cannot be
+        built through the binary at all — `path: a '::' path is skipped, never
+        listed, and refused by name` asserts exactly that. The mis-split it
+        guarded against is still caught: the oracle rejects a `name` carrying a
+        separator, and `scripts/tests/test_collect_stream.py` drives both
+        splittings through it with synthetic records, which needs no `::` file
+        on disk.
 
         **What this does NOT cover.** `terminal.exit_code == returncode` is
         asserted, but that equality alone does not prove the runner resolves
@@ -1161,7 +1186,6 @@ class Runner:
             problems.append("a complete run produced a torn tail")
         if first.stdout != again.stdout:
             problems.append("two identical runs produced different streams")
-        problems += self._collect_json_separator_path_problems()
         ok = not problems
         self.record(PASS if ok else FAIL, name, ref, "" if ok else "; ".join(problems))
 
@@ -1283,6 +1307,13 @@ class Runner:
         (§29, which additionally promise the artifacts exist afterwards), and
         `collect --format json` (§16).
 
+        Both run drivers are here too, and they are the reason this check and
+        `check_unwritable_output_descriptor` have to be read together: an
+        undelivered console report escalates a run to 3, but a consumer that
+        walked away is not that case and must leave the run's own verdict
+        alone. `EPIPE` is the whole difference, and asserting only one side
+        would let a fix for either one quietly eat the other.
+
         Each command is asserted against the exact code its domain gives a
         successful run, so a process that dies of `SIGPIPE` (a negative return
         code from `subprocess`, 141 from a shell) fails here and names itself.
@@ -1301,6 +1332,8 @@ class Runner:
                 0,
                 "",
             ),
+            ("run", ["-I", "build", "tests"], 0, ""),
+            ("run -n 2", ["-I", "build", "-n", "2", "tests"], 0, ""),
         ]
         probs: list[str] = []
         for label, argv, want, artifact in cases:
@@ -1335,6 +1368,357 @@ class Runner:
             ref,
             "; ".join(probs),
         )
+
+    def _unwritable_stdout_mechanisms(self) -> list[str]:
+        """The ways this host can hand the binary a stdout it cannot write.
+
+        Two are portable and always present; one is Linux-only and additive.
+        The portable pair is what keeps this check meaningful on macOS, where
+        there is no `/dev/full` at all — a sub-case silently dropped there
+        would leave the platform whose `ECONNRESET` value is asserted rather
+        than measured with no coverage of the escalation it feeds.
+
+        Returns:
+            Mechanism names for `_run_with_broken_stdout`, most portable
+            first, so a failure names the mechanism that produced it.
+        """
+        available = ["closed", "readonly"]
+        if Path("/dev/full").exists():
+            available.append("full")
+        return available
+
+    @contextlib.contextmanager
+    def _readonly_sink(self) -> Iterator[int]:
+        """Yield a descriptor open for READING on a real file this gate owns.
+
+        Writing to an `O_RDONLY` descriptor fails with `EBADF` on Linux and
+        Darwin alike, which is what makes this the portable stand-in for
+        `/dev/full`. Unlike closing the descriptor outright it keeps the slot
+        OCCUPIED, so the next file the child opens cannot land on descriptor 1
+        and quietly absorb output the check needs to see fail.
+
+        The file is one this gate creates in its own scratch, never a system
+        path like `/etc/hostname`: a check that depends on someone else's
+        filesystem layout is a check that reports on the wrong thing the day
+        the layout differs.
+        """
+        anchor = self.root / "unwritable-sink"
+        if not anchor.exists():
+            anchor.write_text("a file this gate opens read-only\n")
+        fd = os.open(anchor, os.O_RDONLY)
+        try:
+            yield fd
+        finally:
+            os.close(fd)
+
+    def _run_with_broken_stdout(
+        self, argv: list[str], cwd: Path, mechanism: str
+    ) -> int | str:
+        """Run the binary with a stdout that cannot take bytes.
+
+        Args:
+            argv: Arguments passed after the binary path.
+            cwd: The invocation root for this run.
+            mechanism: `"closed"` for no descriptor 1 at all (`>&-`, `EBADF`),
+                `"readonly"` for a descriptor open for reading (`EBADF`, with
+                the slot still occupied), or `"full"` for `/dev/full`
+                (`ENOSPC`, Linux only).
+
+        Returns:
+            The child's exit status, negative when a signal killed it, or the
+            string `"timeout"`.
+        """
+        try:
+            if mechanism == "closed":
+                return subprocess.run(
+                    [str(MTEST), *argv],
+                    cwd=cwd,
+                    env=self.env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=180,
+                    check=False,
+                    preexec_fn=_close_stdout,
+                ).returncode
+            if mechanism == "readonly":
+                with self._readonly_sink() as sink:
+                    return subprocess.run(
+                        [str(MTEST), *argv],
+                        cwd=cwd,
+                        env=self.env,
+                        stdout=sink,
+                        stderr=subprocess.DEVNULL,
+                        timeout=180,
+                        check=False,
+                    ).returncode
+            with Path("/dev/full").open("wb") as full_sink:
+                return subprocess.run(
+                    [str(MTEST), *argv],
+                    cwd=cwd,
+                    env=self.env,
+                    stdout=full_sink,
+                    stderr=subprocess.DEVNULL,
+                    timeout=180,
+                    check=False,
+                ).returncode
+        except subprocess.TimeoutExpired:
+            return "timeout"
+
+    def check_unwritable_output_descriptor(self) -> None:
+        """Assert undelivered PRIMARY output exits 3, and a diagnostic does not.
+
+        The sibling of `check_direct_output_closed_pipe`, from the other side
+        of one policy: a departed consumer is absorbed, but a destination that
+        cannot take the bytes at all is not, because the command's own success
+        code would then be a lie about output nobody received.
+
+        Three shapes stand for that, and every command is put through each one
+        this host can build: a CLOSED descriptor (`>&-`), a descriptor open
+        for READING (both `EBADF`), and a full destination (`/dev/full`,
+        `ENOSPC`, Linux only). The first two are portable on purpose — the
+        `/dev/full` case alone would test nothing on macOS, and one classifier
+        reached through two different errnos is worth more than one errno
+        reached on one platform.
+
+        Every command whose product IS its text is here, since each publishes
+        its own exit domain and each admits 3 on this condition: help and
+        version (§19), `config show` and `doctor` (§27), `new` and `init`
+        (§29, whose artifacts must still exist afterwards). A run is here too,
+        for both drivers: its console report is primary output, so an
+        undelivered one escalates through the same delivery precedence a dead
+        `--json` destination uses (§9).
+
+        A USAGE ERROR is the counter-case, and it is the reason this check
+        asserts two different codes rather than one. There the exit code is
+        itself the machine-readable product, and it was delivered perfectly;
+        the prose on stderr is a diagnostic about it. §9 freezes 4 for a
+        pre-run refusal, so 4 it stays whether or not stderr took the bytes —
+        `2>/dev/null` and `2>&-` are two spellings of "I do not want the
+        diagnostic", and only a broken runner should be able to turn either
+        into a 3.
+        """
+        ref = "§9/§19/§27/§29 undelivered primary output exits 3; a refusal keeps 4"
+        name = "io: an unwritable output descriptor exits 3, never a crash"
+        probs: list[str] = []
+        cases: list[tuple[str, list[str], str]] = [
+            ("help: --help", ["--help"], ""),
+            ("help: version", ["version"], ""),
+            ("config show", ["config", "show"], ""),
+            ("doctor", ["doctor"], ""),
+            ("new", ["new", "tests/test_closed.mojo"], "tests/test_closed.mojo"),
+            ("init", ["init"], "mtest.toml"),
+        ]
+        # Both run drivers join the list, because each drains the console
+        # itself: the sequential loop and, under `-n`, the parallel pool with
+        # its progress overlay. A run whose console report went nowhere has not
+        # reported, so its own verdict is no longer authoritative and 3
+        # displaces it.
+        cases += [
+            ("run", ["-I", "build", "tests"], ""),
+            ("run -n 2", ["-I", "build", "-n", "2", "tests"], ""),
+        ]
+        mechanisms = self._unwritable_stdout_mechanisms()
+        for mechanism in mechanisms:
+            for label, argv, artifact in cases:
+                cwd = self.root
+                if artifact:
+                    cwd = self.root / f"broken-{mechanism}-{argv[0]}"
+                    cwd.mkdir(exist_ok=True)
+                code = self._run_with_broken_stdout(argv, cwd, mechanism)
+                if code != 3:
+                    probs.append(f"{label}: {mechanism} stdout exit {code}, want 3")
+                if artifact and not (cwd / artifact).exists():
+                    probs.append(f"{label}: {artifact} was never created")
+
+        # A usage error keeps its frozen 4: the code IS the product and it was
+        # delivered. Every spelling of a discarded diagnostic must agree, so
+        # the stderr side runs the same portable mechanisms.
+        for mechanism in mechanisms:
+            refused = self._run_with_broken_stderr(["-V"], mechanism)
+            if refused != 4:
+                probs.append(f"usage error: {mechanism} stderr exit {refused}, want 4")
+
+        self.record(
+            PASS if not probs else FAIL,
+            name,
+            ref,
+            "; ".join(probs),
+        )
+
+    def _run_with_broken_stderr(self, argv: list[str], mechanism: str) -> int | str:
+        """Run the binary with a stderr that cannot take bytes.
+
+        The mirror of `_run_with_broken_stdout` and the same three mechanisms,
+        because the property under test is the difference between the two
+        streams: an undelivered diagnostic must not move a code the command
+        already resolved, however the descriptor was broken.
+
+        Args:
+            argv: Arguments passed after the binary path.
+            mechanism: `"closed"`, `"readonly"`, or `"full"`, as above.
+
+        Returns:
+            The child's exit status, negative when a signal killed it, or the
+            string `"timeout"`.
+        """
+        try:
+            if mechanism == "closed":
+                return subprocess.run(
+                    [str(MTEST), *argv],
+                    cwd=self.root,
+                    env=self.env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=180,
+                    check=False,
+                    preexec_fn=_close_stderr,
+                ).returncode
+            if mechanism == "readonly":
+                with self._readonly_sink() as sink:
+                    return subprocess.run(
+                        [str(MTEST), *argv],
+                        cwd=self.root,
+                        env=self.env,
+                        stdout=subprocess.DEVNULL,
+                        stderr=sink,
+                        timeout=180,
+                        check=False,
+                    ).returncode
+            with Path("/dev/full").open("wb") as full_sink:
+                return subprocess.run(
+                    [str(MTEST), *argv],
+                    cwd=self.root,
+                    env=self.env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=full_sink,
+                    timeout=180,
+                    check=False,
+                ).returncode
+        except subprocess.TimeoutExpired:
+            return "timeout"
+
+    def check_undelivered_output_releases_its_resources(self) -> None:
+        """Assert a run that cannot write its report still frees its scratch.
+
+        The JUnit spool is a directory `main` creates under `TMPDIR` and owns:
+        no other process sweeps it, so an exit that skips the resource ladder
+        leaks it once per invocation, forever. `open_junit_spool` exists
+        precisely to keep leftovers out of a shared temp, and an exit taken
+        from inside the write primitive walked around it.
+
+        The forcing shape is the annotation epilogue: under
+        `--gh-annotations on` a failing run writes its tail to the console
+        AFTER the session has finalized, which is the last write before the
+        ladder runs. Pointed at a stdout that cannot take it, that write fails,
+        so the run must both escalate to 3 (undelivered primary output, §9) and
+        leave `TMPDIR` exactly as it found it — the spool, its `suite-*.xml`
+        fragments, and the target temp all gone.
+
+        The descriptor has to stay OCCUPIED for this one, which is why it is
+        not simply closed: with descriptor 1 free, the next file the run opens
+        lands on it and the epilogue writes into that file instead of failing.
+        A descriptor open for reading keeps the slot and still fails `EBADF`,
+        on Linux and Darwin alike; `/dev/full` reaches the same classifier
+        through `ENOSPC` and runs beside it where the host provides one. This
+        check never skips: a leak is a leak on every platform, and the lane
+        that would have to notice it treats a skip as a failure.
+
+        The control is the same argv with a writable stdout: it must exit 1,
+        publish the report, and leave `TMPDIR` empty too, so a check that
+        passed by never creating a spool cannot look like a check that passed
+        by cleaning one up.
+        """
+        ref = "§9/§15.2 no owned scratch survives any exit path"
+        name = "io: an undelivered report still releases the JUnit spool"
+        d = self.root / "probes_spool"
+        d.mkdir(exist_ok=True)
+        (d / "test_pass.mojo").write_text(
+            HEAD + "def test_spool_ok() raises:\n"
+            '    assert_equal(reverse("ab"), "ba")\n' + MAIN
+        )
+        (d / "test_fail.mojo").write_text(
+            HEAD + "def test_spool_fails() raises:\n    assert_equal(1, 2)\n" + MAIN
+        )
+        argv = [
+            "-I",
+            "build",
+            "--gh-annotations",
+            "on",
+            "--junit-xml",
+            "spool-report.xml",
+            "probes_spool",
+        ]
+        probs: list[str] = []
+        # The control first, so a scaffold that never produces a spool at all
+        # is caught before any conclusion is drawn from an empty TMPDIR.
+        occupied = [m for m in self._unwritable_stdout_mechanisms() if m != "closed"]
+        for label, want in [("control", 1)] + [(m, 3) for m in occupied]:
+            tmp = self.root / f"spool-tmp-{label}"
+            shutil.rmtree(tmp, ignore_errors=True)
+            tmp.mkdir(parents=True)
+            env = dict(self.env, TMPDIR=str(tmp), GITHUB_ACTIONS="")
+            try:
+                if label == "control":
+                    code: int | str = subprocess.run(
+                        [str(MTEST), *argv],
+                        cwd=self.root,
+                        env=env,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=180,
+                        check=False,
+                    ).returncode
+                else:
+                    code = self._run_with_broken_stdout_in(argv, env, label)
+            except subprocess.TimeoutExpired:
+                code = "timeout"
+            if code != want:
+                probs.append(f"{label}: exit {code}, want {want}")
+            leftovers = sorted(item.name for item in tmp.iterdir())
+            if leftovers:
+                probs.append(f"{label}: TMPDIR still holds {leftovers}")
+            shutil.rmtree(tmp, ignore_errors=True)
+        self.record(PASS if not probs else FAIL, name, ref, "; ".join(probs))
+
+    def _run_with_broken_stdout_in(
+        self, argv: list[str], env: dict[str, str], mechanism: str
+    ) -> int | str:
+        """`_run_with_broken_stdout` with a caller-supplied environment.
+
+        Separate only because the spool check needs its own `TMPDIR` on the
+        child, which is the whole point of that check and no business of the
+        exit-code one.
+
+        Args:
+            argv: Arguments passed after the binary path.
+            env: The complete child environment.
+            mechanism: `"readonly"` or `"full"`; a closed descriptor is not
+                offered here, since the slot has to stay occupied.
+
+        Returns:
+            The child's exit status, negative when a signal killed it.
+        """
+        if mechanism == "readonly":
+            with self._readonly_sink() as sink:
+                return subprocess.run(
+                    [str(MTEST), *argv],
+                    cwd=self.root,
+                    env=env,
+                    stdout=sink,
+                    stderr=subprocess.DEVNULL,
+                    timeout=180,
+                    check=False,
+                ).returncode
+        with Path("/dev/full").open("wb") as full_sink:
+            return subprocess.run(
+                [str(MTEST), *argv],
+                cwd=self.root,
+                env=env,
+                stdout=full_sink,
+                stderr=subprocess.DEVNULL,
+                timeout=180,
+                check=False,
+            ).returncode
 
     def check_collect_interrupted_json(self) -> None:
         """Assert an interrupted collect stream reports the code it exits with.
@@ -1405,54 +1789,6 @@ class Runner:
                 )
         ok = not problems
         self.record(PASS if ok else FAIL, name, ref, "" if ok else "; ".join(problems))
-
-    def _collect_json_separator_path_problems(self) -> list[str]:
-        """Collect a file under a `::`-named directory and check its triple.
-
-        A node id is `path::name`, and a path may itself contain `::` while a
-        test name never can, so the decomposition has to split at the LAST
-        separator. Splitting at the first one yields
-        `path="oddroot/od", name="d/test_odd.mojo::test_odd_one"` — a triple
-        that still concatenates back to the right `node_id`, so only the
-        name-has-no-`::` rule in the oracle rejects it.
-
-        The `::` directory is reached by naming its PARENT, never itself: an
-        operand containing `::` is read as a node id (`select`/`discover`
-        refuse anything but one separator), so such a file is discoverable by a
-        walk and not addressable directly. That is a pre-existing limitation of
-        the operand grammar, unrelated to this format.
-
-        Returns:
-            One problem string per violation, empty when the triple is right.
-            A setup failure is itself reported as a problem, never skipped.
-        """
-        odd_dir = self.root / "oddroot" / "od::d"
-        try:
-            odd_dir.mkdir(parents=True, exist_ok=True)
-            (odd_dir / "test_odd.mojo").write_text(
-                HEAD + "def test_odd_one() raises:\n    assert_equal(1, 1)\n" + MAIN
-            )
-        except OSError as exc:
-            return [f"could not scaffold a '::' path: {exc}"]
-
-        run = self.mtest(["collect", "--format", "json", "-I", "build", "oddroot"])
-        if run.returncode != 0:
-            return [f"collecting a '::' path exited {run.returncode}: {run.stderr}"]
-        try:
-            report = collect_stream_oracle.parse_collect_stream(run.stdout)
-        except collect_stream_oracle.CollectStreamError as exc:
-            return [f"the '::' path stream did not parse: {exc}"]
-
-        want_id = "oddroot/od::d/test_odd.mojo::test_odd_one"
-        if report.node_ids != [want_id]:
-            return [f"'::' path listed {report.node_ids}, want [{want_id!r}]"]
-        node = next(r for r in report.records if r.get("event") == "node")
-        problems = []
-        if node.get("path") != "oddroot/od::d/test_odd.mojo":
-            problems.append(f"'::' path decomposed to path={node.get('path')!r}")
-        if node.get("name") != "test_odd_one":
-            problems.append(f"'::' path decomposed to name={node.get('name')!r}")
-        return problems
 
     def _shuffled_file_order(self, seed: str) -> tuple[str, ...]:
         """The ordered `file_started` paths of one seeded shuffled run.
@@ -1867,6 +2203,85 @@ class Runner:
             pipe.unlink(missing_ok=True)
         ok = not bad
         self.record(PASS if ok else FAIL, name, ref, "" if ok else "; ".join(bad))
+
+    def check_separator_in_path(self) -> None:
+        """Assert `::` in a path is enforced, announced, and named honestly.
+
+        §5 always said `::` in a file path is unsupported, and nothing
+        enforced it. A walk discovered such a file, `collect` listed it, and a
+        run ran it — but no operand could reach it, because an operand splits
+        at its FIRST separator, so `mtest 'tests/co::l/test_x.mojo'` answered
+        `no such path 'tests/co'`: a path the caller never wrote, describing a
+        problem that was not theirs.
+
+        Three properties, one tree. The walk skips the file and says so with
+        the `skipped-unaddressable` warning §5 names, so the run cannot go
+        quietly green over a smaller set; `collect` lists files rather than
+        warnings, so it simply omits it; and the operand is refused with exit
+        4 quoting itself. The POISON test inside would FAIL if it ran, so a
+        walk that regressed flips the exit code rather than only the text.
+        """
+        ref = "§5/§9 `::` in a path is unsupported: skipped, unlisted, refused"
+        name = "path: a '::' path is skipped, never listed, and refused by name"
+        d = self.root / "probes_sep"
+        d.mkdir(exist_ok=True)
+        (d / "test_plain.mojo").write_text(
+            HEAD + "def test_sep_plain_ok() raises:\n"
+            '    assert_equal(reverse("ab"), "ba")\n' + MAIN
+        )
+        nested = d / "co::l"
+        nested.mkdir(exist_ok=True)
+        (nested / "test_x.mojo").write_text(
+            HEAD + "def test_sep_poison() raises:\n"
+            "    assert_equal(1, 2)  # POISON: an addressable file would run\n" + MAIN
+        )
+
+        probs: list[str] = []
+        run = self.mtest(["-I", "build", "probes_sep"])
+        both = run.stdout + run.stderr
+        warned = [ln for ln in both.splitlines() if "skipped-unaddressable" in ln]
+        if run.returncode != 0:
+            probs.append(f"run: exit {run.returncode} (want 0)")
+        if "1 passed" not in both:
+            probs.append("run: the addressable sibling did not pass alone")
+        if len(warned) != 1 or "co::l/test_x.mojo" not in warned[0]:
+            probs.append(f"run: warnings={warned}, want exactly one naming the file")
+
+        listed = self.mtest(["collect", "-I", "build", "probes_sep"])
+        if "co::l" in listed.stdout:
+            probs.append("collect: listed a node id nothing could address")
+        if "skipped-unaddressable" in listed.stdout + listed.stderr:
+            probs.append("collect: emitted a discovery warning")
+
+        for operand in ("probes_sep/co::l/test_x.mojo", "probes_sep/co::l"):
+            refused = self.mtest(["-I", "build", operand])
+            text = refused.stdout + refused.stderr
+            if refused.returncode != 4:
+                probs.append(f"{operand}: exit {refused.returncode} (want 4)")
+            if "unsupported path" not in text:
+                probs.append(f"{operand}: no unsupported-path diagnostic")
+            if operand not in text:
+                probs.append(f"{operand}: the refusal did not quote the operand")
+            if "no such path" in text:
+                probs.append(f"{operand}: still reports a truncated prefix")
+
+        # The rule is applied only AFTER an entry is characterized, so a `::`
+        # directory this process may read but not search stays what §5 lines
+        # 324-326 call it: an entry the walk cannot inspect, exit 4. Deciding
+        # unaddressability first would answer for entries nobody had looked at
+        # and hand back a green run over a subtree that was never read.
+        nested.chmod(0o644)
+        try:
+            blind = self.mtest(["-I", "build", "probes_sep"])
+        finally:
+            nested.chmod(0o755)
+        blind_text = blind.stdout + blind.stderr
+        if blind.returncode != 4:
+            probs.append(f"unsearchable '::' dir: exit {blind.returncode} (want 4)")
+        if "cannot inspect" not in blind_text:
+            probs.append("unsearchable '::' dir: no inspection-failure diagnostic")
+
+        self.record(PASS if not probs else FAIL, name, ref, "; ".join(probs))
 
     def check_integer_overflow_values(self) -> None:
         """Assert the decimal values `atol` wraps are refused, not accepted.
@@ -2947,6 +3362,10 @@ def main() -> int:
             runner.check_collect_pipe_early_close()
         if wanted("pipe: every direct-output command survives a closed stdout"):
             runner.check_direct_output_closed_pipe()
+        if wanted("io: an unwritable output descriptor exits 3, never a crash"):
+            runner.check_unwritable_output_descriptor()
+        if wanted("io: an undelivered report still releases the JUnit spool"):
+            runner.check_undelivered_output_releases_its_resources()
         if wanted("collect: an interrupted --format json run agrees with its own exit"):
             runner.check_collect_interrupted_json()
         if wanted("determinism: --shuffle --seed repeats its file order"):
@@ -2969,6 +3388,8 @@ def main() -> int:
             runner.check_nonregular_walk_entry()
         if wanted("shape: an unsupported operand is refused with its real problem"):
             runner.check_unsupported_operand()
+        if wanted("path: a '::' path is skipped, never listed, and refused by name"):
+            runner.check_separator_in_path()
         if wanted("value: 2^63 refused for every non-negative integer flag"):
             runner.check_integer_overflow_values()
         if wanted("report: --json to a readerless FIFO fails fast, never blocks"):

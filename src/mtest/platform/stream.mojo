@@ -43,6 +43,37 @@ comptime _ENOENT = 2
 """`ENOENT`, identical on Linux and Darwin: the destination does not exist."""
 
 
+def write_errno_name(err: Int) -> String:
+    """The strerror-style words for an errno a failed `write(2)` reports.
+
+    Deliberately narrow, and a sibling rather than an extension of the report
+    layer's spawn-errno table: these are the errnos a write to an output
+    descriptor produces, that one holds the errnos an `execve` produces, and
+    neither list would be true of the other's callers. Every number here is
+    identical on Linux and Darwin.
+
+    Args:
+        err: The errno to name.
+
+    Returns:
+        The lowercase description, or `""` when the number is not one this
+        boundary can name. Allocates the returned string.
+    """
+    if err == 5:
+        return String("input/output error")
+    if err == 9:
+        return String("bad file descriptor")
+    if err == 13:
+        return String("permission denied")
+    if err == 27:
+        return String("file too large")
+    if err == 28:
+        return String("no space left on device")
+    if err == 32:
+        return String("broken pipe")
+    return String("")
+
+
 def errno_now() -> Int:
     """Return the calling thread's current `errno`.
 

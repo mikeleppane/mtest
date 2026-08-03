@@ -16,7 +16,10 @@ call site.
 
 `split_rendered_node_id` is the other direction and splits at the LAST `::`,
 because it undoes `render()` on an id the runner itself produced rather than
-parsing something a user typed.
+parsing something a user typed. On an id this runner produced that is also the
+only separator, since discovery refuses a path carrying one (§5 of the CLI
+contract); splitting at the last one keeps the function honest about ids from
+anywhere else, where the name is the part that cannot hold a separator.
 """
 
 
@@ -111,11 +114,12 @@ def split_rendered_node_id(node_id: String) -> NodeId:
     """Recover the `NodeId` behind a string `render()` produced.
 
     Splits at the LAST `::`, which is what makes this the exact inverse of
-    `render()`: a test name is a Mojo identifier and can never contain `::`,
-    while a file path can, so only the final separator reconstructs the pair.
-    `split_node_token` splits at the FIRST one on purpose — its callers parse
-    raw user operands, where a second separator means a malformed node id they
-    refuse rather than a path to keep whole.
+    `render()`: a test name is a Mojo identifier and can never contain `::`, so
+    the final separator always reconstructs the pair, whatever precedes it. An
+    id this runner produced carries exactly one anyway, because discovery
+    refuses a path containing the separator. `split_node_token` splits at the
+    FIRST one on purpose — its callers parse raw user operands, where a second
+    separator is a shape they refuse rather than a path to keep whole.
 
     Args:
         node_id: A rendered `path::name` string produced by this runner.
@@ -131,8 +135,8 @@ def split_rendered_node_id(node_id: String) -> NodeId:
     ```mojo
     from mtest.model import split_rendered_node_id
 
-    var node = split_rendered_node_id("we::ird/test_a.mojo::test_foo")
-    var path = node.path  # "we::ird/test_a.mojo"
+    var node = split_rendered_node_id("tests/test_a.mojo::test_foo")
+    var path = node.path  # "tests/test_a.mojo"
     var name = node.name  # "test_foo"
     ```
     """

@@ -125,6 +125,17 @@ append here as later phases teach more.
   never been validated against an observed real ICE, so extend it when a real
   one shows a new banner. A process that exited under its own control, at any
   code, is deterministic and never retried.
+- A grammar that reserves a character has to enforce the reservation, or the
+  reservation becomes a lie the diagnostics tell. `::` was documented as
+  unsupported in a file path and unchecked, so a walk collected
+  `tests/co::l/test_x.mojo` and ran it while no operand could address it: an
+  operand splits at its FIRST separator, so the refusal read
+  `no such path 'tests/co'` — a path the caller never typed. Two rules follow.
+  A diagnostic quotes the token as typed, never a fragment a splitter produced.
+  And the check belongs at the ONE seam that resolves a token against the world
+  (discovery), not scattered across every consumer of the splitter. Unenforced
+  rules also grow consumers while nobody is looking: `docs/collect-stream.md`
+  had begun telling readers how to parse ids the runner refused to act on.
 - BuildProducts registry replacement is atomic (whole-slot): always replace the
   whole product on rebuild, never patch a field, so no stale canonical-source
   or listing survives.
@@ -198,6 +209,16 @@ append here as later phases teach more.
 - A raw `external_call["isatty", ...]` link-conflicts with
   `std.io.FileDescriptor`'s own declaration once imported next to TestSuite, so
   delegate to the std wrapper. The same discipline governs `write`.
+- `print(text, file=FileDescriptor(fd))` OWNS the descriptor it wraps: the
+  temporary's teardown closes it, and closing an already-closed descriptor
+  faults inside `_IO_fclose` and kills the process with SIGSEGV — a status
+  outside every documented exit domain, reached after the command had already
+  done its work. `>&-` on any subcommand exposed it. A write to a descriptor
+  this process merely BORROWED (stdout, stderr, a console handle main lends the
+  session) goes through the raw `write(2)` under `platform`, never a
+  `FileDescriptor`. Reading is not the same hazard: `FileDescriptor(fd).isatty()`
+  on a closed descriptor was probed and returns cleanly; it is the printing path
+  that closes.
 - `external_call` emits a NON-variadic call. On Darwin arm64 a variadic
   argument travels on the stack while the emitted call passes it in a register,
   so a variadic argument libc actually *consumes* is silent garbage there while

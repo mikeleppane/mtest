@@ -27,9 +27,24 @@ Other kinds, by name. A directory, FIFO, socket, or device wearing a
 It is never descended and never collected, but it is always reported. A
 non-test-named entry of those kinds cannot hide a test, so it stays silent.
 
-Nothing here prints: both loud channels — the refused links and the test-named
-non-regular entries — ride out in `WalkResult` so the session can emit one loud
-warning apiece, the way it already does for a stale exclude.
+Paths carrying `::`. The node-id grammar reserves `::` to separate a file from
+a test name, so a `test_*.mojo` file whose root-relative path contains one has
+no identity the runner can express: it cannot be typed as an operand, cannot be
+rendered as a node id, and cannot be recalled from last-run state. Collecting
+it would put a test in the run that nothing could then name, so it is refused —
+and reported, because a refusal that runs one test fewer is exactly the kind of
+silence §5's walk-totality rule exists to prevent. The rule applies only after
+the entry has been characterized and found to be a usable test file: an entry
+of any other kind keeps the channel that says what it actually is, and one the
+walk cannot characterize refuses discovery, exactly as it does anywhere else.
+A directory carrying the separator is still descended, so each unaddressable
+test under it is announced on its own rather than as a subtree the reader would
+have to expand.
+
+Nothing here prints: all three loud channels — the refused links, the
+test-named non-regular entries, and the unaddressable paths — ride out in
+`WalkResult` so the session can emit one loud warning apiece, the way it
+already does for a stale exclude.
 """
 from std.builtin.sort import sort
 from std.os import listdir, lstat
@@ -52,6 +67,34 @@ comptime _S_IFLNK = 0xA000
 
 comptime _S_IFREG = 0x8000
 """`S_IFREG`: the `st_mode` file-type value for a regular file."""
+
+comptime NODE_ID_SEPARATOR = "::"
+"""What separates a file from a test name in a node id, and so what a path may
+not contain (§5 of the CLI contract)."""
+
+
+def path_is_addressable(rel: String) -> Bool:
+    """Whether a root-relative path can be named as an operand or a node id.
+
+    The one place the `::` rule is applied to a path, so the walk that drops
+    such a file and the operand refusal that explains it cannot drift apart.
+
+    Args:
+        rel: A root-relative path, exactly as discovery spells it.
+
+    Returns:
+        False iff `rel` contains the node-id separator. Allocates nothing.
+
+    Examples:
+
+    ```mojo
+    from mtest.discover import path_is_addressable
+
+    print(path_is_addressable("tests/test_a.mojo"))  # True
+    print(path_is_addressable("tests/co::l/test_a.mojo"))  # False
+    ```
+    """
+    return rel.find(NODE_ID_SEPARATOR) == -1
 
 
 def is_discovered_test_name(name: String) -> Bool:
@@ -105,6 +148,12 @@ struct WalkResult(Copyable, Movable):
     file is expected. Never silent: each one is a test the tree suggests
     exists and the run will not contain."""
 
+    var skipped_unaddressable: List[String]
+    """Root-relative test-named entries whose path carries `::`, which the
+    node-id grammar reserves (§5). The file may be perfectly runnable; it is
+    refused because nothing could name it afterwards. Never silent, for the
+    same reason the two channels above are not."""
+
 
 def walk_dir(abs_dir: String, rel_prefix: String) raises -> WalkResult:
     """Root-relative `test_*.mojo` files under `abs_dir`, recursively, sorted.
@@ -117,8 +166,9 @@ def walk_dir(abs_dir: String, rel_prefix: String) raises -> WalkResult:
     Returns:
         The matching files as root-relative paths — symlinked files included,
         keeping the link's own path — together with every symlink the walk
-        refused to use and every test-named entry that is not a runnable file.
-        Each directory's entries are visited in sorted order.
+        refused to use, every test-named entry that is not a runnable file,
+        and every test-named entry no node id could address. Each directory's
+        entries are visited in sorted order.
 
     Raises:
         Error: If a directory cannot be listed, or an entry cannot be
@@ -132,6 +182,7 @@ def walk_dir(abs_dir: String, rel_prefix: String) raises -> WalkResult:
     var out = List[String]()
     var skipped = List[String]()
     var nonregular = List[String]()
+    var unaddressable = List[String]()
     for name in names:
         var full = abs_dir + "/" + name
         var rel: String
@@ -159,7 +210,10 @@ def walk_dir(abs_dir: String, rel_prefix: String) raises -> WalkResult:
             elif isfile(full):
                 # One entry, no cycle possible: an ordinary test file.
                 if is_discovered_test_name(name):
-                    out.append(rel^)
+                    if path_is_addressable(rel):
+                        out.append(rel^)
+                    else:
+                        unaddressable.append(rel^)
             elif is_discovered_test_name(name):
                 # Dangling, and named like a test the user expects to run.
                 skipped.append(rel^)
@@ -179,11 +233,29 @@ def walk_dir(abs_dir: String, rel_prefix: String) raises -> WalkResult:
                     skipped.append(s)
                 for s in sub.skipped_nonregular:
                     nonregular.append(s)
+                for s in sub.skipped_unaddressable:
+                    unaddressable.append(s)
         elif kind == _S_IFREG:
             if is_discovered_test_name(name):
-                out.append(rel^)
+                # The addressability rule applies HERE and at the symlinked
+                # twin above, and nowhere earlier: those are the only two
+                # points at which an entry would otherwise be collected. An
+                # entry the walk has not characterized has not been shown to be
+                # a runnable test file at all, so refusing it for its name
+                # would answer a question the walk never asked — and would
+                # claim a dangling link, a FIFO, or a test-named directory was
+                # merely unaddressable, when each has a channel of its own that
+                # says what it actually is. An entry it CANNOT characterize
+                # refuses discovery outright, above, which is what keeps a
+                # `::` directory this process may read but not search an exit-4
+                # inspection failure rather than a green run over a subtree
+                # nobody looked inside.
+                if path_is_addressable(rel):
+                    out.append(rel^)
+                else:
+                    unaddressable.append(rel^)
         elif is_discovered_test_name(name):
             # Characterized, and neither regular file nor directory nor
             # symlink: a FIFO, socket, or device wearing a test file's name.
             nonregular.append(rel^)
-    return WalkResult(out^, skipped^, nonregular^)
+    return WalkResult(out^, skipped^, nonregular^, unaddressable^)

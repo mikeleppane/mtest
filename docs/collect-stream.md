@@ -85,11 +85,16 @@ One record per node id, in listing order.
 entry, so `node_id` always equals `path` + `::` + `name`. A consumer may read
 whichever of the three it needs without reconciling them.
 
-`name` never contains `::`; it is a test function's bare identifier. `path`
-**may**, since nothing stops a directory from being named that way. So the
-split point is the **last** `::` in `node_id`, not the first, and those two
-rules together are what let a consumer verify the triple rather than trust it:
-a producer that split at the first separator emits a `name` carrying `::`.
+`name` never contains `::`; it is a test function's bare identifier. That is
+the wire-format rule, and the one a consumer may verify the triple against: a
+`name` carrying a separator means the producer split `node_id` at the wrong
+one, which concatenation alone cannot detect.
+
+`path` is unconstrained by this format. As a property of **this** producer it
+never carries `::` either, because §5 of the CLI contract refuses to collect a
+file whose path does. Splitting `node_id` at its last separator is therefore
+the rule to write, and against an mtest stream the first and the last are the
+same separator anyway.
 
 ### 2.3 `collect_finished` — the terminal
 

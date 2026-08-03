@@ -174,12 +174,18 @@ def _check_known_records(records: list[dict[str, object]]) -> None:
     producer that splits at the wrong separator emits a triple that is
     individually well-typed, correctly counted, and correctly ordered —
     invisible to every other check here, and to any check built on top of this
-    module. But concatenation alone does not catch it either: splitting
-    `we::ird/t.mojo::test_x` at the FIRST separator yields
-    `path="we", name="ird/t.mojo::test_x"`, which concatenates back to the
-    right `node_id`. The second clause is what closes that: `name` is a test
-    function's bare identifier and can never contain `::`, so the split point
-    is unambiguous and a `name` carrying a separator is a mis-split.
+    module. Concatenation alone does not catch it either: splitting a
+    multi-separator `node_id` at the FIRST separator instead of the last still
+    concatenates back to the right string. The second clause is what closes
+    that: `name` is a test function's bare identifier and can never contain
+    `::`, so a `name` carrying a separator is a mis-split whatever the `path`
+    was.
+
+    That clause is deliberately the only one, and `path` stays unconstrained
+    here. mtest itself never emits a `path` containing `::` — §5 of the CLI
+    contract refuses such files, so they are never collected — but this module
+    validates a WIRE FORMAT rather than one producer, and forward
+    compatibility is the property that must never tighten.
 
     Raises:
         CollectStreamError: The first violation found, naming the record's
