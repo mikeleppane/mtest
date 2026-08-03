@@ -238,6 +238,113 @@ def xml_escape_attribute(s: String) -> String:
     return _bytes_to_string(out)
 
 
+def html_escape_text(s: String) -> String:
+    """Escape `s` for HTML text content (element body text).
+
+    `&` `<` `>` become entities. Literal Tab/LF/CR pass through unchanged, as
+    they do in XML text content. Every other byte below 0x20, and the
+    XML-forbidden noncharacters U+FFFE/U+FFFF, are replaced with U+FFFD,
+    mirroring `xml_escape_text`'s policy: neither has a legal representation
+    in a well-formed document, and treating them identically means one
+    control-byte policy covers every machine format this runner emits. Every
+    other byte passes through unchanged. Quotes are left literal; only
+    `html_escape_attribute` escapes them, since a quote is meaningless outside
+    an attribute value.
+
+    Args:
+        s: The already-UTF-8-valid text to escape.
+
+    Returns:
+        `s` escaped for HTML text-node content.
+
+    Examples:
+
+    ```mojo
+    from mtest.report.escape import html_escape_text
+
+    var body = "<p>" + html_escape_text("a & b") + "</p>"
+    ```
+    """
+    var data = _string_bytes(s)
+    var n = len(data)
+    var out = List[UInt8]()
+    var i = 0
+    while i < n:
+        if _is_xml_noncharacter(data, i):  # U+FFFE/U+FFFF: no legal glyph.
+            _push_str(out, _FFFD)
+            i += 3
+            continue
+        var v = Int(data[i])
+        if v == 38:  # '&'
+            _push_str(out, "&amp;")
+        elif v == 60:  # '<'
+            _push_str(out, "&lt;")
+        elif v == 62:  # '>'
+            _push_str(out, "&gt;")
+        elif v == 9 or v == 10 or v == 13:  # Tab, LF, CR: pass through.
+            out.append(data[i])
+        elif v < 0x20:  # Invalid control code point.
+            _push_str(out, _FFFD)
+        else:
+            out.append(data[i])
+        i += 1
+    return _bytes_to_string(out)
+
+
+def html_escape_attribute(s: String) -> String:
+    """Escape `s` for an HTML attribute value.
+
+    Adds `"` -> `&quot;` and `'` -> `&#39;` on top of `html_escape_text`'s
+    entity set (`&` `<` `>`) and its identical noncharacter/control-byte
+    policy: Tab/LF/CR still pass through literally and every other byte below
+    0x20, plus U+FFFE/U+FFFF, still become U+FFFD. Both quote characters are
+    escaped regardless of which one delimits the attribute in the caller's
+    markup, so the result is safe to quote with either.
+
+    Args:
+        s: The already-UTF-8-valid text to escape.
+
+    Returns:
+        `s` escaped for an HTML attribute value quoted with `"` or `'`.
+
+    Examples:
+
+    ```mojo
+    from mtest.report.escape import html_escape_attribute
+
+    var attr = ' title="' + html_escape_attribute('t "x"') + '"'
+    ```
+    """
+    var data = _string_bytes(s)
+    var n = len(data)
+    var out = List[UInt8]()
+    var i = 0
+    while i < n:
+        if _is_xml_noncharacter(data, i):  # U+FFFE/U+FFFF: no legal glyph.
+            _push_str(out, _FFFD)
+            i += 3
+            continue
+        var v = Int(data[i])
+        if v == 38:  # '&'
+            _push_str(out, "&amp;")
+        elif v == 60:  # '<'
+            _push_str(out, "&lt;")
+        elif v == 62:  # '>'
+            _push_str(out, "&gt;")
+        elif v == 34:  # '"'
+            _push_str(out, "&quot;")
+        elif v == 39:  # '\''
+            _push_str(out, "&#39;")
+        elif v == 9 or v == 10 or v == 13:  # Tab, LF, CR: pass through.
+            out.append(data[i])
+        elif v < 0x20:  # Invalid control code point.
+            _push_str(out, _FFFD)
+        else:
+            out.append(data[i])
+        i += 1
+    return _bytes_to_string(out)
+
+
 def gh_escape_message(s: String) -> String:
     """Escape `s` for a GitHub Actions workflow-command message payload.
 

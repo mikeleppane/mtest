@@ -18,6 +18,8 @@ from std.testing import (
 from mtest.report.escape import (
     gh_escape_message,
     gh_escape_property,
+    html_escape_attribute,
+    html_escape_text,
     json_escape_string,
     xml_escape_attribute,
     xml_escape_text,
@@ -201,6 +203,109 @@ def test_xml_both_contexts_hostile_corpus() raises:
     assert_false("\t" in attr_got)
     assert_false("\n" in attr_got)
     assert_false("\r" in attr_got)
+
+
+# --- HTML text-context escaping ---------------------------------------------
+
+
+def test_html_text_escapes_metacharacters() raises:
+    assert_equal(html_escape_text("a<b&c>d"), "a&lt;b&amp;c&gt;d")
+
+
+def test_html_text_does_not_escape_quotes() raises:
+    assert_equal(html_escape_text("a\"b'c"), "a\"b'c")
+
+
+def test_html_text_preserves_literal_tab_lf_cr() raises:
+    assert_equal(html_escape_text("a\tb\nc\rd"), "a\tb\nc\rd")
+
+
+def test_html_text_control_bytes_become_fffd() raises:
+    for v in range(0x20):
+        if v == 0x09 or v == 0x0A or v == 0x0D:
+            continue
+        var got = html_escape_text(chr(v))
+        assert_equal(got, "�")
+
+
+def test_html_text_noncharacters_become_fffd() raises:
+    assert_equal(html_escape_text(chr(0xFFFE)), "�")
+    assert_equal(html_escape_text(chr(0xFFFF)), "�")
+    assert_equal(
+        html_escape_text("a" + chr(0xFFFE) + "b" + chr(0xFFFF)), "a�b�"
+    )
+    assert_equal(html_escape_text(chr(0xFFFD)), chr(0xFFFD))
+    assert_equal(html_escape_text(chr(0xFDD0)), chr(0xFDD0))
+
+
+def test_html_text_angle_storm() raises:
+    assert_equal(
+        html_escape_text("<<<>>>&&&"),
+        "&lt;&lt;&lt;&gt;&gt;&gt;&amp;&amp;&amp;",
+    )
+
+
+# --- HTML attribute-context escaping ----------------------------------------
+
+
+def test_html_attribute_escapes_quotes() raises:
+    assert_equal(html_escape_attribute("a\"b'c"), "a&quot;b&#39;c")
+
+
+def test_html_attribute_escapes_amp_lt_gt_too() raises:
+    assert_equal(
+        html_escape_attribute("a&b<c>d\"e'f"),
+        "a&amp;b&lt;c&gt;d&quot;e&#39;f",
+    )
+
+
+def test_html_attribute_preserves_literal_tab_lf_cr() raises:
+    assert_equal(html_escape_attribute("a\tb\nc\rd"), "a\tb\nc\rd")
+
+
+def test_html_attribute_other_control_bytes_become_fffd() raises:
+    for v in range(0x20):
+        if v == 0x09 or v == 0x0A or v == 0x0D:
+            continue
+        var got = html_escape_attribute(chr(v))
+        assert_equal(got, "�")
+
+
+def test_html_attribute_noncharacters_become_fffd() raises:
+    assert_equal(html_escape_attribute(chr(0xFFFE)), "�")
+    assert_equal(html_escape_attribute(chr(0xFFFF)), "�")
+    assert_equal(
+        html_escape_attribute("a" + chr(0xFFFE) + "b" + chr(0xFFFF)), "a�b�"
+    )
+    assert_equal(html_escape_attribute(chr(0xFFFD)), chr(0xFFFD))
+    assert_equal(html_escape_attribute(chr(0xFDD0)), chr(0xFDD0))
+
+
+def test_html_attribute_quote_storm() raises:
+    assert_equal(html_escape_attribute("'\"'\""), "&#39;&quot;&#39;&quot;")
+
+
+def test_html_both_contexts_hostile_corpus() raises:
+    var s = 'path/"a"<b>&c\'d\t\n\r\x00\x1f' + chr(0xFFFE) + chr(0xFFFF)
+    var text_got = html_escape_text(s)
+    var attr_got = html_escape_attribute(s)
+    # The noncharacters never survive raw in either context.
+    assert_false(chr(0xFFFE) in text_got)
+    assert_false(chr(0xFFFF) in text_got)
+    assert_false(chr(0xFFFE) in attr_got)
+    assert_false(chr(0xFFFF) in attr_got)
+    # TEXT: literal quotes pass, tab/lf/cr pass literally, control -> FFFD.
+    assert_true('"a"' in text_got)
+    assert_true("'d" in text_got)
+    assert_true("&lt;b&gt;" in text_got)
+    assert_true("&amp;c" in text_got)
+    assert_true("\t\n\r" in text_got)
+    assert_true("�" in text_got)
+    # ATTRIBUTE: both quote kinds entity-escaped, tab/lf/cr pass literally.
+    assert_true("&quot;a&quot;" in attr_got)
+    assert_true("&#39;d" in attr_got)
+    assert_true("\t\n\r" in attr_got)
+    assert_true("�" in attr_got)
 
 
 # --- GitHub annotation escaping ---------------------------------------------

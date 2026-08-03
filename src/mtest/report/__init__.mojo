@@ -44,6 +44,7 @@ from mtest.report.collect_stream import (
 from mtest.report.console import ConsoleReporter
 from mtest.report.recording import RecordingReporter
 from mtest.report.fencing import resume_delimiter
+from mtest.report.escape import html_escape_attribute, html_escape_text
 from mtest.report.json_stream_reporter import (
     JsonStreamReporter,
     close_json_fd,
