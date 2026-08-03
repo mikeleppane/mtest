@@ -7,7 +7,7 @@ existing destination while leaving its bytes exactly as they were: the refusal
 is a property of `link(2)`, not of a check that a concurrent creation could
 slip past, so the surviving content is what the assertion is really about.
 """
-from std.os import listdir, remove, stat
+from std.os import listdir, mkdir, remove, stat
 from std.os.path import exists
 from std.testing import (
     assert_equal,
@@ -26,7 +26,6 @@ from mtest.cli.scaffold import (
 from mtest.platform import (
     close_checked_fd,
     create_unique_temp,
-    default_file_mode,
     publish_new_file,
     write_all_fd,
 )
@@ -155,11 +154,18 @@ def test_new_gives_the_file_the_mode_an_editor_would() raises:
         assert_equal(report.code, 0)
         # `mkstemp` hands back 0600, which is right for a temporary and wrong
         # for source about to be edited and committed; the published file must
-        # carry the umask-derived mode any other tool would have produced.
+        # carry the mode this process's umask gives an ordinary new file.
+        #
+        # The oracle is the kernel, reached through a different syscall:
+        # `mkdir` asks for 0777 and comes back with the umask already applied,
+        # and masking that down to the file bits is what an `open(2)` asking
+        # for 0666 would have produced. Neither `default_file_mode()` — the
+        # very call the scaffold uses, which would agree with any answer it
+        # gives — nor a hard-coded 0644, which is only true under one umask.
+        mkdir(root + "/probe", 0o777)
+        var expected = (Int(stat(root + "/probe").st_mode) & 0o777) & 0o666
         var mode = Int(stat(root + "/tests/test_mode.mojo").st_mode) & 0o777
-        assert_equal(mode, default_file_mode())
-        assert_true(mode & 0o400 != 0)
-        assert_true(mode != 0o600)
+        assert_equal(mode, expected)
     finally:
         remove_tree(root)
 
@@ -263,14 +269,15 @@ def test_new_reports_an_unusable_parent_as_an_io_failure() raises:
         assert_equal(report.code, 3)
         assert_equal(len(report.lines), 1)
         # `"scaffold: " in ...` would be true of every reachable outcome, so
-        # the line has to be pinned to the failure it is actually reporting.
-        assert_true(
-            report.lines[0].startswith(
-                "scaffold: could not create 'tests/test_blocked.mojo': "
-            ),
-            "not the create-failure line: " + report.lines[0],
+        # the line is pinned whole. It is composed here rather than forwarded
+        # from the standard library, whose own error for this case is two
+        # lines long and names the path twice — escaped, that put a literal
+        # `\n` mid-sentence and truncated the second copy mid-path.
+        assert_equal(
+            report.lines[0],
+            "scaffold: could not create 'tests/test_blocked.mojo':"
+            " 'tests' is not a directory",
         )
-        assert_true("tests/test_blocked.mojo" in report.lines[0])
         assert_false(exists(root + "/tests/test_blocked.mojo"))
     finally:
         remove_tree(root)
@@ -286,6 +293,11 @@ def test_io_failure_escapes_the_cause_it_quotes() raises:
         assert_equal(report.code, 3)
         assert_false("\x1b" in report.lines[0])
         assert_true("\\x1b" in report.lines[0])
+        # One line, and the whole target still named: the escaped form of a
+        # newline is what the forwarded standard-library cause used to smuggle
+        # into the middle of this diagnostic.
+        assert_false("\\n" in report.lines[0])
+        assert_false("..." in report.lines[0])
     finally:
         remove_tree(root)
 

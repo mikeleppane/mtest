@@ -23,8 +23,8 @@ substring search, because both shortcuts are wrong in the direction that
 matters: git accepts a `.gitignore` that is not valid UTF-8, and a `!`
 negation after a positive pattern means the directory is tracked after all.
 Reporting "already ignored" in either case would leave a project whose build
-cache git still tracks, which is precisely what this artifact exists to
-prevent.
+cache — or whose first run's compiled test binaries — git still tracks, which
+is precisely what this artifact exists to prevent.
 
 Nothing here prints or exits. Both entry points report lines and a code, so the
 composition root stays the only place that decides where a line goes and what
@@ -32,7 +32,7 @@ the process exits with.
 """
 from std.memory import Span
 from std.os import makedirs, remove
-from std.os.path import basename, dirname
+from std.os.path import basename, dirname, isdir
 
 from mtest.config import escape_control_characters, safe_path_label
 from mtest.discover import is_discovered_test_name
@@ -58,12 +58,26 @@ comptime _EXIT_REFUSED = 4
 """The request was refused before anything was created."""
 
 comptime _CACHE_IGNORE = ".mtest-cache"
-"""The one path `init` asks a project's `.gitignore` to keep untracked."""
+"""The build cache and last-run state `init` asks git to leave untracked."""
 
-comptime _GITIGNORE_BLOCK = (
+comptime _CACHE_BLOCK = (
     "# mtest's build cache and last-run state\n.mtest-cache/\n"
 )
 """What `init` writes when `.gitignore` does not already ignore the cache."""
+
+comptime _BINARY_IGNORE = "build/bin"
+"""Where every run puts the binary it builds from a test file.
+
+An ordinary run writes `build/bin/<mangled>` into the invocation root, and so
+does every `mtest debug`, so a project bootstrapped without this entry offers
+its first run's compiled output up to `git status`. Only this directory is
+named, never `build/` itself: the rest of that tree belongs to whatever else
+the project builds there, and claiming it would be mtest ignoring someone
+else's work.
+"""
+
+comptime _BINARY_BLOCK = "# the test binaries mtest builds\nbuild/bin/\n"
+"""What `init` writes when `.gitignore` does not already ignore those."""
 
 comptime _GITIGNORE_MAX_BYTES = 1 << 20
 """The largest `.gitignore` this rewrites. A file past it is refused rather
@@ -269,18 +283,25 @@ def _gitignore_pattern(line: Span[UInt8, _]) -> String:
     return String(String(text.removesuffix("/")).removeprefix("/"))
 
 
-def _ignores_the_cache(existing: List[UInt8]) -> Bool:
-    """Whether `existing` leaves the build-cache directory untracked.
+def _ignores_path(existing: List[UInt8], path: String) -> Bool:
+    """Whether `existing` leaves `path` untracked.
 
     Git's last-matching-pattern rule, not a first-hit scan: a `!` negation
     after a positive pattern puts the directory back, and answering "already
-    ignored" there would leave a project whose cache git still tracks.
+    ignored" there would leave a project whose artifacts git still tracks. A
+    pattern naming an ancestor directory counts too, because git never looks
+    inside an excluded directory — a project already ignoring `build/` needs no
+    `build/bin/` line, and adding one would report an update that changed
+    nothing.
 
     Args:
         existing: The current `.gitignore` bytes. Not mutated.
+        path: The path to test, without a trailing slash.
 
     Returns:
-        True when the last pattern matching `.mtest-cache/` is a positive one.
+        True when the last pattern matching `path` or an ancestor of it is a
+        positive one. Wildcards are not expanded, so a pattern matching only
+        through a glob reads here as no match and the entry is added.
     """
     var ignored = False
     var start = 0
@@ -290,7 +311,9 @@ def _ignores_the_cache(existing: List[UInt8]) -> Bool:
             var line = Span(existing)[start:index]
             var negated = len(line) > 0 and line[0] == 0x21
             var pattern = _gitignore_pattern(line[1:] if negated else line)
-            if pattern == _CACHE_IGNORE:
+            if pattern != "" and (
+                pattern == path or path.startswith(pattern + "/")
+            ):
                 ignored = not negated
             start = index + 1
         index += 1
@@ -315,6 +338,9 @@ def gitignore_update(
     file into a failed bootstrap; the existing bytes are carried through
     untouched and only ASCII is ever compared.
 
+    Only the entries that are missing are added, so a project that already
+    ignores one of them does not collect a second line saying so.
+
     Args:
         existing: The current file's bytes, or empty when there is no file.
             Not mutated.
@@ -322,9 +348,9 @@ def gitignore_update(
 
     Returns:
         The complete new content — always the existing bytes followed by the
-        added ones, so writing it back can only add — or `None` when the cache
-        is already ignored and the file must be left alone. Allocates the
-        returned bytes.
+        added ones, so writing it back can only add — or `None` when both
+        entries are already ignored and the file must be left alone. Allocates
+        the returned bytes.
 
     Examples:
 
@@ -336,15 +362,20 @@ def gitignore_update(
     ```
     """
     if not present:
-        return Optional(_file_bytes(_GITIGNORE_BLOCK))
-    if _ignores_the_cache(existing):
+        return Optional(_file_bytes(_CACHE_BLOCK + _BINARY_BLOCK))
+    var added = String("")
+    if not _ignores_path(existing, _CACHE_IGNORE):
+        added += _CACHE_BLOCK
+    if not _ignores_path(existing, _BINARY_IGNORE):
+        added += _BINARY_BLOCK
+    if added == "":
         return None
     var updated = existing.copy()
     # Without this the entry would be glued onto an unterminated last pattern,
     # silently changing what that pattern matches.
     if len(updated) > 0 and updated[len(updated) - 1] != 0x0A:
         updated.append(0x0A)
-    updated.extend(_file_bytes(_GITIGNORE_BLOCK))
+    updated.extend(_file_bytes(added))
     return Optional(updated^)
 
 
@@ -419,8 +450,39 @@ struct _Published(Copyable, Movable):
     """The diagnostic line, or empty when nothing failed."""
 
 
+def _directory_obstruction(absolute: String, spelling: String) -> String:
+    """The first ancestor of `absolute` that exists and is not a directory.
+
+    A parent directory cannot be created through a regular file, and that is
+    the one failure a person hits by ordinary accident — `mtest new
+    notes/test_x.mojo` where `notes` is a file they wrote earlier. Finding the
+    offending component is what lets the diagnostic say so in their own words
+    instead of quoting the standard library back at them.
+
+    Args:
+        absolute: The path being created, with every component resolved.
+        spelling: The same path as the caller wrote it. `absolute` ends with
+            it, which is what lets the answer be given in those terms.
+
+    Returns:
+        The offending component in the caller's spelling where `absolute`
+        still covers it and in absolute form above that, or an empty string
+        when every existing ancestor is a directory. Allocates the answer.
+    """
+    var offset = absolute.byte_length() - spelling.byte_length()
+    var index = absolute.find("/", 1)
+    while index != -1:
+        var prefix = String(absolute[byte=0:index])
+        if observe_path(prefix).present and not isdir(prefix):
+            if offset >= 0 and index > offset:
+                return String(prefix[byte=offset:])
+            return prefix
+        index = absolute.find("/", index + 1)
+    return String("")
+
+
 def _publish_file(
-    absolute: String, label: String, content: List[UInt8]
+    absolute: String, spelling: String, content: List[UInt8]
 ) -> _Published:
     """Write `content` at `absolute`, never replacing what is already there.
 
@@ -431,19 +493,45 @@ def _publish_file(
 
     Args:
         absolute: The absolute path to create, with its parents made as needed.
-        label: The escaped path the diagnostic names. Not used to open
-            anything.
+        spelling: The same path as the caller wrote it, for the diagnostics.
+            Not used to open anything.
         content: The file's complete bytes, written verbatim.
 
     Returns:
         Whether the file was created, and the diagnostic line when the
         publication failed outright. Allocates the transient temporary path.
     """
+    var label = safe_path_label(spelling)
     var directory = String(dirname(absolute))
     var temp = String("")
     var owned_fd = -1
     try:
         makedirs(directory, exist_ok=True)
+    except:
+        # Composed rather than forwarded. The standard library's own error for
+        # this case is two lines long and names the path twice, so escaping it
+        # produces a literal `\n` in the middle of a diagnostic and the length
+        # bound then truncates the second copy mid-path. What went wrong is
+        # knowable here without reading that text at all.
+        var obstruction = _directory_obstruction(absolute, spelling)
+        if obstruction != "":
+            return _Published(
+                False,
+                "scaffold: could not create '"
+                + label
+                + "': '"
+                + safe_path_label(obstruction)
+                + "' is not a directory",
+            )
+        return _Published(
+            False,
+            "scaffold: could not create '"
+            + label
+            + "': could not create the directory '"
+            + safe_path_label(String(dirname(spelling)))
+            + "'",
+        )
+    try:
         # The temporary shares the destination's directory so the publishing
         # link cannot straddle filesystems, and it is hidden so a walk
         # interrupted between the write and the link never collects a
@@ -543,7 +631,7 @@ def run_new(root: String, target: String) -> ScaffoldReport:
 
     var absolute = target if target.startswith("/") else root + "/" + target
     var published = _publish_file(
-        absolute, label, _file_bytes(render_test_file(_stem(name)))
+        absolute, target, _file_bytes(render_test_file(_stem(name)))
     )
     if published.failure != "":
         return _report(published.failure, _EXIT_IO_FAILURE)
@@ -657,12 +745,14 @@ def _uninspectable_name(relative: String, facts: PathFacts) -> String:
     )
 
 
-def _ensure_cache_ignored(path: String, observed: PathFacts) raises -> String:
-    """Make sure `.gitignore` leaves the build cache untracked, and say how.
+def _ensure_artifacts_ignored(
+    path: String, observed: PathFacts
+) raises -> String:
+    """Make sure `.gitignore` leaves what mtest writes untracked, and say how.
 
     The one artifact that may be edited rather than only created, so it is the
     one whose "already there" answer is not the filesystem's to give: a
-    `.gitignore` that exists without the entry still has to gain it.
+    `.gitignore` that exists without an entry still has to gain it.
 
     Args:
         path: The `.gitignore` to create or amend.
@@ -716,7 +806,8 @@ def run_init(root: String, ci: String) -> ScaffoldReport:
 
     Creates `tests/test_example.mojo` and `mtest.toml`, adds
     `.github/workflows/test.yml` under `--ci github`, and makes sure
-    `.gitignore` leaves the build cache untracked. Every one of those is
+    `.gitignore` leaves the build cache and the built test binaries untracked.
+    Every one of those is
     published without replacing anything, so a second run is an all-skip that
     still succeeds and a file someone has already edited is never touched.
 
@@ -811,7 +902,7 @@ def run_init(root: String, ci: String) -> ScaffoldReport:
         lines.append(_artifact_line(relative, published.created))
 
     try:
-        lines.append(_ensure_cache_ignored(gitignore, observed_ignore))
+        lines.append(_ensure_artifacts_ignored(gitignore, observed_ignore))
     except e:
         lines.append(
             "scaffold: could not update '.gitignore': "

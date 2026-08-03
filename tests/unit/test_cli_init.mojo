@@ -32,7 +32,7 @@ from mtest.platform import (
     write_all_bytes_fd,
 )
 from mtest.cli.scaffold import (
-    _ensure_cache_ignored,
+    _ensure_artifacts_ignored,
     gitignore_update,
     render_github_workflow,
     render_mtest_toml,
@@ -111,59 +111,91 @@ def test_workflow_pins_every_action_to_a_commit() raises:
     assert_true(rendered.startswith("name: Tests\n"))
     assert_true(rendered.endswith("path: build/test-results.xml\n"))
     assert_true("pixi run mtest tests" in rendered)
+    var pinned = 0
     for line in rendered.splitlines():
         var text = String(line)
         if "uses:" in text:
             var reference = String(text.split("@", 1)[1])
             var digest = String(reference.split(" ", 1)[0])
             assert_equal(digest.byte_length(), 40, "not a commit sha: " + text)
+            pinned += 1
+    # The count is the point, not decoration: without it a workflow that lost
+    # its `uses:` lines — or gained one spelled some other way — would satisfy
+    # a loop that simply never ran. Three external actions is what this
+    # workflow needs (checkout, setup-pixi, upload-artifact); a fourth is a
+    # deliberate change to make here as well as there.
+    assert_equal(pinned, 3, "the workflow no longer pins three actions")
 
 
 def test_gitignore_update_writes_a_whole_file_when_absent() raises:
     var written = gitignore_update(List[UInt8](), False)
     assert_true(Bool(written))
-    assert_true(_text(written.value()).endswith(".mtest-cache/\n"))
+    assert_equal(
+        _text(written.value()),
+        "# mtest's build cache and last-run state\n.mtest-cache/\n"
+        "# the test binaries mtest builds\nbuild/bin/\n",
+    )
     assert_true(_text(written.value()).startswith("#"))
 
 
 def test_gitignore_update_leaves_an_existing_entry_alone() raises:
+    # `build/` covers `build/bin` the way git does — nothing is looked for
+    # inside an excluded directory — so this file needs no line at all.
     assert_false(
         Bool(gitignore_update(_bytes("build/\n.mtest-cache/\n"), True))
     )
     # The other spellings of the same ignore, all of which already do the job:
     # appending a fourth would be noise in someone else's file. Trailing
     # whitespace goes with them, because git strips it from a pattern.
-    assert_false(Bool(gitignore_update(_bytes(".mtest-cache\n"), True)))
-    assert_false(Bool(gitignore_update(_bytes("/.mtest-cache/\n"), True)))
-    assert_false(Bool(gitignore_update(_bytes(".mtest-cache/  \n"), True)))
-    assert_false(Bool(gitignore_update(_bytes(".mtest-cache/\r\n"), True)))
+    assert_false(Bool(gitignore_update(_bytes("build\n.mtest-cache\n"), True)))
+    assert_false(
+        Bool(gitignore_update(_bytes("/build/\n/.mtest-cache/\n"), True))
+    )
+    assert_false(
+        Bool(gitignore_update(_bytes("build/bin/\n.mtest-cache/  \n"), True))
+    )
+    assert_false(
+        Bool(gitignore_update(_bytes("build/bin\r\n.mtest-cache/\r\n"), True))
+    )
 
 
 def test_gitignore_update_treats_leading_whitespace_as_git_does() raises:
     # `git check-ignore --no-index .mtest-cache/probe` exits 1 against this
     # file: leading whitespace is part of the pattern, so the line names a
     # directory whose name starts with two spaces and ignores nothing.
-    var indented = gitignore_update(_bytes("  .mtest-cache/\n"), True)
+    var indented = gitignore_update(_bytes("  .mtest-cache/\nbuild/\n"), True)
     assert_true(Bool(indented))
     assert_true(_text(indented.value()).endswith(".mtest-cache/\n"))
 
 
 def test_gitignore_update_ignores_a_comment() raises:
     # A commented-out entry ignores nothing.
-    assert_true(Bool(gitignore_update(_bytes("# .mtest-cache/\n"), True)))
+    assert_true(
+        Bool(gitignore_update(_bytes("build/\n# .mtest-cache/\n"), True))
+    )
 
 
 def test_gitignore_update_follows_the_last_matching_pattern() raises:
     # Git's rule, not a first-hit scan: a later negation puts the directory
     # back, so a run reporting `skipped` there would leave a project whose
     # cache git still tracks.
-    assert_true(Bool(gitignore_update(_bytes("!.mtest-cache/\n"), True)))
     assert_true(
-        Bool(gitignore_update(_bytes(".mtest-cache/\n!.mtest-cache/\n"), True))
+        Bool(gitignore_update(_bytes("build/\n!.mtest-cache/\n"), True))
+    )
+    assert_true(
+        Bool(
+            gitignore_update(
+                _bytes("build/\n.mtest-cache/\n!.mtest-cache/\n"), True
+            )
+        )
     )
     # ... and a positive pattern after the negation wins in turn.
     assert_false(
-        Bool(gitignore_update(_bytes("!.mtest-cache/\n.mtest-cache/\n"), True))
+        Bool(
+            gitignore_update(
+                _bytes("build/\n!.mtest-cache/\n.mtest-cache/\n"), True
+            )
+        )
     )
 
 
@@ -179,6 +211,8 @@ def test_gitignore_update_carries_bytes_that_are_not_utf8() raises:
     # order to write it back would turn a legal file into a failed bootstrap.
     var existing: List[UInt8] = [UInt8(ord("m")), UInt8(0xFF), UInt8(0x0A)]
     var updated = gitignore_update(existing, True)
+    # Both entries are missing here, so both are appended after those bytes.
+    assert_true(_text(updated.value()).endswith("build/bin/\n"))
     assert_true(Bool(updated))
     assert_equal(updated.value()[0], UInt8(ord("m")))
     assert_equal(updated.value()[1], UInt8(0xFF))
@@ -318,6 +352,8 @@ def test_init_leaves_a_gitignore_that_already_ignores_the_cache() raises:
         assert_equal(report.code, 0)
         assert_equal(report.lines[2], "skipped .gitignore (exists)")
         assert_equal(_read(root + "/.gitignore"), "build/\n.mtest-cache/\n")
+        # `build/` already covers `build/bin`, so nothing was added for it.
+        assert_true("build/bin" not in _read(root + "/.gitignore"))
     finally:
         remove_tree(root)
 
@@ -349,11 +385,10 @@ def test_init_reports_an_unusable_parent_as_an_io_failure() raises:
         var report = run_init(root, "")
         assert_equal(report.code, 3)
         assert_equal(len(report.lines), 1)
-        assert_true(
-            report.lines[0].startswith(
-                "scaffold: could not create 'tests/test_example.mojo': "
-            ),
-            "not the create-failure line: " + report.lines[0],
+        assert_equal(
+            report.lines[0],
+            "scaffold: could not create 'tests/test_example.mojo':"
+            " 'tests' is not a directory",
         )
         assert_false(exists(root + "/mtest.toml"))
     finally:
@@ -367,7 +402,9 @@ def test_init_keeps_a_gitignore_that_is_not_valid_utf8() raises:
         # the only correct answer is to leave it exactly alone.
         _write_bytes(
             root + "/.gitignore",
-            _bytes("mine:") + [UInt8(0xFF)] + _bytes("\n.mtest-cache/\n"),
+            _bytes("mine:")
+            + [UInt8(0xFF)]
+            + _bytes("\n.mtest-cache/\nbuild/bin/\n"),
         )
         var report = run_init(root, "")
         assert_equal(report.code, 0)
@@ -387,7 +424,7 @@ def test_init_appends_to_a_gitignore_that_is_not_valid_utf8() raises:
         assert_equal(report.lines[2], "updated .gitignore")
         var written = read_regular_file_bytes(root + "/.gitignore", 1 << 20)
         assert_equal(written[5], UInt8(0xFF))
-        assert_true(_text(written).endswith(".mtest-cache/\n"))
+        assert_true(_text(written).endswith("build/bin/\n"))
     finally:
         remove_tree(root)
 
@@ -449,12 +486,13 @@ def test_a_raced_gitignore_still_gains_the_entry() raises:
         _write(root + "/.gitignore", "CONCURRENT\n")
         var absent = PathFacts(False, False, 0, 0)
         assert_equal(
-            _ensure_cache_ignored(root + "/.gitignore", absent),
+            _ensure_artifacts_ignored(root + "/.gitignore", absent),
             "updated .gitignore",
         )
         var written = _read(root + "/.gitignore")
         assert_true(written.startswith("CONCURRENT\n"))
-        assert_true(written.endswith(".mtest-cache/\n"))
+        assert_true(written.endswith("build/bin/\n"))
+        assert_true(".mtest-cache/\n" in written)
     finally:
         remove_tree(root)
 
@@ -465,7 +503,7 @@ def test_a_raced_gitignore_that_is_not_a_file_is_an_io_failure() raises:
         mkdir(root + "/.gitignore", 0o700)
         var absent = PathFacts(False, False, 0, 0)
         with assert_raises(contains="not a regular file"):
-            _ = _ensure_cache_ignored(root + "/.gitignore", absent)
+            _ = _ensure_artifacts_ignored(root + "/.gitignore", absent)
     finally:
         remove_tree(root)
 
@@ -583,6 +621,17 @@ def test_init_refuses_an_artifact_name_it_cannot_inspect() raises:
     var root = temp_root()
     try:
         if not _permissions_are_enforced(root):
+            # Privileged, or holding CAP_DAC_OVERRIDE: a `0o000` directory does
+            # not stop this process, so the inspection failure this pins cannot
+            # be produced. Say so where a reader of the run will see it, and
+            # assert the other half rather than returning a silent pass: a
+            # directory this process CAN search must still bootstrap normally.
+            print("skipped: this process searches a 0o000 directory anyway")
+            mkdir(root + "/tests", 0o700)
+            set_permissions(root + "/tests", 0o000)
+            var permitted = run_init(root, "")
+            set_permissions(root + "/tests", 0o700)
+            assert_equal(permitted.code, 0)
             return
         mkdir(root + "/tests", 0o700)
         set_permissions(root + "/tests", 0o000)
