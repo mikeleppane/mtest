@@ -780,6 +780,8 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "collect: exact node-id set for tests/",
     "determinism: collect byte-identical",
     "collect: --format json agrees with the lines listing and the exit",
+    "collect: a listing larger than the pipe buffer survives an early close",
+    "collect: an interrupted --format json run agrees with its own exit",
     "determinism: --shuffle --seed repeats its file order",
     "help: --help -> stdout, exit 0",
     "usage error: -V -> stderr, exit 4",
@@ -1158,6 +1160,171 @@ class Runner:
         if first.stdout != again.stdout:
             problems.append("two identical runs produced different streams")
         problems += self._collect_json_separator_path_problems()
+        ok = not problems
+        self.record(PASS if ok else FAIL, name, ref, "" if ok else "; ".join(problems))
+
+    def _write_oversized_listing_tree(self) -> str:
+        """Scaffold one file whose node-id listing exceeds the pipe buffer.
+
+        A pipe holds 64 KiB before a write blocks, and the listing goes out in
+        a single write, so a listing under that ceiling is delivered whole no
+        matter what the reader does — the check below would pass against a
+        binary with the defect. Length is bought with long names rather than
+        many files because every file costs a compile: one file with 500 tests
+        under a long directory and a long basename yields roughly 108 KB.
+
+        Returns:
+            The directory operand, relative to the scaffold root.
+        """
+        directory = "collect_pipe_" + "x" * 60
+        stem = "test_" + "n" * 60
+        target = self.root / directory
+        target.mkdir(exist_ok=True)
+        body = ["from std.testing import TestSuite, assert_equal\n\n"]
+        body.extend(
+            f"def {stem}_{i:04d}() raises:\n    assert_equal(1, 1)\n\n\n"
+            for i in range(500)
+        )
+        body.append(
+            "def main() raises:\n"
+            "    TestSuite.discover_tests[__functions_in_module()]().run()\n"
+        )
+        (target / f"{stem}.mojo").write_text("".join(body))
+        return directory
+
+    def check_collect_pipe_early_close(self) -> None:
+        """Assert a cut stdout pipe never takes `collect` outside its exit domain.
+
+        §9 and §16 close `collect`'s exit domain at `{0, 1, 3, 4, 5}`. Death by
+        `SIGPIPE` is 141 — a status in none of them, and one a shell reports as
+        a failure for a run that in fact listed everything it was asked for.
+
+        The defect this pins is an ordering one, not a missing handler. The
+        exec runtime ignores `SIGPIPE` for its lifetime so a broken destination
+        returns `EPIPE` to the write instead of killing the process, and
+        releasing that runtime restores the default disposition. Tearing it
+        down before writing the listing therefore hands exactly this write back
+        to the default, and `mtest collect | head -1` dies at 141. The listing
+        has to be larger than the pipe buffer for the write to still be in
+        progress when the reader goes away, which is what
+        `_write_oversized_listing_tree` is for.
+
+        `--format json` is deliberately not covered: its terminal record must
+        carry the finalized exit code, so it tears down first by design.
+        """
+        ref = "§9/§16 collect's exit domain survives a consumer that stops reading"
+        name = "collect: a listing larger than the pipe buffer survives an early close"
+        directory = self._write_oversized_listing_tree()
+        probe = self.mtest(["collect", "-I", "build", directory])
+        if probe.returncode != 0 or len(probe.stdout) <= 65536:
+            self.record(
+                FAIL,
+                name,
+                ref,
+                f"the fixture proves nothing: exit {probe.returncode}, "
+                f"{len(probe.stdout)} bytes (need > 65536 and exit 0)",
+            )
+            return
+        statuses: list[int | str] = []
+        for _ in range(3):
+            reader = subprocess.Popen(
+                ["head", "-1"], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL
+            )
+            writer = subprocess.Popen(
+                [str(MTEST), "collect", "-I", "build", directory],
+                cwd=self.root,
+                env=self.env,
+                stdout=reader.stdin,
+                stderr=subprocess.DEVNULL,
+            )
+            # The parent's copy of the write end must go, or the pipe never
+            # reports a broken reader and this measures nothing.
+            if reader.stdin is not None:
+                reader.stdin.close()
+            try:
+                statuses.append(writer.wait(timeout=180))
+            except subprocess.TimeoutExpired:
+                writer.kill()
+                statuses.append("timeout")
+            reader.wait(timeout=30)
+        bad = [s for s in statuses if s != 0]
+        self.record(
+            PASS if not bad else FAIL,
+            name,
+            ref,
+            ""
+            if not bad
+            else f"statuses {statuses}; a negative or 141 is death by SIGPIPE, "
+            "which is outside the frozen exit domain",
+        )
+
+    def check_collect_interrupted_json(self) -> None:
+        """Assert an interrupted collect stream reports the code it exits with.
+
+        Exit 2 is reachable under `collect` — `run_collect` resolves it the
+        moment the interrupt latch is set — and the stream's whole promise is
+        that `collect_finished.exit_code` is the code the process really ends
+        with. An interrupt is the one path where the two could most easily
+        drift apart, because the code is decided by a latch rather than by the
+        collection's own outcome.
+
+        The interrupt goes to the process group so the in-flight compiler
+        child dies with it, and it is timed to land inside the collection
+        rather than after it: the terminal must say `2`, not the `0` the
+        finished collection would have produced. `--no-cache` is what makes
+        that timing reliable — the check above leaves the build store warm, and
+        a cached collection of this tree finishes well inside the delay, which
+        would quietly turn this into an assertion about an uninterrupted run.
+        """
+        ref = "§9/§16 an interrupted collect exits 2 and its terminal says so"
+        name = "collect: an interrupted --format json run agrees with its own exit"
+        directory = self._write_oversized_listing_tree()
+        proc = subprocess.Popen(
+            [
+                str(MTEST),
+                "collect",
+                "--format",
+                "json",
+                "--no-cache",
+                "-I",
+                "build",
+                directory,
+            ],
+            cwd=self.root,
+            env=self.env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        time.sleep(0.4)
+        try:
+            os.killpg(proc.pid, signal.SIGINT)
+        except ProcessLookupError:
+            proc.kill()
+            self.record(FAIL, name, ref, "the collection finished before the SIGINT")
+            return
+        try:
+            out, _ = proc.communicate(timeout=180)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            self.record(FAIL, name, ref, "mtest ignored the SIGINT; killed at 180s")
+            return
+        problems = []
+        if proc.returncode != 2:
+            problems.append(f"exit {proc.returncode}, want 2")
+        try:
+            report = collect_stream_oracle.parse_collect_stream(out)
+        except collect_stream_oracle.CollectStreamError as exc:
+            problems.append(f"stream did not parse: {exc}")
+        else:
+            if report.torn_tail:
+                problems.append("the stream was torn, so it carries no terminal")
+            elif report.exit_code != proc.returncode:
+                problems.append(
+                    f"terminal exit_code={report.exit_code} but the process "
+                    f"exited {proc.returncode}"
+                )
         ok = not problems
         self.record(PASS if ok else FAIL, name, ref, "" if ok else "; ".join(problems))
 
@@ -2674,6 +2841,12 @@ def main() -> int:
             runner.check_determinism()
         if wanted("collect: --format json agrees with the lines listing and the exit"):
             runner.check_collect_json()
+        if wanted(
+            "collect: a listing larger than the pipe buffer survives an early close"
+        ):
+            runner.check_collect_pipe_early_close()
+        if wanted("collect: an interrupted --format json run agrees with its own exit"):
+            runner.check_collect_interrupted_json()
         if wanted("determinism: --shuffle --seed repeats its file order"):
             runner.check_shuffle_determinism()
         if wanted("help: --help -> stdout, exit 0") or wanted(

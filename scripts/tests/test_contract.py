@@ -600,6 +600,11 @@ class CheckRosterTests(unittest.TestCase):
                 "collect: exact node-id set for tests/",
                 "determinism: collect byte-identical",
                 "collect: --format json agrees with the lines listing and the exit",
+                (
+                    "collect: a listing larger than the pipe buffer survives an"
+                    " early close"
+                ),
+                "collect: an interrupted --format json run agrees with its own exit",
                 "determinism: --shuffle --seed repeats its file order",
                 "help: --help -> stdout, exit 0",
                 "usage error: -V -> stderr, exit 4",
@@ -691,6 +696,17 @@ class CheckRosterTests(unittest.TestCase):
             def check_collect_json(self) -> None:
                 self._perform(
                     "collect: --format json agrees with the lines listing and the exit"
+                )
+
+            def check_collect_pipe_early_close(self) -> None:
+                self._perform(
+                    "collect: a listing larger than the pipe buffer survives an"
+                    " early close"
+                )
+
+            def check_collect_interrupted_json(self) -> None:
+                self._perform(
+                    "collect: an interrupted --format json run agrees with its own exit"
                 )
 
             def check_shuffle_determinism(self) -> None:
