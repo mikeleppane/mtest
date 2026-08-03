@@ -783,6 +783,7 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "collect: --format json agrees with the lines listing and the exit",
     "collect: a listing larger than the pipe buffer survives an early close",
     "pipe: every direct-output command survives a closed stdout",
+    "io: an unwritable output descriptor exits 3, never a crash",
     "collect: an interrupted --format json run agrees with its own exit",
     "determinism: --shuffle --seed repeats its file order",
     "help: --help -> stdout, exit 0",
@@ -963,6 +964,21 @@ def _flaky_surface_problems(
         if got != want_body:
             probs.append(f"{label}: notice is {got!r}, want {want_body!r}")
     return probs
+
+
+def _close_stdout() -> None:
+    """Close descriptor 1 in the forked child, exactly as `>&-` does.
+
+    `subprocess` performs its own `dup2` redirection before it calls this, so
+    closing here leaves the child with no descriptor 1 at all rather than one
+    pointing at a sink. That is the state a write must report `EBADF` for.
+    """
+    os.close(1)
+
+
+def _close_stderr() -> None:
+    """Close descriptor 2 in the forked child, exactly as `2>&-` does."""
+    os.close(2)
 
 
 class Runner:
@@ -1332,6 +1348,132 @@ class Runner:
         self.record(
             PASS if not probs else FAIL,
             "pipe: every direct-output command survives a closed stdout",
+            ref,
+            "; ".join(probs),
+        )
+
+    def _run_with_broken_stdout(
+        self, argv: list[str], cwd: Path, full: bool
+    ) -> int | str:
+        """Run the binary with an output descriptor that cannot take bytes.
+
+        Args:
+            argv: Arguments passed after the binary path.
+            cwd: The invocation root for this run.
+            full: Whether stdout is `/dev/full` (a write reports `ENOSPC`)
+                rather than genuinely closed (a write reports `EBADF`).
+
+        Returns:
+            The child's exit status, negative when a signal killed it, or the
+            string `"timeout"`.
+        """
+        try:
+            if full:
+                with Path("/dev/full").open("wb") as sink:
+                    return subprocess.run(
+                        [str(MTEST), *argv],
+                        cwd=cwd,
+                        env=self.env,
+                        stdout=sink,
+                        stderr=subprocess.DEVNULL,
+                        timeout=180,
+                        check=False,
+                    ).returncode
+            return subprocess.run(
+                [str(MTEST), *argv],
+                cwd=cwd,
+                env=self.env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=180,
+                check=False,
+                preexec_fn=_close_stdout,
+            ).returncode
+        except subprocess.TimeoutExpired:
+            return "timeout"
+
+    def check_unwritable_output_descriptor(self) -> None:
+        """Assert an undeliverable direct write exits 3 rather than faulting.
+
+        The sibling of `check_direct_output_closed_pipe`, from the other side
+        of one policy: a departed consumer is absorbed, but a destination that
+        cannot take the bytes at all is not, because the command's own success
+        code would then be a lie about output nobody received. Two shapes
+        stand for that — a CLOSED descriptor (`>&-`, `EBADF`) and a full
+        destination (`/dev/full`, `ENOSPC`).
+
+        Every command that writes straight to a descriptor is here, since each
+        publishes its own exit domain and each admits 3 on this condition:
+        help and version (§19), `config show` and `doctor` (§27), `new` and
+        `init` (§29, whose artifacts must still exist afterwards). A usage
+        error whose stderr is closed is here too: it cannot deliver its
+        diagnostic, so 3 displaces its 4.
+
+        A run is held to the weaker property that it does not die of a signal.
+        Its console drain is best-effort by contract (§15.1) and swallows the
+        failure, but it used to fault at the same place these commands did,
+        which turned a finished run into a crash.
+        """
+        ref = "§9/§19/§27/§29 an undeliverable direct write exits 3"
+        name = "io: an unwritable output descriptor exits 3, never a crash"
+        probs: list[str] = []
+        cases: list[tuple[str, list[str], str]] = [
+            ("help: --help", ["--help"], ""),
+            ("help: version", ["version"], ""),
+            ("config show", ["config", "show"], ""),
+            ("doctor", ["doctor"], ""),
+            ("new", ["new", "tests/test_closed.mojo"], "tests/test_closed.mojo"),
+            ("init", ["init"], "mtest.toml"),
+        ]
+        for label, argv, artifact in cases:
+            cwd = self.root
+            if artifact:
+                cwd = self.root / f"closed-fd-{argv[0]}"
+                cwd.mkdir(exist_ok=True)
+            code = self._run_with_broken_stdout(argv, cwd, full=False)
+            if code != 3:
+                probs.append(f"{label}: closed stdout exit {code}, want 3")
+            if artifact and not (cwd / artifact).exists():
+                probs.append(f"{label}: {artifact} was never created")
+
+        # A usage error that cannot reach stderr is undelivered for the same
+        # reason, so 3 displaces the 4 its own refusal would have carried.
+        try:
+            refused = subprocess.run(
+                [str(MTEST), "-V"],
+                cwd=self.root,
+                env=self.env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=180,
+                check=False,
+                preexec_fn=_close_stderr,
+            ).returncode
+        except subprocess.TimeoutExpired:
+            refused = -1
+        if refused != 3:
+            probs.append(f"usage error: closed stderr exit {refused}, want 3")
+
+        if Path("/dev/full").exists():
+            for label, argv in (("help: --help", ["--help"]), ("version", ["version"])):
+                code = self._run_with_broken_stdout(argv, self.root, full=True)
+                if code != 3:
+                    probs.append(f"{label}: /dev/full exit {code}, want 3")
+
+        # Both drivers, because each drains the console itself: the sequential
+        # loop and, under `-n`, the parallel pool with its progress overlay.
+        for driver, extra in (("run", []), ("run -n 2", ["-n", "2"])):
+            run_code = self._run_with_broken_stdout(
+                ["-I", "build", *extra, "tests"], self.root, full=False
+            )
+            if not isinstance(run_code, int) or run_code < 0:
+                probs.append(
+                    f"{driver}: closed stdout exit {run_code}, want no signal death"
+                )
+
+        self.record(
+            PASS if not probs else FAIL,
+            name,
             ref,
             "; ".join(probs),
         )
@@ -2947,6 +3089,8 @@ def main() -> int:
             runner.check_collect_pipe_early_close()
         if wanted("pipe: every direct-output command survives a closed stdout"):
             runner.check_direct_output_closed_pipe()
+        if wanted("io: an unwritable output descriptor exits 3, never a crash"):
+            runner.check_unwritable_output_descriptor()
         if wanted("collect: an interrupted --format json run agrees with its own exit"):
             runner.check_collect_interrupted_json()
         if wanted("determinism: --shuffle --seed repeats its file order"):

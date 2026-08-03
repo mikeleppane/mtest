@@ -794,7 +794,7 @@ grow:
 | 0 | the session ran; every selected test's outcome is PASS or SKIP (exclusions allowed) |
 | 1 | at least one selected outcome is FAIL, CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT, MALFORMED-SUITE, or PRECOMPILE-ERROR; or the session would otherwise exit 0 and, under `--fail-on-flaky` (§13), counted at least one FLAKY file |
 | 2 | interrupted (SIGINT/SIGTERM); a partial summary is printed |
-| 3 | internal `mtest` error — including protocol drift (a report present but off-grammar) and an environment/I-O failure such as a runtime report-destination open/write failure (a `--json` destination that cannot be opened at session start, or whose stream write later fails — a fatal abort; or a `--junit-xml` target that cannot be created at session start, or whose report cannot be finalized and renamed onto PATH) |
+| 3 | internal `mtest` error — including protocol drift (a report present but off-grammar) and an environment/I-O failure such as a runtime report-destination open/write failure (a `--json` destination that cannot be opened at session start, or whose stream write later fails — a fatal abort; or a `--junit-xml` target that cannot be created at session start, or whose report cannot be finalized and renamed onto PATH), or a direct write to stdout or stderr that the destination could not take at all (a closed descriptor, a full filesystem — anything but a departed consumer, below) |
 | 4 | pre-run usage error (unknown flag, bad value, nonexistent path, an explicit operand of a file type mtest cannot run (a FIFO, socket, or device, §5), a path discovery cannot inspect (§5), unknown node id, forbidden build argument, mutually exclusive `--config`/`--no-config`, `--seed` without `--shuffle`, `--shuffle` beside `--lf`/`--ff` (§18), a flag applied to a subcommand it does not belong to (§4) — a run-only flag `collect` marks `—`, `--format` outside `collect`, or any run, build, selection, state, or reporter flag under `doctor` — a `--format` value that is neither `lines` nor `json`, a selected project config that is missing, unreadable, malformed, or has an invalid key/value, a syntactically invalid `--json` or `--junit-xml` report destination — an empty value or a nonexistent parent directory, the machine-stdout conflict — `--json -` without an explicit `--gh-annotations off`, since the byte-pure stream and the annotation tail cannot share stdout, or a `--cache-clear` target mtest can see and cannot prove it owns, or can prove and cannot delete, §8.5 — a target it cannot characterize at all is treated as absent and exits `0`) — detected **before any test runs** |
 | 5 | no tests collected (empty walk, `-k` matched nothing, everything excluded) |
 
@@ -813,6 +813,18 @@ around every write it makes to a descriptor, so a reader that closes early —
 rest of that write and nothing else. Death at signal 13, which a shell reports
 as 141, is a status no subcommand produces, and every command exits with a code
 from its own domain whether or not anyone was still reading.
+
+That carve-out is `EPIPE` and only `EPIPE`, because a departed consumer is the
+one write failure that says nothing about `mtest`: the consumer chose it, and
+the bytes it did not read were bytes it did not want. **Every other write
+failure is exit 3**, in every command's domain, including the six whose domains
+are otherwise `{0}`, `{0, 3}`, or `{0, 3, 4}` (§19, §27, §29). A descriptor
+that is closed (`mtest --version >&-`) or a destination that is full reports
+`EBADF` or `ENOSPC`, nobody asked for the output to be dropped, and a success
+code over undelivered output would be a lie about the one thing the command was
+asked to produce. The diagnostic goes to stderr naming the errno, unless stderr
+is itself the descriptor that failed, in which case the exit is silent rather
+than recursive. No write failure of any kind terminates the process by signal.
 
 A `--shard` (§18) that owns no run files reaches exit 5 by the same
 nothing-collected rule — but only when nothing else ran: a shard whose gates ran
@@ -1519,6 +1531,11 @@ file's result line carries an informal `SERIAL` marker (§15.1).
 - `mtest version` and `mtest --version` print the version to **stdout** and exit
   **0**.
 - A usage **error** prints to **stderr** and exits **4**.
+- Each of those exits assumes its stream took the bytes. A write that fails for
+  any reason other than a departed consumer exits **3** instead, with a
+  diagnostic on stderr naming the errno (§9). That applies to the usage error
+  too: a refusal whose stderr is closed exits 3 rather than 4, because the
+  diagnostic that gives the 4 its meaning was never delivered.
 
 ---
 
@@ -1992,8 +2009,13 @@ code exist today. Section 27 separately covers the reachable `config show` and
   carries the same 2 the process exits with.
 - **3** — reachable via a spawn failure (the runner could not spawn `mojo` or
   a built binary), via protocol drift (a report present but off-grammar, §6)
-  in both `run` and `collect`, and via runtime `--json` or `--junit-xml`
-  report-destination failures (§9).
+  in both `run` and `collect`, via runtime `--json` or `--junit-xml`
+  report-destination failures (§9), and via a direct write to stdout or stderr
+  that failed for any reason other than a departed consumer — a `collect`
+  listing whose stdout is closed or full reaches it. The console output a
+  session drains as the run proceeds is the exception: that write is
+  best-effort by §15.1, so a run whose console cannot take the bytes still
+  exits by its own outcomes.
 - **4** — reachable under `run` and `collect` for every served cause in §9 —
   including mutually exclusive config controls; `--seed` without `--shuffle`
   and `--shuffle` beside `--lf`/`--ff`; a `--format` value that is neither
@@ -2047,7 +2069,8 @@ domain is `{0, 3, 4}`: 0 with `created PATH` on stdout, 4 for a target carrying
 `::`, a target that is not Mojo source, a basename no directory walk would
 collect, a target that already exists, or anything in argv but one operand and
 `-h`/`--help`, and 3 for a filesystem failure while creating the directories or
-the file. There is no other code, because nothing is discovered, built, or run.
+the file, or for a report line its stream could not take (§9). There is no
+other code, because nothing is discovered, built, or run.
 
 **`init` reachability.** `mtest init [--ci github]` is served (§29.2). Its
 whole exit domain is `{0, 3, 4}`: 0 for a run that created every artifact, one
@@ -2057,8 +2080,9 @@ the promise is that the artifacts exist, not that this run made them — 4 for a
 anything else that is not a regular file, and for anything in argv beyond
 `--ci VALUE` and `-h`/`--help`, and 3 for a filesystem failure while creating a
 directory, writing an artifact, or rewriting `.gitignore`, for a `.gitignore`
-past the 1 MiB rewrite ceiling, and for a `.gitignore` that appeared after the
-pre-run observation and is not a regular file. Every exit-4 cause is decided
+past the 1 MiB rewrite ceiling, for a `.gitignore` that appeared after the
+pre-run observation and is not a regular file, and for a report block its
+stream could not take (§9). Every exit-4 cause is decided
 before the first artifact is created, so a refused `init` leaves the directory
 as it found it. There is no other code, because nothing is discovered, built,
 or run.
@@ -2341,8 +2365,9 @@ The `config show` text is informal human output. A machine-readable
 configuration-display format is reserved.
 
 Its exit domain is `{0, 3, 4}`: 0 after successful rendering, 3 when
-invocation-root acquisition itself fails, and 4 for argv or selected-config
-usage failures.
+invocation-root acquisition itself fails or the rendering could not be written
+to stdout for any reason other than a departed consumer (§9), and 4 for argv or
+selected-config usage failures.
 
 ### 27.2 Environment doctor
 
@@ -2396,7 +2421,7 @@ follow the restored disposition rather than being guaranteed a doctor exit
 code; the post-close sample observes only signals that reached the latch.
 
 For exits resolved by doctor within the guarded lifecycle, the exit domain is
-exactly `{0, 1, 2, 4}`. Termination under a restored disposition during the
+exactly `{0, 1, 2, 3, 4}`. Termination under a restored disposition during the
 disclosed handoff is outside doctor's resolved exit domain:
 
 - **0** — no check emitted `FAIL`; `WARN` is allowed.
@@ -2405,6 +2430,9 @@ disclosed handoff is outside doctor's resolved exit domain:
   toolchain, unusable state/temp/report parent, or runtime-close failure.
 - **2** — SIGINT or SIGTERM latched during guarded doctor execution or either
   close-adjacent sample; cleanup still runs.
+- **3** — the one stdout write carrying the whole block failed for a reason
+  other than a departed consumer (§9). No check line was delivered, so no
+  diagnosis was; that displaces whatever the checks themselves resolved.
 - **4** — argv syntax or doctor-flag applicability error only.
 
 Selected-config failures deliberately differ from `run` and `config show`:
@@ -2586,11 +2614,14 @@ subcommand opens, truncates, appends to, or renames onto an existing file.
 |------|-------|
 | 0 | the file was created; `created PATH` is written to stdout |
 | 4 | a target containing `::`, a target that does not end in `.mojo`, a basename no directory walk would collect, a target that already exists, or anything in argv beyond one operand and `-h`/`--help` |
-| 3 | a filesystem failure: the parent directories could not be created, or the file could not be written or published |
+| 3 | a filesystem failure: the parent directories could not be created, or the file could not be written or published; or the report line itself could not be written to its stream for any reason other than a departed consumer (§9) |
 
 Nothing else is reachable. Every diagnostic goes to stderr and the success line
 goes to stdout (§19), and the diagnostics themselves are informal text (§20) —
-the exit code and the file's presence are what this section freezes.
+the exit code and the file's presence are what this section freezes. The 3 an
+undeliverable report line produces is the one code that does not describe the
+file: the artifact may already exist and still be intact, and the exit says
+only that the caller was never told so.
 
 ### 29.2 A whole project — `mtest init [--ci github]`
 
@@ -2711,7 +2742,7 @@ per project.
 |------|-------|
 | 0 | every artifact exists; the per-artifact lines and the next steps go to stdout |
 | 4 | a `--ci` value other than `github`, any artifact name held by a symlink or anything else that is not a regular file, or anything in argv beyond `--ci VALUE` and `-h`/`--help` — each detected before the first artifact is created |
-| 3 | a filesystem failure while creating a directory, writing an artifact, or rewriting `.gitignore`; a `.gitignore` larger than 1 MiB; or a `.gitignore` that appeared between the pre-run observation and its publication and is not a regular file |
+| 3 | a filesystem failure while creating a directory, writing an artifact, or rewriting `.gitignore`; a `.gitignore` larger than 1 MiB; a `.gitignore` that appeared between the pre-run observation and its publication and is not a regular file; or a report block that could not be written to its stream for any reason other than a departed consumer (§9), which says nothing about the artifacts and only that the caller was never told about them |
 
 Nothing else is reachable. A successful run writes to stdout; a failed one
 writes what it did and what stopped it to stderr, because the record of a

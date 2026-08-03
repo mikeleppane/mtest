@@ -1066,8 +1066,9 @@ different `TestSuite` report format. `doctor` also treats a broken
 configuration differently from every other command on purpose. A missing or
 malformed selected config is a `FAIL`ed check and exit `1`, not the usage error
 `run` and `config show` raise, because a diagnostic tool that refuses to
-diagnose is useless. Its exit domain is `{0, 1, 2, 4}`, and `WARN` never fails
-the command.
+diagnose is useless. Its exit domain is `{0, 1, 2, 3, 4}`, and `WARN` never
+fails the command; the `3` is reserved for a stdout that could not take the
+report block at all, which leaves no diagnosis delivered to stand behind.
 
 ### Debugging one test: `mtest debug`
 

@@ -605,6 +605,7 @@ class CheckRosterTests(unittest.TestCase):
                     " early close"
                 ),
                 "pipe: every direct-output command survives a closed stdout",
+                "io: an unwritable output descriptor exits 3, never a crash",
                 "collect: an interrupted --format json run agrees with its own exit",
                 "determinism: --shuffle --seed repeats its file order",
                 "help: --help -> stdout, exit 0",
@@ -708,6 +709,11 @@ class CheckRosterTests(unittest.TestCase):
             def check_direct_output_closed_pipe(self) -> None:
                 self._perform(
                     "pipe: every direct-output command survives a closed stdout"
+                )
+
+            def check_unwritable_output_descriptor(self) -> None:
+                self._perform(
+                    "io: an unwritable output descriptor exits 3, never a crash"
                 )
 
             def check_collect_interrupted_json(self) -> None:

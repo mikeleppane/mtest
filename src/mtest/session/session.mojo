@@ -36,7 +36,6 @@ selection, probe, and gate paths route non-valid reports through the same
 `resolve_report`/`classify` machinery as the default path, so a forged or
 off-grammar report resolves identically either way.
 """
-from std.io import FileDescriptor
 from std.sys import num_logical_cores
 from std.time import perf_counter_ns
 
@@ -53,7 +52,7 @@ from mtest.model import (
     exit_code_for,
     resolve_exit_code,
 )
-from mtest.platform import process_id
+from mtest.platform import process_id, write_all_bytes_fd_status
 from mtest.report import ReportCoordinator
 from mtest.select import NamedTarget, parse_operands, selection_active
 from mtest.select.shuffle import shuffle_strings
@@ -100,6 +99,11 @@ def _flush_console[
     writes nothing. The write is best-effort: a dead destination is not a new
     exit cause, so a failed incremental write is not distinguished here.
 
+    A raw `write(2)` rather than a `FileDescriptor`: constructing one takes
+    ownership of a descriptor the session only borrowed, and its teardown
+    closes it — which faults outright when the borrowed descriptor is already
+    closed, killing a run that had otherwise finished.
+
     Args:
         reporter: The coordinator to drain. A recording coordinator drains
             empty, so this is a no-op for the session's own test drivers.
@@ -113,7 +117,7 @@ def _flush_console[
     var chunk = reporter.drain_console(closing)
     if chunk.byte_length() == 0:
         return
-    print(chunk, end="", file=FileDescriptor(console_fd), flush=True)
+    _ = write_all_bytes_fd_status(console_fd, chunk.as_bytes())
 
 
 def _warn_cache_off[

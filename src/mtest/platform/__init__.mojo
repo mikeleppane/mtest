@@ -23,7 +23,11 @@ operation beats wrapping it.
 The public surface is re-exported here so callers write
 `from mtest.platform import create_unique_temp, rename_path, ...`.
 """
-from mtest.platform.broken_pipe import ignore_broken_pipe
+from mtest.platform.broken_pipe import (
+    EPIPE,
+    direct_write_failed,
+    ignore_broken_pipe,
+)
 from mtest.platform.exec_replace import exec_replace
 from mtest.platform.executable import is_executable_file, resolve_executable
 from mtest.platform.fs import (
@@ -47,5 +51,6 @@ from mtest.platform.temp_file import (
     close_checked_fd,
     create_unique_temp,
     write_all_bytes_fd,
+    write_all_bytes_fd_status,
     write_all_fd,
 )

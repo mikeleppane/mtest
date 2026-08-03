@@ -22,7 +22,9 @@ their artifact lines directly to stdout and everything else to stderr;
 NDJSON collect stream under `--format json` — directly to stdout; and a
 post-close state-write failure goes to stderr after the terminal event already
 sealed the stream. Every one of them goes through `_write_direct`, so a
-consumer that stops reading costs the write and nothing else.
+consumer that stops reading costs the write and nothing else, while a
+destination that cannot take the bytes at all — a closed descriptor, a full
+filesystem — costs the command its success code and exits 3.
 
 The parser owns argv syntax; config owns typed conversion, layering, and state
 bytes; the console resolves color from the inputs main supplies; the session
@@ -33,7 +35,6 @@ dedicated pre-run usage refusal. All FFI stays below in `exec`.
 cwd, getenv, file operations, and exit are ordinary program-level operations
 via `std`.
 """
-from std.io import FileDescriptor
 from std.os import getenv, listdir, remove, rmdir
 from std.os.path import dirname, exists, isdir
 from std.pathlib import cwd
@@ -87,11 +88,13 @@ from mtest.platform import (
     BoundedRegularFileRead,
     close_checked_fd,
     create_unique_temp,
+    direct_write_failed,
     exec_replace,
     ignore_broken_pipe,
     process_id,
     read_bounded_regular_file,
     rename_path,
+    write_all_bytes_fd_status,
     write_all_fd,
 )
 from mtest.report import (
@@ -158,7 +161,7 @@ def _no_color_set() -> Bool:
 
 
 def _write_direct(text: String, fd: Int):
-    """Write `text` verbatim to `fd`, flushed, surviving a departed reader.
+    """Write `text` verbatim to `fd`, surviving a departed reader; else exit 3.
 
     The one path for every byte `main` writes outside a reporter: help,
     version, the doctor lines, `new` and `init`'s artifact lines, the resolved
@@ -169,6 +172,19 @@ def _write_direct(text: String, fd: Int):
     exit domain (§9, §16, §27, §28, §29). The write is lost instead, and the
     command still exits with the code its own domain defines.
 
+    A raw `write(2)` rather than a `FileDescriptor`, and that is the whole
+    difference between working and crashing: constructing one takes ownership
+    of the descriptor, and its teardown closes a descriptor this process does
+    not own and may already have lost. Against a closed `fd` that teardown
+    faults, so `mtest --version >&-` died of SIGSEGV — after the command had
+    done its work — for every subcommand alike.
+
+    Any other errno is a real I/O failure: the output was not delivered, so no
+    domain's success code is honest any more and the process exits 3 (§9's
+    environment/I-O failure). The diagnostic goes to stderr unless stderr is
+    the descriptor that just failed, in which case the exit is silent rather
+    than recursive.
+
     The one place this must NOT be used is between the exec runtime's release
     and the `debug` handoff: the debuggee inherits this process's dispositions,
     and a test that dies of a genuine broken pipe has to be able to say so.
@@ -178,7 +194,24 @@ def _write_direct(text: String, fd: Int):
         fd: The destination descriptor.
     """
     ignore_broken_pipe()
-    print(text, end="", file=FileDescriptor(fd), flush=True)
+    var status = write_all_bytes_fd_status(fd, text.as_bytes())
+    if not direct_write_failed(status):
+        return
+    if fd != 2:
+        var reason = "errno " + String(status) if status > 0 else String(
+            "no progress"
+        )
+        var note = (
+            "mtest: internal error: could not write to file descriptor "
+            + String(fd)
+            + " ("
+            + reason
+            + ")\n"
+        )
+        # Best-effort by construction: an unwritable stderr must not turn one
+        # failed write into two, so this result is deliberately discarded.
+        _ = write_all_bytes_fd_status(2, note.as_bytes())
+    exit(EXIT_INTERNAL_ERROR)
 
 
 def _eprintln(text: String):

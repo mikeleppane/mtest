@@ -10,11 +10,14 @@ from std.testing import (
 )
 
 from mtest.platform import (
+    EPIPE,
     close_checked_fd,
     create_unique_temp,
+    direct_write_failed,
     process_id,
     read_bounded_regular_file,
     rename_path,
+    write_all_bytes_fd_status,
     write_all_fd,
 )
 
@@ -87,6 +90,40 @@ def test_create_and_write_failures_leave_cleanup_to_the_exact_owner() raises:
         assert_equal(len(listdir(root)), 0)
     finally:
         remove_tree(root)
+
+
+def test_write_status_reports_the_errno_a_failed_write_set() raises:
+    """A status write reports `errno` instead of an error string.
+
+    `main` must tell a departed consumer from an undeliverable destination,
+    and reading that out of a message would be classification across a seam.
+    """
+    var root = temp_root()
+    try:
+        var temp = create_unique_temp(root + "/state.XXXXXX")
+        assert_equal(write_all_bytes_fd_status(temp.fd, "kept".as_bytes()), 0)
+        close_checked_fd(temp.fd)
+        # EBADF is 9 on Linux and Darwin alike.
+        assert_equal(write_all_bytes_fd_status(temp.fd, "lost".as_bytes()), 9)
+        assert_equal(write_all_bytes_fd_status(temp.fd, "".as_bytes()), 0)
+        remove(temp.path)
+        assert_equal(len(listdir(root)), 0)
+    finally:
+        remove_tree(root)
+
+
+def test_only_a_departed_consumer_survives_a_failed_direct_write() raises:
+    """`EPIPE` is the one write failure a command may exit successfully after.
+
+    Every other errno means the bytes were never delivered, so the command's
+    own success code would be a lie. `-1` is the no-errno short write, which
+    is undelivered for the same reason.
+    """
+    assert_false(direct_write_failed(0))
+    assert_false(direct_write_failed(EPIPE))
+    assert_true(direct_write_failed(9))  # EBADF: the descriptor is closed
+    assert_true(direct_write_failed(28))  # ENOSPC: the destination is full
+    assert_true(direct_write_failed(-1))  # a write that made no progress
 
 
 def test_bounded_read_validates_the_opened_regular_file() raises:

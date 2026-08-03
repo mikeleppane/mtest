@@ -30,7 +30,6 @@ batch runs is the binary the store serves, the run-step diagnostics name a live
 generation rather than a directory that is about to disappear, and the window in
 which a hard kill can orphan a staging directory is one build long.
 """
-from std.io import FileDescriptor
 from std.time import perf_counter_ns
 
 from mtest.config import ResolvedConfig, RunnerConfig, lossy_utf8
@@ -51,6 +50,7 @@ from mtest.model import (
     Summary,
     TestCounts,
 )
+from mtest.platform import write_all_bytes_fd_status
 from mtest.report import ReportCoordinator
 from mtest.session.attempt import (
     _AttemptResult,
@@ -461,6 +461,11 @@ def _flush_console_with_progress[
     negative handle or an empty assembly writes nothing; the write is
     best-effort, so a dead destination is not a new exit cause.
 
+    A raw `write(2)` rather than a `FileDescriptor`, for the reason
+    `session._flush_console` records: constructing one takes ownership of a
+    borrowed descriptor and its teardown closes it, which faults outright once
+    that descriptor is already closed.
+
     Args:
         reporter: The coordinator to drain and read the overlay from.
         console_fd: The borrowed console descriptor, or negative when none.
@@ -479,7 +484,7 @@ def _flush_console_with_progress[
     var overlay = String("") if closing else reporter.progress_overlay()
     var out = _progress_flush_bytes(chunk, overlay, counter_shown)
     if out.byte_length() > 0:
-        print(out, end="", file=FileDescriptor(console_fd), flush=True)
+        _ = write_all_bytes_fd_status(console_fd, out.as_bytes())
     return overlay.byte_length() > 0
 
 

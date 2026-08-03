@@ -14,6 +14,12 @@ which is what lets each command exit with a code its own domain defines. The
 `exec` runtime installs the same carve-out through the native adapter for its
 own lifetime; this is the carve-out for the commands that never open one.
 
+`direct_write_failed` is the other half of that policy, and the reason the two
+live together: absorbing `EPIPE` is only correct because every OTHER errno
+means the output was not delivered and no consumer chose that. A closed
+descriptor or a full filesystem is a failure the command must report, not a
+reader that walked away.
+
 `signal(2)` rather than `sigaction(2)`, and here rather than behind the native
 ABI, because the only disposition installed is the constant `SIG_IGN`: there is
 no handler function to recover a code pointer from, no `sigaction` layout to
@@ -28,6 +34,37 @@ comptime _SIGPIPE = 13
 
 comptime _SIG_IGN = 1
 """`SIG_IGN`, the handler sentinel `(void (*)(int)) 1` on both platforms."""
+
+comptime EPIPE = 32
+"""`EPIPE`, 32 on both Linux and Darwin: the read end of the pipe is gone."""
+
+
+def direct_write_failed(status: Int) -> Bool:
+    """Whether a direct write's status is a failure its command must report.
+
+    The one statement of the policy, so no caller re-derives it. A departed
+    consumer is not a failure: the rest of the output is lost and nothing else
+    changes, which is what lets `mtest --help | head -1` still exit 0. Every
+    other nonzero status — a closed descriptor, a full filesystem, a write that
+    made no progress — means the command's output was not delivered.
+
+    Args:
+        status: A `write_all_bytes_fd_status` result: `0`, an `errno`, or `-1`.
+
+    Returns:
+        True when the caller must treat the write as undelivered. Allocates
+        nothing and cannot fail.
+
+    Examples:
+
+    ```mojo
+    from mtest.platform import EPIPE, direct_write_failed
+
+    print(direct_write_failed(EPIPE))  # False: the consumer left
+    print(direct_write_failed(28))  # True: ENOSPC, nothing was written
+    ```
+    """
+    return status != 0 and status != EPIPE
 
 
 def ignore_broken_pipe():
