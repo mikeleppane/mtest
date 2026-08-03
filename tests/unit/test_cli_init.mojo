@@ -132,8 +132,10 @@ def test_gitignore_update_writes_a_whole_file_when_absent() raises:
     assert_true(Bool(written))
     assert_equal(
         _text(written.value()),
-        "# mtest's build cache and last-run state\n.mtest-cache/\n"
-        "# the test binaries mtest builds\nbuild/bin/\n",
+        (
+            "# mtest's build cache and last-run state\n.mtest-cache/\n"
+            "# the test binaries mtest builds\nbuild/bin/\n"
+        ),
     )
     assert_true(_text(written.value()).startswith("#"))
 
@@ -387,8 +389,10 @@ def test_init_reports_an_unusable_parent_as_an_io_failure() raises:
         assert_equal(len(report.lines), 1)
         assert_equal(
             report.lines[0],
-            "scaffold: could not create 'tests/test_example.mojo':"
-            " 'tests' is not a directory",
+            (
+                "scaffold: could not create 'tests/test_example.mojo':"
+                " 'tests' is not a directory"
+            ),
         )
         assert_false(exists(root + "/mtest.toml"))
     finally:

@@ -275,8 +275,10 @@ def test_new_reports_an_unusable_parent_as_an_io_failure() raises:
         # `\n` mid-sentence and truncated the second copy mid-path.
         assert_equal(
             report.lines[0],
-            "scaffold: could not create 'tests/test_blocked.mojo':"
-            " 'tests' is not a directory",
+            (
+                "scaffold: could not create 'tests/test_blocked.mojo':"
+                " 'tests' is not a directory"
+            ),
         )
         assert_false(exists(root + "/tests/test_blocked.mojo"))
     finally:
