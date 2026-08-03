@@ -6,14 +6,19 @@ otherwise green run to exit 3, and it does so at the FIRST resolve — the one
 whose code rides `SessionFinished` — rather than at the delivery re-resolve
 that follows the terminal writes.
 
-Three of these are regression tests for the `console_dead` term of the single
-`delivery_failed` variable. That variable is read twice: once as a fact the
-model ranks, and once again as the guard on the delivery re-resolve. Dropping a
-term from it would therefore both under-resolve the code and silently disarm
-that guard, so a dead console and a dead report are exercised alone and
-together, and every case asserts the code the session RETURNED alongside the
-code `SessionFinished` carried. Those two agreeing is what proves the run
-resolved once.
+Two of these are regression tests for the `console_dead` term of the single
+`delivery_failed` variable, which is read twice: once as a fact the model
+ranks, and once again as the guard on the delivery re-resolve. Dropping a term
+from it would therefore both under-resolve the code and silently disarm that
+guard, so a dead console is exercised alone and alongside a failed report.
+Every case asserts the code the session RETURNED together with the code
+`SessionFinished` carried; those two agreeing is what proves the run resolved
+once, before the terminal record rather than after it.
+
+Every report failure here is a REAL one — the target directory goes unwritable
+after the writer is constructed, so the atomic rename that publishes the
+document fails — and each sink is failed on its own, because each earns the
+delivery fact and its own warning independently.
 """
 from std.os import mkdir
 from std.os.path import exists
@@ -26,7 +31,11 @@ from mtest.model import (
     SessionFinishedPayload,
     WarningPayload,
 )
-from mtest.platform import close_checked_fd, create_unique_temp
+from mtest.platform import (
+    close_checked_fd,
+    create_unique_temp,
+    set_permissions,
+)
 from mtest.report import (
     REPORT_STYLE_CONCISE,
     AnnotationsReporter,
@@ -66,23 +75,12 @@ def _off() -> Optional[ReportArtifact]:
     return Optional[ReportArtifact](None)
 
 
-def _stub_failed_writer() -> ReportWriter:
-    """A writer whose Markdown sink reports a finalize failure, and nothing else.
-
-    The Markdown artifact arrives already latched with its descriptor released
-    (`fd == -1`), which is the shape `finalize_reports` answers from its
-    recorded outcome: it streams nothing, closes nothing, renames nothing, and
-    returns `md_failed=True, md_detail="stub"`. No file is touched anywhere, so
-    the test observes the session's response to a failed sink and not the
-    writer's own publishing machinery, which `test_report_writer` owns.
+def _artifact(target: String) raises -> Optional[ReportArtifact]:
+    """One active sink: the target plus a freshly created unique temp beside it.
     """
-    return ReportWriter(
-        _facts(),
-        REPORT_STYLE_CONCISE,
-        Optional[ReportArtifact](ReportArtifact("", "", -1, True, "stub")),
-        _off(),
-        "",
-        "",
+    var created = create_unique_temp(target + ".XXXXXX")
+    return Optional[ReportArtifact](
+        ReportArtifact(target, created.path, created.fd, False, "")
     )
 
 
@@ -90,16 +88,17 @@ def _md_writer(
     target: String, spool: String, root: String
 ) raises -> ReportWriter:
     """A real writer publishing Markdown to `target`, with HTML off."""
-    var created = create_unique_temp(target + ".XXXXXX")
     return ReportWriter(
-        _facts(),
-        REPORT_STYLE_CONCISE,
-        Optional[ReportArtifact](
-            ReportArtifact(target, created.path, created.fd, False, "")
-        ),
-        _off(),
-        spool,
-        root,
+        _facts(), REPORT_STYLE_CONCISE, _artifact(target), _off(), spool, root
+    )
+
+
+def _html_writer(
+    target: String, spool: String, root: String
+) raises -> ReportWriter:
+    """A real writer publishing HTML to `target`, with Markdown off."""
+    return ReportWriter(
+        _facts(), REPORT_STYLE_CONCISE, _off(), _artifact(target), spool, root
     )
 
 
@@ -125,17 +124,26 @@ def _read(path: String) raises -> String:
     return body^
 
 
+def _session_finished_index(rec: RecordingReporter) raises -> Int:
+    """The position of the session's terminal record in the recording.
+
+    Raises:
+        Error: When no `SessionFinished` was recorded at all.
+    """
+    for i in range(rec.count()):
+        if rec.kind_at(i) == EventKind.SESSION_FINISHED:
+            return i
+    raise Error("no SessionFinished event was recorded")
+
+
 def _session_finished_code(rec: RecordingReporter) raises -> Int:
     """The exit code the session's terminal record carried.
 
     Raises:
         Error: When no `SessionFinished` was recorded at all.
     """
-    for i in range(rec.count()):
-        var e = rec.event_at(i)
-        if e.kind == EventKind.SESSION_FINISHED:
-            return e.data[SessionFinishedPayload].exit_code
-    raise Error("no SessionFinished event was recorded")
+    var e = rec.event_at(_session_finished_index(rec))
+    return e.data[SessionFinishedPayload].exit_code
 
 
 def _warning_index(rec: RecordingReporter, kind: String) raises -> Int:
@@ -146,6 +154,21 @@ def _warning_index(rec: RecordingReporter, kind: String) raises -> Int:
             if e.data[WarningPayload].warning_kind == kind:
                 return i
     return -1
+
+
+def _warning_detail(rec: RecordingReporter, at: Int) raises -> String:
+    """The diagnostic the warning at `at` carried.
+
+    Args:
+        rec: The recording to read.
+        at: The position of a `WARNING` event in it.
+
+    Returns:
+        The warning's pattern datum, which is the sink's own failure
+        diagnostic for a `report-finalize` warning.
+    """
+    var e = rec.event_at(at)
+    return e.data[WarningPayload].warning_pattern.copy()
 
 
 def _run_with_console[
@@ -173,13 +196,26 @@ def _run_with_console[
 
 
 def test_failed_report_finalize_escalates_a_green_run_to_exit_3() raises:
+    # A REAL publish failure, not a pre-latched artifact: the target directory
+    # is made unwritable AFTER the writer is constructed, so the document
+    # streams and closes normally and the atomic rename that publishes it
+    # fails. The diagnostic asserted below is therefore one the writer
+    # produced, which is the only way this test can prove the session reports
+    # what the sink actually said.
     var root = temp_root()
     write_file(root, "tests/test_a.mojo", SRC_PASS)
+    var dir = temp_root()
 
     var comp = RecordingCoordinator(
-        CompositeReporter(Tuple(RecordingReporter())), _stub_failed_writer()
+        CompositeReporter(Tuple(RecordingReporter())),
+        _md_writer(dir + "/report.md", temp_root(), root),
     )
-    var code = run_session(base_config(), root, comp)
+    var code: Int
+    set_permissions(dir, 0o500)
+    try:
+        code = run_session(base_config(), root, comp)
+    finally:
+        set_permissions(dir, 0o700)
 
     assert_equal(code, 3, "an undelivered run report escalates 0 to 3")
     ref rec = comp.composite.reporters[0]
@@ -191,8 +227,54 @@ def test_failed_report_finalize_escalates_a_green_run_to_exit_3() raises:
     var warned = _warning_index(rec, "report-finalize")
     assert_true(warned >= 0, "no report-finalize warning was emitted")
     assert_true(
-        warned < rec.count() - 1,
+        warned < _session_finished_index(rec),
         "the warning must precede the terminal record",
+    )
+    var detail = _warning_detail(rec, warned)
+    assert_true(
+        detail.startswith("run report (markdown) could not be published:"),
+        "the warning must carry the markdown sink's own publish diagnostic: "
+        + detail,
+    )
+
+
+def test_failed_html_report_escalates_and_warns_on_its_own_sink() raises:
+    # The HTML sink earns the delivery fact and its own warning exactly as the
+    # Markdown sink does: same unwritable-target mechanism, different sink, and
+    # the diagnostic must name the format that failed rather than the other.
+    var root = temp_root()
+    write_file(root, "tests/test_a.mojo", SRC_PASS)
+    var dir = temp_root()
+
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter())),
+        _html_writer(dir + "/report.html", temp_root(), root),
+    )
+    var code: Int
+    set_permissions(dir, 0o500)
+    try:
+        code = run_session(base_config(), root, comp)
+    finally:
+        set_permissions(dir, 0o700)
+
+    assert_equal(code, 3, "an undelivered HTML report escalates 0 to 3")
+    ref rec = comp.composite.reporters[0]
+    assert_equal(
+        _session_finished_code(rec),
+        3,
+        "the terminal record must carry the escalated code, not 0",
+    )
+    var warned = _warning_index(rec, "report-finalize")
+    assert_true(warned >= 0, "no report-finalize warning was emitted")
+    assert_true(
+        warned < _session_finished_index(rec),
+        "the warning must precede the terminal record",
+    )
+    var detail = _warning_detail(rec, warned)
+    assert_true(
+        detail.startswith("run report (html) could not be published:"),
+        "the warning must carry the html sink's own publish diagnostic: "
+        + detail,
     )
 
 
@@ -239,6 +321,11 @@ def test_dead_console_escalates_at_the_first_resolve() raises:
         AnnotationsReporter.inert(),
         ReportWriter.inert(),
     )
+    # `_get_raw_fd` is a PRIVATE stdlib accessor on `FileHandle`, taken
+    # deliberately: AGENTS.md prefers a safe stdlib operation over writing a
+    # foreign `open` declaration here just to obtain a read-only descriptor.
+    # It is the one thing in this module that a toolchain bump can break, so
+    # grep for it first if this file stops compiling after a pin move.
     with open(root + "/unwritable-console", "r") as ro:
         code = _run_with_console(coord, root, ro._get_raw_fd())
     _ = close_json_fd(json_fd)
@@ -261,6 +348,7 @@ def test_dead_console_and_failed_report_resolve_once_to_exit_3() raises:
     write_file(root, "unwritable-console", "opened read-only\n")
     var events = root + "/events.ndjson"
     var json_fd = open_json_fd(events)
+    var dir = temp_root()
 
     var code: Int
     var coord = StandardReportCoordinator(
@@ -268,10 +356,15 @@ def test_dead_console_and_failed_report_resolve_once_to_exit_3() raises:
         JsonStreamReporter(json_fd, "x.y.z", True),
         JunitReporter.inert(),
         AnnotationsReporter.inert(),
-        _stub_failed_writer(),
+        _md_writer(dir + "/report.md", temp_root(), root),
     )
-    with open(root + "/unwritable-console", "r") as ro:
-        code = _run_with_console(coord, root, ro._get_raw_fd())
+    set_permissions(dir, 0o500)
+    try:
+        # See the private-stdlib note in the test above.
+        with open(root + "/unwritable-console", "r") as ro:
+            code = _run_with_console(coord, root, ro._get_raw_fd())
+    finally:
+        set_permissions(dir, 0o700)
     _ = close_json_fd(json_fd)
 
     assert_equal(code, 3, "two delivery failures still resolve to one 3")
@@ -280,26 +373,41 @@ def test_dead_console_and_failed_report_resolve_once_to_exit_3() raises:
     assert_false('"exit_code":0' in stream, "the run must not report 0")
 
 
-def test_failed_report_alone_skips_the_delivery_re_resolve() raises:
-    # The console here is a REAL writable file, so the only delivery failure is
-    # the report. The re-resolve after the terminal writes is guarded by the
-    # same named `delivery_failed` the first resolve read: already true, so it
-    # is skipped, and the returned code is the one SessionFinished carried.
+def test_report_only_failure_escalates_at_the_first_resolve() raises:
+    # The console here is a REAL writable file and the machine stream is
+    # healthy, so the report is the ONLY delivery failure: the escalation to 3
+    # can have come from nowhere but the first resolve, which is what the
+    # terminal record carrying 3 pins.
+    #
+    # This does NOT falsify the re-resolve's `not delivery_failed` guard, and
+    # no test can. With console and stream both healthy the re-resolve's own
+    # condition is false anyway; and when it is true, re-resolving with
+    # `delivery_failed=True` over an already-delivery-failed base yields the
+    # same code for every base the resolver defines. The guard is therefore
+    # unobservable by construction — a redundancy, not an untested branch.
+    # It still must not be deleted, because it is what documents that the fact
+    # was already folded in.
     var root = temp_root()
     write_file(root, "tests/test_a.mojo", SRC_PASS)
     var console_path = root + "/console.txt"
     var console = create_unique_temp(console_path + ".XXXXXX")
     var events = root + "/events.ndjson"
     var json_fd = open_json_fd(events)
+    var dir = temp_root()
 
     var coord = StandardReportCoordinator(
         _console(),
         JsonStreamReporter(json_fd, "x.y.z", True),
         JunitReporter.inert(),
         AnnotationsReporter.inert(),
-        _stub_failed_writer(),
+        _md_writer(dir + "/report.md", temp_root(), root),
     )
-    var code = _run_with_console(coord, root, console.fd)
+    var code: Int
+    set_permissions(dir, 0o500)
+    try:
+        code = _run_with_console(coord, root, console.fd)
+    finally:
+        set_permissions(dir, 0o700)
     _ = close_json_fd(json_fd)
     close_checked_fd(console.fd)
 
