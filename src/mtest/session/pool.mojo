@@ -50,7 +50,7 @@ from mtest.model import (
     Summary,
     TestCounts,
 )
-from mtest.platform import write_all_bytes_fd_status
+from mtest.platform import direct_write_failed, write_all_bytes_fd_status
 from mtest.report import ReportCoordinator
 from mtest.session.attempt import (
     _AttemptResult,
@@ -189,6 +189,11 @@ struct PoolBatchResult(Movable):
     `CacheContext`, which both terminal artifacts read."""
     var cached_files: Int
     """Cache-hit admissions in this batch, folded the same way."""
+    var console_dead: Bool
+    """Whether a console flush in this batch could not deliver its bytes for a
+    reason other than a departed consumer. `run_session` folds it into the
+    delivery fact the exit-code model ranks, so a batch that printed nothing
+    cannot report the verdict it never showed anyone."""
 
 
 struct _PoolFile(Movable):
@@ -449,7 +454,13 @@ def _progress_flush_bytes(
 
 def _flush_console_with_progress[
     C: ReportCoordinator
-](mut reporter: C, console_fd: Int, counter_shown: Bool, closing: Bool) -> Bool:
+](
+    mut reporter: C,
+    console_fd: Int,
+    counter_shown: Bool,
+    closing: Bool,
+    mut console_dead: Bool,
+) -> Bool:
     """Flush committed console bytes while erasing and redrawing the counter.
 
     Drains the coordinator's pending committed bytes NON-closing, since the
@@ -458,8 +469,14 @@ def _flush_console_with_progress[
     counter before those bytes, and redraws the counter after unless `closing`.
     On a non-terminal destination the overlay is empty and `counter_shown` never
     becomes True, so no erase or counter byte is ever written to a pipe. A
-    negative handle or an empty assembly writes nothing; the write is
-    best-effort, so a dead destination is not a new exit cause.
+    negative handle or an empty assembly writes nothing.
+
+    A destination that cannot take the bytes latches `console_dead`, for the
+    reason `session._flush_console` states: the console report is the run's
+    primary output, so an undelivered one is a delivery failure the model
+    ranks. A departed consumer is the carve-out and never latches. The latch
+    is an out-parameter because the return already carries the counter state
+    and 1.0.0b2 has no tuple return.
 
     A raw `write(2)` rather than a `FileDescriptor`, for the reason
     `session._flush_console` records: constructing one takes ownership of a
@@ -473,6 +490,8 @@ def _flush_console_with_progress[
         closing: Whether this is the batch's terminal flush, which erases the
             counter without redrawing it; the committed tail and the session's
             closing flush follow.
+        console_dead: Set to True when this flush could not deliver its bytes.
+            Never cleared, so one failed flush survives every later one.
 
     Returns:
         Whether a counter is on the terminal after this flush, to thread into
@@ -484,7 +503,10 @@ def _flush_console_with_progress[
     var overlay = String("") if closing else reporter.progress_overlay()
     var out = _progress_flush_bytes(chunk, overlay, counter_shown)
     if out.byte_length() > 0:
-        _ = write_all_bytes_fd_status(console_fd, out.as_bytes())
+        if direct_write_failed(
+            write_all_bytes_fd_status(console_fd, out.as_bytes())
+        ):
+            console_dead = True
     return overlay.byte_length() > 0
 
 
@@ -595,6 +617,7 @@ def _run_pool_batch[
         List[_CrashFile](),
         0,
         0,
+        False,
     )
     if n == 0:
         return result^
@@ -1251,7 +1274,7 @@ def _run_pool_batch[
         ):
             _emit_progress(reporter, state, completed, n)
             counter_shown = _flush_console_with_progress(
-                reporter, console_fd, counter_shown, False
+                reporter, console_fd, counter_shown, False, result.console_dead
             )
             last_completed = completed
             last_running_sig = running_sig^
@@ -1286,7 +1309,9 @@ def _run_pool_batch[
     # committed bytes without redrawing it. The counter is ephemeral and must
     # not survive into the framed sections and summary band, which the session's
     # single closing flush emits after every batch has returned.
-    _ = _flush_console_with_progress(reporter, console_fd, counter_shown, True)
+    _ = _flush_console_with_progress(
+        reporter, console_fd, counter_shown, True, result.console_dead
+    )
 
     # A run batch that latched its `-x`/`--maxfail` limit records it so a later
     # serial pass honors the same stop rather than starting fresh work. The gate

@@ -784,6 +784,7 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "collect: a listing larger than the pipe buffer survives an early close",
     "pipe: every direct-output command survives a closed stdout",
     "io: an unwritable output descriptor exits 3, never a crash",
+    "io: an undelivered report still releases the JUnit spool",
     "collect: an interrupted --format json run agrees with its own exit",
     "determinism: --shuffle --seed repeats its file order",
     "help: --help -> stdout, exit 0",
@@ -1306,6 +1307,13 @@ class Runner:
         (§29, which additionally promise the artifacts exist afterwards), and
         `collect --format json` (§16).
 
+        Both run drivers are here too, and they are the reason this check and
+        `check_unwritable_output_descriptor` have to be read together: an
+        undelivered console report escalates a run to 3, but a consumer that
+        walked away is not that case and must leave the run's own verdict
+        alone. `EPIPE` is the whole difference, and asserting only one side
+        would let a fix for either one quietly eat the other.
+
         Each command is asserted against the exact code its domain gives a
         successful run, so a process that dies of `SIGPIPE` (a negative return
         code from `subprocess`, 141 from a shell) fails here and names itself.
@@ -1324,6 +1332,8 @@ class Runner:
                 0,
                 "",
             ),
+            ("run", ["-I", "build", "tests"], 0, ""),
+            ("run -n 2", ["-I", "build", "-n", "2", "tests"], 0, ""),
         ]
         probs: list[str] = []
         for label, argv, want, artifact in cases:
@@ -1400,7 +1410,7 @@ class Runner:
             return "timeout"
 
     def check_unwritable_output_descriptor(self) -> None:
-        """Assert an undeliverable direct write exits 3 rather than faulting.
+        """Assert undelivered PRIMARY output exits 3, and a diagnostic does not.
 
         The sibling of `check_direct_output_closed_pipe`, from the other side
         of one policy: a departed consumer is absorbed, but a destination that
@@ -1409,19 +1419,24 @@ class Runner:
         stand for that — a CLOSED descriptor (`>&-`, `EBADF`) and a full
         destination (`/dev/full`, `ENOSPC`).
 
-        Every command that writes straight to a descriptor is here, since each
-        publishes its own exit domain and each admits 3 on this condition:
-        help and version (§19), `config show` and `doctor` (§27), `new` and
-        `init` (§29, whose artifacts must still exist afterwards). A usage
-        error whose stderr is closed is here too: it cannot deliver its
-        diagnostic, so 3 displaces its 4.
+        Every command whose product IS its text is here, since each publishes
+        its own exit domain and each admits 3 on this condition: help and
+        version (§19), `config show` and `doctor` (§27), `new` and `init`
+        (§29, whose artifacts must still exist afterwards). A run is here too,
+        for both drivers: its console report is primary output, so an
+        undelivered one escalates through the same delivery precedence a dead
+        `--json` destination uses (§9).
 
-        A run is held to the weaker property that it does not die of a signal.
-        Its console drain is best-effort by contract (§15.1) and swallows the
-        failure, but it used to fault at the same place these commands did,
-        which turned a finished run into a crash.
+        A USAGE ERROR is the counter-case, and it is the reason this check
+        asserts two different codes rather than one. There the exit code is
+        itself the machine-readable product, and it was delivered perfectly;
+        the prose on stderr is a diagnostic about it. §9 freezes 4 for a
+        pre-run refusal, so 4 it stays whether or not stderr took the bytes —
+        `2>/dev/null` and `2>&-` are two spellings of "I do not want the
+        diagnostic", and only a broken runner should be able to turn either
+        into a 3.
         """
-        ref = "§9/§19/§27/§29 an undeliverable direct write exits 3"
+        ref = "§9/§19/§27/§29 undelivered primary output exits 3; a refusal keeps 4"
         name = "io: an unwritable output descriptor exits 3, never a crash"
         probs: list[str] = []
         cases: list[tuple[str, list[str], str]] = [
@@ -1443,11 +1458,68 @@ class Runner:
             if artifact and not (cwd / artifact).exists():
                 probs.append(f"{label}: {artifact} was never created")
 
-        # A usage error that cannot reach stderr is undelivered for the same
-        # reason, so 3 displaces the 4 its own refusal would have carried.
+        # A usage error keeps its frozen 4: the code IS the product and it was
+        # delivered. Both spellings of a discarded diagnostic must agree.
+        for label, sink in (("closed stderr", None), ("/dev/full stderr", "/dev/full")):
+            if sink is not None and not Path(sink).exists():
+                continue
+            refused = self._run_with_broken_stderr(["-V"], sink)
+            if refused != 4:
+                probs.append(f"usage error: {label} exit {refused}, want 4")
+
+        if Path("/dev/full").exists():
+            for label, argv in (("help: --help", ["--help"]), ("version", ["version"])):
+                code = self._run_with_broken_stdout(argv, self.root, full=True)
+                if code != 3:
+                    probs.append(f"{label}: /dev/full exit {code}, want 3")
+
+        # Both drivers, because each drains the console itself: the sequential
+        # loop and, under `-n`, the parallel pool with its progress overlay. A
+        # run whose console report went nowhere has not reported, so its own
+        # verdict is no longer authoritative and 3 displaces it.
+        for driver, extra in (("run", []), ("run -n 2", ["-n", "2"])):
+            argv = ["-I", "build", *extra, "tests"]
+            closed = self._run_with_broken_stdout(argv, self.root, full=False)
+            if closed != 3:
+                probs.append(f"{driver}: closed stdout exit {closed}, want 3")
+            if Path("/dev/full").exists():
+                full = self._run_with_broken_stdout(argv, self.root, full=True)
+                if full != 3:
+                    probs.append(f"{driver}: /dev/full exit {full}, want 3")
+
+        self.record(
+            PASS if not probs else FAIL,
+            name,
+            ref,
+            "; ".join(probs),
+        )
+
+    def _run_with_broken_stderr(self, argv: list[str], sink: str | None) -> int | str:
+        """Run the binary with a stderr that cannot take bytes.
+
+        Args:
+            argv: Arguments passed after the binary path.
+            sink: A path to redirect stderr to (`/dev/full`), or None to close
+                descriptor 2 outright the way `2>&-` does.
+
+        Returns:
+            The child's exit status, negative when a signal killed it, or the
+            string `"timeout"`.
+        """
         try:
-            refused = subprocess.run(
-                [str(MTEST), "-V"],
+            if sink is not None:
+                with Path(sink).open("wb") as handle:
+                    return subprocess.run(
+                        [str(MTEST), *argv],
+                        cwd=self.root,
+                        env=self.env,
+                        stdout=subprocess.DEVNULL,
+                        stderr=handle,
+                        timeout=180,
+                        check=False,
+                    ).returncode
+            return subprocess.run(
+                [str(MTEST), *argv],
                 cwd=self.root,
                 env=self.env,
                 stdout=subprocess.DEVNULL,
@@ -1457,33 +1529,90 @@ class Runner:
                 preexec_fn=_close_stderr,
             ).returncode
         except subprocess.TimeoutExpired:
-            refused = -1
-        if refused != 3:
-            probs.append(f"usage error: closed stderr exit {refused}, want 3")
+            return "timeout"
 
-        if Path("/dev/full").exists():
-            for label, argv in (("help: --help", ["--help"]), ("version", ["version"])):
-                code = self._run_with_broken_stdout(argv, self.root, full=True)
-                if code != 3:
-                    probs.append(f"{label}: /dev/full exit {code}, want 3")
+    def check_undelivered_output_releases_its_resources(self) -> None:
+        """Assert a run that cannot write its report still frees its scratch.
 
-        # Both drivers, because each drains the console itself: the sequential
-        # loop and, under `-n`, the parallel pool with its progress overlay.
-        for driver, extra in (("run", []), ("run -n 2", ["-n", "2"])):
-            run_code = self._run_with_broken_stdout(
-                ["-I", "build", *extra, "tests"], self.root, full=False
-            )
-            if not isinstance(run_code, int) or run_code < 0:
-                probs.append(
-                    f"{driver}: closed stdout exit {run_code}, want no signal death"
-                )
+        The JUnit spool is a directory `main` creates under `TMPDIR` and owns:
+        no other process sweeps it, so an exit that skips the resource ladder
+        leaks it once per invocation, forever. `open_junit_spool` exists
+        precisely to keep leftovers out of a shared temp, and an exit taken
+        from inside the write primitive walked around it.
 
-        self.record(
-            PASS if not probs else FAIL,
-            name,
-            ref,
-            "; ".join(probs),
+        The forcing shape is the annotation epilogue: under
+        `--gh-annotations on` a failing run writes its tail to the console
+        AFTER the session has finalized, which is the last write before the
+        ladder runs. Pointed at `/dev/full` that write fails, so the run must
+        both escalate to 3 (undelivered primary output, §9) and leave `TMPDIR`
+        exactly as it found it — the spool, its `suite-*.xml` fragments, and
+        the target temp all gone.
+
+        The control is the same argv with a writable stdout: it must exit 1,
+        publish the report, and leave `TMPDIR` empty too, so a check that
+        passed by never creating a spool cannot look like a check that passed
+        by cleaning one up.
+        """
+        ref = "§9/§15.2 no owned scratch survives any exit path"
+        name = "io: an undelivered report still releases the JUnit spool"
+        if not Path("/dev/full").exists():
+            self.record(SKIP, name, ref, "/dev/full is unavailable on this host")
+            return
+        d = self.root / "probes_spool"
+        d.mkdir(exist_ok=True)
+        (d / "test_pass.mojo").write_text(
+            HEAD + "def test_spool_ok() raises:\n"
+            '    assert_equal(reverse("ab"), "ba")\n' + MAIN
         )
+        (d / "test_fail.mojo").write_text(
+            HEAD + "def test_spool_fails() raises:\n    assert_equal(1, 2)\n" + MAIN
+        )
+        argv = [
+            "-I",
+            "build",
+            "--gh-annotations",
+            "on",
+            "--junit-xml",
+            "spool-report.xml",
+            "probes_spool",
+        ]
+        probs: list[str] = []
+        for label, want, full in (("control", 1, False), ("/dev/full", 3, True)):
+            tmp = self.root / f"spool-tmp-{label.strip('/').replace('/', '-')}"
+            shutil.rmtree(tmp, ignore_errors=True)
+            tmp.mkdir(parents=True)
+            env = dict(self.env, TMPDIR=str(tmp), GITHUB_ACTIONS="")
+            try:
+                if full:
+                    with Path("/dev/full").open("wb") as sink:
+                        code: int | str = subprocess.run(
+                            [str(MTEST), *argv],
+                            cwd=self.root,
+                            env=env,
+                            stdout=sink,
+                            stderr=subprocess.DEVNULL,
+                            timeout=180,
+                            check=False,
+                        ).returncode
+                else:
+                    code = subprocess.run(
+                        [str(MTEST), *argv],
+                        cwd=self.root,
+                        env=env,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=180,
+                        check=False,
+                    ).returncode
+            except subprocess.TimeoutExpired:
+                code = "timeout"
+            if code != want:
+                probs.append(f"{label}: exit {code}, want {want}")
+            leftovers = sorted(p.name for p in tmp.iterdir())
+            if leftovers:
+                probs.append(f"{label}: TMPDIR still holds {leftovers}")
+            shutil.rmtree(tmp, ignore_errors=True)
+        self.record(PASS if not probs else FAIL, name, ref, "; ".join(probs))
 
     def check_collect_interrupted_json(self) -> None:
         """Assert an interrupted collect stream reports the code it exits with.
@@ -3129,6 +3258,8 @@ def main() -> int:
             runner.check_direct_output_closed_pipe()
         if wanted("io: an unwritable output descriptor exits 3, never a crash"):
             runner.check_unwritable_output_descriptor()
+        if wanted("io: an undelivered report still releases the JUnit spool"):
+            runner.check_undelivered_output_releases_its_resources()
         if wanted("collect: an interrupted --format json run agrees with its own exit"):
             runner.check_collect_interrupted_json()
         if wanted("determinism: --shuffle --seed repeats its file order"):

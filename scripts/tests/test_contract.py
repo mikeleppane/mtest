@@ -606,6 +606,7 @@ class CheckRosterTests(unittest.TestCase):
                 ),
                 "pipe: every direct-output command survives a closed stdout",
                 "io: an unwritable output descriptor exits 3, never a crash",
+                "io: an undelivered report still releases the JUnit spool",
                 "collect: an interrupted --format json run agrees with its own exit",
                 "determinism: --shuffle --seed repeats its file order",
                 "help: --help -> stdout, exit 0",
@@ -715,6 +716,11 @@ class CheckRosterTests(unittest.TestCase):
             def check_unwritable_output_descriptor(self) -> None:
                 self._perform(
                     "io: an unwritable output descriptor exits 3, never a crash"
+                )
+
+            def check_undelivered_output_releases_its_resources(self) -> None:
+                self._perform(
+                    "io: an undelivered report still releases the JUnit spool"
                 )
 
             def check_collect_interrupted_json(self) -> None:

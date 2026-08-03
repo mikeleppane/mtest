@@ -96,6 +96,7 @@ from mtest.platform import (
     rename_path,
     write_all_bytes_fd_status,
     write_all_fd,
+    write_errno_name,
 )
 from mtest.report import (
     AnnotationsReporter,
@@ -160,8 +161,8 @@ def _no_color_set() -> Bool:
     return getenv("NO_COLOR", "").byte_length() > 0
 
 
-def _write_direct(text: String, fd: Int):
-    """Write `text` verbatim to `fd`, surviving a departed reader; else exit 3.
+def _write_direct(text: String, fd: Int) -> Bool:
+    """Write `text` verbatim to `fd`; report whether the bytes were delivered.
 
     The one path for every byte `main` writes outside a reporter: help,
     version, the doctor lines, `new` and `init`'s artifact lines, the resolved
@@ -169,8 +170,8 @@ def _write_direct(text: String, fd: Int):
     epilogue, and every diagnostic. Ignoring `SIGPIPE` first is what keeps a
     consumer that stops reading — `mtest collect --format json | head -1` —
     from killing this process at signal 13, a status outside every documented
-    exit domain (§9, §16, §27, §28, §29). The write is lost instead, and the
-    command still exits with the code its own domain defines.
+    exit domain (§9, §16, §27, §28, §29). Such a write reports delivered: the
+    consumer chose to stop, and §9's carve-out is about exactly that.
 
     A raw `write(2)` rather than a `FileDescriptor`, and that is the whole
     difference between working and crashing: constructing one takes ownership
@@ -179,11 +180,14 @@ def _write_direct(text: String, fd: Int):
     faults, so `mtest --version >&-` died of SIGSEGV — after the command had
     done its work — for every subcommand alike.
 
-    Any other errno is a real I/O failure: the output was not delivered, so no
-    domain's success code is honest any more and the process exits 3 (§9's
-    environment/I-O failure). The diagnostic goes to stderr unless stderr is
-    the descriptor that just failed, in which case the exit is silent rather
-    than recursive.
+    It reports rather than exits, and that is the whole reason it returns a
+    value: only the caller knows whether these bytes were the command's
+    PRODUCT or a diagnostic ABOUT one, and only the caller knows which
+    resources are still owned. `_eprintln` discards the answer, so a usage
+    error keeps its frozen 4 whatever stderr does with the prose; a command
+    whose output IS its text escalates to 3; and a caller past
+    `RunResources` routes that 3 through `close_into` so no owned scratch
+    survives.
 
     The one place this must NOT be used is between the exec runtime's release
     and the `debug` handoff: the debuggee inherits this process's dispositions,
@@ -192,17 +196,27 @@ def _write_direct(text: String, fd: Int):
     Args:
         text: The complete bytes to write, terminator included.
         fd: The destination descriptor.
+
+    Returns:
+        True when every byte was written or a consumer departed mid-write;
+        False when the destination could not take them at all, after a
+        best-effort note on stderr naming the errno. Writes nothing to stderr
+        when stderr is itself the descriptor that failed, so one failed write
+        can never become two.
     """
     ignore_broken_pipe()
     var status = write_all_bytes_fd_status(fd, text.as_bytes())
     if not direct_write_failed(status):
-        return
+        return True
     if fd != 2:
-        var reason = "errno " + String(status) if status > 0 else String(
-            "no progress"
-        )
+        var reason = String("made no progress")
+        if status > 0:
+            reason = "errno " + String(status)
+            var named = write_errno_name(status)
+            if named != "":
+                reason += " — " + named
         var note = (
-            "mtest: internal error: could not write to file descriptor "
+            "mtest: could not write to file descriptor "
             + String(fd)
             + " ("
             + reason
@@ -211,12 +225,40 @@ def _write_direct(text: String, fd: Int):
         # Best-effort by construction: an unwritable stderr must not turn one
         # failed write into two, so this result is deliberately discarded.
         _ = write_all_bytes_fd_status(2, note.as_bytes())
-    exit(EXIT_INTERNAL_ERROR)
+    return False
 
 
 def _eprintln(text: String):
-    """Write `text` and a newline to standard error (fd 2), flushed."""
-    _write_direct(text + "\n", 2)
+    """Write `text` and a newline to standard error, keeping the caller's code.
+
+    A diagnostic ABOUT an outcome, never the outcome itself. The exit code the
+    caller already resolved is the machine-readable statement — a usage error's
+    4 says "you typed it wrong" whether or not the prose arrived — so a stderr
+    that will not take the words costs the words and nothing else. Escalation
+    to 3 belongs to undelivered PRIMARY output, which goes through
+    `_exit_with_output` or an explicit `close_into` instead.
+    """
+    _ = _write_direct(text + "\n", 2)
+
+
+def _exit_with_output(text: String, fd: Int, code: Int):
+    """Write one command's whole output, then exit with `code` — or 3.
+
+    For the commands whose product IS this text and that hold no run
+    resources: help, version, `doctor`, `config show`, and a successful `new`
+    or `init`. A destination that could not take the bytes leaves the caller
+    with nothing, so `code` is no longer an honest answer and 3 (§9's
+    environment/I-O failure) replaces it. A departed consumer is not that
+    case and keeps `code`.
+
+    Args:
+        text: The command's complete output, terminator included.
+        fd: The destination descriptor.
+        code: The code this command's own domain resolved.
+    """
+    if not _write_direct(text, fd):
+        exit(EXIT_INTERNAL_ERROR)
+    exit(code)
 
 
 def _normalize_absolute(path: String) -> String:
@@ -645,18 +687,15 @@ def main():
         exit(EXIT_USAGE_ERROR)
 
     if result.is_help():
-        _write_direct(help_text(), 1)
-        exit(0)
+        _exit_with_output(help_text(), 1, 0)
     if result.is_version():
-        _write_direct(version_text() + "\n", 1)
-        exit(0)
+        _exit_with_output(version_text() + "\n", 1, 0)
     if result.is_doctor():
         var diagnosis = run_doctor(result, MTEST_VERSION)
         var rendered = String("")
         for line in diagnosis.lines:
             rendered += line + "\n"
-        _write_direct(rendered, 1)
-        exit(diagnosis.code)
+        _exit_with_output(rendered, 1, diagnosis.code)
 
     # Resolve the invocation root, then discover and layer project configuration
     # before taking process-global exec state. An absent file and `--no-config`
@@ -686,10 +725,14 @@ def main():
         var rendered = String("")
         for line in scaffolded.lines:
             rendered += line + "\n"
-        # A refusal and an I/O failure are diagnostics and belong on stderr;
-        # `created <path>` is the command's output and belongs on stdout.
-        var destination = 1 if scaffolded.code == 0 else 2
-        _write_direct(rendered, destination)
+        # `created <path>` is the command's output and belongs on stdout, so a
+        # stdout that will not take it leaves the caller with no record of the
+        # file and escalates to 3 (§29). A refusal or an I/O failure is a
+        # diagnostic ABOUT a code already resolved: it belongs on stderr, and a
+        # stderr that will not take it costs the words, never the verdict.
+        if scaffolded.code == 0:
+            _exit_with_output(rendered, 1, 0)
+        _ = _write_direct(rendered, 2)
         exit(scaffolded.code)
 
     # Beside `new`, and for the same reason: `init` writes the project file
@@ -704,9 +747,13 @@ def main():
             rendered += line + "\n"
         # A failed `init` may already have created something, and the record of
         # what it did belongs with the diagnostic that stopped it rather than
-        # split across two streams a reader would have to reassemble.
-        var destination = 1 if bootstrapped.code == 0 else 2
-        _write_direct(rendered, destination)
+        # split across two streams a reader would have to reassemble. That
+        # makes the failure path a diagnostic and the success path the
+        # command's product, which is what decides whether an undelivered
+        # write may move the code — see `new` above.
+        if bootstrapped.code == 0:
+            _exit_with_output(rendered, 1, 0)
+        _ = _write_direct(rendered, 2)
         exit(bootstrapped.code)
 
     var loaded = _load_config(root, result.config_path, result.no_config)
@@ -745,8 +792,7 @@ def main():
     # and make a resolution-only command probe the filesystem.
     if result.is_config_show():
         var state_present = exists(_state_path(root))
-        _write_direct(render_config_show(resolved, state_present), 1)
-        exit(0)
+        _exit_with_output(render_config_show(resolved, state_present), 1, 0)
 
     var destination_error = _resolved_destination_error(resolved)
     if destination_error:
@@ -829,17 +875,21 @@ def main():
             for line in outcome.diagnostics:
                 _eprintln(line)
             exit(resources.close_into(outcome.code, rank_delivery=False))
-        # The flush inside `_write_direct` is load-bearing here: `execv` does
-        # not flush stdio, so an unflushed pair would vanish with this process
-        # image.
-        _write_direct(
+        # The unbuffered write is load-bearing here: `execv` does not flush
+        # stdio, so an unflushed pair would vanish with this process image.
+        # These two lines are the whole point of `debug` before the handoff —
+        # a reader who never got them cannot rerun anything — so an
+        # undelivered write is exit 3, taken through the ladder because the
+        # exec runtime and the report scratch are already owned.
+        if not _write_direct(
             "build: "
             + outcome.plan.build_line
             + "\nrun: "
             + outcome.plan.run_line
             + "\n",
             1,
-        )
+        ):
+            exit(resources.close_into(EXIT_INTERNAL_ERROR, rank_delivery=False))
         # An interrupt that arrived during the preparation — or while the
         # marker write above was blocked on a reader that had stopped reading —
         # is an interrupt of MTEST, and mtest is the only process that can
@@ -919,7 +969,10 @@ def main():
             # that closed early (`mtest collect --format json | head -1`) from
             # killing mtest at 141 — a status outside the frozen {0,1,2,3,4,5}
             # domain (§9, §16) for a listing that completed.
-            _write_direct(stream, 1)
+            # The ladder has already run for this format — `final_code` is
+            # its result — so nothing is owned here and the 3 is direct.
+            if not _write_direct(stream, 1):
+                exit(EXIT_INTERNAL_ERROR)
             exit(final_code)
         # The plain listing carries no terminal record, so nothing in it depends
         # on the finalized code and the runtime deliberately stays up across the
@@ -930,7 +983,11 @@ def main():
         var listing = String("")
         for nid in collected.listing:
             listing += nid + "\n"
-        _write_direct(listing, 1)
+        # The listing IS what `collect` produces, so a stdout that could not
+        # take it leaves the caller with nothing to consume. The runtime is
+        # still up here, so the 3 goes through the ladder.
+        if not _write_direct(listing, 1):
+            exit(resources.close_into(EXIT_INTERNAL_ERROR, rank_delivery=True))
         exit(resources.close_into(collected.code, rank_delivery=True))
 
     # Resolve the machine-stream destination and, with it, the console's own
@@ -1051,15 +1108,43 @@ def main():
     # mtest's OWN `::error`/`::warning`/`::notice` lines — no error or partial path
     # can leave commands disabled. The tail itself renders only when annotations
     # resolved on (never beside `--json -`, refused at parse time).
+    #
+    # Neither write may exit on its own. Both land after the session finalized
+    # and while the JUnit spool, the machine-stream descriptor and the exec
+    # runtime are still owned, so an exit taken here would walk around the
+    # ladder below and leave the spool and its fragments in TMPDIR, once per
+    # invocation. The failure is latched instead and consumed after the code is
+    # resolved, exactly as a late machine-stream failure is.
+    var epilogue_delivered = True
     var fence_token = comp.fence_token()
     if gh_actions and fence_token != "":
-        _write_direct(resume_delimiter(fence_token) + "\n", console_fd)
+        epilogue_delivered = _write_direct(
+            resume_delimiter(fence_token) + "\n", console_fd
+        )
     if annotations_on:
         var tail = comp.annotation_tail()
         var rendered = String("")
         for line in tail:
             rendered += line + "\n"
-        _write_direct(rendered, console_fd)
+        if not _write_direct(rendered, console_fd):
+            epilogue_delivered = False
+    if not epilogue_delivered:
+        # The console epilogue is part of the run's report, so an undelivered
+        # one is a delivery failure the model ranks, not a code this decides.
+        # Presenting the already-resolved code with `delivery_failed` set is
+        # the documented way to re-apply that one precedence and nothing else:
+        # an interrupt's 2 still stands, a 3 stays 3, a 0/1/5 becomes 3.
+        code = resolve_exit_code(
+            TerminalFacts(
+                interrupted=False,
+                internal_error=False,
+                drift=False,
+                precompile_failed=False,
+                outcome_code=code,
+                delivery_failed=True,
+                flaky_failed=False,
+            )
+        )
 
     # The session has finalized (the JUnit report was renamed onto its target,
     # or left intact on failure), so the epilogue frees the spool directory and

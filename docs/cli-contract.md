@@ -839,17 +839,38 @@ rest of that write and nothing else. Death at signal 13, which a shell reports
 as 141, is a status no subcommand produces, and every command exits with a code
 from its own domain whether or not anyone was still reading.
 
-That carve-out is `EPIPE` and only `EPIPE`, because a departed consumer is the
-one write failure that says nothing about `mtest`: the consumer chose it, and
-the bytes it did not read were bytes it did not want. **Every other write
-failure is exit 3**, in every command's domain, including the six whose domains
-are otherwise `{0}`, `{0, 3}`, or `{0, 3, 4}` (§19, §27, §29). A descriptor
-that is closed (`mtest --version >&-`) or a destination that is full reports
-`EBADF` or `ENOSPC`, nobody asked for the output to be dropped, and a success
-code over undelivered output would be a lie about the one thing the command was
-asked to produce. The diagnostic goes to stderr naming the errno, unless stderr
-is itself the descriptor that failed, in which case the exit is silent rather
-than recursive. No write failure of any kind terminates the process by signal.
+That carve-out is the departed consumer and nothing else, because it is the one
+write failure that says nothing about `mtest`: the consumer chose it, and the
+bytes it did not read were bytes it did not want. Two errnos mean it, one per
+transport — `EPIPE` on a pipe, `ECONNRESET` on a stream socket whose peer reset
+the connection.
+
+**Every other write failure means the output was not delivered**, and what that
+costs depends on what the bytes were.
+
+- **Primary output — the thing the command was asked to produce — escalates to
+  exit 3**, in every command's domain, including the six whose domains are
+  otherwise `{0}`, `{0, 3}`, or `{0, 3, 4}` (§19, §27, §29). Help text, the
+  version, the `doctor` block, the resolved configuration, `created <path>`,
+  the `collect` listing, the `debug` plan lines, and a run's console report are
+  all primary output. A descriptor that is closed (`mtest --version >&-`) or a
+  destination that is full reports `EBADF` or `ENOSPC`, nobody asked for the
+  output to be dropped, and a success code over undelivered output would be a
+  lie about the one thing the caller wanted. For a run this arrives through the
+  ordinary delivery precedence above, so it behaves exactly as a dead `--json`
+  destination does: a 0, 1, or 5 becomes 3, an interrupt's 2 still stands.
+- **A diagnostic about an already-resolved refusal does not move that code.**
+  A usage error exits **4** whether or not stderr took the prose, because there
+  the exit code *is* the machine-readable statement and it was delivered
+  perfectly; losing the words costs the words. `2>/dev/null` and `2>&-` are two
+  spellings of "I do not want the diagnostic", and neither turns a bad flag
+  into a broken runner. The same holds for `new` and `init`'s failure lines,
+  which explain a code those subcommands had already decided.
+
+The diagnostic for an undelivered write goes to stderr naming and decoding the
+errno, unless stderr is itself the descriptor that failed, in which case it is
+silent rather than recursive. No write failure of any kind terminates the
+process by signal.
 
 A `--shard` (§18) that owns no run files reaches exit 5 by the same
 nothing-collected rule — but only when nothing else ran: a shard whose gates ran
@@ -1556,11 +1577,12 @@ file's result line carries an informal `SERIAL` marker (§15.1).
 - `mtest version` and `mtest --version` print the version to **stdout** and exit
   **0**.
 - A usage **error** prints to **stderr** and exits **4**.
-- Each of those exits assumes its stream took the bytes. A write that fails for
-  any reason other than a departed consumer exits **3** instead, with a
-  diagnostic on stderr naming the errno (§9). That applies to the usage error
-  too: a refusal whose stderr is closed exits 3 rather than 4, because the
-  diagnostic that gives the 4 its meaning was never delivered.
+- The two **0**s assume stdout took the bytes: the text is the whole product,
+  so a write that fails for any reason other than a departed consumer exits
+  **3** instead, with a diagnostic on stderr naming the errno (§9). The usage
+  error's **4** is not conditional in the same way — the code is itself the
+  statement that argv was invalid, and it stands whether or not stderr took the
+  prose explaining it.
 
 ---
 
@@ -2035,12 +2057,11 @@ code exist today. Section 27 separately covers the reachable `config show` and
 - **3** — reachable via a spawn failure (the runner could not spawn `mojo` or
   a built binary), via protocol drift (a report present but off-grammar, §6)
   in both `run` and `collect`, via runtime `--json` or `--junit-xml`
-  report-destination failures (§9), and via a direct write to stdout or stderr
-  that failed for any reason other than a departed consumer — a `collect`
-  listing whose stdout is closed or full reaches it. The console output a
-  session drains as the run proceeds is the exception: that write is
-  best-effort by §15.1, so a run whose console cannot take the bytes still
-  exits by its own outcomes.
+  report-destination failures (§9), and via undelivered primary output — a
+  `collect` listing, or a run's console report, whose destination is closed or
+  full. The console reaches it through the same delivery precedence a dead
+  `--json` destination uses, so both run drivers behave alike and an interrupt
+  still outranks it. A departed consumer never reaches it (§9).
 - **4** — reachable under `run` and `collect` for every served cause in §9 —
   including mutually exclusive config controls; `--seed` without `--shuffle`
   and `--shuffle` beside `--lf`/`--ff`; a `--format` value that is neither
@@ -2082,8 +2103,11 @@ exit domain is pre-handoff and is `{1, 2, 3, 4}` plus whatever the test binary
 itself exits with: 4 for a malformed node id, an unknown path, a node id whose
 path is not a runnable file, an unknown test name, or any flag outside its
 grammar; 2 for an interrupt during the build or the probe; 3 for a spawn or
-machinery failure, for protocol drift, and for a failed exec or a failed
-runtime restoration; and 1 for a failed precompile step, a compile error, a
+machinery failure, for protocol drift, for a failed exec or a failed runtime
+restoration, and for the two `build:`/`run:` plan lines when stdout could not
+take them — a reader who never received them cannot rerun anything, which is
+the whole point of the command before the handoff; and 1 for a failed
+precompile step, a compile error, a
 build killed at `--compile-timeout`, or a probe that crashed, timed out,
 overflowed its capture, or did not read as a collection listing. Once the
 handoff happens mtest is gone, so the process's exit status is the binary's own
