@@ -63,7 +63,7 @@ from scripts.checks.reports import json_stream as json_stream_oracle
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
 
 # --------------------------------------------------------------------------- #
@@ -1369,24 +1369,79 @@ class Runner:
             "; ".join(probs),
         )
 
+    def _unwritable_stdout_mechanisms(self) -> list[str]:
+        """The ways this host can hand the binary a stdout it cannot write.
+
+        Two are portable and always present; one is Linux-only and additive.
+        The portable pair is what keeps this check meaningful on macOS, where
+        there is no `/dev/full` at all — a sub-case silently dropped there
+        would leave the platform whose `ECONNRESET` value is asserted rather
+        than measured with no coverage of the escalation it feeds.
+
+        Returns:
+            Mechanism names for `_run_with_broken_stdout`, most portable
+            first, so a failure names the mechanism that produced it.
+        """
+        available = ["closed", "readonly"]
+        if Path("/dev/full").exists():
+            available.append("full")
+        return available
+
+    @contextlib.contextmanager
+    def _readonly_sink(self) -> Iterator[int]:
+        """Yield a descriptor open for READING on a real file this gate owns.
+
+        Writing to an `O_RDONLY` descriptor fails with `EBADF` on Linux and
+        Darwin alike, which is what makes this the portable stand-in for
+        `/dev/full`. Unlike closing the descriptor outright it keeps the slot
+        OCCUPIED, so the next file the child opens cannot land on descriptor 1
+        and quietly absorb output the check needs to see fail.
+
+        The file is one this gate creates in its own scratch, never a system
+        path like `/etc/hostname`: a check that depends on someone else's
+        filesystem layout is a check that reports on the wrong thing the day
+        the layout differs.
+        """
+        anchor = self.root / "unwritable-sink"
+        if not anchor.exists():
+            anchor.write_text("a file this gate opens read-only\n")
+        fd = os.open(anchor, os.O_RDONLY)
+        try:
+            yield fd
+        finally:
+            os.close(fd)
+
     def _run_with_broken_stdout(
-        self, argv: list[str], cwd: Path, full: bool
+        self, argv: list[str], cwd: Path, mechanism: str
     ) -> int | str:
-        """Run the binary with an output descriptor that cannot take bytes.
+        """Run the binary with a stdout that cannot take bytes.
 
         Args:
             argv: Arguments passed after the binary path.
             cwd: The invocation root for this run.
-            full: Whether stdout is `/dev/full` (a write reports `ENOSPC`)
-                rather than genuinely closed (a write reports `EBADF`).
+            mechanism: `"closed"` for no descriptor 1 at all (`>&-`, `EBADF`),
+                `"readonly"` for a descriptor open for reading (`EBADF`, with
+                the slot still occupied), or `"full"` for `/dev/full`
+                (`ENOSPC`, Linux only).
 
         Returns:
             The child's exit status, negative when a signal killed it, or the
             string `"timeout"`.
         """
         try:
-            if full:
-                with Path("/dev/full").open("wb") as sink:
+            if mechanism == "closed":
+                return subprocess.run(
+                    [str(MTEST), *argv],
+                    cwd=cwd,
+                    env=self.env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=180,
+                    check=False,
+                    preexec_fn=_close_stdout,
+                ).returncode
+            if mechanism == "readonly":
+                with self._readonly_sink() as sink:
                     return subprocess.run(
                         [str(MTEST), *argv],
                         cwd=cwd,
@@ -1396,16 +1451,16 @@ class Runner:
                         timeout=180,
                         check=False,
                     ).returncode
-            return subprocess.run(
-                [str(MTEST), *argv],
-                cwd=cwd,
-                env=self.env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=180,
-                check=False,
-                preexec_fn=_close_stdout,
-            ).returncode
+            with Path("/dev/full").open("wb") as full_sink:
+                return subprocess.run(
+                    [str(MTEST), *argv],
+                    cwd=cwd,
+                    env=self.env,
+                    stdout=full_sink,
+                    stderr=subprocess.DEVNULL,
+                    timeout=180,
+                    check=False,
+                ).returncode
         except subprocess.TimeoutExpired:
             return "timeout"
 
@@ -1415,9 +1470,15 @@ class Runner:
         The sibling of `check_direct_output_closed_pipe`, from the other side
         of one policy: a departed consumer is absorbed, but a destination that
         cannot take the bytes at all is not, because the command's own success
-        code would then be a lie about output nobody received. Two shapes
-        stand for that — a CLOSED descriptor (`>&-`, `EBADF`) and a full
-        destination (`/dev/full`, `ENOSPC`).
+        code would then be a lie about output nobody received.
+
+        Three shapes stand for that, and every command is put through each one
+        this host can build: a CLOSED descriptor (`>&-`), a descriptor open
+        for READING (both `EBADF`), and a full destination (`/dev/full`,
+        `ENOSPC`, Linux only). The first two are portable on purpose — the
+        `/dev/full` case alone would test nothing on macOS, and one classifier
+        reached through two different errnos is worth more than one errno
+        reached on one platform.
 
         Every command whose product IS its text is here, since each publishes
         its own exit domain and each admits 3 on this condition: help and
@@ -1447,45 +1508,35 @@ class Runner:
             ("new", ["new", "tests/test_closed.mojo"], "tests/test_closed.mojo"),
             ("init", ["init"], "mtest.toml"),
         ]
-        for label, argv, artifact in cases:
-            cwd = self.root
-            if artifact:
-                cwd = self.root / f"closed-fd-{argv[0]}"
-                cwd.mkdir(exist_ok=True)
-            code = self._run_with_broken_stdout(argv, cwd, full=False)
-            if code != 3:
-                probs.append(f"{label}: closed stdout exit {code}, want 3")
-            if artifact and not (cwd / artifact).exists():
-                probs.append(f"{label}: {artifact} was never created")
+        # Both run drivers join the list, because each drains the console
+        # itself: the sequential loop and, under `-n`, the parallel pool with
+        # its progress overlay. A run whose console report went nowhere has not
+        # reported, so its own verdict is no longer authoritative and 3
+        # displaces it.
+        cases += [
+            ("run", ["-I", "build", "tests"], ""),
+            ("run -n 2", ["-I", "build", "-n", "2", "tests"], ""),
+        ]
+        mechanisms = self._unwritable_stdout_mechanisms()
+        for mechanism in mechanisms:
+            for label, argv, artifact in cases:
+                cwd = self.root
+                if artifact:
+                    cwd = self.root / f"broken-{mechanism}-{argv[0]}"
+                    cwd.mkdir(exist_ok=True)
+                code = self._run_with_broken_stdout(argv, cwd, mechanism)
+                if code != 3:
+                    probs.append(f"{label}: {mechanism} stdout exit {code}, want 3")
+                if artifact and not (cwd / artifact).exists():
+                    probs.append(f"{label}: {artifact} was never created")
 
         # A usage error keeps its frozen 4: the code IS the product and it was
-        # delivered. Both spellings of a discarded diagnostic must agree.
-        for label, sink in (("closed stderr", None), ("/dev/full stderr", "/dev/full")):
-            if sink is not None and not Path(sink).exists():
-                continue
-            refused = self._run_with_broken_stderr(["-V"], sink)
+        # delivered. Every spelling of a discarded diagnostic must agree, so
+        # the stderr side runs the same portable mechanisms.
+        for mechanism in mechanisms:
+            refused = self._run_with_broken_stderr(["-V"], mechanism)
             if refused != 4:
-                probs.append(f"usage error: {label} exit {refused}, want 4")
-
-        if Path("/dev/full").exists():
-            for label, argv in (("help: --help", ["--help"]), ("version", ["version"])):
-                code = self._run_with_broken_stdout(argv, self.root, full=True)
-                if code != 3:
-                    probs.append(f"{label}: /dev/full exit {code}, want 3")
-
-        # Both drivers, because each drains the console itself: the sequential
-        # loop and, under `-n`, the parallel pool with its progress overlay. A
-        # run whose console report went nowhere has not reported, so its own
-        # verdict is no longer authoritative and 3 displaces it.
-        for driver, extra in (("run", []), ("run -n 2", ["-n", "2"])):
-            argv = ["-I", "build", *extra, "tests"]
-            closed = self._run_with_broken_stdout(argv, self.root, full=False)
-            if closed != 3:
-                probs.append(f"{driver}: closed stdout exit {closed}, want 3")
-            if Path("/dev/full").exists():
-                full = self._run_with_broken_stdout(argv, self.root, full=True)
-                if full != 3:
-                    probs.append(f"{driver}: /dev/full exit {full}, want 3")
+                probs.append(f"usage error: {mechanism} stderr exit {refused}, want 4")
 
         self.record(
             PASS if not probs else FAIL,
@@ -1494,40 +1545,55 @@ class Runner:
             "; ".join(probs),
         )
 
-    def _run_with_broken_stderr(self, argv: list[str], sink: str | None) -> int | str:
+    def _run_with_broken_stderr(self, argv: list[str], mechanism: str) -> int | str:
         """Run the binary with a stderr that cannot take bytes.
+
+        The mirror of `_run_with_broken_stdout` and the same three mechanisms,
+        because the property under test is the difference between the two
+        streams: an undelivered diagnostic must not move a code the command
+        already resolved, however the descriptor was broken.
 
         Args:
             argv: Arguments passed after the binary path.
-            sink: A path to redirect stderr to (`/dev/full`), or None to close
-                descriptor 2 outright the way `2>&-` does.
+            mechanism: `"closed"`, `"readonly"`, or `"full"`, as above.
 
         Returns:
             The child's exit status, negative when a signal killed it, or the
             string `"timeout"`.
         """
         try:
-            if sink is not None:
-                with Path(sink).open("wb") as handle:
+            if mechanism == "closed":
+                return subprocess.run(
+                    [str(MTEST), *argv],
+                    cwd=self.root,
+                    env=self.env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=180,
+                    check=False,
+                    preexec_fn=_close_stderr,
+                ).returncode
+            if mechanism == "readonly":
+                with self._readonly_sink() as sink:
                     return subprocess.run(
                         [str(MTEST), *argv],
                         cwd=self.root,
                         env=self.env,
                         stdout=subprocess.DEVNULL,
-                        stderr=handle,
+                        stderr=sink,
                         timeout=180,
                         check=False,
                     ).returncode
-            return subprocess.run(
-                [str(MTEST), *argv],
-                cwd=self.root,
-                env=self.env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=180,
-                check=False,
-                preexec_fn=_close_stderr,
-            ).returncode
+            with Path("/dev/full").open("wb") as full_sink:
+                return subprocess.run(
+                    [str(MTEST), *argv],
+                    cwd=self.root,
+                    env=self.env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=full_sink,
+                    timeout=180,
+                    check=False,
+                ).returncode
         except subprocess.TimeoutExpired:
             return "timeout"
 
@@ -1543,10 +1609,19 @@ class Runner:
         The forcing shape is the annotation epilogue: under
         `--gh-annotations on` a failing run writes its tail to the console
         AFTER the session has finalized, which is the last write before the
-        ladder runs. Pointed at `/dev/full` that write fails, so the run must
-        both escalate to 3 (undelivered primary output, §9) and leave `TMPDIR`
-        exactly as it found it — the spool, its `suite-*.xml` fragments, and
-        the target temp all gone.
+        ladder runs. Pointed at a stdout that cannot take it, that write fails,
+        so the run must both escalate to 3 (undelivered primary output, §9) and
+        leave `TMPDIR` exactly as it found it — the spool, its `suite-*.xml`
+        fragments, and the target temp all gone.
+
+        The descriptor has to stay OCCUPIED for this one, which is why it is
+        not simply closed: with descriptor 1 free, the next file the run opens
+        lands on it and the epilogue writes into that file instead of failing.
+        A descriptor open for reading keeps the slot and still fails `EBADF`,
+        on Linux and Darwin alike; `/dev/full` reaches the same classifier
+        through `ENOSPC` and runs beside it where the host provides one. This
+        check never skips: a leak is a leak on every platform, and the lane
+        that would have to notice it treats a skip as a failure.
 
         The control is the same argv with a writable stdout: it must exit 1,
         publish the report, and leave `TMPDIR` empty too, so a check that
@@ -1555,9 +1630,6 @@ class Runner:
         """
         ref = "§9/§15.2 no owned scratch survives any exit path"
         name = "io: an undelivered report still releases the JUnit spool"
-        if not Path("/dev/full").exists():
-            self.record(SKIP, name, ref, "/dev/full is unavailable on this host")
-            return
         d = self.root / "probes_spool"
         d.mkdir(exist_ok=True)
         (d / "test_pass.mojo").write_text(
@@ -1577,25 +1649,17 @@ class Runner:
             "probes_spool",
         ]
         probs: list[str] = []
-        for label, want, full in (("control", 1, False), ("/dev/full", 3, True)):
-            tmp = self.root / f"spool-tmp-{label.strip('/').replace('/', '-')}"
+        # The control first, so a scaffold that never produces a spool at all
+        # is caught before any conclusion is drawn from an empty TMPDIR.
+        occupied = [m for m in self._unwritable_stdout_mechanisms() if m != "closed"]
+        for label, want in [("control", 1)] + [(m, 3) for m in occupied]:
+            tmp = self.root / f"spool-tmp-{label}"
             shutil.rmtree(tmp, ignore_errors=True)
             tmp.mkdir(parents=True)
             env = dict(self.env, TMPDIR=str(tmp), GITHUB_ACTIONS="")
             try:
-                if full:
-                    with Path("/dev/full").open("wb") as sink:
-                        code: int | str = subprocess.run(
-                            [str(MTEST), *argv],
-                            cwd=self.root,
-                            env=env,
-                            stdout=sink,
-                            stderr=subprocess.DEVNULL,
-                            timeout=180,
-                            check=False,
-                        ).returncode
-                else:
-                    code = subprocess.run(
+                if label == "control":
+                    code: int | str = subprocess.run(
                         [str(MTEST), *argv],
                         cwd=self.root,
                         env=env,
@@ -1604,15 +1668,57 @@ class Runner:
                         timeout=180,
                         check=False,
                     ).returncode
+                else:
+                    code = self._run_with_broken_stdout_in(argv, env, label)
             except subprocess.TimeoutExpired:
                 code = "timeout"
             if code != want:
                 probs.append(f"{label}: exit {code}, want {want}")
-            leftovers = sorted(p.name for p in tmp.iterdir())
+            leftovers = sorted(item.name for item in tmp.iterdir())
             if leftovers:
                 probs.append(f"{label}: TMPDIR still holds {leftovers}")
             shutil.rmtree(tmp, ignore_errors=True)
         self.record(PASS if not probs else FAIL, name, ref, "; ".join(probs))
+
+    def _run_with_broken_stdout_in(
+        self, argv: list[str], env: dict[str, str], mechanism: str
+    ) -> int | str:
+        """`_run_with_broken_stdout` with a caller-supplied environment.
+
+        Separate only because the spool check needs its own `TMPDIR` on the
+        child, which is the whole point of that check and no business of the
+        exit-code one.
+
+        Args:
+            argv: Arguments passed after the binary path.
+            env: The complete child environment.
+            mechanism: `"readonly"` or `"full"`; a closed descriptor is not
+                offered here, since the slot has to stay occupied.
+
+        Returns:
+            The child's exit status, negative when a signal killed it.
+        """
+        if mechanism == "readonly":
+            with self._readonly_sink() as sink:
+                return subprocess.run(
+                    [str(MTEST), *argv],
+                    cwd=self.root,
+                    env=env,
+                    stdout=sink,
+                    stderr=subprocess.DEVNULL,
+                    timeout=180,
+                    check=False,
+                ).returncode
+        with Path("/dev/full").open("wb") as full_sink:
+            return subprocess.run(
+                [str(MTEST), *argv],
+                cwd=self.root,
+                env=env,
+                stdout=full_sink,
+                stderr=subprocess.DEVNULL,
+                timeout=180,
+                check=False,
+            ).returncode
 
     def check_collect_interrupted_json(self) -> None:
         """Assert an interrupted collect stream reports the code it exits with.
