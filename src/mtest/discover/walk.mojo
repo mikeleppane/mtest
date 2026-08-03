@@ -33,7 +33,13 @@ no identity the runner can express: it cannot be typed as an operand, cannot be
 rendered as a node id, and cannot be recalled from last-run state. Collecting
 it would put a test in the run that nothing could then name, so it is refused —
 and reported, because a refusal that runs one test fewer is exactly the kind of
-silence §5's walk-totality rule exists to prevent.
+silence §5's walk-totality rule exists to prevent. The rule applies only after
+the entry has been characterized and found to be a usable test file: an entry
+of any other kind keeps the channel that says what it actually is, and one the
+walk cannot characterize refuses discovery, exactly as it does anywhere else.
+A directory carrying the separator is still descended, so each unaddressable
+test under it is announced on its own rather than as a subtree the reader would
+have to expand.
 
 Nothing here prints: all three loud channels — the refused links, the
 test-named non-regular entries, and the unaddressable paths — ride out in
@@ -184,15 +190,6 @@ def walk_dir(abs_dir: String, rel_prefix: String) raises -> WalkResult:
             rel = name
         else:
             rel = rel_prefix + "/" + name
-        # Before the entry is characterized at all: what makes this file
-        # unusable is its NAME, not its kind, and a `::` in the path defeats
-        # every way the runner has of pointing at the result. A directory
-        # carrying one is still descended, so each unaddressable test under it
-        # is announced on its own rather than as a whole subtree the reader
-        # would have to expand.
-        if not path_is_addressable(rel) and is_discovered_test_name(name):
-            unaddressable.append(rel^)
-            continue
         # One raising characterization per entry: `isdir`/`isfile`/`islink`
         # fold every inspection error into False, and a folded error here is a
         # silently smaller run. This name came out of the listing, so it
@@ -213,7 +210,10 @@ def walk_dir(abs_dir: String, rel_prefix: String) raises -> WalkResult:
             elif isfile(full):
                 # One entry, no cycle possible: an ordinary test file.
                 if is_discovered_test_name(name):
-                    out.append(rel^)
+                    if path_is_addressable(rel):
+                        out.append(rel^)
+                    else:
+                        unaddressable.append(rel^)
             elif is_discovered_test_name(name):
                 # Dangling, and named like a test the user expects to run.
                 skipped.append(rel^)
@@ -237,7 +237,23 @@ def walk_dir(abs_dir: String, rel_prefix: String) raises -> WalkResult:
                     unaddressable.append(s)
         elif kind == _S_IFREG:
             if is_discovered_test_name(name):
-                out.append(rel^)
+                # The addressability rule applies HERE and at the symlinked
+                # twin above, and nowhere earlier: those are the only two
+                # points at which an entry would otherwise be collected. An
+                # entry the walk has not characterized has not been shown to be
+                # a runnable test file at all, so refusing it for its name
+                # would answer a question the walk never asked — and would
+                # claim a dangling link, a FIFO, or a test-named directory was
+                # merely unaddressable, when each has a channel of its own that
+                # says what it actually is. An entry it CANNOT characterize
+                # refuses discovery outright, above, which is what keeps a
+                # `::` directory this process may read but not search an exit-4
+                # inspection failure rather than a green run over a subtree
+                # nobody looked inside.
+                if path_is_addressable(rel):
+                    out.append(rel^)
+                else:
+                    unaddressable.append(rel^)
         elif is_discovered_test_name(name):
             # Characterized, and neither regular file nor directory nor
             # symlink: a FIFO, socket, or device wearing a test file's name.

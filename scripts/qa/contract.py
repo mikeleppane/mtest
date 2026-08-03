@@ -2030,6 +2030,22 @@ class Runner:
             if "no such path" in text:
                 probs.append(f"{operand}: still reports a truncated prefix")
 
+        # The rule is applied only AFTER an entry is characterized, so a `::`
+        # directory this process may read but not search stays what §5 lines
+        # 324-326 call it: an entry the walk cannot inspect, exit 4. Deciding
+        # unaddressability first would answer for entries nobody had looked at
+        # and hand back a green run over a subtree that was never read.
+        nested.chmod(0o644)
+        try:
+            blind = self.mtest(["-I", "build", "probes_sep"])
+        finally:
+            nested.chmod(0o755)
+        blind_text = blind.stdout + blind.stderr
+        if blind.returncode != 4:
+            probs.append(f"unsearchable '::' dir: exit {blind.returncode} (want 4)")
+        if "cannot inspect" not in blind_text:
+            probs.append("unsearchable '::' dir: no inspection-failure diagnostic")
+
         self.record(PASS if not probs else FAIL, name, ref, "; ".join(probs))
 
     def check_integer_overflow_values(self) -> None:

@@ -289,9 +289,15 @@ project configuration (§29.2).
   root-relative path contains `::` and warns about it (kind
   `skipped-unaddressable`, below); `collect` simply does not list it. An
   **operand** whose path carries the separator is a usage error (exit 4)
-  naming the operand exactly as it was typed — never the prefix before the
-  separator, which is a path the caller never wrote. A genuine node id, with
-  one `::` and a real file before it, is unaffected. The rule is about
+  naming the operand exactly as it was typed. A token is read that way when its
+  text after the first `::` is not a test name at all, or when the operand as
+  typed names something on disk; those are the readings under which the
+  separator is the operative problem. A token that matches nothing under either
+  reading is an ordinary missing path, and keeps `no such path` for its
+  node-id file part — `mtest 'tests/gone::l'` says `no such path 'tests/gone'`,
+  because `l` is a valid test name and a node id for a file that is not there
+  is exactly what it looks like. A genuine node id, with one `::` and a real
+  file before it, is unaffected. The rule is about
   addressability, not runnability: such a file may compile and pass perfectly
   well, but nothing could point at the result afterwards — not an operand, not
   a node id in a report, not a `--lf` entry — so admitting it would put a test
@@ -355,7 +361,7 @@ runs at most once.
 A nonexistent path, an explicit operand whose file type mtest cannot run (a
 FIFO, socket, or device — refused as `unsupported file type`, never as `no such
 path`), an operand that spells a path with `::` (refused as `unsupported path`,
-never as `no such path` for the prefix before the separator), or a node id
+quoting the operand as typed), or a node id
 naming a file that exists but a test that does
 not, is a usage error (exit 4). That check happens **after** the file's
 `--skip-all` collection probe (§6) reports its universe of test names: an
