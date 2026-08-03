@@ -42,8 +42,14 @@ from mtest.cli import (
     run_doctor,
     version_text,
 )
-from mtest.exec import ExecRuntime, stderr_isatty, stdout_isatty
+from mtest.exec import (
+    ExecRuntime,
+    interrupt_requested,
+    stderr_isatty,
+    stdout_isatty,
+)
 from mtest.config import (
+    ActiveConfigKeys,
     ConfigEnvironment,
     FileConfig,
     LastRunState,
@@ -64,6 +70,7 @@ from mtest.config import (
 )
 from mtest.model import (
     EXIT_INTERNAL_ERROR,
+    EXIT_INTERRUPTED,
     TerminalFacts,
     resolve_exit_code,
     split_rendered_node_id,
@@ -72,6 +79,7 @@ from mtest.platform import (
     BoundedRegularFileRead,
     close_checked_fd,
     create_unique_temp,
+    exec_replace,
     process_id,
     read_bounded_regular_file,
     rename_path,
@@ -94,7 +102,10 @@ from mtest.report import (
 )
 from mtest.session import (
     CollectResult,
+    DebugOutcome,
+    DebugPlan,
     SessionResult,
+    prepare_debug,
     run_collect,
     run_session_with_state,
 )
@@ -609,6 +620,15 @@ def main():
         result.overlay,
     )
     resolved.config_file = loaded.config_file.copy()
+    # The projection is chosen from the parsed command, and `resolve_config`
+    # sees only a `RunnerConfig` — which carries collect mode but not the debug
+    # subcommand — so the one command whose kind it cannot see is applied here,
+    # before any validation reads an active key. Under debug the report keys are
+    # inactive, which is what makes a project file's `[report]` destinations
+    # neither validated nor opened for a command that will leave no reporter
+    # behind to write them.
+    if result.is_debug():
+        resolved.active_keys = ActiveConfigKeys.debug()
     var validation = validate_resolved_config(resolved)
     if validation:
         _eprintln(validation.value())
@@ -686,6 +706,70 @@ def main():
     # The machine-stream descriptor and the JUnit scratch join it below, each
     # recorded the moment it is actually opened.
     var resources = RunResources(runtime^, -1, False, String(""), String(""))
+
+    # Debug: prepare one test under ordinary supervision, print the two
+    # commands, and then BECOME the test binary. Every refusal is made here,
+    # while this process still owns its exit code; after the exec there is no
+    # mtest left to report anything, so nothing below the handoff renders a
+    # summary or claims a verdict over what the binary goes on to do.
+    if result.is_debug():
+        var outcome = DebugOutcome(0, List[String](), DebugPlan.none())
+        try:
+            outcome = prepare_debug(
+                resources.runtime, resolved, root, result.operand
+            )
+        except e:
+            # An unclassifiable machinery failure. Caught rather than allowed to
+            # escape: an uncaught raise exits 1, which is exactly the code that
+            # would read as "your test failed".
+            _eprintln("mtest: internal error: " + String(e))
+            exit(resources.close_into(EXIT_INTERNAL_ERROR, rank_delivery=False))
+        if outcome.code != 0:
+            for line in outcome.diagnostics:
+                _eprintln(line)
+            exit(resources.close_into(outcome.code, rank_delivery=False))
+        # `flush=True` is load-bearing: `execv` does not flush stdio, so an
+        # unflushed pair would vanish with this process image.
+        print(
+            "build: "
+            + outcome.plan.build_line
+            + "\nrun: "
+            + outcome.plan.run_line,
+            flush=True,
+        )
+        # An interrupt that arrived during the preparation — or while the
+        # marker write above was blocked on a reader that had stopped reading —
+        # is an interrupt of MTEST, and mtest is the only process that can
+        # still report it as one. Sampled on both sides of the close, as
+        # doctor's is: the first sample sees what the runtime's handler
+        # latched, and the second covers restoration itself. Execing on a
+        # latched interrupt would hand the terminal over anyway and return the
+        # debuggee's own status, which reads as though nothing was interrupted.
+        if interrupt_requested():
+            exit(resources.close_into(EXIT_INTERRUPTED, rank_delivery=False))
+        var handoff_code = resources.close_into(0, rank_delivery=False)
+        if handoff_code != 0:
+            # A failed restoration is exactly the state in which the debuggee
+            # would inherit `SIGPIPE=SIG_IGN` from the runtime and a genuine
+            # broken-pipe death could read as a pass. Refuse the handoff.
+            exit(handoff_code)
+        if interrupt_requested():
+            exit(EXIT_INTERRUPTED)
+        try:
+            # The exec target is absolute, so the handoff never depends on the
+            # process cwd; the printed line keeps the rerunnable relative form,
+            # and `run_argv` carries it as argv[0] for the same reason.
+            exec_replace(
+                root + "/" + outcome.plan.binary, outcome.plan.run_argv
+            )
+        except e:
+            _eprintln("mtest: internal error: " + String(e))
+            exit(EXIT_INTERNAL_ERROR)
+        # Unreachable: `exec_replace` either never returns or raises. Stated
+        # anyway because `exit` is not noreturn to the compiler, so without it
+        # a debug invocation would fall through into the run path below and
+        # execute a whole session nobody asked for.
+        exit(EXIT_INTERNAL_ERROR)
 
     # Collect mode: probe every discovered file for its node ids and print the
     # SORTED listing to STDOUT, byte-clean, running no test body. This print is

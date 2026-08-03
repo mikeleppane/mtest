@@ -952,6 +952,56 @@ malformed selected config is a `FAIL`ed check and exit `1`, not the usage error
 diagnose is useless. Its exit domain is `{0, 1, 2, 4}`, and `WARN` never fails
 the command.
 
+### Debugging one test: `mtest debug`
+
+Sometimes a report is the wrong tool. `mtest debug PATH::TEST` prepares exactly
+one test the way a run would — precompiles, builds, and probes the file to
+check the name really exists — prints the two commands it used, and then
+**becomes** the test binary:
+
+```console
+$ pixi run bash -c 'build/mtest debug e2e/suite/test_passing.mojo::test_two_passes'
+build: mojo build e2e/suite/test_passing.mojo -o build/bin/e2e_ssuite_stest_upassing
+run: build/bin/e2e_ssuite_stest_upassing --only test_two_passes
+
+Running 3 tests for /home/mikko/dev/mtest/e2e/suite/test_passing.mojo
+    SKIP [ 0.001 ] test_one_passes
+    PASS [ 0.001 ] test_two_passes
+    SKIP [ 0.001 ] test_three_passes
+--------
+Summary [ 0.001 ] 3 tests run: 1 passed , 0 failed , 2 skipped
+
+$ echo $?
+0
+```
+
+Everything after those two lines is the test binary talking to your terminal
+directly. mtest is gone — it replaced its own process image — so the test owns
+stdin, stdout and stderr connected straight through rather than to a capture
+pipe, the signals, the debugger you attached, and the exit status. There is no summary band and no mtest verdict, on purpose:
+that `0` is the binary's statement about itself, not an mtest PASS. Run the
+printed `run:` line under `gdb`, `lldb`, `strace`, or `valgrind` and you are
+debugging exactly what mtest just ran.
+
+Because there is no reporter left afterwards, the grammar is narrow: one node
+id, the build flags (`--mojo`, `-I`, `--build-arg`, `--`), `--config`/
+`--no-config`, and `-q`/`-v`. Everything else is refused before anything is
+built, and so is a bare path — a debug session needs one test, not a file:
+
+```console
+$ pixi run bash -c 'build/mtest debug e2e/suite/test_passing.mojo; echo "EXIT=$?"'
+cli: 'debug' wants exactly one PATH::TEST node id (see mtest --help)
+EXIT=4
+```
+
+Every refusal happens while mtest still owns its exit code: `4` for a bad node
+id, an unknown test name, a flag outside the grammar, or a broken `mtest.toml`;
+`1` when the file will not compile or its probe crashes — with the compiler's
+own banner or the binary's stderr printed beneath the diagnostic, since there
+is no reporter left to echo them; `3` for a spawn failure or protocol drift;
+and `2` for an interrupt, which is checked right up to the handover. Once the
+handover happens, the code you get is the test's own.
+
 ## Assertion diagnostics
 
 The package includes an optional source-only
@@ -1392,12 +1442,14 @@ mtest — a pytest-like test runner for Mojo
 usage: mtest [run] [PATHS...] [flags] [-- BUILD-ARGS...]
        mtest config show [PATHS...] [flags] [-- BUILD-ARGS...]
        mtest doctor [--config PATH | --no-config] [--color WHEN] [-q | -v]
+       mtest debug PATH::TEST [build flags] [-- BUILD-ARGS...]
 
 Subcommands:
   run [PATHS...] [flags]      Run tests (the default subcommand).
   collect [PATHS...] [flags]  List node ids without running tests.
   config show [PATHS...]      Show resolved configuration.
   doctor [flags]              Diagnose the environment without running tests.
+  debug PATH::TEST            Run one test with the terminal handed over.
   help                        Show this help and exit.
   version                     Show the version and exit.
 

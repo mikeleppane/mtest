@@ -764,6 +764,10 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "value: --color bad mode -> 4",
     "value: -q and -v mutually exclusive -> 4",
     "precompile: failure -> PRECOMPILE-ERROR, casualties listed, exit 1",
+    "debug: plain path operand -> 4",
+    "debug: unknown test -> 4",
+    "debug: reporter flag refused -> 4",
+    "debug: --retries refused -> 4",
     "served: -n accepted (not exit 4)",
     "served: --workers accepted (not exit 4)",
     "served: --serial accepted (not exit 4)",
@@ -789,6 +793,7 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "report: --json to a readerless FIFO fails fast, never blocks",
     "path: a long-but-legal path builds, never a false COMPILE-ERROR",
     "flaky: --fail-on-flaky turns a FLAKY-only run's 0 into 1",
+    "debug: the handoff is the test's own exit, with no mtest verdict",
     "interrupt: SIGINT frees the owned process group",
 )
 """Every check `main` must perform, in order, on an unfiltered run.
@@ -1740,6 +1745,54 @@ class Runner:
         else:
             self.record(PASS, name, ref)
 
+    def check_debug_handoff(self) -> None:
+        """Assert `debug` hands the terminal over and claims nothing afterwards.
+
+        Two halves over the same surface, one passing node and one failing one.
+        Each asserts the two marker lines, then the test binary's OWN report
+        text after them, then the exit code the binary itself produced. The
+        third assertion is the load-bearing one and applies to both halves: no
+        summary band anywhere. A zero from a handed-over run is the binary's
+        statement, and a band would be mtest claiming a verdict it is in no
+        position to have — there is deliberately no machinery that could
+        produce one, so its absence is what proves the handoff was real.
+        """
+        ref = "§28 debug prepares, prints two lines, then becomes the test"
+        name = "debug: the handoff is the test's own exit, with no mtest verdict"
+        halves = [
+            ("passing", "tests/test_reverse.mojo::test_reverse_ab", 0),
+            ("failing", "probes/test_fail.mojo::test_x", 1),
+        ]
+        probs: list[str] = []
+        for label, node, want_exit in halves:
+            try:
+                r = self.mtest(["debug", "-I", "build", node])
+            except subprocess.TimeoutExpired:
+                probs.append(f"{label}: timed out")
+                continue
+            if r.returncode != want_exit:
+                probs.append(f"{label}: exit {r.returncode}, want {want_exit}")
+            lines = r.stdout.splitlines()
+            if not lines or not lines[0].startswith("build: "):
+                probs.append(f"{label}: first stdout line is not the build line")
+            elif "build/bin/" not in lines[0]:
+                probs.append(f"{label}: the build line names no build/bin/ output")
+            selector = "--only " + node.rpartition("::")[2]
+            if len(lines) < 2 or not lines[1].startswith("run: "):
+                probs.append(f"{label}: second stdout line is not the run line")
+            elif not lines[1].endswith(selector):
+                probs.append(f"{label}: the run line does not end in {selector!r}")
+            # The binary's own report, produced after the exec, on the same
+            # descriptor mtest was writing to a moment earlier.
+            if "tests run:" not in r.stdout:
+                probs.append(f"{label}: the test binary's own report never arrived")
+            if "=====" in r.stdout or "=====" in r.stderr:
+                probs.append(f"{label}: an mtest summary band survived the handoff")
+        if probs:
+            self.record(FAIL, name, ref, "; ".join(probs))
+        else:
+            self.record(PASS, name, ref)
+
     # -- interrupt: signal ONLY mtest, so the child's survival tests mtest's own
     #    process-group teardown (§18/§24.2) rather than a signal the child caught.
     def check_interrupt(self, strict: bool) -> None:
@@ -2162,6 +2215,36 @@ def build_matrix() -> list[Check]:
             any_has=["PRECOMPILE-ERROR", "tests/test_reverse.mojo"],
             any_absent=["PRECOMPILE-FAILED"],
         ),
+        # debug (§28): every refusal is made BEFORE the handoff, so each of
+        # these exits 4 with mtest still owning its own exit code.
+        Check(
+            "debug: plain path operand -> 4",
+            "§28",
+            ["debug", *I, "tests/test_reverse.mojo"],
+            4,
+            err_has=["PATH::TEST"],
+        ),
+        Check(
+            "debug: unknown test -> 4",
+            "§28",
+            ["debug", *I, "tests/test_reverse.mojo::nope"],
+            4,
+            err_has=["unknown test"],
+        ),
+        Check(
+            "debug: reporter flag refused -> 4",
+            "§28",
+            ["debug", *I, "--json", "-", "tests/test_reverse.mojo::test_reverse_ab"],
+            4,
+            err_has=["no terminal record could be written"],
+        ),
+        Check(
+            "debug: --retries refused -> 4",
+            "§28",
+            ["debug", *I, "--retries", "1", "tests/test_reverse.mojo::test_reverse_ab"],
+            4,
+            err_has=["cannot be combined with 'debug'"],
+        ),
     ]
     # Refused v1 flags (§24.1): each names the flag and states it is the v1 contract.
     for flag, val, _cap in refused:
@@ -2307,6 +2390,8 @@ def main() -> int:
             runner.check_long_path_builds()
         if wanted("flaky: --fail-on-flaky turns a FLAKY-only run's 0 into 1"):
             runner.check_fail_on_flaky()
+        if wanted("debug: the handoff is the test's own exit, with no mtest verdict"):
+            runner.check_debug_handoff()
         if wanted("interrupt: SIGINT frees the owned process group"):
             if args.no_interrupt:
                 # Recorded rather than bypassed: testing --no-interrupt BEFORE

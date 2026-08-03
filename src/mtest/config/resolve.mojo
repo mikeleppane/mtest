@@ -176,6 +176,45 @@ struct ActiveConfigKeys(Copyable, Movable):
             gh_annotations=False,
         )
 
+    @staticmethod
+    def debug() -> ActiveConfigKeys:
+        """Build the single-test handover projection.
+
+        Debug compiles and probes exactly the file its node id names, then
+        replaces the mtest process with the resulting binary. Only the build
+        inputs and the two deadlines survive: nothing selects (the operand is
+        the whole selection), nothing schedules, no state is read or written,
+        and every presentation and report key is inactive because the handoff
+        leaves no reporter behind to honor one.
+
+        Returns:
+            A newly allocated key set for debug mode.
+        """
+        return ActiveConfigKeys(
+            paths=False,
+            excludes=False,
+            gates=False,
+            serial_globs=False,
+            workers=False,
+            timeout_secs=True,
+            retries=False,
+            maxfail=False,
+            fail_on_flaky=False,
+            state=False,
+            mojo_path=True,
+            include_paths=True,
+            build_args=True,
+            precompiles=True,
+            compile_timeout_secs=True,
+            color=False,
+            show_output=False,
+            verbosity=False,
+            durations=False,
+            junit_dest=False,
+            json_dest=False,
+            gh_annotations=False,
+        )
+
 
 @fieldwise_init
 struct ResolvedConfig(Copyable, Movable):

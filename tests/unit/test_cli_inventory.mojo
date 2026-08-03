@@ -553,6 +553,7 @@ def test_help_has_grouped_sections_and_clear_subcommands() raises:
     assert_true("  collect [PATHS...] [flags]" in rendered)
     assert_true("  config show [PATHS...]" in rendered)
     assert_true("  doctor [flags]" in rendered)
+    assert_true("  debug PATH::TEST" in rendered)
     var previous_group_position = -1
     for group in [
         "Selection",

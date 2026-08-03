@@ -50,13 +50,16 @@ mtest [run] [PATHS...] [flags] [-- BUILD-ARGS...]   # run is the default subcomm
 mtest collect [PATHS...] [flags]                    # list node ids, one per line
 mtest config show [PATHS...] [flags]                # render resolved configuration
 mtest doctor [--config PATH | --no-config] [--color WHEN] [-q | -v]
+mtest debug PATH::TEST [build flags] [-- BUILD-ARGS...]  # hand over the terminal
 mtest version
 mtest --help | mtest help
 ```
 
 `run` is the default: `mtest tests/` means `mtest run tests/`. A leading token
 that is not a known subcommand is treated as a path or flag for `run`.
-`config show` is the sole two-token subcommand.
+`config show` is the sole two-token subcommand. `debug` is the only one that
+does not end by reporting: it prepares a single test and then replaces the
+mtest process with it (§28).
 
 ---
 
@@ -102,34 +105,35 @@ single **invocation root**. In v1 the root is the **current working directory**.
 
 ## 4. Subcommands and flag applicability
 
-| Flag | `run` | `collect` | `doctor` |
-|------|:-----:|:---------:|:--------:|
-| `PATHS...` | ✓ | ✓ | — |
-| `--config PATH`, `--no-config` | ✓ | ✓ | ✓ |
-| `-k STR` | ✓ | ✓ | — |
-| `--exclude GLOB` | ✓ | ✓ | — |
-| `-I PATH` | ✓ | ✓ | — |
-| `--build-arg ARG`, `-- ARGS` | ✓ | ✓ | — |
-| `--precompile SRC[:OUT]` | ✓ | ✓ | — |
-| `--mojo PATH` | ✓ | ✓ | — |
-| `-x`, `--maxfail N` | ✓ | — | — |
-| `-n, --workers N\|auto` | ✓ | accepted, inert | — |
-| `--shard M/N` | ✓ | ✓ | — |
-| `--lf`, `--last-failed`, `--ff`, `--failed-first` | ✓ | — | — |
-| `--serial GLOB` | ✓ | — | — |
-| `--timeout`, `--compile-timeout` | ✓ | ✓ (compile only) | — |
-| `--retries N` | ✓ | — | — |
-| `--fail-on-flaky` | ✓ | — | — |
-| `--shuffle`, `--seed N` | ✓ | — | — |
-| `--no-cache`, `--cache-clear` | ✓ | ✓ | — |
-| `--gate PATH` | ✓ | — | — |
-| `-s`, `--show-output MODE` | ✓ | — | — |
-| `--durations N` | ✓ | — | — |
-| `--junit-xml PATH`, `--gh-annotations` | ✓ | — | — |
-| `--json PATH\|-` | ✓ | — | — |
-| `--format lines\|json` | — | ✓ | — |
-| `-q`, `-v`, `--color WHEN` | ✓ | ✓ | ✓ |
-| `--collect-only` | ✓ (→ behaves as `collect`) | n/a | — |
+| Flag | `run` | `collect` | `doctor` | `debug` |
+|------|:-----:|:---------:|:--------:|:-------:|
+| `PATHS...` | ✓ | ✓ | — | one node id |
+| `--config PATH`, `--no-config` | ✓ | ✓ | ✓ | ✓ |
+| `-k STR` | ✓ | ✓ | — | — |
+| `--exclude GLOB` | ✓ | ✓ | — | — |
+| `-I PATH` | ✓ | ✓ | — | ✓ |
+| `--build-arg ARG`, `-- ARGS` | ✓ | ✓ | — | ✓ |
+| `--precompile SRC[:OUT]` | ✓ | ✓ | — | — |
+| `--mojo PATH` | ✓ | ✓ | — | ✓ |
+| `-x`, `--maxfail N` | ✓ | — | — | — |
+| `-n, --workers N\|auto` | ✓ | accepted, inert | — | — |
+| `--shard M/N` | ✓ | ✓ | — | — |
+| `--lf`, `--last-failed`, `--ff`, `--failed-first` | ✓ | — | — | — |
+| `--serial GLOB` | ✓ | — | — | — |
+| `--timeout`, `--compile-timeout` | ✓ | ✓ (compile only) | — | — |
+| `--retries N` | ✓ | — | — | — |
+| `--fail-on-flaky` | ✓ | — | — | — |
+| `--shuffle`, `--seed N` | ✓ | — | — | — |
+| `--no-cache`, `--cache-clear` | ✓ | ✓ | — | — |
+| `--gate PATH` | ✓ | — | — | — |
+| `-s`, `--show-output MODE` | ✓ | — | — | — |
+| `--durations N` | ✓ | — | — | — |
+| `--junit-xml PATH`, `--gh-annotations` | ✓ | — | — | — |
+| `--json PATH\|-` | ✓ | — | — | — |
+| `--format lines\|json` | — | ✓ | — | — |
+| `-q`, `-v` | ✓ | ✓ | ✓ | accepted, inert |
+| `--color WHEN` | ✓ | ✓ | ✓ | — |
+| `--collect-only` | ✓ (→ behaves as `collect`) | n/a | — | — |
 
 `collect` compiles files to enumerate their tests, so it honors the build and
 selection flags; it does not schedule test execution, so run-time flags
@@ -160,6 +164,19 @@ whichever way it is resolved, this row moves with it.
 per-invocation flags. It resolves the same default, project-file, environment,
 and CLI layers as `run`, then renders and exits without discovery, builds,
 execution, reporter setup, or state parsing or writes.
+
+`debug` is the narrowest grammar of the five. It takes exactly one `PATH::TEST`
+node id — never a plain path, never a second operand — plus the flags that
+decide how that one file is compiled, the configuration controls, and `-q`/`-v`.
+Every other flag is an applicability error (exit 4), including `--retries` and
+`--timeout`, which are refused rather than silently overridden, and including
+`--color`: after the handoff there is no reporter left to color. The reporter
+flags name the reason in their refusal, because a command that replaces the
+mtest process can leave no terminal record behind. `-q` and `-v` are accepted
+for command-line consistency and change nothing, since the only output is the
+two handover lines. Project-file `[report]` keys and last-run state are
+inactive under `debug`: their values are never acted on, though the document
+they live in is still validated as a whole (§28).
 
 `doctor` accepts only the configuration controls and ordinary human-output
 controls shown in the table. A path operand, passthrough token, or any other
@@ -670,7 +687,9 @@ is safe to delete by hand at any time: it holds nothing that cannot be rebuilt.
 ## 9. Run and collect exit codes
 
 Exit domains are per subcommand. This table and precedence govern `run` and
-`collect`; §27 defines the narrower domains for `config show` and `doctor`.
+`collect`; §27 defines the narrower domains for `config show` and `doctor`, and
+§28 defines `debug`'s pre-handoff domain — past the handoff the exit status is
+the test binary's own and mtest has no code left to define.
 The meanings and precedence within each command domain are **FROZEN**.
 Exit-4's enumerated run/collect triggers grow only as served pre-run surfaces
 grow:
@@ -1771,8 +1790,8 @@ above — it only reports which of those surfaces are wired up yet.
 `-s`/`--show-output`,
 `--durations`, `-q`/`-v`, `--color`, `--format`,
 `-h`/`--help`, `--version`, and the `run`, `collect`, `config show`, `doctor`,
-`version`, and `help` subcommands (`--collect-only` too, as an alias that
-behaves as `collect`).
+`debug`, `version`, and `help` subcommands (`--collect-only` too, as an alias
+that behaves as `collect`).
 `--shard` applies under both `run` and `collect`. `--json` (the machine event
 stream, §15.4), `--junit-xml` (the JUnit report, §15.2), and `--gh-annotations`
 (the CI annotation tail, §15.3) are served too — see §24.2 for how they are now
@@ -1784,7 +1803,7 @@ store described in §8.5, which this build reads and writes by default.
 Every flag and subcommand in the frozen contract above is now served: nothing is
 refused for being unavailable. For `run` and `collect`, exit 4 therefore covers
 exactly the frozen §9 causes. `Config show` and `doctor` use the applicability
-rules and command-specific exit domains in §27.
+rules and command-specific exit domains in §27; `debug` uses §28's.
 
 ### 24.2 Run and collect exit codes reachable in this build
 
@@ -1844,6 +1863,17 @@ resolved-on. Beside `--json -` it must be explicitly `off` — the default `auto
 and an explicit `on` are usage errors (exit 4) detected by pre-run resolved
 validation (§9). The stop-commands fencing of echoed child output is active whenever
 `GITHUB_ACTIONS=true`, independent of the mode.
+
+**`debug` reachability.** `mtest debug PATH::TEST` is served (§28). Its whole
+exit domain is pre-handoff and is `{1, 2, 3, 4}` plus whatever the test binary
+itself exits with: 4 for a malformed node id, an unknown path, a node id whose
+path is not a runnable file, an unknown test name, or any flag outside its
+grammar; 2 for an interrupt during the build or the probe; 3 for a spawn or
+machinery failure, for protocol drift, and for a failed exec or a failed
+runtime restoration; and 1 for a compile error or a probe that crashed, timed
+out, overflowed its capture, or did not read as a collection listing. Once the
+handoff happens mtest is gone, so the process's exit status is the binary's own
+statement and no code in this section applies to it.
 
 **`--format` reachability.** `--format lines|json` is served under `collect`
 (§16): `lines` is the default and leaves the listing byte-identical to a run
@@ -2187,3 +2217,103 @@ the other commands refuse them as usage errors and exit 4.
 fixed inventory is completeness-critical: these controls never suppress,
 duplicate, or add check lines. Doctor output is uncolored; verbosity does not
 alter its one-line details.
+
+---
+
+## 28. Handing the terminal to one test
+
+`mtest debug PATH::TEST` exists for the moment a report is not what you want.
+It prepares exactly one test the way a run would, prints the two commands it
+used, and then **replaces the mtest process** with the test binary, so the test
+owns the raw terminal: its stdin, its stdout and stderr connected directly to
+the ones mtest was given rather than to a capture pipe, its signals, its
+debugger, and its exit status, with nothing in between. What the replacement
+process then does with those descriptors — line buffering, full buffering, none
+— is its own runtime's choice, which `execv` cannot constrain.
+
+**Preparation.** Everything before the handoff is ordinary supervised work. The
+node id is resolved against the invocation root exactly as a `run` operand is
+(§2, §5); the project file's precompile steps run — the flag itself is outside
+the grammar below, but `[build] precompile` stays active, because a file that
+imports a precompiled package cannot be built without them; the file is built;
+and the built binary is probed with `--skip-all` (§6) to learn which tests it
+actually collects. The requested name is validated against that listing, so a
+typo is refused here rather than discovered later by a binary that would have
+run nothing. The build cache is off for the whole preparation and `retries` is
+zero, which is what makes the printed `build:` line reproducible by hand: the
+output is the deterministic `build/bin/` path, not a content-addressed store
+artifact (§8.5).
+
+**Grammar.** Exactly one operand, carrying exactly one `::`. Beside it,
+`--mojo PATH`, `-I PATH`, `--build-arg ARG` and post-`--` passthrough,
+`--config PATH` or `--no-config`, and `-q`/`-v`. Every other flag is an
+applicability error (exit 4, §4). `--retries` and `--timeout` are refused
+rather than silently overridden, and `--color` and the reporter flags are
+refused because the handoff leaves nothing behind to render or write with; each
+reporter refusal says so.
+
+**Inactive configuration.** Under `debug` the project file's `[report]`
+destinations and the last-run state are inactive, which means their values are
+never acted on: no report destination is resolved, checked, created, opened or
+written, and `.mtest-cache/lastrun` is neither read nor written. A
+`[report] junit-xml = "r.xml"` therefore produces no file and no diagnostic,
+and an existing `lastrun` is left byte-for-byte as it was. The build keys and
+both deadlines stay active, so a per-file `[[override]]` still bounds the build
+and the probe.
+
+Inactive is not the same as unparsed, and the difference is worth stating
+plainly. The selected configuration file is still parsed and validated as a
+document before any command projection exists, so a malformed value in *any*
+table — `[report] color = "not-a-color"`, `[run] state = "not-a-boolean"` — is
+a usage error (exit 4) under `debug` exactly as it is under `run` and
+`collect`. A configuration file is well-formed or it is not, and that question
+does not depend on which subcommand happens to read it.
+
+**Captured output.** A refusal that came from a child carries what that child
+wrote. A build that failed to compile prints the compiler's own banner beneath
+its diagnostic, a crashing or malformed probe prints what the binary wrote to
+stderr, and a failed precompile step prints the compiler output for that step —
+all on stderr, bounded, with control characters escaped and a note when the
+tail was dropped. There is no reporter under `debug` to echo them through, so
+they travel on the diagnostic channel instead of being lost.
+
+**Exit codes, all decided before the handoff.**
+
+| Code | Cause |
+|------|-------|
+| 4 | a malformed node id, an unknown path, a node id whose path is not a runnable file, an unknown test name, a flag outside the grammar above, or a selected project config that is missing, unreadable, malformed, or invalid |
+| 2 | interrupted during the build or the probe, or an interrupt latched at any point before the handoff — including while the two lines below were still being written |
+| 3 | a spawn or machinery failure, protocol drift (§6), a failed exec, or a failed exec-runtime restoration |
+| 1 | a failed precompile step, a compile error, a build killed at `--compile-timeout`, or a probe that crashed, timed out, overflowed its capture, or did not read as a collection listing |
+
+**The handoff.** On success mtest writes exactly two lines to stdout,
+shell-quoted so they can be pasted back:
+
+```text
+build: mojo build tests/test_thing.mojo -o build/bin/tests_stest_uthing
+run: build/bin/tests_stest_uthing --only test_case
+```
+
+It flushes them, samples the interrupt latch, closes the exec runtime, samples
+it once more, and — **only if the close succeeded and neither sample was set**
+— replaces itself with the binary. The samples are what stop an interrupt that
+arrived during the preparation, or while that write was blocked on a reader
+that had stopped reading, from being answered with the debuggee's exit status
+as though nothing had been interrupted. A failed close is refused as a
+handoff (exit 3) rather than pressed through: restoration is what returns
+`SIGPIPE` to its default disposition, and a debuggee that inherited `SIG_IGN`
+would survive a broken pipe that should have killed it, so a genuine crash
+could read as a pass.
+
+From the exec on there is no mtest. The process id, the process group, the
+controlling terminal, the signal routing, and every descriptor not marked
+close-on-exec are the test binary's; **mtest renders no summary and makes no
+verdict claim**. A post-handoff exit `0` is the binary's statement, not an
+mtest PASS, and there is deliberately no machinery that could turn it into one.
+
+Like doctor's restoration (§27.2), the close-to-exec window is disclosed rather
+than papered over: restoration puts each signal back one at a time, so a signal
+arriving between the first restored disposition and the exec follows the
+restored disposition rather than being guaranteed a `debug` exit code. The
+window is the price of handing over a process whose signal state is the default
+one.

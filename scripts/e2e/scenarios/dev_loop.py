@@ -10,17 +10,32 @@ The comparison is deliberately made over the `--json` stream's ordered
 the run's wall clock and its build-cache counters, which the contract excludes
 from byte identity, so two console outputs of the identical run differ for
 reasons that have nothing to do with ordering.
+
+`debug` is the other one, and its claim is about what is left of mtest after it
+hands a terminal to a single test: the exit status has to be the test's own,
+nothing may dress a handed-over zero up as an mtest verdict, and the process
+the test wakes up in has to be a clean one. All three are black-box facts about
+a finished process, so all three are asserted from out here rather than from
+inside the runner.
 """
 
 from __future__ import annotations
 
+import fcntl
+import os
+from pathlib import Path
+import signal
+import subprocess
+import tempfile
+import time
 from typing import TYPE_CHECKING
 
 from scripts.e2e.assertions import expect, expect_exit, stream_files
+from scripts.e2e.runner import E2ERunner, ScenarioError
 
 
 if TYPE_CHECKING:
-    from scripts.e2e.runner import ScenarioContext
+    from scripts.e2e.runner import Run, ScenarioContext
 
 
 SUITE = "e2e/suite"
@@ -112,3 +127,572 @@ def s_shuffle_seed_reproduces(context: ScenarioContext) -> str:
         f"seed 7 replayed {len(first)} files in order; "
         f"seed {reordered_by} reordered them"
     )
+
+
+DEBUG_NODE = "e2e/suite/test_passing.mojo::test_two_passes"
+"""A node whose test passes, so the handed-over binary exits 0 on its own."""
+
+DEBUG_FAILING_NODE = "e2e/suite/test_failing.mojo::test_second_fails"
+"""A node whose test fails, so the handed-over binary exits nonzero on its own.
+
+The pair is what makes the no-verdict assertion mean something: a build that
+printed a summary band would print one for both, and a build that laundered the
+handoff into a verdict would have to disagree with one of the two exits."""
+
+ACTOR_SOURCE = """\
+from std.os import getenv, listdir
+from std.os.path import exists
+from std.ffi import external_call
+from std.testing import TestSuite
+from std.time import sleep
+
+
+def test_debug_environment() raises:
+    # SAFETY: libc `getpid` takes no arguments and returns `pid_t`, an `int` on
+    # both supported targets, so this fixed declaration matches each ABI. It
+    # reads no memory this process owns, retains no pointer, and cannot fail.
+    var pid = external_call["getpid", Int32]()
+    print("debug-actor: pid=" + String(Int(pid)))
+    if not exists("/proc/self/status"):
+        print("debug-actor: proc=absent")
+        return
+    var handle = open("/proc/self/status", "r")
+    var status = String(handle.read())
+    handle.close()
+    for line in status.split("\\n"):
+        var text = String(line)
+        if text.startswith("SigIgn:"):
+            print("debug-actor: " + text)
+    var names = String("")
+    for entry in listdir("/proc/self/fd"):
+        if names != "":
+            names += ","
+        names += String(entry)
+    print("debug-actor: fds=" + names)
+
+
+def test_broken_pipe() raises:
+    var release = getenv("MTEST_DEBUG_RELEASE", "")
+    var waited = 0
+    while release != "" and not exists(release) and waited < 3000:
+        sleep(0.01)
+        waited += 1
+    var chunk = String("")
+    for _ in range(64):
+        chunk += "0123456789abcdef"
+    for _ in range(64):
+        print(chunk)
+
+
+def main() raises:
+    TestSuite.discover_tests[__functions_in_module()]().run()
+    var ready = getenv("MTEST_DEBUG_READY", "")
+    if ready != "":
+        with open(ready, "w") as marker:
+            marker.write("ready")
+"""
+"""The suite the debug scenarios drive, and the barriers they synchronise on.
+
+It is written in Mojo and compiled by the real toolchain rather than faked,
+because the instrument has to be trustworthy about the things these scenarios
+measure. A Python actor cannot be: CPython sets `SIGPIPE` to `SIG_IGN` during
+interpreter startup, so a Python debuggee reads its own disposition back no
+matter what it inherited, and would report a restoration failure that never
+happened. A compiled Mojo binary changes no disposition and reports what it was
+handed.
+
+Three roles. `test_debug_environment` reports the process it woke up in: its
+pid from `getpid`, so the identity half holds on both platforms, and the two
+`/proc` facts only where that filesystem exists — their absence is announced
+rather than assumed. `test_broken_pipe` waits on a release file and then floods
+stdout, which is how a scenario can close the reader first and watch what the
+inherited `SIGPIPE` disposition actually does. And `main` writes a ready marker
+after the suite returns, so a scenario can know the `--skip-all` probe has
+finished without guessing at a duration.
+
+Everything printed is a fact, not a verdict: the assertions live in the
+scenarios, where a failure can say what it means."""
+
+READY_ENV = "MTEST_DEBUG_READY"
+"""Environment variable naming the file the actor touches after its probe."""
+
+RELEASE_ENV = "MTEST_DEBUG_RELEASE"
+"""Environment variable naming the file `test_broken_pipe` waits for."""
+
+BARRIER_DEADLINE = 180.0
+"""Seconds a scenario waits for a marker before calling the run hung. Sized for
+a cold `mojo build` of the actor, which every one of these runs pays."""
+
+BARRIER_POLL = 0.01
+"""Seconds between marker polls."""
+
+SIGPIPE_BIT = 1 << (13 - 1)
+"""`SIGPIPE`'s bit in the `SigIgn` mask, which is indexed from signal 1."""
+
+
+def _marker_lines(run: Run) -> tuple[str, str]:
+    """The two lines `debug` prints before it hands the terminal over.
+
+    Args:
+        run: A completed `mtest debug` run.
+
+    Returns:
+        The `build: ` and `run: ` lines, in that order.
+
+    Raises:
+        ScenarioError: If stdout does not open with both of them, which means
+            the handover was never announced or something printed ahead of it.
+    """
+    lines = run.stdout.splitlines()
+    expect(
+        len(lines) >= 2,
+        f"debug printed fewer than two lines before handing over: {run.stdout!r}",
+    )
+    expect(
+        lines[0].startswith("build: "),
+        f"the first stdout line is not the build line: {lines[0]!r}",
+    )
+    expect(
+        lines[1].startswith("run: "),
+        f"the second stdout line is not the run line: {lines[1]!r}",
+    )
+    return lines[0], lines[1]
+
+
+def _expect_no_verdict(run: Run) -> None:
+    """Assert nothing in either stream claims an mtest verdict.
+
+    Args:
+        run: A completed `mtest debug` run that reached the handoff.
+
+    Raises:
+        ScenarioError: If a summary band, a verdict row, or a reproduce line
+            survived the handover. Past the exec there is no mtest left to
+            produce one, so any of them would mean the process never handed
+            over at all.
+
+    The forbidden verdict tokens are matched at the start of a line, which is
+    where mtest's own console rows begin. `TestSuite`'s per-test rows carry the
+    same words indented, and those are exactly what this run is supposed to
+    show — the point is that the words arrive from the test binary rather than
+    from a runner that is no longer there.
+    """
+    forbidden = ("=====", "PASS ", "FAIL ", "CRASH ", "reproduce:")
+    for stream, text in (("stdout", run.stdout), ("stderr", run.stderr)):
+        for line in text.splitlines():
+            for token in forbidden:
+                expect(
+                    not line.startswith(token),
+                    f"{stream} carries an mtest {token!r} row after the "
+                    f"handoff, claiming a verdict it is in no position to "
+                    f"have: {line!r}",
+                )
+
+
+def s_debug_hands_over(context: ScenarioContext) -> str:
+    """`debug` announces two commands, becomes the test, and claims nothing.
+
+    Both halves assert the same three things against different exits: the two
+    marker lines come first, the test binary's own report text follows them on
+    the same stream, and the process exits with the code the binary itself
+    produced. The absence of a summary band is the proof that a zero here is
+    the binary's statement rather than an mtest PASS.
+    """
+    passing = context.runner.run_mtest(["debug", DEBUG_NODE])
+    expect_exit(passing, 0)
+    build_line, run_line = _marker_lines(passing)
+    expect(
+        "build/bin/" in build_line,
+        f"the build line names no deterministic output path: {build_line!r}",
+    )
+    expect(
+        run_line.endswith("--only test_two_passes"),
+        f"the run line does not end in the selector: {run_line!r}",
+    )
+    expect(
+        "tests run:" in passing.stdout,
+        f"the test binary's own report never arrived: {passing.stdout!r}",
+    )
+    _expect_no_verdict(passing)
+
+    failing = context.runner.run_mtest(["debug", DEBUG_FAILING_NODE])
+    expect_exit(failing, 1)
+    _marker_lines(failing)
+    expect(
+        "tests run:" in failing.stdout,
+        f"the failing binary's own report never arrived: {failing.stdout!r}",
+    )
+    _expect_no_verdict(failing)
+    return "handed over twice; the exit was the test's own both times"
+
+
+def s_debug_refusals(context: ScenarioContext) -> str:
+    """Every `debug` refusal lands before the handoff, as a usage error.
+
+    A refusal that arrived after the exec could not exist — there would be no
+    mtest to make it — so each of these is also a check that the preparation
+    really does run to completion before anything is handed anywhere.
+    """
+    plain = context.runner.run_mtest(["debug", "e2e/suite/test_passing.mojo"])
+    expect_exit(plain, 4)
+    expect(
+        "PATH::TEST" in plain.stderr,
+        f"the plain-path refusal does not name the wanted form: {plain.stderr!r}",
+    )
+    expect(
+        not plain.stdout,
+        f"a refused debug printed to stdout: {plain.stdout!r}",
+    )
+
+    retries = context.runner.run_mtest(["debug", "--retries", "1", DEBUG_NODE])
+    expect_exit(retries, 4)
+    expect(
+        "--retries" in retries.stderr,
+        f"the --retries refusal does not name the flag: {retries.stderr!r}",
+    )
+
+    unknown = context.runner.run_mtest(
+        ["debug", "e2e/suite/test_passing.mojo::test_nope"]
+    )
+    expect_exit(unknown, 4)
+    expect(
+        "unknown test" in unknown.stderr,
+        f"the unknown-name refusal is not the select one: {unknown.stderr!r}",
+    )
+    return "plain path, --retries, and an unknown name all refused with 4"
+
+
+def s_debug_environment(context: ScenarioContext) -> str:
+    """The handed-over process is the SAME process, with a clean environment.
+
+    The debugged test reports three facts about the process it woke up in, and
+    each answers a way the handoff could have gone quietly wrong:
+
+    - its pid, compared with the process group the harness created for mtest.
+      They are equal only if the image was REPLACED; a spawned child would sit
+      in the group under a different pid.
+    - its `SigIgn` mask. The exec runtime ignores `SIGPIPE` for its lifetime,
+      and POSIX carries an ignored disposition across `execv`, so a debuggee
+      that inherited `SIG_IGN` would survive a broken pipe that should have
+      killed it and a genuine crash could read as a pass. mtest closes the
+      runtime before the exec precisely to restore it.
+    - its open descriptors. Everything the process adapter opens is
+      close-on-exec, so the debuggee should hold the three standard streams and
+      nothing else. The listing itself needs one descriptor while it is read,
+      which is why exactly one extra is tolerated and two are not.
+
+    The suite is built in a throwaway project by the real toolchain, so the
+    binary under the handoff is an ordinary compiled test rather than a
+    stand-in.
+    """
+    with tempfile.TemporaryDirectory(prefix="mtest-debug-env-") as raw:
+        project = Path(raw)
+        (project / "tests").mkdir()
+        (project / "tests" / "test_env.mojo").write_text(ACTOR_SOURCE, encoding="utf-8")
+        runner = E2ERunner(
+            repo_root=project,
+            mtest=context.runner.mtest,
+            default_timeout=context.runner.default_timeout,
+            short_timeout=context.runner.short_timeout,
+        )
+        run = runner.run_mtest(["debug", "tests/test_env.mojo::test_debug_environment"])
+
+    expect_exit(run, 0)
+    _marker_lines(run)
+    _expect_no_verdict(run)
+    facts: dict[str, str] = {}
+    for line in run.stdout.splitlines():
+        if not line.startswith("debug-actor: "):
+            continue
+        body = line.removeprefix("debug-actor: ")
+        separator = "=" if "=" in body else ":"
+        key, _, value = body.partition(separator)
+        facts[key.strip()] = value.strip()
+
+    expect(
+        "pid" in facts,
+        f"the debugged test reported no pid, so nothing shows it was exec'd: {facts}",
+    )
+    expect(
+        run.pgid is not None and facts["pid"] == str(run.pgid),
+        f"the test's pid {facts['pid']} is not mtest's own process "
+        f"{run.pgid}: the terminal went to a CHILD, not to a replaced image",
+    )
+    if "SigIgn" not in facts:
+        # No `/proc`, so the disposition and descriptor facts do not exist to
+        # be read. The pid identity above is platform-independent and still
+        # proves the handover was an image replacement.
+        return f"same pid {facts['pid']}; {facts.get('proc', 'no /proc')}"
+
+    ignored = int(facts["SigIgn"], 16)
+    expect(
+        not ignored & SIGPIPE_BIT,
+        f"the debuggee inherited SIGPIPE=SIG_IGN (SigIgn {facts['SigIgn']}): "
+        "the exec runtime was not restored before the handoff, so a "
+        "broken-pipe death would be swallowed",
+    )
+    extra = sorted(set(facts["fds"].split(",")) - {"0", "1", "2"})
+    expect(
+        len(extra) <= 1,
+        f"the debuggee inherited descriptors beyond 0/1/2 and its own "
+        f"directory handle: {facts['fds']}",
+    )
+    return f"same pid {facts['pid']}, SigIgn {facts['SigIgn']}, fds {facts['fds']}"
+
+
+def _debug_project(directory: Path) -> Path:
+    """Write the actor suite into `directory` and return its source path.
+
+    Args:
+        directory: An existing scratch directory that becomes the invocation
+            root.
+
+    Returns:
+        The path of the written test file.
+    """
+    (directory / "tests").mkdir()
+    source = directory / "tests" / "test_env.mojo"
+    source.write_text(ACTOR_SOURCE, encoding="utf-8")
+    return source
+
+
+def _await_marker(marker: Path, what: str) -> None:
+    """Block until `marker` exists, under one deadline.
+
+    Args:
+        marker: The file the actor creates.
+        what: Human-readable subject for the failure message.
+
+    Raises:
+        ScenarioError: If the marker never appears, which means the run never
+            reached the point the scenario is trying to interrupt or release.
+    """
+    limit = time.monotonic() + BARRIER_DEADLINE
+    while not marker.exists():
+        if time.monotonic() >= limit:
+            raise ScenarioError(
+                f"{what}: {marker} never appeared within {BARRIER_DEADLINE:.0f}s"
+            )
+        time.sleep(BARRIER_POLL)
+
+
+def _fill_pipe(write_fd: int) -> int:
+    """Fill a pipe to capacity and leave the descriptor blocking again.
+
+    The descriptor is handed to mtest as its stdout, so it has to be blocking
+    when the child inherits it — the flag lives on the shared open file
+    description, not on the copy.
+
+    Args:
+        write_fd: The pipe's write end.
+
+    Returns:
+        How many filler bytes were written.
+    """
+    flags = fcntl.fcntl(write_fd, fcntl.F_GETFL)
+    fcntl.fcntl(write_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+    filler = b"." * 4096
+    written = 0
+    try:
+        while True:
+            written += os.write(write_fd, filler)
+    except BlockingIOError:
+        pass
+    finally:
+        fcntl.fcntl(write_fd, fcntl.F_SETFL, flags)
+    return written
+
+
+def s_debug_interrupt_before_handoff(context: ScenarioContext) -> str:
+    """An interrupt latched before the exec is answered by mtest, not the test.
+
+    The window is real and was reachable: the two marker lines are written
+    before the handoff, and a reader that has stopped reading blocks that write
+    for as long as it likes. An interrupt arriving then used to be carried
+    straight through the exec, and the process exited with whatever the test
+    binary went on to return — a SIGINT answered with a green run.
+
+    The pipe is filled to capacity before mtest is spawned, so its marker write
+    is guaranteed to block; the actor's own ready marker says the probe has
+    finished, so the SIGINT is guaranteed to land after the preparation. Then
+    the pipe is drained, which releases the write, and mtest samples the latch
+    it was holding.
+    """
+    with tempfile.TemporaryDirectory(prefix="mtest-debug-int-") as raw:
+        project = Path(raw)
+        _debug_project(project)
+        ready = project / "probe-ready"
+        read_fd, write_fd = os.pipe()
+        errors = project / "stderr.txt"
+        filler = _fill_pipe(write_fd)
+        child_env = dict(os.environ)
+        child_env["GITHUB_ACTIONS"] = ""
+        child_env[READY_ENV] = str(ready)
+        with open(errors, "wb") as error_sink:
+            process = subprocess.Popen(
+                [
+                    os.fspath(context.runner.mtest),
+                    "debug",
+                    "tests/test_env.mojo::test_debug_environment",
+                ],
+                cwd=project,
+                stdout=write_fd,
+                stderr=error_sink,
+                env=child_env,
+                start_new_session=True,
+            )
+        os.close(write_fd)
+        try:
+            _await_marker(ready, "the --skip-all probe")
+            os.kill(process.pid, signal.SIGINT)
+            captured = b""
+            while True:
+                chunk = os.read(read_fd, 65536)
+                if not chunk:
+                    break
+                captured += chunk
+            code = process.wait(timeout=BARRIER_DEADLINE)
+        finally:
+            os.close(read_fd)
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+        text = captured[filler:].decode("utf-8", errors="replace")
+
+    expect(
+        code == 2,
+        f"an interrupt before the handoff exited {code}, want 2; mtest handed "
+        f"the terminal over while holding a latched SIGINT\n{text!r}",
+    )
+    expect(
+        "build: " in text and "run: " in text,
+        f"the interrupt landed before the marker write, so this run proves "
+        f"nothing about the handoff window: {text!r}",
+    )
+    expect(
+        "tests run:" not in text,
+        f"the test binary ran anyway, so the exec happened despite the "
+        f"latched interrupt: {text!r}",
+    )
+    return "SIGINT during the blocked marker write -> exit 2, no handoff"
+
+
+def s_debug_default_sigpipe(context: ScenarioContext) -> str:
+    """The debuggee dies of a broken pipe, which is the property that matters.
+
+    Reading the disposition out of `/proc` proves the bookkeeping and is Linux
+    only. This proves the behaviour on every platform: the reader is closed
+    after the two marker lines arrive, the debuggee is released, and its first
+    write to the dead pipe has to kill it. Under an inherited `SIG_IGN` — the
+    state a handoff that skipped the runtime close would leave — that write
+    would return `EPIPE` instead and the process would live on, which is
+    exactly how a crash comes to read as a pass.
+    """
+    with tempfile.TemporaryDirectory(prefix="mtest-debug-pipe-") as raw:
+        project = Path(raw)
+        _debug_project(project)
+        release = project / "release"
+        errors = project / "stderr.txt"
+        child_env = dict(os.environ)
+        child_env["GITHUB_ACTIONS"] = ""
+        child_env[RELEASE_ENV] = str(release)
+        with open(errors, "wb") as error_sink:
+            process = subprocess.Popen(
+                [
+                    os.fspath(context.runner.mtest),
+                    "debug",
+                    "tests/test_env.mojo::test_broken_pipe",
+                ],
+                cwd=project,
+                stdout=subprocess.PIPE,
+                stderr=error_sink,
+                env=child_env,
+                start_new_session=True,
+            )
+        reader = process.stdout
+        if reader is None:  # pragma: no cover - Popen was asked for a pipe
+            raise ScenarioError("the run was spawned without a stdout pipe")
+        try:
+            markers = [reader.readline(), reader.readline()]
+            reader.close()
+            release.write_bytes(b"go")
+            code = process.wait(timeout=BARRIER_DEADLINE)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+        detail = errors.read_text(encoding="utf-8", errors="replace")
+
+    expect(
+        markers[0].startswith(b"build: ") and markers[1].startswith(b"run: "),
+        f"the handoff was never announced: {markers!r}\n{detail}",
+    )
+    expect(
+        code == -signal.SIGPIPE,
+        f"the debuggee exited {code}, want {-signal.SIGPIPE} (death by "
+        "SIGPIPE): it inherited an ignored disposition from the exec runtime, "
+        f"so a broken pipe no longer kills it\n{detail}",
+    )
+    return "the debuggee died of SIGPIPE, so it inherited the default"
+
+
+def s_debug_inactive_config(context: ScenarioContext) -> str:
+    """Report destinations and last-run state are never acted on under debug.
+
+    Both halves are black-box, because both are about files that must not
+    appear or change. The project asks for a JUnit report and a JSON stream and
+    carries a last-run state file with known bytes; after a successful handoff
+    neither destination exists and the state is byte-identical.
+
+    The second half pins the boundary the contract now states explicitly:
+    inactive is not unparsed. A malformed value in an inactive table is still a
+    usage error, because the document is validated before any command
+    projection exists — the same answer `run` and `collect` give.
+    """
+    with tempfile.TemporaryDirectory(prefix="mtest-debug-cfg-") as raw:
+        project = Path(raw)
+        _debug_project(project)
+        (project / ".mtest-cache").mkdir()
+        state = project / ".mtest-cache" / "lastrun"
+        state.write_bytes(b"mtest-lastrun v1\ntest\ttests/gone.mojo::test_x\n")
+        before = state.read_bytes()
+        config = project / "mtest.toml"
+        config.write_text(
+            '[report]\njunit-xml = "report.xml"\njson = "stream.ndjson"\n',
+            encoding="utf-8",
+        )
+        runner = E2ERunner(
+            repo_root=project,
+            mtest=context.runner.mtest,
+            default_timeout=context.runner.default_timeout,
+            short_timeout=context.runner.short_timeout,
+        )
+        run = runner.run_mtest(["debug", "tests/test_env.mojo::test_debug_environment"])
+        expect_exit(run, 0)
+        _marker_lines(run)
+        expect(
+            not (project / "report.xml").exists(),
+            "a configured JUnit destination was created by a command that "
+            "renders no report",
+        )
+        expect(
+            not (project / "stream.ndjson").exists(),
+            "a configured stream destination was created by a command that "
+            "emits no events",
+        )
+        expect(
+            state.read_bytes() == before,
+            f"the last-run state changed under debug: {state.read_bytes()!r}",
+        )
+
+        config.write_text('[report]\ncolor = "not-a-color"\n', encoding="utf-8")
+        malformed = runner.run_mtest(
+            ["debug", "tests/test_env.mojo::test_debug_environment"]
+        )
+        expect_exit(malformed, 4)
+        expect(
+            "color" in malformed.stderr,
+            f"the document diagnostic does not name the offending key: "
+            f"{malformed.stderr!r}",
+        )
+    return "no report written, lastrun untouched, malformed document still 4"

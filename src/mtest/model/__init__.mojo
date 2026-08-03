@@ -47,6 +47,7 @@ from mtest.model.exit_code import (
     EXIT_SUCCESS,
     EXIT_FAILURE,
     EXIT_NOTHING_RAN,
+    EXIT_INTERRUPTED,
     EXIT_INTERNAL_ERROR,
 )
 from mtest.model.slow import SLOW_THRESHOLD_SECONDS, is_slow, slow_step_label

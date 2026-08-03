@@ -22,6 +22,7 @@ from mtest.cli.flag_spec import (
     flag_specs,
 )
 from mtest.cli.parse_result import ParseResult
+from mtest.model import split_node_token
 from mtest.config import (
     AnnotationsMode,
     CliOverlay,
@@ -77,8 +78,9 @@ def help_text() -> String:
         "       mtest config show [PATHS...] [flags] [-- BUILD-ARGS...]\n",
         (
             "       mtest doctor [--config PATH | --no-config]"
-            " [--color WHEN] [-q | -v]\n\n"
+            " [--color WHEN] [-q | -v]\n"
         ),
+        "       mtest debug PATH::TEST [build flags] [-- BUILD-ARGS...]\n\n",
         "Subcommands:\n",
     )
     rendered += _help_row(
@@ -93,6 +95,9 @@ def help_text() -> String:
     )
     rendered += _help_row(
         "doctor [flags]", "Diagnose the environment without running tests."
+    )
+    rendered += _help_row(
+        "debug PATH::TEST", "Run one test with the terminal handed over."
     )
     rendered += _help_row("help", "Show this help and exit.")
     rendered += _help_row("version", "Show the version and exit.")
@@ -395,6 +400,254 @@ def _lookup(name: String) -> Optional[FlagSpec]:
     return Optional[FlagSpec](None)
 
 
+def _debug_refusal(name: String, id: Int) -> Error:
+    """The usage error for a flag `debug` does not accept.
+
+    Two refusals carry their reason, because the reason is not guessable from
+    the flag: a command that replaces the mtest process leaves nothing behind
+    to write a report with, and nothing to color.
+
+    Args:
+        name: The offending flag spelling, as typed.
+        id: Its `FlagId`, which decides whether a reason is attached.
+
+    Returns:
+        The complete `cli:`-prefixed usage error.
+    """
+    var body = "'" + name + "' cannot be combined with 'debug'"
+    if (
+        id == FlagId.JSON
+        or id == FlagId.JUNIT_XML
+        or id == FlagId.GH_ANNOTATIONS
+    ):
+        return _err(
+            body
+            + ": debug replaces the mtest process, so no terminal record could"
+            " be written"
+        )
+    if id == FlagId.COLOR:
+        return _err(
+            body
+            + ": debug replaces the mtest process, so there is no reporter to"
+            " color"
+        )
+    return _err(body)
+
+
+def _debug_accepts(id: Int) -> Bool:
+    """Whether `debug`'s grammar accepts this flag identity.
+
+    The single gate, consulted before a flag's value is consumed. Deciding it
+    inside the arity branches instead let `debug NODE --json` report a missing
+    value and never state why the flag is refused at all, which is exactly the
+    explanation the refusal exists to give.
+
+    Args:
+        id: The matched `FlagId`.
+
+    Returns:
+        True for `--help`, the configuration controls, `-q`/`-v`, and the three
+        build controls; False for every other flag.
+    """
+    return (
+        id == FlagId.HELP
+        or id == FlagId.NO_CONFIG
+        or id == FlagId.QUIET
+        or id == FlagId.VERBOSE
+        or id == FlagId.CONFIG
+        or id == FlagId.INCLUDE
+        or id == FlagId.BUILD_ARG
+        or id == FlagId.MOJO
+    )
+
+
+def _err_debug_operand() -> Error:
+    """The usage error for anything but exactly one node-id operand."""
+    return _err("'debug' wants exactly one PATH::TEST node id")
+
+
+def _parse_debug(argv: List[String]) raises -> ParseResult:
+    """Parse the `debug` tail: one node id plus the build controls.
+
+    `debug` prepares one test and then becomes it, so its grammar is the
+    narrowest in the parser: exactly one `PATH::TEST` operand, the flags that
+    decide how that file is compiled (`--mojo`, `-I`, `--build-arg`, and
+    post-`--` passthrough), the configuration controls, and `-q`/`-v`.
+    Everything else is refused rather than accepted-and-ignored, because a
+    silently dropped `--retries` or `--json` would promise something the
+    handoff cannot deliver.
+
+    Args:
+        argv: The complete argument vector; the `debug` head token is skipped.
+
+    Returns:
+        A result whose `kind` is `DEBUG`, or the help directive when `--help`
+        appears anywhere in the tail.
+
+    Raises:
+        Error: A `cli:`-prefixed usage error for a missing, malformed, plain,
+            or repeated operand, an unknown flag, a missing value, a forbidden
+            build argument, `-q` with `-v`, `--config` with `--no-config`, or
+            any flag outside the accepted set.
+    """
+    var operand = String("")
+    var saw_operand = False
+    var include_paths = List[String]()
+    var saw_include = False
+    var build_args = List[String]()
+    var saw_build_args = False
+    var mojo_flag = Optional[String](None)
+    var saw_mojo = False
+    var config_path = String("")
+    var saw_config = False
+    var no_config = False
+    var saw_quiet = False
+    var saw_verbose = False
+    var passthrough = False
+
+    var i = 1
+    while i < len(argv):
+        var tok = argv[i]
+
+        if passthrough:
+            _check_build_arg(tok)
+            build_args.append(tok)
+            saw_build_args = True
+            i += 1
+            continue
+
+        if tok == "--":
+            passthrough = True
+            i += 1
+            continue
+
+        if not tok.startswith("-") or tok == "-":
+            var split = split_node_token(tok)
+            if (
+                saw_operand
+                or split.sep_count != 1
+                or split.file_part == ""
+                or split.name_part == ""
+            ):
+                raise _err_debug_operand()
+            operand = tok
+            saw_operand = True
+            i += 1
+            continue
+
+        var name = tok
+        var has_inline = False
+        var inline_val = String("")
+        if tok.find("=") != -1:
+            var parts = tok.split("=", 1)
+            name = String(parts[0])
+            inline_val = String(parts[1])
+            has_inline = True
+
+        if (
+            not name.startswith("--")
+            and name.byte_length() > 2
+            and not has_inline
+        ):
+            raise _err(
+                "short flags cannot be bundled: '"
+                + tok
+                + "'; pass them separately like '-q -I src'"
+            )
+
+        var spec = _lookup(name)
+        if not spec:
+            raise _err("unknown flag '" + name + "'")
+        var s = spec.value().copy()
+        # Before the value: a refused flag's message must say WHY it is
+        # refused, and a `--json` with no value would otherwise be reported as
+        # a missing value instead.
+        if not _debug_accepts(s.id):
+            raise _debug_refusal(name, s.id)
+
+        if s.arity == 0:
+            if has_inline:
+                raise _err(
+                    "flag '"
+                    + s.spelling
+                    + "' takes no value, got '"
+                    + tok
+                    + "'"
+                )
+            if s.id == FlagId.HELP:
+                return ParseResult.show_help()
+            if s.id == FlagId.NO_CONFIG:
+                no_config = True
+            elif s.id == FlagId.QUIET:
+                saw_quiet = True
+            elif s.id == FlagId.VERBOSE:
+                saw_verbose = True
+            else:
+                raise _debug_refusal(name, s.id)
+            i += 1
+            continue
+
+        var value: String
+        if has_inline:
+            value = inline_val
+        else:
+            if i + 1 >= len(argv):
+                raise _err("'" + name + "' requires a value")
+            value = argv[i + 1]
+            i += 1
+        i += 1
+
+        if s.id == FlagId.INCLUDE:
+            _check_build_arg(value)
+            include_paths.append(value)
+            saw_include = True
+        elif s.id == FlagId.BUILD_ARG:
+            _check_build_arg(value)
+            build_args.append(value)
+            saw_build_args = True
+        elif s.id == FlagId.MOJO:
+            mojo_flag = value
+            saw_mojo = True
+        elif s.id == FlagId.CONFIG:
+            if value == "":
+                raise _err("'--config' requires a non-empty path")
+            config_path = value
+            saw_config = True
+        else:
+            raise _debug_refusal(name, s.id)
+
+    if not saw_operand:
+        raise _err_debug_operand()
+    if saw_config and no_config:
+        raise _err("'--config' and '--no-config' are mutually exclusive")
+    if saw_quiet and saw_verbose:
+        raise _err("'-q' and '-v' are mutually exclusive")
+
+    var verbosity = Verbosity.NORMAL
+    if saw_quiet:
+        verbosity = Verbosity.QUIET
+    elif saw_verbose:
+        verbosity = Verbosity.VERBOSE
+
+    var overlay_mojo = String("mojo")
+    if mojo_flag:
+        overlay_mojo = mojo_flag.value()
+    var overlay = CliOverlay.default()
+    overlay.mojo_path = overlay_mojo^
+    overlay.saw_mojo = saw_mojo
+    overlay.include_paths = include_paths^
+    overlay.saw_include = saw_include
+    overlay.build_args = build_args^
+    overlay.saw_build_args = saw_build_args
+    overlay.verbosity = verbosity
+    overlay.saw_verbosity = saw_quiet or saw_verbose
+
+    var defaults = RunnerConfig.default()
+    defaults.mojo_path = resolve_mojo_path(Optional[String](None), _env_mojo())
+    var cfg = overlay.fold(defaults)
+    return ParseResult.debug(cfg^, overlay^, operand^, config_path^, no_config)
+
+
 def parse_args(argv: List[String]) raises -> ParseResult:
     """Parse `argv` into a run, config-display, doctor, help, or version result.
 
@@ -415,8 +668,8 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         argv: The argument tokens, excluding the program name.
 
     Returns:
-        A configured run, config-display request, doctor request, or
-        help/version directive.
+        A configured run, config-display request, doctor request, debug
+        request, or help/version directive.
 
     Raises:
         Error: A `cli:`-prefixed usage error, raised for an unknown flag, a
@@ -458,6 +711,11 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         if head == "doctor":
             doctor = True
             start = 1
+        if head == "debug":
+            # `debug` owns its own tail walk: its grammar accepts a handful of
+            # build controls and refuses everything else by name, which the
+            # general loop would have to unlearn flag by flag.
+            return _parse_debug(argv)
         if head == "config":
             if len(argv) < 2 or argv[1] != "show":
                 raise _err(
@@ -582,7 +840,6 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         if not spec:
             raise _err("unknown flag '" + name + "'")
         var s = spec.value().copy()
-
         if s.arity == 0:
             if has_inline:
                 raise _err(

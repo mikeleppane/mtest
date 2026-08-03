@@ -16,6 +16,7 @@ from mtest.session.session import (
     run_session_with_state,
 )
 from mtest.session.collect import CollectResult, run_collect
+from mtest.session.debug import DebugOutcome, DebugPlan, prepare_debug
 from mtest.session.effective_settings import (
     EffectiveFileSettings,
     effective_file_settings,

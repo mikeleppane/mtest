@@ -613,6 +613,7 @@ class CheckRosterTests(unittest.TestCase):
                 "report: --json to a readerless FIFO fails fast, never blocks",
                 "path: a long-but-legal path builds, never a false COMPILE-ERROR",
                 "flaky: --fail-on-flaky turns a FLAKY-only run's 0 into 1",
+                "debug: the handoff is the test's own exit, with no mtest verdict",
                 "interrupt: SIGINT frees the owned process group",
             ],
         )
@@ -733,6 +734,11 @@ class CheckRosterTests(unittest.TestCase):
             def check_fail_on_flaky(self) -> None:
                 self._perform(
                     "flaky: --fail-on-flaky turns a FLAKY-only run's 0 into 1"
+                )
+
+            def check_debug_handoff(self) -> None:
+                self._perform(
+                    "debug: the handoff is the test's own exit, with no mtest verdict"
                 )
 
             def check_interrupt(self, _strict: bool) -> None:

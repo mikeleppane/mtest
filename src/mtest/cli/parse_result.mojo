@@ -1,9 +1,9 @@
 """`ParseResult`: what a successful parse produces.
 
-Parsing either yields a configured run, `config show`, or `doctor` request with
-both its typed argv overlay and defaults-folded compatibility config, or a
-non-error directive to print help or the version. A usage error is not a
-`ParseResult`: it is raised. `main` handles each result; this layer never
+Parsing either yields a configured run, `config show`, `doctor`, or `debug`
+request with both its typed argv overlay and defaults-folded compatibility
+config, or a non-error directive to print help or the version. A usage error is
+not a `ParseResult`: it is raised. `main` handles each result; this layer never
 prints or exits.
 """
 from mtest.config import CliOverlay, RunnerConfig
@@ -13,9 +13,10 @@ from mtest.config import CliOverlay, RunnerConfig
 struct ParseResult(Copyable, Movable):
     """The outcome of a successful parse.
 
-    A tagged union over `kind`. For `RUN`, `CONFIG_SHOW`, and `DOCTOR`,
-    `overlay` holds argv presence and values while `config` holds their
-    defaults-folded compatibility view. Only help and version carry
+    A tagged union over `kind`. For `RUN`, `CONFIG_SHOW`, `DOCTOR`, and
+    `DEBUG`, `overlay` holds argv presence and values while `config` holds
+    their defaults-folded compatibility view. `DEBUG` additionally carries the
+    one node id it was given in `operand`. Only help and version carry
     placeholder fields.
 
     Examples:
@@ -45,11 +46,19 @@ struct ParseResult(Copyable, Movable):
     var no_config: Bool
     """Whether configuration-file discovery is explicitly disabled."""
 
+    var operand: String
+    """The single `PATH::TEST` node id a `DEBUG` result names; empty otherwise.
+
+    It is kept out of `config.paths` on purpose: the debug preparation owns
+    the operand and resolves it against a projection in which a project file's
+    own path list never participates."""
+
     comptime RUN = 0
     comptime SHOW_HELP = 1
     comptime SHOW_VERSION = 2
     comptime CONFIG_SHOW = 3
     comptime DOCTOR = 4
+    comptime DEBUG = 5
 
     @staticmethod
     def run(
@@ -77,6 +86,7 @@ struct ParseResult(Copyable, Movable):
             overlay=overlay^,
             config_path=config_path,
             no_config=no_config,
+            operand=String(""),
         )
 
     @staticmethod
@@ -88,6 +98,7 @@ struct ParseResult(Copyable, Movable):
             overlay=CliOverlay.default(),
             config_path="",
             no_config=False,
+            operand=String(""),
         )
 
     @staticmethod
@@ -99,6 +110,7 @@ struct ParseResult(Copyable, Movable):
             overlay=CliOverlay.default(),
             config_path="",
             no_config=False,
+            operand=String(""),
         )
 
     @staticmethod
@@ -125,6 +137,7 @@ struct ParseResult(Copyable, Movable):
             overlay=overlay^,
             config_path=config_path,
             no_config=no_config,
+            operand=String(""),
         )
 
     @staticmethod
@@ -151,6 +164,36 @@ struct ParseResult(Copyable, Movable):
             overlay=overlay^,
             config_path=config_path,
             no_config=no_config,
+            operand=String(""),
+        )
+
+    @staticmethod
+    def debug(
+        var config: RunnerConfig,
+        var overlay: CliOverlay,
+        var operand: String,
+        config_path: String = "",
+        no_config: Bool = False,
+    ) -> ParseResult:
+        """A result asking `main` to prepare one test and hand over the terminal.
+
+        Args:
+            config: The parsed build configuration. Consumed.
+            overlay: The typed argv overlay. Consumed.
+            operand: The `PATH::TEST` node id to debug. Consumed.
+            config_path: The explicit configuration path, or empty to discover.
+            no_config: Whether to skip configuration discovery.
+
+        Returns:
+            A result whose `kind` is `DEBUG`.
+        """
+        return ParseResult(
+            kind=Self.DEBUG,
+            config=config^,
+            overlay=overlay^,
+            config_path=config_path,
+            no_config=no_config,
+            operand=operand^,
         )
 
     def is_run(self) -> Bool:
@@ -172,3 +215,7 @@ struct ParseResult(Copyable, Movable):
     def is_doctor(self) -> Bool:
         """Whether this result asks to diagnose the local mtest environment."""
         return self.kind == Self.DOCTOR
+
+    def is_debug(self) -> Bool:
+        """Whether this result asks to hand the terminal to one test."""
+        return self.kind == Self.DEBUG

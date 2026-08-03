@@ -627,6 +627,65 @@ def test_collect_projection_excludes_run_and_report_only_keys() raises:
     assert_false(Bool(validate_resolved_config(resolved)))
 
 
+def test_debug_projection_keeps_only_the_build_keys_and_the_deadlines() raises:
+    """Every field pinned, because a flipped bit is silent.
+
+    `debug` replaces the mtest process, so an accidentally active report key
+    would resolve a destination nothing will ever write, and an active `state`
+    would read and rewrite `lastrun` for a command that reports nothing. The
+    projection is the only thing standing between those and the code, and it is
+    selected by `main` rather than by a `RunnerConfig` field, so nothing else
+    in this layer would notice it drifting.
+    """
+    var keys = ActiveConfigKeys.debug()
+
+    assert_false(keys.paths)
+    assert_false(keys.excludes)
+    assert_false(keys.gates)
+    assert_false(keys.serial_globs)
+    assert_false(keys.workers)
+    assert_true(keys.timeout_secs)
+    assert_false(keys.retries)
+    assert_false(keys.maxfail)
+    assert_false(keys.fail_on_flaky)
+    assert_false(keys.state)
+    assert_true(keys.mojo_path)
+    assert_true(keys.include_paths)
+    assert_true(keys.build_args)
+    assert_true(keys.precompiles)
+    assert_true(keys.compile_timeout_secs)
+    assert_false(keys.color)
+    assert_false(keys.show_output)
+    assert_false(keys.verbosity)
+    assert_false(keys.durations)
+    assert_false(keys.junit_dest)
+    assert_false(keys.json_dest)
+    assert_false(keys.gh_annotations)
+
+
+def test_debug_projection_makes_the_stdout_stream_conflict_inert() raises:
+    """The one cross-key rule must not fire for a command that opens neither.
+
+    `--json -` beside the annotation tail is a usage error for a run because
+    both want stdout. Under `debug` neither exists, so the same resolved values
+    must validate cleanly — this is what stops a project file's reporter
+    settings from refusing a command that would never have used them.
+    """
+    var file = FileConfig.empty()
+    file.json_dest = "-"
+    file.saw_json = True
+    var resolved = resolve_config(
+        RunnerConfig.default(),
+        file,
+        ConfigEnvironment.empty(),
+        CliOverlay.default(),
+    )
+    assert_true(Bool(validate_resolved_config(resolved)))
+
+    resolved.active_keys = ActiveConfigKeys.debug()
+    assert_false(Bool(validate_resolved_config(resolved)))
+
+
 def test_run_cross_value_validation_names_each_value_where_it_was_set() raises:
     """The remedy must be one the reader can act on.
 
