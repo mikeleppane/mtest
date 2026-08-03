@@ -42,12 +42,14 @@ from mtest.model.events import (
     TestReportedPayload,
 )
 from mtest.platform import close_checked_fd, rename_path, write_all_bytes_fd
+from mtest.report.file_accum import FileAccums
 from mtest.report.junit import bounded_text_from_bytes
 from mtest.report.report_html import (
     html_document_close,
     html_document_open,
     html_file_section,
     html_machine_index,
+    html_not_run_heading,
     html_not_run_line,
     html_summary_row,
 )
@@ -55,6 +57,7 @@ from mtest.report.report_md import (
     md_file_section,
     md_header,
     md_machine_index,
+    md_not_run_heading,
     md_not_run_line,
     md_summary_row,
     md_summary_table_header,
@@ -154,18 +157,6 @@ struct _SpoolEntry(Copyable, Movable):
 
 
 @fieldwise_init
-struct _FileAccum(Copyable, Movable):
-    """The per-file state accumulated between FileStarted and FileFinished."""
-
-    var path: String
-    """The file this accumulator belongs to."""
-    var tests: List[TestResult]
-    """The per-test results reported for it, in arrival order."""
-    var attempts: List[String]
-    """One bounded one-line summary per non-final retry attempt, in order."""
-
-
-@fieldwise_init
 struct _SinkOutcome(Copyable, Movable):
     """One sink's finalize verdict, before the two are paired into a result."""
 
@@ -237,6 +228,35 @@ def _build_line(argv: List[String]) -> String:
     return out^
 
 
+def _sorted_indices(keys: List[String]) -> List[Int]:
+    """The permutation that puts `keys` in ascending order.
+
+    One insertion sort for every ordered thing the document has — the summary
+    rows, each sink's spooled sections, and the not-run reasons — so a section
+    can never land in a different order from the row that announced it. Stable
+    and comparison-based over the same `String` ordering, which is what makes
+    "the sections are in the rows' order" a property of one function rather
+    than an agreement between three.
+
+    Args:
+        keys: The sort keys, in their arrival order. Not mutated.
+
+    Returns:
+        Indices into `keys`, ordered so `keys[result[i]]` is ascending.
+    """
+    var order = List[Int]()
+    for i in range(len(keys)):
+        order.append(i)
+    for i in range(1, len(order)):
+        var j = i
+        while j > 0 and keys[order[j]] < keys[order[j - 1]]:
+            var t = order[j]
+            order[j] = order[j - 1]
+            order[j - 1] = t
+            j -= 1
+    return order^
+
+
 def _sink_label(fmt: Int) -> String:
     """The format's name, as it appears in a failure diagnostic."""
     return String("markdown") if fmt == _FORMAT_MD else String("html")
@@ -274,7 +294,12 @@ struct ReportWriter(Reporter):
     a section."""
     var _spool_dir: String
     """The existing session temp directory the section fragments are written
-    to; empty when inert."""
+    to; empty when inert.
+
+    The writer neither creates nor removes it: `main` creates it before the run
+    and removes it, fragments and all, on the way out, exactly as it owns the
+    JUnit spool. A fragment left here after a failed sink is therefore cleaned
+    up with the rest of the directory rather than one file at a time."""
     var _root: String
     """The run root every section relativizes a compiler-baked `At <path>`
     line against, the same root every other reporter was given."""
@@ -295,8 +320,12 @@ struct ReportWriter(Reporter):
     """The HTML sections spooled so far, in arrival order."""
     var _not_run: List[NotRunRecord]
     """The not-run records that survived the row-index filter."""
-    var _accums: List[_FileAccum]
-    """The in-flight per-file accumulators, keyed by path."""
+    var _accums: FileAccums[String]
+    """The in-flight per-file accumulators, keyed by path.
+
+    The same mechanism `JunitReporter` keeps, parameterized by what an attempt
+    record is: this writer keeps the composed one-line summary, the JUnit
+    reporter a typed struct it renders later."""
 
     def __init__(
         out self,
@@ -332,7 +361,7 @@ struct ReportWriter(Reporter):
         self._md_spool = List[_SpoolEntry]()
         self._html_spool = List[_SpoolEntry]()
         self._not_run = List[NotRunRecord]()
-        self._accums = List[_FileAccum]()
+        self._accums = FileAccums[String].empty()
 
     @staticmethod
     def inert() -> Self:
@@ -363,17 +392,17 @@ struct ReportWriter(Reporter):
         if not self.active():
             return
         if e.kind == EventKind.FILE_STARTED:
-            self._reset_accum(e.data[FileStartedPayload].path)
+            self._accums.reset(e.data[FileStartedPayload].path)
             return
         if e.kind == EventKind.TEST_REPORTED:
             ref tr = e.data[TestReportedPayload]
-            var idx = self._ensure_accum(tr.path)
-            self._accums[idx].tests.append(tr.test.copy())
+            var idx = self._accums.ensure(tr.path)
+            self._accums.items[idx].tests.append(tr.test.copy())
             return
         if e.kind == EventKind.ATTEMPT_FINISHED:
             ref a = e.data[AttemptFinishedPayload]
-            var idx = self._ensure_accum(a.path)
-            self._accums[idx].attempts.append(_attempt_line(a))
+            var idx = self._accums.ensure(a.path)
+            self._accums.items[idx].attempts.append(_attempt_line(a))
             return
         if e.kind == EventKind.FILE_FINISHED:
             self._finish_file(e.data[FileFinishedPayload])
@@ -509,17 +538,28 @@ struct ReportWriter(Reporter):
         return _SinkOutcome(False, "")
 
     def _release(mut self, fmt: Int, detail: String):
-        """Mark one sink's descriptor released, recording any first failure."""
+        """Mark one sink's descriptor released, recording the final failure.
+
+        A non-empty `detail` REPLACES whatever a fragment-write latch recorded
+        earlier, because this one is the finalize-level diagnostic the caller
+        was handed. Storing the same string is what lets a second
+        `finalize_reports` answer with the first call's result rather than the
+        raw latch text underneath it.
+
+        Args:
+            fmt: Which sink to release.
+            detail: The finalize diagnostic, or `""` when the sink published.
+        """
         if fmt == _FORMAT_MD:
             if self._md:
                 self._md.value().fd = -1
-                if detail != "" and not self._md.value().failed:
+                if detail != "":
                     self._md.value().failed = True
                     self._md.value().detail = detail.copy()
             return
         if self._html:
             self._html.value().fd = -1
-            if detail != "" and not self._html.value().failed:
+            if detail != "":
                 self._html.value().failed = True
                 self._html.value().detail = detail.copy()
 
@@ -554,6 +594,13 @@ struct ReportWriter(Reporter):
             self._stream_sections(fd, self._html_spool)
 
         var reasons = self._sorted_not_run_order()
+        if len(reasons) > 0:
+            # Only when a list actually follows: a run where every selected
+            # file produced a verdict carries no empty section.
+            if fmt == _FORMAT_MD:
+                self._write(fd, md_not_run_heading())
+            else:
+                self._write(fd, html_not_run_heading())
         for i in range(len(reasons)):
             ref record = self._not_run[reasons[i]]
             if fmt == _FORMAT_MD:
@@ -595,52 +642,24 @@ struct ReportWriter(Reporter):
 
     def _sorted_row_order(self) -> List[Int]:
         """Row indices in sorted path order; the document's one order."""
-        var order = List[Int]()
+        var keys = List[String]()
         for i in range(len(self._rows)):
-            order.append(i)
-        for i in range(1, len(order)):
-            var j = i
-            while (
-                j > 0
-                and self._rows[order[j]].path < self._rows[order[j - 1]].path
-            ):
-                var t = order[j]
-                order[j] = order[j - 1]
-                order[j - 1] = t
-                j -= 1
-        return order^
+            keys.append(self._rows[i].path.copy())
+        return _sorted_indices(keys)
 
     def _sorted_spool_order(self, spool: List[_SpoolEntry]) -> List[Int]:
         """Fragment indices in sorted key order, matching the row order."""
-        var order = List[Int]()
+        var keys = List[String]()
         for i in range(len(spool)):
-            order.append(i)
-        for i in range(1, len(order)):
-            var j = i
-            while j > 0 and spool[order[j]].key < spool[order[j - 1]].key:
-                var t = order[j]
-                order[j] = order[j - 1]
-                order[j - 1] = t
-                j -= 1
-        return order^
+            keys.append(spool[i].key.copy())
+        return _sorted_indices(keys)
 
     def _sorted_not_run_order(self) -> List[Int]:
         """Record indices in sorted path order, so the reasons read stably."""
-        var order = List[Int]()
+        var keys = List[String]()
         for i in range(len(self._not_run)):
-            order.append(i)
-        for i in range(1, len(order)):
-            var j = i
-            while (
-                j > 0
-                and self._not_run[order[j]].path
-                < self._not_run[order[j - 1]].path
-            ):
-                var t = order[j]
-                order[j] = order[j - 1]
-                order[j - 1] = t
-                j -= 1
-        return order^
+            keys.append(self._not_run[i].path.copy())
+        return _sorted_indices(keys)
 
     def _has_row(self, path: String) -> Bool:
         """Whether a summary row already exists for `path`."""
@@ -648,40 +667,6 @@ struct ReportWriter(Reporter):
             if self._rows[i].path == path:
                 return True
         return False
-
-    def _accum_index(self, path: String) -> Int:
-        """The index of `path`'s accumulator, or -1 if none exists yet."""
-        for i in range(len(self._accums)):
-            if self._accums[i].path == path:
-                return i
-        return -1
-
-    def _ensure_accum(mut self, path: String) -> Int:
-        """The index of `path`'s accumulator, creating one if absent."""
-        var idx = self._accum_index(path)
-        if idx >= 0:
-            return idx
-        self._accums.append(
-            _FileAccum(path.copy(), List[TestResult](), List[String]())
-        )
-        return len(self._accums) - 1
-
-    def _reset_accum(mut self, path: String):
-        """Begin a fresh accumulator for `path`, discarding any stale one."""
-        var idx = self._accum_index(path)
-        if idx >= 0:
-            self._accums[idx].tests = List[TestResult]()
-            self._accums[idx].attempts = List[String]()
-            return
-        self._accums.append(
-            _FileAccum(path.copy(), List[TestResult](), List[String]())
-        )
-
-    def _drop_accum(mut self, path: String):
-        """Remove `path`'s accumulator once its section has been rendered."""
-        var idx = self._accum_index(path)
-        if idx >= 0:
-            _ = self._accums.pop(idx)
 
     def _reproduce_target(self, accum_idx: Int, path: String) -> String:
         """The section's single reproduce/debug target for one file.
@@ -693,8 +678,8 @@ struct ReportWriter(Reporter):
         """
         var failing = 0
         var node = String("")
-        for i in range(len(self._accums[accum_idx].tests)):
-            ref t = self._accums[accum_idx].tests[i]
+        for i in range(len(self._accums.items[accum_idx].tests)):
+            ref t = self._accums.items[accum_idx].tests[i]
             if t.outcome == Outcome.FAIL:
                 failing += 1
                 node = t.node.render()
@@ -705,7 +690,7 @@ struct ReportWriter(Reporter):
     def _finish_file(mut self, e: FileFinishedPayload):
         """Record one finished file's row and, when it earns one, its section.
         """
-        var idx = self._ensure_accum(e.path)
+        var idx = self._accums.ensure(e.path)
         var repro = self._reproduce_target(idx, e.path)
         self._rows.append(
             ReportRow(
@@ -722,22 +707,22 @@ struct ReportWriter(Reporter):
         if self._style == REPORT_STYLE_CONCISE and not needs_action(
             e.outcome.code
         ):
-            self._drop_accum(e.path)
+            self._accums.drop(e.path)
             return
         var section = ReportSectionInput(
             e.path.copy(),
             self._root.copy(),
             e.outcome.code,
-            self._accums[idx].tests.copy(),
+            self._accums.items[idx].tests.copy(),
             bounded_text_from_bytes(e.captured_stdout),
             bounded_text_from_bytes(e.captured_stderr),
             e.stdout_truncated,
             e.stderr_truncated,
-            self._accums[idx].attempts.copy(),
+            self._accums.items[idx].attempts.copy(),
             _build_line(e.build_argv),
             repro^,
         )
-        self._drop_accum(e.path)
+        self._accums.drop(e.path)
         self._spool_section(section, e.path)
 
     def _finish_precompile(mut self, e: PrecompileFailedPayload):

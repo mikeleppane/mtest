@@ -233,8 +233,8 @@ def test_not_run_records_drop_paths_that_already_produced_a_row() raises:
     )
     var label = not_run_reason_label(NotRunReason.LIMIT_REACHED)
     assert_true(
-        "- tests/test_b.mojo: " + label in body,
-        "the not-run reason line is missing",
+        "## Not run\n\n- tests/test_b.mojo: " + label in body,
+        "the reason line is missing, or floats without its heading",
     )
     assert_false(
         "- tests/test_a.mojo: " in body,
@@ -287,7 +287,14 @@ def test_finalize_failure_leaves_a_prior_report_byte_identical() raises:
 
     assert_true(result.md_failed, "a failed rename must report the sink failed")
     assert_true(
-        result.md_detail.byte_length() > 0, "a failed sink names a diagnostic"
+        result.md_detail.startswith("run report (markdown) could not be"),
+        "the diagnostic must name the markdown sink and the failed step: "
+        + result.md_detail,
+    )
+    assert_true(
+        "published" in result.md_detail,
+        "the diagnostic must name the failed publish, not another step: "
+        + result.md_detail,
     )
     assert_equal(_read(target), prior, "the prior report was not preserved")
 
@@ -314,9 +321,22 @@ def test_a_latched_sink_fails_while_its_sibling_publishes() raises:
 
     assert_true(result.md_failed, "the latched markdown sink must fail")
     assert_true(
-        result.md_detail.byte_length() > 0, "the latch carries a diagnostic"
+        result.md_detail.startswith(
+            "run report (markdown) section spool failed: section"
+            " tests/test_b.mojo:"
+        ),
+        "the diagnostic must name the sink and the section that could not be"
+        " spooled: "
+        + result.md_detail,
     )
     assert_false(exists(md_target), "a latched sink must publish nothing")
+    # A second finalize repeats the FIRST call's diagnostic verbatim rather
+    # than the raw latch text underneath it.
+    var again = w.finalize_reports(_ctx())
+    assert_true(again.md_failed, "the latch does not clear")
+    assert_equal(
+        again.md_detail, result.md_detail, "a second finalize changed the story"
+    )
     assert_false(result.html_failed, "the healthy html sink must publish")
     assert_equal(result.html_detail, "", "a clean sink carries no diagnostic")
     var body = _read(html_target)
@@ -402,6 +422,89 @@ def test_precompile_failure_earns_its_own_section() raises:
         "## `src/pkg` — PRECOMPILE_ERROR" in body, "no precompile section"
     )
     assert_true("error: cannot compile" in body, "no compiler output")
+
+
+def test_no_surviving_record_renders_no_not_run_heading() raises:
+    # Every selected file produced a verdict, so the whole not-run block —
+    # heading included — is absent rather than an empty section.
+    var dir = temp_root()
+    var md_target = dir + "/report.md"
+    var html_target = dir + "/report.html"
+    var w = ReportWriter(
+        _facts(),
+        REPORT_STYLE_CONCISE,
+        _artifact(md_target),
+        _artifact(html_target),
+        temp_root(),
+        "/run/root",
+    )
+    _pass_file(w, "tests/test_a.mojo")
+    w.note_not_run_records(
+        [NotRunRecord("tests/test_a.mojo", NotRunReason.LIMIT_REACHED)]
+    )
+    var result = w.finalize_reports(_ctx())
+
+    assert_false(result.md_failed)
+    assert_false(result.html_failed)
+    assert_false("## Not run" in _read(md_target), "an empty not-run section")
+    # The class name also appears in the stylesheet every document carries, so
+    # this looks for the ROW rather than the selector.
+    assert_false(
+        '<tr class="not-run-heading">' in _read(html_target),
+        "an empty not-run section",
+    )
+
+
+def test_not_run_heading_precedes_the_reason_rows_in_html() raises:
+    var dir = temp_root()
+    var target = dir + "/report.html"
+    var w = ReportWriter(
+        _facts(),
+        REPORT_STYLE_CONCISE,
+        _off(),
+        _artifact(target),
+        temp_root(),
+        "/run/root",
+    )
+    w.note_not_run_records(
+        [NotRunRecord("tests/test_c.mojo", NotRunReason.INTERRUPTED)]
+    )
+    _ = w.finalize_reports(_ctx())
+
+    var body = _read(target)
+    var heading = body.find('<tr class="not-run-heading">')
+    var row = body.find('<tr class="not-run">')
+    assert_true(heading >= 0, "the not-run heading row is missing")
+    assert_true(row > heading, "the heading must precede its reason rows")
+
+
+def test_a_second_finalize_neither_closes_nor_republishes() raises:
+    # The exactly-one-close property, tested rather than argued. A second close
+    # of the released descriptor would report EBADF as a sink failure, and a
+    # second rename would put the document back over the sentinel written here.
+    var dir = temp_root()
+    var target = dir + "/report.md"
+    var w = _md_writer(target, temp_root(), REPORT_STYLE_CONCISE)
+    _fail_file(w, "tests/test_b.mojo")
+    var first = w.finalize_reports(_ctx())
+    assert_false(first.md_failed, "the first finalize must publish")
+
+    var published = _read(target)
+    assert_true(published.byte_length() > 0, "nothing was published")
+    var sentinel = String("SENTINEL\n")
+    with open(target, "w") as f:
+        f.write(sentinel)
+
+    var second = w.finalize_reports(_ctx())
+    assert_false(
+        second.md_failed,
+        "a second finalize closed the released descriptor again: "
+        + second.md_detail,
+    )
+    assert_equal(second.md_detail, "", "a clean sink carries no diagnostic")
+    assert_equal(
+        _read(target), sentinel, "a second finalize republished the document"
+    )
 
 
 def test_inert_writer_does_nothing_and_finalizes_clean() raises:

@@ -87,7 +87,8 @@ comptime _REPORT_CSS: StaticString = (
     " text-align: left; vertical-align: top;"
     " }\n"
     "table.report thead { background: #8882; }\n"
-    "tr.file-section td, tr.not-run td, tr.machine-index td {"
+    "tr.file-section td, tr.not-run td, tr.not-run-heading td,"
+    " tr.machine-index td {"
     " border: none; padding: 0.35rem 0;"
     " }\n"
     "details.file {"
@@ -395,6 +396,24 @@ def html_file_section(section: ReportSectionInput, root_note: Bool) -> String:
     out += _reproduce_lines(section.reproduce_node)
     out += "</details>\n</td></tr>\n"
     return out^
+
+
+def html_not_run_heading() -> String:
+    """The heading a document's not-run reason rows are introduced by.
+
+    The Markdown renderer's `md_not_run_heading` in this document's syntax:
+    one self-contained `<tr>` spanning every column, so it nests inside the
+    same `<tbody>` every other fragment does. Emitted by the caller only when
+    at least one `html_not_run_line` follows.
+
+    Returns:
+        One complete `<tr>`, newline-terminated.
+    """
+    return (
+        '<tr class="not-run-heading"><td colspan="'
+        + String(_SUMMARY_COLS)
+        + '">\n<h2>Not run</h2>\n</td></tr>\n'
+    )
 
 
 def html_not_run_line(record: NotRunRecord) -> String:

@@ -74,10 +74,12 @@ from mtest.report.report_md import (
     md_file_section,
     md_header,
     md_machine_index,
+    md_not_run_heading,
     md_not_run_line,
     md_summary_row,
     md_summary_table_header,
 )
+from mtest.report.file_accum import FileAccum, FileAccums
 from mtest.report.report_writer import (
     REPORT_STYLE_CONCISE,
     REPORT_STYLE_FULL,
@@ -90,6 +92,7 @@ from mtest.report.report_html import (
     html_document_open,
     html_file_section,
     html_machine_index,
+    html_not_run_heading,
     html_not_run_line,
     html_summary_row,
 )

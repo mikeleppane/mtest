@@ -246,6 +246,19 @@ def md_file_section(section: ReportSectionInput, root_note: Bool) -> String:
     return out^
 
 
+def md_not_run_heading() -> String:
+    """The heading a document's not-run reason list is introduced by.
+
+    Emitted by the caller only when at least one `md_not_run_line` follows, so
+    a run where every selected file produced a verdict carries no empty
+    section. Its HTML counterpart is `html_not_run_heading`.
+
+    Returns:
+        The heading, ending in a blank line.
+    """
+    return String("## Not run\n\n")
+
+
 def md_not_run_line(record: NotRunRecord) -> String:
     """One selected file's not-run reason, as a bullet line.
 

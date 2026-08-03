@@ -50,6 +50,7 @@ from mtest.model.events import (
 from mtest.model.outcome import Outcome
 from mtest.model.test_result import TestResult
 from mtest.platform import process_id, rename_path
+from mtest.report.file_accum import FileAccums
 from mtest.report.junit import (
     CACHE_SUITE_NAME,
     JunitCase,
@@ -275,15 +276,6 @@ struct _AttemptRec(Copyable, Movable):
 
 
 @fieldwise_init
-struct _FileAccum(Copyable, Movable):
-    """The per-file state accumulated between FileStarted and FileFinished."""
-
-    var path: String
-    var tests: List[TestResult]
-    var attempts: List[_AttemptRec]
-
-
-@fieldwise_init
 struct _SpoolEntry(Copyable, Movable):
     """One spooled suite's order key, on-disk fragment path, and counts."""
 
@@ -463,7 +455,7 @@ struct JunitReporter(Reporter):
     """A monotonic counter minting a unique fragment filename per suite."""
     var _index: List[_SpoolEntry]
     """One entry per spooled suite: order key, fragment path, and counts."""
-    var _accums: List[_FileAccum]
+    var _accums: FileAccums[_AttemptRec]
     """The in-flight per-file accumulators, keyed by path."""
     var _failed: Bool
     """The latch: set on the first fragment-write failure, then `handle` no-ops.
@@ -512,7 +504,7 @@ struct JunitReporter(Reporter):
         self._spool_dir = spool_dir
         self._counter = 0
         self._index = List[_SpoolEntry]()
-        self._accums = List[_FileAccum]()
+        self._accums = FileAccums[_AttemptRec].empty()
         self._failed = False
         self._context = String("")
         self._target_path = target_path
@@ -719,17 +711,17 @@ struct JunitReporter(Reporter):
         if not self._active or self._failed:
             return
         if e.kind == EventKind.FILE_STARTED:
-            self._reset_accum(e.data[FileStartedPayload].path)
+            self._accums.reset(e.data[FileStartedPayload].path)
             return
         if e.kind == EventKind.TEST_REPORTED:
             ref tr = e.data[TestReportedPayload]
-            var idx = self._ensure_accum(tr.path)
-            self._accums[idx].tests.append(tr.test.copy())
+            var idx = self._accums.ensure(tr.path)
+            self._accums.items[idx].tests.append(tr.test.copy())
             return
         if e.kind == EventKind.ATTEMPT_FINISHED:
             ref a = e.data[AttemptFinishedPayload]
-            var idx = self._ensure_accum(a.path)
-            self._accums[idx].attempts.append(
+            var idx = self._accums.ensure(a.path)
+            self._accums.items[idx].attempts.append(
                 _AttemptRec(
                     a.term_kind,
                     a.term_value,
@@ -801,49 +793,15 @@ struct JunitReporter(Reporter):
             )
         return assemble(root_name, frags)
 
-    def _accum_index(self, path: String) -> Int:
-        """The index of `path`'s accumulator, or -1 if none exists yet."""
-        for i in range(len(self._accums)):
-            if self._accums[i].path == path:
-                return i
-        return -1
-
-    def _ensure_accum(mut self, path: String) -> Int:
-        """The index of `path`'s accumulator, creating one if absent."""
-        var idx = self._accum_index(path)
-        if idx >= 0:
-            return idx
-        self._accums.append(
-            _FileAccum(path.copy(), List[TestResult](), List[_AttemptRec]())
-        )
-        return len(self._accums) - 1
-
-    def _reset_accum(mut self, path: String):
-        """Begin a fresh accumulator for `path`, discarding any stale one."""
-        var idx = self._accum_index(path)
-        if idx >= 0:
-            self._accums[idx].tests = List[TestResult]()
-            self._accums[idx].attempts = List[_AttemptRec]()
-            return
-        self._accums.append(
-            _FileAccum(path.copy(), List[TestResult](), List[_AttemptRec]())
-        )
-
-    def _drop_accum(mut self, path: String):
-        """Remove `path`'s accumulator once its suite has been rendered."""
-        var idx = self._accum_index(path)
-        if idx >= 0:
-            _ = self._accums.pop(idx)
-
     def _finish_file(mut self, e: FileFinishedPayload):
         """Render and spool the suite for one finished file (or drop it)."""
         # Selection-induced absences carry no suite at all.
         if e.outcome == Outcome.EXCLUDED or e.outcome == Outcome.DESELECTED:
-            self._drop_accum(e.path)
+            self._accums.drop(e.path)
             return
-        var idx = self._ensure_accum(e.path)
+        var idx = self._accums.ensure(e.path)
         var suite = self._suite_for_file(e, idx)
-        self._drop_accum(e.path)
+        self._accums.drop(e.path)
         self._spool(render_suite(suite), "suite " + e.path)
 
     def _suite_for_file(
@@ -866,8 +824,8 @@ struct JunitReporter(Reporter):
             return JunitSuite(e.path, e.duration_seconds, cases^, "", "")
 
         var failing_test_rows = 0
-        for i in range(len(self._accums[accum_idx].tests)):
-            var t = self._accums[accum_idx].tests[i].copy()
+        for i in range(len(self._accums.items[accum_idx].tests)):
+            var t = self._accums.items[accum_idx].tests[i].copy()
             if _is_failing_test(t):
                 failing_test_rows += 1
             cases.append(_case_for_test(t, cn))
@@ -915,8 +873,8 @@ struct JunitReporter(Reporter):
         termination.
         """
         var reruns = List[JunitRerun]()
-        for i in range(len(self._accums[accum_idx].attempts)):
-            var a = self._accums[accum_idx].attempts[i].copy()
+        for i in range(len(self._accums.items[accum_idx].attempts)):
+            var a = self._accums.items[accum_idx].attempts[i].copy()
             var d = _attempt_diag(a)
             reruns.append(
                 JunitRerun(
@@ -937,8 +895,8 @@ struct JunitReporter(Reporter):
         since the per-test rows already carry the verdict.
         """
         var reruns = List[JunitRerun]()
-        for i in range(len(self._accums[accum_idx].attempts)):
-            var a = self._accums[accum_idx].attempts[i].copy()
+        for i in range(len(self._accums.items[accum_idx].attempts)):
+            var a = self._accums.items[accum_idx].attempts[i].copy()
             var d = _attempt_diag(a)
             reruns.append(_rerun_from(d, False, a.stdout_text, a.stderr_text))
         return JunitCase("[attempts]", cn, False, _blank_primary(), reruns^)
@@ -953,7 +911,7 @@ struct JunitReporter(Reporter):
         order. When no non-final attempts were captured, the final outcome is
         the primary and there are no reruns.
         """
-        var n = len(self._accums[accum_idx].attempts)
+        var n = len(self._accums.items[accum_idx].attempts)
         var final_d = _outcome_diag(
             e, bounded_text_from_bytes(e.captured_stderr)
         )
@@ -967,11 +925,11 @@ struct JunitReporter(Reporter):
             )
         var reruns = List[JunitRerun]()
         for i in range(1, n):
-            var a = self._accums[accum_idx].attempts[i].copy()
+            var a = self._accums.items[accum_idx].attempts[i].copy()
             var d = _attempt_diag(a)
             reruns.append(_rerun_from(d, False, a.stdout_text, a.stderr_text))
         reruns.append(_rerun_from(final_d, False, "", ""))
-        var first_d = _attempt_diag(self._accums[accum_idx].attempts[0])
+        var first_d = _attempt_diag(self._accums.items[accum_idx].attempts[0])
         return JunitCase(
             "[attempts]", cn, True, _primary_from(first_d), reruns^
         )

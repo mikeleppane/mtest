@@ -20,6 +20,7 @@ from mtest.report.report_html import (
     html_document_open,
     html_file_section,
     html_machine_index,
+    html_not_run_heading,
     html_not_run_line,
     html_summary_row,
 )
@@ -522,6 +523,18 @@ def test_detail_backtrace_is_relativized_against_section_root() raises:
 
 
 # --- Not-run line ------------------------------------------------------------
+
+
+def test_not_run_heading_is_exact_and_spans_the_table() raises:
+    # The Markdown heading in this document's syntax: one self-contained row
+    # spanning every column, so it nests inside the same open `<tbody>`.
+    assert_equal(
+        html_not_run_heading(),
+        (
+            '<tr class="not-run-heading"><td colspan="7">\n'
+            "<h2>Not run</h2>\n</td></tr>\n"
+        ),
+    )
 
 
 def test_not_run_line_escapes_a_hostile_path() raises:

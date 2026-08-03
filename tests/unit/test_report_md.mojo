@@ -14,6 +14,7 @@ from mtest.report.report_md import (
     md_file_section,
     md_header,
     md_machine_index,
+    md_not_run_heading,
     md_not_run_line,
     md_summary_row,
     md_summary_table_header,
@@ -331,6 +332,12 @@ def test_detail_backtrace_is_relativized_against_section_root() raises:
     var out = md_file_section(section, root_note=False)
     assert_true(out.find("At tests/a.mojo:3: assertion failed") != -1)
     assert_true(out.find("/abs/root/tests/a.mojo") == -1)
+
+
+def test_not_run_heading_is_exact() raises:
+    # The bullets a caller emits below this must not float unlabelled between
+    # the last file section and the machine index.
+    assert_equal(md_not_run_heading(), "## Not run\n\n")
 
 
 def test_not_run_line_escapes_a_hostile_leading_dash() raises:
