@@ -14,7 +14,9 @@ node id is hostile.
 `md_header` and `md_summary_table_header` open the document; `md_summary_row`,
 `md_file_section`, and `md_not_run_line` render one row/section/reason each;
 `md_machine_index` closes it with a flat, grep-friendly list of every row that
-needs a second look (see `_needs_action` for the exact outcome set).
+needs a second look (see `report_model.needs_action` for the exact outcome
+set, shared with `html_machine_index` so the ruling cannot drift between
+renderings).
 """
 from mtest.config import shell_quote
 from mtest.model import NotRunRecord, Outcome, not_run_reason_label
@@ -25,6 +27,7 @@ from mtest.report.report_model import (
     ReportHeaderFacts,
     ReportRow,
     ReportSectionInput,
+    needs_action,
     outcome_label,
 )
 from mtest.report.report_text import (
@@ -262,28 +265,6 @@ def md_not_run_line(record: NotRunRecord) -> String:
     )
 
 
-def _needs_action(outcome_code: Int) -> Bool:
-    """Whether a row's outcome belongs on the machine index.
-
-    The index exists so a reader or a script can jump straight to every
-    file that needs a look, so it excludes exactly the outcomes that never
-    do: `PASS` (nothing wrong), `SKIP` (the child suite's own choice, not a
-    stop condition), `DESELECTED`, and `EXCLUDED` (both intentionally kept
-    out of the run, not casualties of it). Every other outcome — `FAIL`,
-    `CRASH`, `TIMEOUT`, `COMPILE_ERROR`, `COMPILE_TIMEOUT`,
-    `MALFORMED_SUITE`, `PRECOMPILE_ERROR`, `FLAKY`, and `NOT_RUN` — is
-    included, `FLAKY` and `NOT_RUN` among them because a flaky pass and an
-    unrun file both warrant a second look even though neither fails the
-    run.
-    """
-    return not (
-        outcome_code == Outcome.PASS.code
-        or outcome_code == Outcome.SKIP.code
-        or outcome_code == Outcome.DESELECTED.code
-        or outcome_code == Outcome.EXCLUDED.code
-    )
-
-
 def md_machine_index(rows: List[ReportRow], nodes: List[String]) -> String:
     """A flat, grep-friendly index of every row that needs a second look.
 
@@ -295,7 +276,8 @@ def md_machine_index(rows: List[ReportRow], nodes: List[String]) -> String:
     rather than indexing out of bounds, so a violated contract degrades a
     line's target instead of crashing the whole document.
 
-    See `_needs_action` for exactly which outcomes are included.
+    See `report_model.needs_action` for exactly which outcomes are
+    included.
 
     Args:
         rows: The summary rows to filter, in their table order. Not
@@ -309,7 +291,7 @@ def md_machine_index(rows: List[ReportRow], nodes: List[String]) -> String:
     var body = String("")
     var i = 0
     for ref row in rows:
-        if _needs_action(row.outcome_code):
+        if needs_action(row.outcome_code):
             var node = nodes[i] if i < len(nodes) else String("")
             body += (
                 "- "

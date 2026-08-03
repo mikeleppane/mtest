@@ -1,6 +1,6 @@
-"""The pure data model behind the run report, plus its outcome-label mapping.
+"""The pure data model behind the run report, plus its report-layer rulings.
 
-`report_md.mojo` (and a later HTML renderer) turn these plain, allocation-free
+`report_md.mojo` and `report_html.mojo` turn these plain, allocation-free
 value types into Markdown/HTML fragments. Nothing here does I/O, and nothing
 here decides document structure: nesting, spooling, and assembly are the
 report writer's job, not this module's. Every struct is a caller-populated
@@ -12,7 +12,10 @@ which stay stable even if the event payloads they were built from evolve.
 from the console's private verdict tokens (`console._verdict_token` and
 friends) because the two surfaces are allowed to diverge in wording without
 coordinating: the console optimizes for a human watching a live run, this
-module for a document read later, possibly by a machine.
+module for a document read later, possibly by a machine. `needs_action` is
+the report layer's other shared ruling — which outcomes belong on a
+document's machine index — hoisted here rather than duplicated per renderer,
+since both renderers must agree on it by construction.
 """
 from mtest.model import Outcome, TestResult
 
@@ -197,3 +200,32 @@ def outcome_label(code: Int) -> String:
     if code == Outcome.NOT_RUN.code:
         return String("NOT_RUN")
     return String("OUTCOME(") + String(code) + String(")")
+
+
+def needs_action(outcome_code: Int) -> Bool:
+    """Whether a row's outcome belongs on a report's machine index.
+
+    The report layer's own definition of "needs a second look": excludes
+    exactly `PASS` (nothing wrong), `SKIP` (the child suite's own choice, not
+    a stop condition), `DESELECTED`, and `EXCLUDED` (both intentionally kept
+    out of the run, not casualties of it). Every other outcome — `FAIL`,
+    `CRASH`, `TIMEOUT`, `COMPILE_ERROR`, `COMPILE_TIMEOUT`,
+    `MALFORMED_SUITE`, `PRECOMPILE_ERROR`, `FLAKY`, and `NOT_RUN` — is
+    included, `FLAKY` and `NOT_RUN` among them because a flaky pass and an
+    unrun file both warrant a second look even though neither fails the run.
+    Shared by every report's machine index (`md_machine_index`,
+    `html_machine_index`) so the ruling cannot drift between renderings.
+
+    Args:
+        outcome_code: An `Outcome.code` value; not required to be one of the
+            known discriminants.
+
+    Returns:
+        `True` when the outcome belongs on the machine index.
+    """
+    return not (
+        outcome_code == Outcome.PASS.code
+        or outcome_code == Outcome.SKIP.code
+        or outcome_code == Outcome.DESELECTED.code
+        or outcome_code == Outcome.EXCLUDED.code
+    )

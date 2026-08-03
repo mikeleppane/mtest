@@ -67,6 +67,7 @@ from mtest.report.report_model import (
     ReportHeaderFacts,
     ReportRow,
     ReportSectionInput,
+    needs_action,
     outcome_label,
 )
 from mtest.report.report_md import (

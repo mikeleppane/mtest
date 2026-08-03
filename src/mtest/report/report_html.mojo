@@ -6,17 +6,24 @@ here turns one `report_model` value into a self-contained HTML fragment; no
 function reads another's output, and none does I/O — assembling fragments
 into one streamed document is the report writer's job, not this module's.
 
-Placement policy: every model-derived byte passes through `html_escape_text`
-before it reaches the document, text content and `<pre>` blocks alike —
-unlike the console and Markdown renderers, HTML text-node escaping already
-has a total, correct answer for a multi-line value (`html_escape_text` keeps
-LF and Tab literal), so there is no separate scalar/multiline split and no
-second escaper to reach for. Nothing here imports `console_text`: that
-module's policy is about what a *terminal* would interpret, and a browser
-rendering this document never does. A reproduce or debug target is
-additionally shell-quoted, through `html_escape_text(shell_quote(node))`, so
-the emitted command is copy-paste safe even when the underlying path or node
-id is hostile.
+Placement policy mirrors `report_md.mojo`'s, layered under the same
+`html_escape_text` (and, for the one attribute position that carries
+model-derived text, `html_escape_attribute`): an inline/one-line value (a
+path, node id, version/platform label, build line, not-run reason, attempt
+summary) passes through `console_text.escape_scalar` FIRST, so a raw ESC or
+a bare CR renders as the visible `\x1B`/`\x0D` text the console and the
+Markdown renderer already show there, rather than silently becoming a
+browser line break or vanishing into HTML's own control-byte policy. A block
+of legitimately multi-line untrusted text (a failure detail, a captured
+stream) passes through `escape_multiline` instead, keeping LF and Tab
+literal. Either pass runs before `html_escape_text`, which still applies on
+top for the HTML-specific entities (`&`, `<`, `>`) and as a second line of
+defense for any control byte the first pass did not already spell out. A
+reproduce or debug target composes three passes in that order —
+`escape_scalar`, then `shell_quote`, then `html_escape_text` — matching the
+Markdown renderer's `shell_quote(escape_scalar(node))` with an HTML-escaping
+pass on top, so a control byte cannot survive into the shell-quoting
+decision and the quoted result is still HTML-safe.
 
 The document is one continuous `<table>`: `html_document_open` opens it
 (`<thead>` plus an unclosed `<tbody>`) and `html_document_close` is the only
@@ -45,13 +52,15 @@ with nothing in between that needed a document shell.
 """
 from mtest.config import shell_quote
 from mtest.model import NotRunRecord, Outcome, not_run_reason_label
-from mtest.report.escape import html_escape_text
+from mtest.report.console_text import escape_multiline, escape_scalar
+from mtest.report.escape import html_escape_attribute, html_escape_text
 from mtest.report.junit import format_seconds
 from mtest.report.report_model import (
     ReportFinalizeContext,
     ReportHeaderFacts,
     ReportRow,
     ReportSectionInput,
+    needs_action,
     outcome_label,
 )
 from mtest.report.report_text import normalize_detail
@@ -106,6 +115,42 @@ comptime _REPORT_CSS: StaticString = (
 renders identically with no network access."""
 
 
+def _escape_inline(text: String) -> String:
+    """HTML-safe rendering of a value that must stay on one line.
+
+    Runs `console_text.escape_scalar` first, so a raw control byte or an ESC
+    sequence renders as the same visible escape text (`\\x1B`, `\\x0D`, ...)
+    the console and the Markdown renderer already show there, rather than a
+    bare CR becoming a browser line break or a C0 byte silently turning into
+    HTML's own `html_escape_text` replacement character. `html_escape_text`
+    still runs on top for `&`/`<`/`>` and as a second line of defense.
+
+    Args:
+        text: The untrusted, single-line value to render.
+
+    Returns:
+        `text`, control-escaped then HTML-escaped.
+    """
+    return html_escape_text(escape_scalar(text))
+
+
+def _escape_block(text: String) -> String:
+    """HTML-safe rendering of a block that legitimately spans lines.
+
+    Runs `console_text.escape_multiline` first, keeping LF and Tab literal —
+    a captured stream or a failure detail is shaped by them — and escaping
+    every other control byte, then `html_escape_text` on top for `&`/`<`/`>`
+    and as a second line of defense.
+
+    Args:
+        text: The untrusted, multi-line block to render.
+
+    Returns:
+        `text`, control-escaped then HTML-escaped.
+    """
+    return html_escape_text(escape_multiline(text))
+
+
 def html_document_open(
     facts: ReportHeaderFacts, ctx: ReportFinalizeContext
 ) -> String:
@@ -133,9 +178,9 @@ def html_document_open(
     out += "<h1>mtest report</h1>\n"
     out += (
         "<p>mtest "
-        + html_escape_text(facts.version)
+        + _escape_inline(facts.version)
         + " ("
-        + html_escape_text(facts.platform)
+        + _escape_inline(facts.platform)
         + ")</p>\n"
     )
     out += '<ul class="facts">\n'
@@ -174,7 +219,7 @@ def html_document_open(
     if ctx.shuffle:
         out += "<li>shuffle seed: " + String(ctx.shuffle_seed) + "</li>\n"
     if ctx.shard_label.byte_length() > 0:
-        out += "<li>shard: " + html_escape_text(ctx.shard_label) + "</li>\n"
+        out += "<li>shard: " + _escape_inline(ctx.shard_label) + "</li>\n"
     if ctx.interrupted:
         out += "<li>interrupted: yes</li>\n"
     if ctx.drift:
@@ -194,8 +239,11 @@ def html_summary_row(row: ReportRow) -> String:
     """One file's row in the summary table.
 
     `row.path` is the only untrusted field, so it alone goes through
-    `html_escape_text`; `outcome_label` and `format_seconds` already produce
-    HTML-safe text, and the remaining fields are plain integers.
+    `_escape_inline`; the outcome label is our own closed vocabulary, still
+    routed through `html_escape_attribute` where it lands in the `class`
+    attribute so that safety is structural rather than "provably safe
+    today". `format_seconds` already produces HTML-safe text, and the
+    remaining fields are plain integers.
 
     Args:
         row: The file's summary facts. Not mutated.
@@ -206,10 +254,10 @@ def html_summary_row(row: ReportRow) -> String:
     """
     var label = outcome_label(row.outcome_code)
     return (
-        '<tr class="outcome-'
-        + label
+        '<tr class="'
+        + html_escape_attribute("outcome-" + label)
         + '"><td><code>'
-        + html_escape_text(row.path)
+        + _escape_inline(row.path)
         + "</code></td><td>"
         + label
         + "</td><td>"
@@ -227,15 +275,18 @@ def html_summary_row(row: ReportRow) -> String:
 
 
 def _reproduce_target(node: String) -> String:
-    """The shell-quoted, HTML-escaped target for a reproduce/debug line.
+    """The scalar-safe, shell-quoted, HTML-escaped reproduce/debug target.
 
-    Shell-quotes `node` first — `shell_quote` leaves a plain path or node id
-    unquoted (`/ . : _ -` are in its safe set) and single-quotes anything
-    else — then runs the result through `html_escape_text`, so a hostile
-    node id can neither break the emitted shell command nor the surrounding
+    Three passes, in order, matching the Markdown renderer's
+    `shell_quote(escape_scalar(node))` with an HTML-escaping pass on top:
+    `escape_scalar` first, so a control byte or ESC sequence cannot survive
+    into the shell-quoting decision; then `shell_quote`, which leaves a
+    plain path or node id unquoted (`/ . : _ -` are in its safe set) and
+    single-quotes anything else; then `html_escape_text`, so a hostile node
+    id can neither break the emitted shell command nor the surrounding
     `<code>` text.
     """
-    return html_escape_text(shell_quote(node))
+    return html_escape_text(shell_quote(escape_scalar(node)))
 
 
 def _reproduce_lines(node: String) -> String:
@@ -298,7 +349,7 @@ def html_file_section(section: ReportSectionInput, root_note: Bool) -> String:
     out += '<details class="file"' + open_attr + ">\n"
     out += (
         "<summary><code>"
-        + html_escape_text(section.path)
+        + _escape_inline(section.path)
         + "</code> — "
         + outcome_label(section.outcome_code)
         + "</summary>\n"
@@ -314,31 +365,31 @@ def html_file_section(section: ReportSectionInput, root_note: Bool) -> String:
             continue
         out += (
             "<h4>FAIL <code>"
-            + html_escape_text(t.node.render())
+            + _escape_inline(t.node.render())
             + "</code></h4>\n"
         )
         var detail = normalize_detail(t.detail, section.root)
         if detail.byte_length() > 0:
-            out += "<pre>" + html_escape_text(detail) + "</pre>\n"
+            out += "<pre>\n" + _escape_block(detail) + "</pre>\n"
     if section.stdout_text.byte_length() > 0:
         out += "<p><strong>stdout</strong></p>\n"
-        out += "<pre>" + html_escape_text(section.stdout_text) + "</pre>\n"
+        out += "<pre>\n" + _escape_block(section.stdout_text) + "</pre>\n"
         if section.stdout_truncated:
             out += "<p><em>(stdout truncated)</em></p>\n"
     if section.stderr_text.byte_length() > 0:
         out += "<p><strong>stderr</strong></p>\n"
-        out += "<pre>" + html_escape_text(section.stderr_text) + "</pre>\n"
+        out += "<pre>\n" + _escape_block(section.stderr_text) + "</pre>\n"
         if section.stderr_truncated:
             out += "<p><em>(stderr truncated)</em></p>\n"
     if len(section.attempts) > 0:
         out += "<p><strong>attempts</strong></p>\n<ul>\n"
         for ref a in section.attempts:
-            out += "<li>" + html_escape_text(a) + "</li>\n"
+            out += "<li>" + _escape_inline(a) + "</li>\n"
         out += "</ul>\n"
     if section.build_line.byte_length() > 0:
         out += (
             "<p>build: <code>"
-            + html_escape_text(section.build_line)
+            + _escape_inline(section.build_line)
             + "</code></p>\n"
         )
     out += _reproduce_lines(section.reproduce_node)
@@ -360,27 +411,10 @@ def html_not_run_line(record: NotRunRecord) -> String:
         '<tr class="not-run"><td colspan="'
         + String(_SUMMARY_COLS)
         + '"><code>'
-        + html_escape_text(record.path)
+        + _escape_inline(record.path)
         + "</code>: "
-        + html_escape_text(not_run_reason_label(record.reason))
+        + _escape_inline(not_run_reason_label(record.reason))
         + "</td></tr>\n"
-    )
-
-
-def _needs_action(outcome_code: Int) -> Bool:
-    """Whether a row's outcome belongs on the machine index.
-
-    The same total ruling `md_machine_index` uses, restated here rather than
-    imported: excludes exactly `PASS`, `SKIP`, `DESELECTED`, and `EXCLUDED`;
-    every other outcome — `FAIL`, `CRASH`, `TIMEOUT`, `COMPILE_ERROR`,
-    `COMPILE_TIMEOUT`, `MALFORMED_SUITE`, `PRECOMPILE_ERROR`, `FLAKY`, and
-    `NOT_RUN` — is included.
-    """
-    return not (
-        outcome_code == Outcome.PASS.code
-        or outcome_code == Outcome.SKIP.code
-        or outcome_code == Outcome.DESELECTED.code
-        or outcome_code == Outcome.EXCLUDED.code
     )
 
 
@@ -391,7 +425,7 @@ def html_machine_index(rows: List[ReportRow], nodes: List[String]) -> String:
     `rows[i]`, exactly as `md_machine_index` reads it, including its guard
     against a `nodes` shorter than `rows` — a violated caller contract
     degrades a line's target to `''` rather than indexing out of bounds. See
-    `_needs_action` for exactly which outcomes are included.
+    `report_model.needs_action` for exactly which outcomes are included.
 
     Args:
         rows: The summary rows to filter, in their table order. Not
@@ -406,7 +440,7 @@ def html_machine_index(rows: List[ReportRow], nodes: List[String]) -> String:
     var body = String("")
     var i = 0
     for ref row in rows:
-        if _needs_action(row.outcome_code):
+        if needs_action(row.outcome_code):
             var node = nodes[i] if i < len(nodes) else String("")
             body += (
                 "<li><code>"

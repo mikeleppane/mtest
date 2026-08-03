@@ -4,7 +4,10 @@ The HTML sibling of `test_report_md.mojo`: exact-output tests over the same
 fragment boundaries, adjusted for HTML syntax instead of Markdown's. The
 security-focused cases pin the brief's own two invariants — a hostile value
 cannot close the document's one `<style>` block or escape a `<details>`
-section — plus the structural invariant the renderer's design leans on: the
+section — the control-byte scalarization policy shared with the console and
+Markdown renderer (a C0 byte, a raw ESC, and a bare CR must render as
+visible escape text, never a browser line break or a silent replacement
+character), and the structural invariant the renderer's design leans on: the
 summary table stays one continuous, balanced `<table>`/`<tbody>` from
 `html_document_open` to `html_document_close`, however many rows, file
 sections, not-run lines, or a machine index land in between.
@@ -25,6 +28,7 @@ from mtest.report.report_model import (
     ReportHeaderFacts,
     ReportRow,
     ReportSectionInput,
+    needs_action,
     outcome_label,
 )
 
@@ -161,6 +165,68 @@ def test_hostile_name_cannot_close_style_or_details() raises:
     assert_true(out.find("&lt;script&gt;") != -1)
 
 
+# --- Control-byte scalarization ---------------------------------------------
+#
+# An inline value must pass through `console_text.escape_scalar` before
+# `html_escape_text`, exactly as the Markdown renderer's `md_escape_cell`
+# does, so a C0 byte, a raw ESC, and a bare CR render as the same visible
+# `\xHH` text the console shows rather than a browser line break (CR) or a
+# bare U+FFFD (any other C0 byte) from HTML's own control-byte policy alone.
+
+
+def test_not_run_path_scalarizes_a_c0_byte_esc_and_bare_cr() raises:
+    var hostile = "a" + chr(0x07) + "b" + chr(0x1B) + "c" + chr(0x0D) + "d.mojo"
+    var record = NotRunRecord(hostile, NotRunReason.LIMIT_REACHED)
+    assert_equal(
+        html_not_run_line(record),
+        (
+            '<tr class="not-run"><td colspan="7"><code>'
+            "a\\x07b\\x1Bc\\x0Dd.mojo</code>: stopped early"
+            " (-x/--maxfail)</td></tr>\n"
+        ),
+    )
+    # The raw control bytes must not survive into the document.
+    assert_true(html_not_run_line(record).find(chr(0x1B)) == -1)
+    assert_true(html_not_run_line(record).find(chr(0x0D)) == -1)
+
+
+def test_reproduce_target_scalarizes_control_bytes_before_shell_quoting() raises:
+    var hostile = "tests/a" + chr(0x1B) + "b" + chr(0x0D) + ".mojo"
+    var out = _section_with_node(hostile)
+    assert_true(
+        out.find(
+            "<p>reproduce: <code>mtest 'tests/a\\x1Bb\\x0D.mojo'</code></p>"
+        )
+        != -1
+    )
+    assert_true(out.find(chr(0x1B)) == -1)
+
+
+def test_stream_pre_preserves_lf_tab_but_escapes_other_controls() raises:
+    # A block position (`<pre>`) keeps LF and Tab literal, matching
+    # `escape_multiline`'s console/Markdown policy, while a C0 byte that is
+    # neither (here BEL) and a bare CR both still render as visible escape
+    # text rather than a raw control byte or a silent line break.
+    var hostile_stream = "line1\n\tindented" + chr(0x07) + chr(0x0D) + "line2"
+    var section = ReportSectionInput(
+        path="tests/g.mojo",
+        root="",
+        outcome_code=Outcome.FAIL.code,
+        tests=List[TestResult](),
+        stdout_text=hostile_stream,
+        stderr_text="",
+        stdout_truncated=False,
+        stderr_truncated=False,
+        attempts=List[String](),
+        build_line="",
+        reproduce_node="",
+    )
+    var out = html_file_section(section, root_note=False)
+    assert_true(out.find("<pre>\nline1\n\tindented\\x07\\x0Dline2</pre>") != -1)
+    assert_true(out.find(chr(0x07)) == -1)
+    assert_true(out.find(chr(0x0D)) == -1)
+
+
 # --- Document shell ----------------------------------------------------------
 
 
@@ -173,6 +239,35 @@ def test_document_open_ends_with_unclosed_tbody() raises:
 def test_document_close_closes_table_and_shell() raises:
     assert_equal(
         html_document_close(), "</tbody>\n</table>\n</body>\n</html>\n"
+    )
+
+
+def test_document_open_has_meta_charset() raises:
+    var out = html_document_open(_facts(), _ctx())
+    assert_true(out.find('<meta charset="utf-8">') != -1)
+
+
+def test_document_has_no_external_urls() raises:
+    var doc = (
+        html_document_open(_facts(), _ctx_fixture()) + html_document_close()
+    )
+    assert_true(doc.find("http://") == -1)
+    assert_true(doc.find("https://") == -1)
+    assert_true(doc.find("url(") == -1)
+    assert_true(doc.find("@import") == -1)
+    assert_true(doc.find("@font-face") == -1)
+
+
+def test_summary_table_header_is_exact() raises:
+    var out = html_document_open(_facts(), _ctx())
+    assert_true(
+        out.find(
+            '<table class="report">\n<thead>\n<tr>'
+            "<th>Path</th><th>Outcome</th><th>Duration (s)</th>"
+            "<th>Passed</th><th>Failed</th><th>Skipped</th><th>Attempts</th>"
+            "</tr>\n</thead>\n<tbody>\n"
+        )
+        != -1
     )
 
 
@@ -267,7 +362,7 @@ def test_file_section_fences_detail_and_names_reproduce() raises:
         reproduce_node="tests/a.mojo::test_x",
     )
     var out = html_file_section(section, root_note=True)
-    assert_true(out.find("<pre>boom ``` here</pre>") != -1)
+    assert_true(out.find("<pre>\nboom ``` here</pre>") != -1)
     assert_true(
         out.find("<p>reproduce: <code>mtest tests/a.mojo::test_x</code></p>")
         != -1
@@ -343,7 +438,8 @@ def test_stream_pre_holds_hostile_content() raises:
     )
     var out = html_file_section(section, root_note=False)
     assert_true(
-        out.find("<pre>closes &lt;/pre&gt; fence &amp; &lt;tag&gt;</pre>") != -1
+        out.find("<pre>\ncloses &lt;/pre&gt; fence &amp; &lt;tag&gt;</pre>")
+        != -1
     )
     assert_true(out.find("also &lt;/details&gt; hostile") != -1)
     assert_true(out.find("<tag>") == -1)
@@ -441,6 +537,17 @@ def test_not_run_line_escapes_a_hostile_path() raises:
 
 
 # --- Header ------------------------------------------------------------------
+
+
+def test_header_version_and_platform_line_is_escaped() raises:
+    var facts = ReportHeaderFacts(
+        version="x.y.z<script>", platform="Linux & x86_64"
+    )
+    var out = html_document_open(facts, _ctx())
+    assert_true(
+        out.find("<p>mtest x.y.z&lt;script&gt; (Linux &amp; x86_64)</p>") != -1
+    )
+    assert_true(out.find("<script>") == -1)
 
 
 def test_header_names_shuffle_seed_only_when_shuffled() raises:
@@ -550,19 +657,17 @@ def test_machine_index_is_empty_when_nothing_needs_action() raises:
 
 
 def test_machine_index_outcome_inclusion_is_total() raises:
+    # Pointed at the hoisted `report_model.needs_action`, the single source
+    # of truth both renderers call, so a drift between this renderer's
+    # filtering and the shared ruling shows up here rather than only in
+    # report_md's own suite.
     for code in range(Outcome.COUNT):
         var rows = List[ReportRow]()
         rows.append(_row("only.mojo", code))
         var nodes = List[String]()
         nodes.append("only.mojo")
         var out = html_machine_index(rows, nodes)
-        var excluded = (
-            code == Outcome.PASS.code
-            or code == Outcome.SKIP.code
-            or code == Outcome.DESELECTED.code
-            or code == Outcome.EXCLUDED.code
-        )
-        if excluded:
+        if not needs_action(code):
             assert_equal(out, "")
         else:
             assert_true(out.find(outcome_label(code)) != -1)

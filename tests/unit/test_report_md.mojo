@@ -23,6 +23,7 @@ from mtest.report.report_model import (
     ReportHeaderFacts,
     ReportRow,
     ReportSectionInput,
+    needs_action,
     outcome_label,
 )
 
@@ -459,9 +460,26 @@ def test_machine_index_is_empty_when_nothing_needs_action() raises:
     assert_equal(md_machine_index(rows, nodes), "")
 
 
+def test_needs_action_is_total() raises:
+    # The one hardcoded pin of the ruling itself: `report_model.needs_action`
+    # is the single source of truth both `md_machine_index` and
+    # `html_machine_index` call, so its own boolean per code is checked
+    # here directly, against a literal restatement of the ruling, rather
+    # than only indirectly through a renderer's output.
+    for code in range(Outcome.COUNT):
+        var excluded = (
+            code == Outcome.PASS.code
+            or code == Outcome.SKIP.code
+            or code == Outcome.DESELECTED.code
+            or code == Outcome.EXCLUDED.code
+        )
+        assert_equal(needs_action(code), not excluded)
+
+
 def test_machine_index_outcome_inclusion_is_total() raises:
-    # Walk every known outcome code and pin exactly which ones are on the
-    # index: PASS, SKIP, DESELECTED, and EXCLUDED are silent; every other
+    # Walk every known outcome code and pin that md_machine_index's own
+    # filtering agrees with the hoisted `needs_action` for every one of
+    # them: PASS, SKIP, DESELECTED, and EXCLUDED are silent; every other
     # outcome, FLAKY and NOT_RUN included, gets a line.
     for code in range(Outcome.COUNT):
         var rows = List[ReportRow]()
@@ -469,13 +487,7 @@ def test_machine_index_outcome_inclusion_is_total() raises:
         var nodes = List[String]()
         nodes.append("only.mojo")
         var out = md_machine_index(rows, nodes)
-        var excluded = (
-            code == Outcome.PASS.code
-            or code == Outcome.SKIP.code
-            or code == Outcome.DESELECTED.code
-            or code == Outcome.EXCLUDED.code
-        )
-        if excluded:
+        if not needs_action(code):
             assert_equal(out, "")
         else:
             assert_true(out.find(outcome_label(code)) != -1)
