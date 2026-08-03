@@ -847,30 +847,40 @@ def main():
             exit(resources.close_into(EXIT_USAGE_ERROR, rank_delivery=False))
         for line in collected.diagnostics:
             _eprintln(line)
-        # Teardown FIRST, before a single byte of the listing is printed: the
-        # stream's terminal has to carry the code this process will actually
-        # exit with, and releasing the runtime can still escalate it to 3.
-        # Printing first and resolving after would let the two disagree.
-        var final_code = resources.close_into(
-            collected.code, rank_delivery=True
-        )
-        var listing = String("")
         if config.collect_json:
-            listing += collect_stream_header(MTEST_VERSION) + "\n"
+            # Teardown FIRST, and for this format only: the terminal record
+            # carries the code the process exits with, and releasing the
+            # runtime can still escalate a collection to 3. Rendering first and
+            # resolving after would let the record and `$?` disagree, which is
+            # the one thing `collect_finished` promises cannot happen.
+            var final_code = resources.close_into(
+                collected.code, rank_delivery=True
+            )
+            var stream = collect_stream_header(MTEST_VERSION) + "\n"
             for nid in collected.listing:
                 # Both formats re-split the ONE sorted listing, so a node line
                 # and its plain-text twin cannot describe different tests. The
                 # split is `render()`'s inverse, at the LAST separator: a test
                 # name never contains `::` but a file path can.
                 var node = split_rendered_node_id(nid)
-                listing += collect_node_line(nid, node.path, node.name) + "\n"
-            listing += collect_finished_line(len(collected.listing), final_code)
-            listing += "\n"
-        else:
-            for nid in collected.listing:
-                listing += nid + "\n"
+                stream += collect_node_line(nid, node.path, node.name) + "\n"
+            stream += collect_finished_line(len(collected.listing), final_code)
+            stream += "\n"
+            print(stream, end="", flush=True)
+            exit(final_code)
+        # The plain listing carries no terminal record, so nothing in it depends
+        # on the finalized code and the runtime deliberately stays up across the
+        # write. That ordering is load-bearing, not incidental: the runtime
+        # ignores SIGPIPE for its lifetime, so a consumer that closes early
+        # (`mtest collect | head`) returns EPIPE to this write instead of
+        # killing mtest at 141 — a status outside the frozen {0,1,3,4,5} domain
+        # (§9, §16). Tearing down first would put SIGPIPE back at its default
+        # for exactly this write.
+        var listing = String("")
+        for nid in collected.listing:
+            listing += nid + "\n"
         print(listing, end="", flush=True)
-        exit(final_code)
+        exit(resources.close_into(collected.code, rank_delivery=True))
 
     # Resolve the machine-stream destination and, with it, the console's own
     # destination. Under `--json -` the stream OWNS stdout (byte-pure), so the
