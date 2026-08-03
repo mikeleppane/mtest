@@ -788,14 +788,10 @@ struct ReportWriter(Reporter):
         self._counter += 1
         if self._md and not self._md.value().failed:
             var path = self._spool_dir + "/md-" + String(index) + ".md"
-            self._spool_one(
-                _FORMAT_MD, md_file_section(section, False), path, key
-            )
+            self._spool_one(_FORMAT_MD, md_file_section(section), path, key)
         if self._html and not self._html.value().failed:
             var path = self._spool_dir + "/html-" + String(index) + ".html"
-            self._spool_one(
-                _FORMAT_HTML, html_file_section(section, False), path, key
-            )
+            self._spool_one(_FORMAT_HTML, html_file_section(section), path, key)
 
     def _spool_one(mut self, fmt: Int, body: String, path: String, key: String):
         """Write one rendered fragment, latching that sink on any failure."""

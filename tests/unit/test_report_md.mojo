@@ -95,7 +95,7 @@ def _section_with_node(node: String) -> String:
         build_line="",
         reproduce_node=node,
     )
-    return md_file_section(section, root_note=False)
+    return md_file_section(section)
 
 
 def test_summary_row_escapes_untrusted_path() raises:
@@ -148,7 +148,7 @@ def test_file_section_fences_detail_and_names_reproduce() raises:
         build_line="",
         reproduce_node="tests/a.mojo::test_x",
     )
-    var out = md_file_section(section, root_note=True)
+    var out = md_file_section(section)
     assert_true(out.find("````") != -1)
     assert_true(out.find("reproduce: `mtest tests/a.mojo::test_x`") != -1)
     assert_true(out.find("debug: `mtest debug tests/a.mojo::test_x`") != -1)
@@ -183,11 +183,14 @@ def _plain_section() -> ReportSectionInput:
     )
 
 
-def test_file_section_root_note_is_conditional() raises:
-    var with_note = md_file_section(_plain_section(), root_note=True)
-    var without_note = md_file_section(_plain_section(), root_note=False)
-    assert_true(with_note.find("relative to the run root") != -1)
-    assert_true(without_note.find("relative to the run root") == -1)
+def test_file_section_leaves_the_root_note_to_the_document_head() raises:
+    # Sections are spooled at file-finish and assembled in sorted path order,
+    # so "the first section" is not a position any section can know it is in.
+    # The note is stated once by `md_header` instead, and repeating it per
+    # section would put it on the page as many times as the run had files.
+    assert_true(
+        md_file_section(_plain_section()).find("relative to the run root") == -1
+    )
 
 
 def test_file_section_marks_truncated_streams() raises:
@@ -204,7 +207,7 @@ def test_file_section_marks_truncated_streams() raises:
         build_line="",
         reproduce_node="",
     )
-    var out = md_file_section(section, root_note=False)
+    var out = md_file_section(section)
     assert_true(out.find("*(stdout truncated)*") != -1)
     assert_true(out.find("*(stderr truncated)*") != -1)
     # An empty reproduce_node renders neither line.
@@ -229,7 +232,7 @@ def test_stream_fences_hold_hostile_content() raises:
         build_line="",
         reproduce_node="",
     )
-    var out = md_file_section(section, root_note=False)
+    var out = md_file_section(section)
     assert_true(out.find("````\ncloses ``` fence & <tag>\n````") != -1)
     assert_true(out.find("also </style> hostile") != -1)
 
@@ -253,7 +256,7 @@ def test_attempts_are_cell_escaped_and_cannot_break_the_bullet() raises:
         build_line="",
         reproduce_node="",
     )
-    var out = md_file_section(section, root_note=False)
+    var out = md_file_section(section)
     # Only '<' and '&' are escaped; a bare '>' is inert, matching
     # md_escape_cell's own contract.
     assert_true(out.find("- \\# fake heading &lt;b>&amp;amp;&lt;/b>\n") != -1)
@@ -276,7 +279,7 @@ def test_build_line_is_a_code_target() raises:
         build_line="mojo build tests/e.mojo",
         reproduce_node="",
     )
-    var out = md_file_section(section, root_note=False)
+    var out = md_file_section(section)
     assert_true(out.find("build: `mojo build tests/e.mojo`\n") != -1)
 
 
@@ -300,7 +303,7 @@ def test_build_line_hostile_sweep_stays_inside_the_code_span() raises:
         build_line="mojo build `-o` a|b <tag>&x # trailing",
         reproduce_node="",
     )
-    var out = md_file_section(section, root_note=False)
+    var out = md_file_section(section)
     assert_true(
         out.find("build: ``mojo build `-o` a|b <tag>&x # trailing``\n") != -1
     )
@@ -329,7 +332,7 @@ def test_detail_backtrace_is_relativized_against_section_root() raises:
         build_line="",
         reproduce_node="",
     )
-    var out = md_file_section(section, root_note=False)
+    var out = md_file_section(section)
     assert_true(out.find("At tests/a.mojo:3: assertion failed") != -1)
     assert_true(out.find("/abs/root/tests/a.mojo") == -1)
 
@@ -346,6 +349,18 @@ def test_not_run_line_escapes_a_hostile_leading_dash() raises:
         md_not_run_line(record),
         "- \\-danger.mojo: stopped early (-x/--maxfail)\n",
     )
+
+
+def test_header_states_that_paths_are_root_relative() raises:
+    # Every path the document renders is root-relative, including the `At`
+    # line rewritten inside a failure detail. Saying so once at the head is
+    # what makes the whole document readable from a checkout of the run root.
+    var facts = ReportHeaderFacts(version="x.y.z", platform="Linux x86_64")
+    var out = md_header(facts, _ctx())
+    assert_true(out.find("relative to the run root") != -1)
+    # Above the summary table, which the writer appends straight after the
+    # header: a note under the table is a note a reader meets too late.
+    assert_true(out.find("| Path |") == -1)
 
 
 def test_header_names_shuffle_seed_only_when_shuffled() raises:

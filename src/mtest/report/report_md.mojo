@@ -47,6 +47,14 @@ def md_header(facts: ReportHeaderFacts, ctx: ReportFinalizeContext) -> String:
     interrupt, no drift) renders no line at all, so a plain run's header
     stays short.
 
+    The header also states, once, that every path in the document is
+    relative to the run root. It belongs here rather than on a file section
+    because sections are spooled as their files finish and assembled in
+    sorted path order, so no section can know it is the first one a reader
+    meets; attaching the note to one of them would make the document depend
+    on completion order, and attaching it to all of them would repeat it
+    once per file.
+
     Args:
         facts: The build-time version and platform labels. Not mutated.
         ctx: The run-wide facts gathered at finalize. Not mutated.
@@ -61,6 +69,10 @@ def md_header(facts: ReportHeaderFacts, ctx: ReportFinalizeContext) -> String:
         + " ("
         + md_escape_cell(facts.platform)
         + ")\n\n"
+    )
+    out += (
+        "> File paths in this report, including a backtrace `At` line inside"
+        " a failure detail, are shown relative to the run root.\n\n"
     )
     out += "wall time: " + format_seconds(ctx.wall_seconds) + "s\n"
     out += (
@@ -180,21 +192,20 @@ def _reproduce_lines(node: String) -> String:
     return out^
 
 
-def md_file_section(section: ReportSectionInput, root_note: Bool) -> String:
+def md_file_section(section: ReportSectionInput) -> String:
     """One file's full-detail section: per-test failures, streams, repro.
 
     `section.path` is already root-relative, the convention every `NodeId`
     in this runner follows; a compiler-baked `At <path>` line inside a
     failure's raw detail is not, and `normalize_detail` rewrites it against
     `section.root`, exactly as the console does, so the two renderings do
-    not drift apart. `root_note` controls whether a short note says the
-    report's paths are root-relative, so the caller can show it once per
-    document rather than on every section.
+    not drift apart. That the paths a reader sees are root-relative is said
+    once by `md_header`, not here: a section cannot know whether it is the
+    first one in a document assembled in sorted path order.
 
     Args:
         section: The file's per-test results, captured streams, and repro
             target. Not mutated.
-        root_note: Whether to emit the root-relativity note.
 
     Returns:
         The section fragment, ending in a blank line.
@@ -206,12 +217,6 @@ def md_file_section(section: ReportSectionInput, root_note: Bool) -> String:
         + outcome_label(section.outcome_code)
         + "\n\n"
     )
-    if root_note:
-        out += (
-            "> File paths in this report, including a backtrace `At` line"
-            " inside a failure detail, are shown relative to the run"
-            " root.\n\n"
-        )
     for ref t in section.tests:
         if t.outcome != Outcome.FAIL:
             continue

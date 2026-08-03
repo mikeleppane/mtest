@@ -81,6 +81,7 @@ comptime _REPORT_CSS: StaticString = (
     "h1, h2 { border-bottom: 1px solid #8888; padding-bottom: 0.25rem; }\n"
     "ul.facts { list-style: none; padding: 0; margin: 0 0 1.5rem 0; }\n"
     "ul.facts li { margin: 0.15rem 0; }\n"
+    "p.note { color: #6e7781; margin: 0 0 1rem 0; }\n"
     "table.report { border-collapse: collapse; width: 100%; }\n"
     "table.report th, table.report td {"
     " border: 1px solid #8888; padding: 0.35rem 0.6rem;"
@@ -159,7 +160,10 @@ def html_document_open(
 
     Mirrors `md_header`'s conditional-fact policy exactly: every count below
     the title is conditional except the tests and wall-time lines, so a
-    plain run's header stays short. Ends by opening the summary table
+    plain run's header stays short. It carries `md_header`'s root-relativity
+    note too, and for the same reason: sections are spooled as their files
+    finish and assembled in sorted path order, so no section can know it is
+    the first one a reader meets. Ends by opening the summary table
     (`<thead>` with the column labels, then an unclosed `<tbody>`) for
     `html_summary_row` to append into; `html_document_close` is the only
     function that closes it.
@@ -183,6 +187,11 @@ def html_document_open(
         + " ("
         + _escape_inline(facts.platform)
         + ")</p>\n"
+    )
+    out += (
+        '<p class="note">File paths in this report, including a backtrace'
+        " <code>At</code> line inside a failure detail, are shown relative"
+        " to the run root.</p>\n"
     )
     out += '<ul class="facts">\n'
     out += "<li>wall time: " + format_seconds(ctx.wall_seconds) + "s</li>\n"
@@ -316,25 +325,24 @@ def _is_green(outcome_code: Int) -> Bool:
     return outcome_code == Outcome.PASS.code
 
 
-def html_file_section(section: ReportSectionInput, root_note: Bool) -> String:
+def html_file_section(section: ReportSectionInput) -> String:
     """One file's full-detail section: per-test failures, streams, repro.
 
     `section.path` is already root-relative, the convention every `NodeId`
     in this runner follows; a compiler-baked `At <path>` line inside a
     failure's raw detail is not, and `normalize_detail` rewrites it against
     `section.root`, exactly as the console and the Markdown renderer do, so
-    every rendering of a failure's detail reads identically. `root_note`
-    controls whether a short note says the report's paths are root-relative,
-    so the caller can show it once per document rather than on every
-    section. The whole section renders as one `<tr>` whose single `<td>`
-    spans every summary column (`colspan="_SUMMARY_COLS"`) and holds a
-    `<details>`, open by default for any outcome other than `PASS`
-    (`_is_green`).
+    every rendering of a failure's detail reads identically. That the paths
+    a reader sees are root-relative is said once by `html_document_open`,
+    not here: a section cannot know whether it is the first one in a
+    document assembled in sorted path order. The whole section renders as
+    one `<tr>` whose single `<td>` spans every summary column
+    (`colspan="_SUMMARY_COLS"`) and holds a `<details>`, open by default for
+    any outcome other than `PASS` (`_is_green`).
 
     Args:
         section: The file's per-test results, captured streams, and repro
             target. Not mutated.
-        root_note: Whether to emit the root-relativity note.
 
     Returns:
         One complete `<tr>`, newline-terminated.
@@ -355,12 +363,6 @@ def html_file_section(section: ReportSectionInput, root_note: Bool) -> String:
         + outcome_label(section.outcome_code)
         + "</summary>\n"
     )
-    if root_note:
-        out += (
-            '<p class="note">File paths in this report, including a'
-            " backtrace <code>At</code> line inside a failure detail, are"
-            " shown relative to the run root.</p>\n"
-        )
     for ref t in section.tests:
         if t.outcome != Outcome.FAIL:
             continue

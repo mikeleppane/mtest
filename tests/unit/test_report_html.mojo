@@ -127,7 +127,7 @@ def _section_with_node(node: String) -> String:
         build_line="",
         reproduce_node=node,
     )
-    return html_file_section(section, root_note=False)
+    return html_file_section(section)
 
 
 def _hostile_section() -> ReportSectionInput:
@@ -153,7 +153,7 @@ def _hostile_section() -> ReportSectionInput:
 def test_document_has_one_style_and_no_script() raises:
     var doc = (
         html_document_open(_facts(), _ctx_fixture())
-        + html_file_section(_hostile_section(), True)
+        + html_file_section(_hostile_section())
         + html_document_close()
     )
     assert_equal(_count_occurrences(doc, "<script"), 0)
@@ -161,7 +161,7 @@ def test_document_has_one_style_and_no_script() raises:
 
 
 def test_hostile_name_cannot_close_style_or_details() raises:
-    var out = html_file_section(_hostile_section(), True)
+    var out = html_file_section(_hostile_section())
     assert_true(out.find("</style") == -1)
     assert_true(out.find("&lt;script&gt;") != -1)
 
@@ -222,7 +222,7 @@ def test_stream_pre_preserves_lf_tab_but_escapes_other_controls() raises:
         build_line="",
         reproduce_node="",
     )
-    var out = html_file_section(section, root_note=False)
+    var out = html_file_section(section)
     assert_true(out.find("<pre>\nline1\n\tindented\\x07\\x0Dline2</pre>") != -1)
     assert_true(out.find(chr(0x07)) == -1)
     assert_true(out.find(chr(0x0D)) == -1)
@@ -241,6 +241,15 @@ def test_document_close_closes_table_and_shell() raises:
     assert_equal(
         html_document_close(), "</tbody>\n</table>\n</body>\n</html>\n"
     )
+
+
+def test_document_open_states_that_paths_are_root_relative() raises:
+    # The Markdown renderer's head note in this document's syntax, and above
+    # the summary table for the same reason: a note under the table is a note
+    # a reader meets after every path it explains.
+    var out = html_document_open(_facts(), _ctx())
+    assert_true(out.find("relative to the run root") != -1)
+    assert_true(out.find("relative to the run root") < out.find("<table"))
 
 
 def test_document_open_has_meta_charset() raises:
@@ -275,7 +284,7 @@ def test_summary_table_header_is_exact() raises:
 def test_full_document_assembly_has_balanced_table_and_shell() raises:
     var doc = html_document_open(_facts(), _ctx())
     doc += html_summary_row(_row("a.mojo", Outcome.PASS.code))
-    doc += html_file_section(_plain_section(), root_note=False)
+    doc += html_file_section(_plain_section())
     doc += html_not_run_line(NotRunRecord("b.mojo", NotRunReason.LIMIT_REACHED))
     var rows = List[ReportRow]()
     rows.append(_row("a.mojo", Outcome.FAIL.code))
@@ -318,7 +327,7 @@ def test_summary_row_escapes_untrusted_path() raises:
 
 
 def test_file_section_open_for_non_green_closed_for_pass() raises:
-    var fail_out = html_file_section(_plain_section(), root_note=False)
+    var fail_out = html_file_section(_plain_section())
     assert_true(fail_out.find('<details class="file" open>') != -1)
 
     var pass_section = ReportSectionInput(
@@ -334,7 +343,7 @@ def test_file_section_open_for_non_green_closed_for_pass() raises:
         build_line="",
         reproduce_node="",
     )
-    var pass_out = html_file_section(pass_section, root_note=False)
+    var pass_out = html_file_section(pass_section)
     assert_true(pass_out.find('<details class="file">') != -1)
     assert_true(pass_out.find('<details class="file" open>') == -1)
 
@@ -362,7 +371,7 @@ def test_file_section_fences_detail_and_names_reproduce() raises:
         build_line="",
         reproduce_node="tests/a.mojo::test_x",
     )
-    var out = html_file_section(section, root_note=True)
+    var out = html_file_section(section)
     assert_true(out.find("<pre>\nboom ``` here</pre>") != -1)
     assert_true(
         out.find("<p>reproduce: <code>mtest tests/a.mojo::test_x</code></p>")
@@ -394,11 +403,15 @@ def test_reproduce_escapes_a_hostile_html_node() raises:
     assert_true(out.find("<a>.mojo") == -1)
 
 
-def test_file_section_root_note_is_conditional() raises:
-    var with_note = html_file_section(_plain_section(), root_note=True)
-    var without_note = html_file_section(_plain_section(), root_note=False)
-    assert_true(with_note.find("relative to the run root") != -1)
-    assert_true(without_note.find("relative to the run root") == -1)
+def test_file_section_leaves_the_root_note_to_the_document_head() raises:
+    # Sections are spooled at file-finish and assembled in sorted path order,
+    # so "the first section" is not a position any section can know it is in.
+    # `html_document_open` states it once, and repeating it per section would
+    # put it on the page as many times as the run had files.
+    assert_true(
+        html_file_section(_plain_section()).find("relative to the run root")
+        == -1
+    )
 
 
 def test_file_section_marks_truncated_streams() raises:
@@ -415,7 +428,7 @@ def test_file_section_marks_truncated_streams() raises:
         build_line="",
         reproduce_node="",
     )
-    var out = html_file_section(section, root_note=False)
+    var out = html_file_section(section)
     assert_true(out.find("<p><em>(stdout truncated)</em></p>") != -1)
     assert_true(out.find("<p><em>(stderr truncated)</em></p>") != -1)
     # An empty reproduce_node renders neither line.
@@ -437,7 +450,7 @@ def test_stream_pre_holds_hostile_content() raises:
         build_line="",
         reproduce_node="",
     )
-    var out = html_file_section(section, root_note=False)
+    var out = html_file_section(section)
     assert_true(
         out.find("<pre>\ncloses &lt;/pre&gt; fence &amp; &lt;tag&gt;</pre>")
         != -1
@@ -463,7 +476,7 @@ def test_attempts_are_escaped_and_cannot_open_a_tag() raises:
         build_line="",
         reproduce_node="",
     )
-    var out = html_file_section(section, root_note=False)
+    var out = html_file_section(section)
     assert_true(
         out.find("<li># fake heading &lt;b&gt;&amp;amp;&lt;/b&gt;</li>") != -1
     )
@@ -484,7 +497,7 @@ def test_build_line_is_escaped() raises:
         build_line="mojo build `-o` a|b <tag>&x # trailing",
         reproduce_node="",
     )
-    var out = html_file_section(section, root_note=False)
+    var out = html_file_section(section)
     assert_true(
         out.find(
             "<p>build: <code>mojo build `-o` a|b &lt;tag&gt;&amp;x #"
@@ -517,7 +530,7 @@ def test_detail_backtrace_is_relativized_against_section_root() raises:
         build_line="",
         reproduce_node="",
     )
-    var out = html_file_section(section, root_note=False)
+    var out = html_file_section(section)
     assert_true(out.find("At tests/a.mojo:3: assertion failed") != -1)
     assert_true(out.find("/abs/root/tests/a.mojo") == -1)
 
