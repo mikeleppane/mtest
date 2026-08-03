@@ -629,6 +629,34 @@ def _unusable_name(relative: String, facts: PathFacts) -> String:
     )
 
 
+def _uninspectable_name(relative: String, facts: PathFacts) -> String:
+    """The failure for an artifact name this could not observe at all.
+
+    Separate from `_unusable_name` because the two are different answers to
+    different questions. A name held by a symlink is a refusal decided against
+    an untouched directory (exit 4); a name that could not be inspected —
+    `EACCES` on an unsearchable parent, `ELOOP`, `EIO` — is a filesystem
+    failure (exit 3), because nothing was learned about it and creating
+    through it would be a guess.
+
+    Args:
+        relative: The artifact's path as the report names it.
+        facts: What observing that name produced.
+
+    Returns:
+        The failure line, or empty when the observation succeeded.
+    """
+    if facts.error == 0:
+        return String("")
+    return (
+        "scaffold: could not inspect '"
+        + relative
+        + "' (errno "
+        + String(facts.error)
+        + ")"
+    )
+
+
 def _ensure_cache_ignored(path: String, observed: PathFacts) raises -> String:
     """Make sure `.gitignore` leaves the build cache untracked, and say how.
 
@@ -665,6 +693,12 @@ def _ensure_cache_ignored(path: String, observed: PathFacts) raises -> String:
         # publication. The link refused, correctly — and the winner still has
         # to carry the entry, so the update path takes over from here.
         facts = observe_path(path)
+        if facts.error != 0:
+            raise Error(
+                "could not inspect '.gitignore' (errno "
+                + String(facts.error)
+                + ")"
+            )
         if not facts.present or not facts.is_regular:
             raise Error("'.gitignore' is not a regular file")
     # Raises on a file past the ceiling rather than handing back a truncated
@@ -745,13 +779,23 @@ def run_init(root: String, ci: String) -> ScaffoldReport:
     # claim a file exists that does not.
     var gitignore = root + "/.gitignore"
     var observed_ignore = observe_path(gitignore)
+    var unreadable = _uninspectable_name(".gitignore", observed_ignore)
+    if unreadable != "":
+        return _report(unreadable, _EXIT_IO_FAILURE)
     var refusal = _unusable_name(".gitignore", observed_ignore)
     if refusal != "":
         return _report(refusal, _EXIT_REFUSED)
     for relative in relatives:
-        var blocked = _unusable_name(
-            relative, observe_path(root + "/" + relative)
-        )
+        var facts = observe_path(root + "/" + relative)
+        # An observation that FAILED is not an observation of absence. Creating
+        # through a name this could not inspect is exactly how a symlink or a
+        # directory behind an unsearchable parent would be written through, and
+        # it would surface as a half-bootstrapped project reporting a creation
+        # failure rather than as the inspection failure it really is.
+        var blind = _uninspectable_name(relative, facts)
+        if blind != "":
+            return _report(blind, _EXIT_IO_FAILURE)
+        var blocked = _unusable_name(relative, facts)
         if blocked != "":
             return _report(blocked, _EXIT_REFUSED)
 

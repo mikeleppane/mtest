@@ -25,6 +25,7 @@ from mtest.platform import (
     PathFacts,
     close_checked_fd,
     create_unique_temp,
+    observe_path,
     read_regular_file_bytes,
     rename_path,
     set_permissions,
@@ -446,7 +447,7 @@ def test_a_raced_gitignore_still_gains_the_entry() raises:
     var root = temp_root()
     try:
         _write(root + "/.gitignore", "CONCURRENT\n")
-        var absent = PathFacts(False, False, 0)
+        var absent = PathFacts(False, False, 0, 0)
         assert_equal(
             _ensure_cache_ignored(root + "/.gitignore", absent),
             "updated .gitignore",
@@ -462,7 +463,7 @@ def test_a_raced_gitignore_that_is_not_a_file_is_an_io_failure() raises:
     var root = temp_root()
     try:
         mkdir(root + "/.gitignore", 0o700)
-        var absent = PathFacts(False, False, 0)
+        var absent = PathFacts(False, False, 0, 0)
         with assert_raises(contains="not a regular file"):
             _ = _ensure_cache_ignored(root + "/.gitignore", absent)
     finally:
@@ -513,6 +514,87 @@ def test_ci_is_not_a_run_flag() raises:
     # make `mtest --ci github tests` parse as a run whose value nothing reads.
     with assert_raises(contains="--ci"):
         _ = parse_args(["--ci", "github", "tests"])
+
+
+def _permissions_are_enforced(root: String) raises -> Bool:
+    """Whether this process is actually stopped by a `0o000` directory.
+
+    A privileged process searches one anyway, so every assertion below about
+    `EACCES` would be vacuously wrong rather than merely untested. Asking the
+    filesystem is the only honest way to know: an effective-uid check would
+    still miss a container that grants `CAP_DAC_OVERRIDE` without being uid 0.
+    """
+    var sealed = root + "/sealed-probe"
+    mkdir(sealed, 0o700)
+    _write(sealed + "/inside", "x")
+    set_permissions(sealed, 0o000)
+    var blind = observe_path(sealed + "/inside")
+    set_permissions(sealed, 0o700)
+    return blind.error != 0
+
+
+def test_observe_path_separates_absence_from_unreadability() raises:
+    # The distinction the publication protocol rests on. A name nothing holds
+    # is free and may be created; a name that could not be INSPECTED is
+    # unknown, and creating through it is how a symlink gets written through.
+    # Folding both into "absent" is what this pins against.
+    var root = temp_root()
+    try:
+        # ENOENT: nothing there, and nothing wrong.
+        var missing = observe_path(root + "/never-written")
+        assert_false(missing.present)
+        assert_equal(missing.error, 0)
+
+        # ENOTDIR: a non-directory partway along the path is still absence —
+        # no file can ever live there, so the name is genuinely free.
+        _write(root + "/plain", "x")
+        var through_a_file = observe_path(root + "/plain/deeper")
+        assert_false(through_a_file.present)
+        assert_equal(through_a_file.error, 0)
+
+        # A real observation reports itself cleanly.
+        var seen = observe_path(root + "/plain")
+        assert_true(seen.present)
+        assert_true(seen.is_regular)
+        assert_equal(seen.error, 0)
+
+        # EACCES: the parent cannot be searched, so nothing is known. This is
+        # also the guard on `errno_now` still reading the errno the failed
+        # `lstat` set — a clobbered slot would land here as a 0.
+        if _permissions_are_enforced(root):
+            var locked = root + "/locked"
+            mkdir(locked, 0o700)
+            _write(locked + "/artifact", "x")
+            set_permissions(locked, 0o000)
+            var blind = observe_path(locked + "/artifact")
+            set_permissions(locked, 0o700)
+            assert_false(blind.present)
+            assert_true(blind.error != 0)
+    finally:
+        remove_tree(root)
+
+
+def test_init_refuses_an_artifact_name_it_cannot_inspect() raises:
+    # The preflight's whole job is to decide against an UNTOUCHED directory. A
+    # name it could not inspect used to read as absent, so `init` created the
+    # artifacts ahead of it and only then failed on the one it could not
+    # publish — a half-bootstrapped project reporting a creation failure
+    # instead of the inspection failure that really stopped it.
+    var root = temp_root()
+    try:
+        if not _permissions_are_enforced(root):
+            return
+        mkdir(root + "/tests", 0o700)
+        set_permissions(root + "/tests", 0o000)
+        var report = run_init(root, "")
+        set_permissions(root + "/tests", 0o700)
+        assert_equal(report.code, 3)
+        assert_true("could not inspect" in _joined(report.lines))
+        # Nothing was created: the refusal came before the first publication.
+        assert_false(exists(root + "/mtest.toml"))
+        assert_false(exists(root + "/.gitignore"))
+    finally:
+        remove_tree(root)
 
 
 def main() raises:
