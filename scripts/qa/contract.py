@@ -768,6 +768,14 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "debug: unknown test -> 4",
     "debug: reporter flag refused -> 4",
     "debug: --retries refused -> 4",
+    "run: --report bad format -> 4",
+    "run: --report duplicate format -> 4",
+    "run: --report md=html collision -> 4",
+    "run: --report collides with --junit-xml -> 4",
+    "run: --report relative-alias collision -> 4",
+    "collect: --report rejected -> 4",
+    "doctor: --report rejected -> 4",
+    "debug: --report rejected -> 4",
     "served: -n accepted (not exit 4)",
     "served: --workers accepted (not exit 4)",
     "served: --serial accepted (not exit 4)",
@@ -810,6 +818,12 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "init: --ci github bootstraps a runnable project",
     "init: a second run skips every artifact, still 0",
     "init: --ci gitlab -> 4",
+    "report: --report md publishes a document for a green run",
+    "report: --report md+html describes a failing run in both formats",
+    "report: --report-style full sections a file concise leaves out",
+    "determinism: two --report runs agree once durations are normalized",
+    "report: an unwritable --report target exits 3, prior report intact",
+    "config show: colliding destinations render with provenance, exit 0",
     "interrupt: SIGINT frees the owned process group",
 )
 """Every check `main` must perform, in order, on an unfiltered run.
@@ -879,6 +893,26 @@ def verify_every_check_ran(performed: tuple[str, ...], filtered: bool) -> None:
 # counters, which depend on what the store held when the run started. Both are
 # elided before an exact comparison, so a warm scaffold cannot flap a check.
 _RUN_SPECIFICS = re.compile(r", builds: \d+, cached: \d+| in \d+\.\d+s")
+
+I_FLAGS = ["-I", "build"]
+"""The `-I` include flag every scaffolded run needs, for the bespoke checks.
+
+`build_matrix` names the same pair locally; the bespoke `Runner` methods below
+are outside that function and cannot see it.
+"""
+
+# EVERY machine-dependent cell in a run report, anchored so nothing else is
+# masked: the header's wall time, the build-cache counters (whose values depend
+# on what the store held when the run started), and the summary table's per-file
+# duration column. Normalizing only the wall time would let a per-file duration
+# flap two identical runs apart; normalizing bare `\d+\.\d+` everywhere would
+# quietly mask a real difference in some other number.
+_REPORT_MEASURED = re.compile(
+    r"(?<=wall time: )\d+\.\d+s"
+    r"|^builds: \d+ built, \d+ cached$"
+    r"|(?<=\| )\d+\.\d+(?= \|)",
+    re.MULTILINE,
+)
 
 
 def _first_yaml_fence(page: Path) -> bytes:
@@ -2773,6 +2807,184 @@ class Runner:
             probs.append(f"the refusal created artifacts anyway: {left}")
         self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
 
+    # -- run report: the document a caller was promised actually lands, says
+    #    what the run did, and never survives a doomed destination (§15.5).
+    def check_run_report(self) -> None:
+        """Assert `--report` publishes documents that describe the real run.
+
+        Four properties, each its own rostered verdict: a green run publishes a
+        Markdown document naming the file it ran; a failing run publishes both
+        formats and both name the failing test; `--report-style full` sections a
+        file that `concise` deliberately leaves out; and two identical runs
+        produce byte-identical documents once every measured duration is
+        normalized away.
+        """
+        ref = "§15.5 --report writes a self-contained document per format"
+        out = self.root / "reports"
+        out.mkdir(exist_ok=True)
+
+        # (1) A green run: the document exists, is not empty, and names the
+        #     file it ran rather than being a shell of headings.
+        name = "report: --report md publishes a document for a green run"
+        green = out / "green.md"
+        run = self.mtest([*I_FLAGS, "--report", f"md:{green}", "tests"])
+        probs: list[str] = []
+        if run.returncode != 0:
+            probs.append(f"exit {run.returncode}, want 0")
+        if not green.is_file():
+            probs.append("no markdown report was published")
+        else:
+            body = green.read_text()
+            probs += [
+                f"the report omits {needed!r}"
+                for needed in ("# mtest report", "tests/test_reverse.mojo", "PASS")
+                if needed not in body
+            ]
+        self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
+
+        # (2) A failing run, both formats: each document names the failing test,
+        #     and the exit code is the run's own 1 rather than a report failure.
+        name = "report: --report md+html describes a failing run in both formats"
+        fail_md, fail_html = out / "fail.md", out / "fail.html"
+        run = self.mtest(
+            [
+                *I_FLAGS,
+                "--report",
+                f"md:{fail_md}",
+                "--report",
+                f"html:{fail_html}",
+                "probes/test_fail.mojo",
+            ]
+        )
+        probs = []
+        if run.returncode != 1:
+            probs.append(f"exit {run.returncode}, want 1")
+        for doc in (fail_md, fail_html):
+            if not doc.is_file():
+                probs.append(f"{doc.name} was not published")
+                continue
+            body = doc.read_text()
+            if "test_f" not in body:
+                probs.append(f"{doc.name} does not name the failing test")
+            if "FAIL" not in body:
+                probs.append(f"{doc.name} does not carry the FAIL outcome")
+        if fail_html.is_file() and "<html" not in fail_html.read_text():
+            probs.append("the html report is not an html document")
+        self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
+
+        # (3) `full` sections a passing file; `concise` gives it a row only.
+        name = "report: --report-style full sections a file concise leaves out"
+        concise_md, full_md = out / "concise.md", out / "full.md"
+        a = self.mtest(
+            [*I_FLAGS, "--report", f"md:{concise_md}", "tests/test_palindrome.mojo"]
+        )
+        b = self.mtest(
+            [
+                *I_FLAGS,
+                "--report",
+                f"md:{full_md}",
+                "--report-style",
+                "full",
+                "tests/test_palindrome.mojo",
+            ]
+        )
+        probs = []
+        if a.returncode != 0 or b.returncode != 0:
+            probs.append(f"exits {a.returncode}/{b.returncode}, want 0/0")
+        if not (concise_md.is_file() and full_md.is_file()):
+            probs.append("one of the two documents was not published")
+        else:
+            heading = "## `tests/test_palindrome.mojo`"
+            if heading in concise_md.read_text():
+                probs.append("concise sectioned a file that needs no action")
+            if heading not in full_md.read_text():
+                probs.append("full did not section every file")
+        self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
+
+        # (4) Determinism. Every duration cell is measured, so the comparison
+        #     normalizes ALL of them — the summary line, the table column, and
+        #     any in-section timing — rather than sampling one.
+        name = "determinism: two --report runs agree once durations are normalized"
+        first, second = out / "det1.md", out / "det2.md"
+        r1 = self.mtest([*I_FLAGS, "--report", f"md:{first}", "tests"])
+        r2 = self.mtest([*I_FLAGS, "--report", f"md:{second}", "tests"])
+        probs = []
+        if r1.returncode != 0 or r2.returncode != 0:
+            probs.append(f"exits {r1.returncode}/{r2.returncode}, want 0/0")
+        if not (first.is_file() and second.is_file()):
+            probs.append("one of the two documents was not published")
+        else:
+            a_body = _REPORT_MEASURED.sub("<t>", first.read_text())
+            b_body = _REPORT_MEASURED.sub("<t>", second.read_text())
+            if a_body != b_body:
+                probs.append("two identical runs produced different documents")
+            if not a_body.strip():
+                probs.append("the normalized document is empty")
+        self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
+
+    def check_run_report_construction_failure(self) -> None:
+        """Assert an unpreparable `--report` target exits 3 and keeps the prior.
+
+        The JUnit precedent, exactly: the parent EXISTS (so pre-run validation
+        passes and this is not the exit-4 missing-parent case) but is not
+        writable, so the unique temp cannot be created at session start. That is
+        a construction failure, exit 3, and the report already at PATH is never
+        touched.
+        """
+        ref = "§15.5/§9 an unpreparable report destination is a pre-run exit 3"
+        name = "report: an unwritable --report target exits 3, prior report intact"
+        locked = self.root / "locked"
+        locked.mkdir(exist_ok=True)
+        target = locked / "run.md"
+        prior = "# PRIOR REPORT\nkeep me\n"
+        target.write_text(prior)
+        probs: list[str] = []
+        os.chmod(locked, 0o500)
+        try:
+            run = self.mtest([*I_FLAGS, "--report", f"md:{target}", "tests"])
+            if run.returncode != 3:
+                probs.append(f"exit {run.returncode}, want 3")
+            if "internal error" not in run.stderr.lower():
+                probs.append(f"not reported as an internal error: {run.stderr!r}")
+            if target.read_text() != prior:
+                probs.append("the prior report at PATH was modified")
+        finally:
+            os.chmod(locked, 0o700)
+        self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
+
+    def check_config_show_report(self) -> None:
+        """Assert `config show` renders a collision instead of refusing it.
+
+        The run path refuses two destinations that name one file (§15.5), and
+        `config show` must not: it resolves without touching the filesystem, so
+        it renders both values with their provenance and exits 0. Pinned here
+        because the two commands read the same resolved config and could
+        otherwise drift silently.
+        """
+        ref = "§27.1 config show resolves only; §15.5 collisions are a run refusal"
+        name = "config show: colliding destinations render with provenance, exit 0"
+        project = self.root / "showcfg"
+        project.mkdir(exist_ok=True)
+        (project / "mtest.toml").write_text(
+            '[report]\nmd = "same.md"\njson = "same.md"\nstyle = "full"\n'
+        )
+        run = self.mtest(["config", "show"], cwd=project)
+        probs: list[str] = []
+        if run.returncode != 0:
+            probs.append(f"exit {run.returncode}, want 0")
+        probs += [
+            f"stdout omits {needed!r}"
+            for needed in (
+                'md = "same.md"  # (mtest.toml)',
+                'json = "same.md"  # (mtest.toml)',
+                'style = "full"  # (mtest.toml)',
+            )
+            if needed not in run.stdout
+        ]
+        if "same destination" in run.stdout + run.stderr:
+            probs.append("config show refused a collision it must only render")
+        self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
+
     # -- interrupt: signal ONLY mtest, so the child's survival tests mtest's own
     #    process-group teardown (§18/§24.2) rather than a signal the child caught.
     def check_interrupt(self, strict: bool) -> None:
@@ -3225,6 +3437,72 @@ def build_matrix() -> list[Check]:
             4,
             err_has=["cannot be combined with 'debug'"],
         ),
+        # The run report's pre-run refusals (§15.5). Every one is decided
+        # before a file is built, so none of them can leave a partial document.
+        Check(
+            "run: --report bad format -> 4",
+            "§15.5",
+            [*I, "--report", "xml:r.xml", "tests"],
+            4,
+            err_has=["md:PATH or html:PATH"],
+        ),
+        Check(
+            "run: --report duplicate format -> 4",
+            "§15.5",
+            [*I, "--report", "md:a.md", "--report", "md:b.md", "tests"],
+            4,
+            err_has=["given twice"],
+        ),
+        Check(
+            "run: --report md=html collision -> 4",
+            "§15.5",
+            [*I, "--report", "md:out.md", "--report", "html:out.md", "tests"],
+            4,
+            err_has=["same destination"],
+        ),
+        Check(
+            "run: --report collides with --junit-xml -> 4",
+            "§15.5",
+            [*I, "--report", "md:out.md", "--junit-xml", "out.md", "tests"],
+            4,
+            err_has=["same destination"],
+        ),
+        # The alias case: two spellings of ONE file, which a string comparison
+        # of the raw values would let through.
+        Check(
+            "run: --report relative-alias collision -> 4",
+            "§15.5",
+            [*I, "--report", "md:out.md", "--json", "./out.md", "tests"],
+            4,
+            err_has=["same destination"],
+        ),
+        Check(
+            "collect: --report rejected -> 4",
+            "§4",
+            ["collect", *I, "--report", "md:r.md", "tests"],
+            4,
+            err_has=["run-only"],
+        ),
+        Check(
+            "doctor: --report rejected -> 4",
+            "§4",
+            ["doctor", "--report", "md:r.md"],
+            4,
+            err_has=["doctor"],
+        ),
+        Check(
+            "debug: --report rejected -> 4",
+            "§28",
+            [
+                "debug",
+                *I,
+                "--report",
+                "md:r.md",
+                "tests/test_reverse.mojo::test_reverse_ab",
+            ],
+            4,
+            err_has=["no terminal record could be written"],
+        ),
     ]
     # Refused v1 flags (§24.1): each names the flag and states it is the v1 contract.
     for flag, val, _cap in refused:
@@ -3418,6 +3696,21 @@ def main() -> int:
             or wanted("init: --ci gitlab -> 4")
         ):
             runner.check_init_scaffold()
+        if (
+            wanted("report: --report md publishes a document for a green run")
+            or wanted(
+                "report: --report md+html describes a failing run in both formats"
+            )
+            or wanted("report: --report-style full sections a file concise leaves out")
+            or wanted(
+                "determinism: two --report runs agree once durations are normalized"
+            )
+        ):
+            runner.check_run_report()
+        if wanted("report: an unwritable --report target exits 3, prior report intact"):
+            runner.check_run_report_construction_failure()
+        if wanted("config show: colliding destinations render with provenance, exit 0"):
+            runner.check_config_show_report()
         if wanted("interrupt: SIGINT frees the owned process group"):
             if args.no_interrupt:
                 # Recorded rather than bypassed: testing --no-interrupt BEFORE

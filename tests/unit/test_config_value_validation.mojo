@@ -15,7 +15,13 @@ wrapping values, and the neighbours on both sides — rather than sampled.
 """
 from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
-from mtest.config import parse_nonnegative_decimal, parse_worker_count
+from mtest.config import (
+    ReportStyle,
+    parse_nonnegative_decimal,
+    parse_report_style_value,
+    parse_report_value,
+    parse_worker_count,
+)
 
 
 # --- parse_nonnegative_decimal: the accepted domain ---
@@ -95,6 +101,89 @@ def test_worker_count_accepts_i64_max() raises:
     var parsed = parse_worker_count("9223372036854775807")
     assert_true(Bool(parsed))
     assert_equal(parsed.value(), 9223372036854775807)
+
+
+# --- parse_report_value: the accepted FORMAT:PATH domain ---
+
+
+def test_report_value_accepts_markdown() raises:
+    var parsed = parse_report_value("md:build/report.md")
+    assert_true(Bool(parsed))
+    assert_equal(parsed.value().format, "md")
+    assert_equal(parsed.value().path, "build/report.md")
+
+
+def test_report_value_accepts_html() raises:
+    var parsed = parse_report_value("html:report.html")
+    assert_true(Bool(parsed))
+    assert_equal(parsed.value().format, "html")
+    assert_equal(parsed.value().path, "report.html")
+
+
+def test_report_value_keeps_every_later_colon_in_the_path() raises:
+    """The split is at the FIRST colon, so a colon-bearing path survives."""
+    var parsed = parse_report_value("md:build/a:b.md")
+    assert_true(Bool(parsed))
+    assert_equal(parsed.value().path, "build/a:b.md")
+
+
+def test_report_value_accepts_an_absolute_path() raises:
+    var parsed = parse_report_value("html:/tmp/out.html")
+    assert_true(Bool(parsed))
+    assert_equal(parsed.value().path, "/tmp/out.html")
+
+
+# --- parse_report_value: the refused domain ---
+
+
+def test_report_value_refuses_an_unknown_format() raises:
+    assert_false(Bool(parse_report_value("xml:r.xml")))
+
+
+def test_report_value_refuses_a_missing_separator() raises:
+    assert_false(Bool(parse_report_value("report.md")))
+
+
+def test_report_value_refuses_an_empty_path() raises:
+    assert_false(Bool(parse_report_value("md:")))
+
+
+def test_report_value_refuses_an_empty_format() raises:
+    assert_false(Bool(parse_report_value(":report.md")))
+
+
+def test_report_value_refuses_an_empty_value() raises:
+    assert_false(Bool(parse_report_value("")))
+
+
+def test_report_value_refuses_a_bare_separator() raises:
+    assert_false(Bool(parse_report_value(":")))
+
+
+def test_report_value_format_match_is_case_sensitive() raises:
+    """The closed set is lowercase; `MD` is a value error, not an alias."""
+    assert_false(Bool(parse_report_value("MD:report.md")))
+
+
+# --- parse_report_style_value: a closed two-member set ---
+
+
+def test_report_style_accepts_concise() raises:
+    var parsed = parse_report_style_value("concise")
+    assert_true(Bool(parsed))
+    assert_true(parsed.value() == ReportStyle.CONCISE)
+
+
+def test_report_style_accepts_full() raises:
+    var parsed = parse_report_style_value("full")
+    assert_true(Bool(parsed))
+    assert_true(parsed.value() == ReportStyle.FULL)
+
+
+def test_report_style_refuses_anything_else() raises:
+    assert_false(Bool(parse_report_style_value("")))
+    assert_false(Bool(parse_report_style_value("Full")))
+    assert_false(Bool(parse_report_style_value("verbose")))
 
 
 def main() raises:

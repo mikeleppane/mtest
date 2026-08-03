@@ -44,6 +44,7 @@ from mtest.config.mojo_path import resolve_mojo_path
 from mtest.config.overlay import CliOverlay
 from mtest.config.precompile import Precompile
 from mtest.config.provenance import ConfigProvenance, Provenance
+from mtest.config.report_style import ReportStyle
 from mtest.config.resolve import (
     ActiveConfigKeys,
     ConfigEnvironment,
@@ -68,12 +69,15 @@ from mtest.config.toml_bridge import (
 )
 from mtest.config.verbosity import Verbosity
 from mtest.config.value_validation import (
+    ReportValue,
     build_arg_rejection,
     escape_control_characters,
     parse_annotations_value,
     parse_color_value,
     parse_nonnegative_decimal,
     parse_precompile_value,
+    parse_report_style_value,
+    parse_report_value,
     parse_show_output_value,
     parse_verbosity_value,
     parse_worker_count,

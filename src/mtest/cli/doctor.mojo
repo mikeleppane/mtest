@@ -657,14 +657,43 @@ def _check_report_destinations(
     )
 
 
+def platform_label(macos: Bool) -> String:
+    """Name one supported platform, as `doctor`'s platform line names it.
+
+    Args:
+        macos: Whether the label describes Darwin rather than Linux.
+
+    Returns:
+        The bare platform identity, with no verdict or qualifier attached.
+    """
+    return String("macOS arm64") if macos else String("Linux x86_64")
+
+
+def host_platform_label() -> String:
+    """This build's own platform identity, resolved at compile time.
+
+    The same source `doctor`'s platform line reads from, so a run report's
+    header and a `doctor` block can never name two different platforms for one
+    binary.
+
+    Returns:
+        `macOS arm64` on Darwin, `Linux x86_64` on Linux.
+    """
+    comptime if CompilationTarget.is_macos():
+        return platform_label(True)
+    else:
+        return platform_label(False)
+
+
 def _platform_line(macos: Bool) -> String:
     if macos:
         return _line(
             "WARN",
             "platform",
-            "macOS arm64 supported; hosted runtime evidence pending",
+            platform_label(True)
+            + " supported; hosted runtime evidence pending",
         )
-    return _line("PASS", "platform", "Linux x86_64 supported")
+    return _line("PASS", "platform", platform_label(False) + " supported")
 
 
 def _execute_check(

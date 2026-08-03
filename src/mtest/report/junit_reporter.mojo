@@ -34,9 +34,8 @@ step is the fragment file write, which is wrapped and latched as in the JSON
 stream reporter, after which the reporter goes silent. An inert reporter, the
 no-`--junit-xml` shape, owns no spool directory and does nothing.
 """
-from std.os import getenv, mkdir, remove
+from std.os import remove
 from std.os.path import basename, dirname
-from std.time import perf_counter_ns
 
 from mtest.model.events import (
     AttemptFinishedPayload,
@@ -51,6 +50,7 @@ from mtest.model.outcome import Outcome
 from mtest.model.test_result import TestResult
 from mtest.platform import process_id, rename_path
 from mtest.report.file_accum import FileAccums
+from mtest.report.spool_dir import _SPOOL_ATTEMPTS, open_spool_dir
 from mtest.report.junit import (
     CACHE_SUITE_NAME,
     JunitCase,
@@ -72,21 +72,14 @@ comptime _TERM_SIGNALED = 1
 comptime _TERM_TIMED_OUT = 2
 comptime _TERM_SPAWN_FAILED = 3
 
-# How many distinct spool-directory names one call may try before giving up.
-# Every candidate re-reads the nanosecond clock, so a repeat needs two readings
-# to land on the same nanosecond; the budget therefore guards against an
-# unusable temp base rather than a collision rate.
-comptime _SPOOL_ATTEMPTS = 64
-
 
 def _junit_nonce() -> String:
-    """A per-process token isolating this run's JUnit spool and temp paths.
+    """A per-process token isolating this run's JUnit temp paths.
 
     Two mtest processes writing the same `--junit-xml PATH`, which `--shard`
     makes plausible, must never collide on a temp path one's finalize is
-    renaming or a spool dir one's cleanup would delete. The process id is stable
-    within a run and distinct across concurrent runs, so it keys each
-    invocation's disposable paths apart.
+    renaming. The process id is stable within a run and distinct across
+    concurrent runs, so it keys each invocation's disposable paths apart.
 
     Returns:
         The process id, rendered in decimal.
@@ -97,36 +90,17 @@ def _junit_nonce() -> String:
 def open_junit_spool() raises -> String:
     """Create and return this run's private temp directory for suite fragments.
 
-    Deliberately avoids `std.tempfile.mkdtemp`: at the pinned toolchain its
-    candidate-name generator is unseeded, so every process walks the same name
-    sequence. In a shared `/tmp` those exact names already exist from earlier
-    runs, mkdtemp exhausts its internal attempts, and `--junit-xml` dies before
-    a single test is built.
-
-    The key here is instead a monotonic nanosecond reading taken fresh on every
-    attempt, with `mkdir`'s own atomic exclusive create as the arbiter, under a
-    `mtest-junit-<pid>-` prefix that ties a stray directory back to the run that
-    left it. The pid alone cannot be the key: pids recur across pid namespaces
-    and after wraparound, so a fixed per-pid stem walked in index order would
-    have to step over every leftover a previous same-pid run abandoned, which
-    against a persisted `/tmp` reproduces the budget exhaustion this function
-    exists to remove. A re-read clock cannot be walked into again.
-
-    Honors `TMPDIR`, then `TEMP`, then `TMP`, falling back to `/tmp`. That is the
-    same precedence `gettempdir()` applies behind the `mkdtemp()` this replaces,
-    so confining a run's scratch keeps working exactly as it did before.
+    A thin naming of `open_spool_dir`, which owns the creation protocol and the
+    reasoning behind it (no `mkdtemp`, a re-read clock per attempt, the
+    TMPDIR/TEMP/TMP precedence).
 
     Returns:
         The path of the freshly created, empty directory, mode 0o700. The
         caller owns it and is responsible for removing it.
 
     Raises:
-        Error: When no candidate could be created within the attempt budget,
-            because the temp base is missing, is not a directory, or is
-            unwritable. The message carries the last underlying failure
-            verbatim, since every one of those causes burns the whole budget
-            identically and only the errno text tells them apart. The caller
-            resolves this to the pre-run internal-error exit code.
+        Error: When no candidate could be created within the attempt budget.
+            The caller resolves this to the pre-run internal-error exit code.
 
     Examples:
 
@@ -136,36 +110,7 @@ def open_junit_spool() raises -> String:
     var rep = JunitReporter(open_junit_spool(), True)
     ```
     """
-    var base = getenv("TMPDIR", "")
-    if base == "":
-        base = getenv("TEMP", "")
-    if base == "":
-        base = getenv("TMP", "")
-    if base == "":
-        base = String("/tmp")
-    if base.byte_length() > 1 and base.endswith("/"):
-        base = String(base.removesuffix("/"))
-    var stem = base + "/mtest-junit-" + _junit_nonce() + "-"
-    # Seeded so the raise below is always well-formed; the budget is positive,
-    # so a real failure always overwrites this.
-    var last = String("no attempt was made")
-    for attempt in range(_SPOOL_ATTEMPTS):
-        var candidate = stem + String(perf_counter_ns()) + "-" + String(attempt)
-        try:
-            mkdir(candidate, 0o700)
-        except e:
-            last = String(e)
-            continue
-        return candidate^
-    raise Error(
-        "report: could not create a junit spool directory under '"
-        + base
-        + "' ("
-        + String(_SPOOL_ATTEMPTS)
-        + " attempts; last: "
-        + last
-        + ")"
-    )
+    return open_spool_dir("junit")
 
 
 @fieldwise_init

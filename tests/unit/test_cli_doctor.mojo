@@ -92,6 +92,12 @@ def test_doctor_refuses_reporter_flags() raises:
     ]
     with assert_raises(contains="--gh-annotations"):
         _ = parse_args(annotations)
+    var report: List[String] = ["doctor", "--report", "md:run.md"]
+    with assert_raises(contains="--report"):
+        _ = parse_args(report)
+    var style: List[String] = ["doctor", "--report-style", "full"]
+    with assert_raises(contains="--report-style"):
+        _ = parse_args(style)
 
 
 def test_doctor_preserves_malformed_value_refusals() raises:

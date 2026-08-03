@@ -8,6 +8,7 @@ this layer.
 from mtest.config.annotations_mode import AnnotationsMode
 from mtest.config.color_when import ColorWhen
 from mtest.config.precompile import Precompile
+from mtest.config.report_style import ReportStyle
 from mtest.config.show_output import ShowOutput
 from mtest.config.verbosity import Verbosity
 
@@ -216,6 +217,24 @@ struct FileConfig(Copyable, Movable):
     var saw_gh_annotations: Bool
     """Whether `[report] gh-annotations` was supplied."""
 
+    var report_md_dest: String
+    """The `[report] md` destination."""
+
+    var saw_report_md: Bool
+    """Whether `[report] md` was supplied."""
+
+    var report_html_dest: String
+    """The `[report] html` destination."""
+
+    var saw_report_html: Bool
+    """Whether `[report] html` was supplied."""
+
+    var report_style: ReportStyle
+    """The `[report] style` choice."""
+
+    var saw_report_style: Bool
+    """Whether `[report] style` was supplied."""
+
     var overrides: List[OverrideRule]
     """The override tables in document order."""
 
@@ -274,5 +293,11 @@ struct FileConfig(Copyable, Movable):
             saw_json=False,
             gh_annotations=AnnotationsMode.AUTO,
             saw_gh_annotations=False,
+            report_md_dest="",
+            saw_report_md=False,
+            report_html_dest="",
+            saw_report_html=False,
+            report_style=ReportStyle.CONCISE,
+            saw_report_style=False,
             overrides=[],
         )

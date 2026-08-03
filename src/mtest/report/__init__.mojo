@@ -86,6 +86,7 @@ from mtest.report.report_writer import (
     ReportArtifact,
     ReportFinalizeResult,
     ReportWriter,
+    open_report_spool,
 )
 from mtest.report.report_html import (
     html_document_close,

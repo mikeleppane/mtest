@@ -5,7 +5,8 @@ a file indivisibly, and `publish_new_file` is its opposite number: a
 publication that can only ever create, never replace. `set_permissions`
 supports explicit mode changes, while `prepare_directory_for_rename` makes an
 identity-checked damaged cache directory movable on Darwin without following
-substituted symlinks.
+substituted symlinks. `destination_identity` answers the adjacent question of
+whether two spellings name one file that does not exist yet.
 
 The pinned standard library does not expose these operations with the required
 semantics. Its `link` wrapper is the closest, and it is not close enough: it
@@ -18,7 +19,7 @@ centralized here instead of being redeclared in session or tests.
 from std.ffi import external_call
 from std.memory import alloc, memset_zero
 from std.os import remove
-from std.os.path import realpath
+from std.os.path import basename, dirname, realpath
 from std.sys.info import CompilationTarget
 
 from mtest.platform.cstring import c_string_bytes
@@ -44,6 +45,52 @@ comptime _DARWIN_ANCHOR_OPEN_FLAGS = (
     | 0x01000000  # O_CLOEXEC
     | 0x20000000  # O_NOFOLLOW_ANY
 )
+
+
+def destination_identity(path: String) -> String:
+    """The key two not-yet-created output destinations compare equal on.
+
+    Canonicalizing `path` itself is not available: `realpath(3)` resolves every
+    component and fails on a final one that does not exist, which is the normal
+    state of a destination about to be written. The parent does exist (a
+    missing one is refused earlier, as a usage error), so the parent is
+    resolved and the basename appended verbatim. Two spellings of one file —
+    `out.md` and `./out.md`, a `..` segment, or a symlinked parent directory —
+    therefore produce one key, while two different names never do.
+
+    An empty `dirname` is normalized to `.` first, so a bare filename resolves
+    against the working directory instead of joining onto the filesystem root.
+
+    Deliberately total rather than raising: an unresolvable parent falls back to
+    the lexical spelling, which keeps the key comparable for a destination whose
+    real failure is reported by whichever check owns it.
+
+    Args:
+        path: The destination as its own layer spelled it.
+
+    Returns:
+        A freshly allocated comparison key. Meaningful only against another key
+        from this same function; never a path to open.
+
+    Examples:
+
+    ```mojo
+    from mtest.platform import destination_identity
+
+    var same = destination_identity("out.md") == destination_identity(
+        "./out.md"
+    )
+    ```
+    """
+    var parent = String(dirname(path))
+    if parent == "":
+        parent = String(".")
+    var resolved = parent.copy()
+    try:
+        resolved = realpath(parent)
+    except:
+        pass
+    return resolved + "/" + String(basename(path))
 
 
 def set_permissions(path: String, mode: Int) raises:

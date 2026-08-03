@@ -58,6 +58,8 @@ struct FlagId:
     comptime SHUFFLE = 34
     comptime SEED = 35
     comptime FORMAT = 36
+    comptime REPORT = 37
+    comptime REPORT_STYLE = 38
 
 
 struct FlagGroup:
@@ -431,6 +433,24 @@ def flag_specs() -> List[FlagSpec]:
             False,
             "Write a JUnit XML report.",
             "PATH",
+            FlagGroup.REPORTING,
+        ),
+        FlagSpec(
+            "--report",
+            FlagId.REPORT,
+            1,
+            True,
+            "Write a md or html run report (once each).",
+            "FORMAT:PATH",
+            FlagGroup.REPORTING,
+        ),
+        FlagSpec(
+            "--report-style",
+            FlagId.REPORT_STYLE,
+            1,
+            False,
+            "Choose concise|full report detail.",
+            "STYLE",
             FlagGroup.REPORTING,
         ),
         FlagSpec(

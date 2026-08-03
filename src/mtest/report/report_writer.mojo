@@ -70,6 +70,7 @@ from mtest.report.report_model import (
     needs_action,
 )
 from mtest.report.reporter import Reporter
+from mtest.report.spool_dir import open_spool_dir
 
 comptime REPORT_STYLE_CONCISE = 0
 """The concise style: every file earns a summary row, and only a file that
@@ -100,6 +101,34 @@ comptime _PRECOMPILE_SECTION: StaticString = "mtest::precompile"
 """The section identity a precompile failure that named no step falls back to;
 session-level like the JUnit suite of the same name, and deliberately not a
 path, so it can never collide with a real file's section."""
+
+
+def open_report_spool() raises -> String:
+    """Create and return this run's private temp directory for section
+    fragments.
+
+    A thin naming of `open_spool_dir`, which owns the creation protocol and the
+    reasoning behind it (no `mkdtemp`, a re-read clock per attempt, the
+    TMPDIR/TEMP/TMP precedence). One directory serves both sinks: a section's
+    Markdown and HTML fragments differ by filename, never by directory.
+
+    Returns:
+        The path of the freshly created, empty directory, mode 0o700. The
+        caller owns it and is responsible for removing it, fragments and all.
+
+    Raises:
+        Error: When no candidate could be created within the attempt budget.
+            The caller resolves this to the pre-run internal-error exit code.
+
+    Examples:
+
+    ```mojo
+    from mtest.report import open_report_spool
+
+    var spool = open_report_spool()
+    ```
+    """
+    return open_spool_dir("run report")
 
 
 @fieldwise_init

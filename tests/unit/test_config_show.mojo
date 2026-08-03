@@ -16,6 +16,7 @@ from mtest.config import (
     FileConfig,
     OverrideRule,
     Precompile,
+    ReportStyle,
     ResolvedConfig,
     RunnerConfig,
     ShowOutput,
@@ -107,11 +108,38 @@ def test_config_show_skips_report_destination_parent_checks() raises:
         "missing/events.ndjson",
         "--junit-xml",
         "missing/junit.xml",
+        "--report",
+        "md:missing/run.md",
+        "--report",
+        "html:missing/run.html",
     ]
     var result = parse_args(argv)
     assert_true(result.is_config_show())
     assert_equal(result.config.json_dest, "missing/events.ndjson")
     assert_equal(result.config.junit_dest, "missing/junit.xml")
+    assert_equal(result.config.report_md_dest, "missing/run.md")
+    assert_equal(result.config.report_html_dest, "missing/run.html")
+
+
+def test_config_show_renders_colliding_destinations_without_refusing() raises:
+    """Resolution-only display never probes the filesystem, so a collision
+    between two destinations is rendered with provenance rather than refused;
+    the run path is the one that refuses it."""
+    var file = FileConfig.empty()
+    file.report_md_dest = "out.md"
+    file.saw_report_md = True
+    var overlay = CliOverlay.default()
+    overlay.json_dest = "out.md"
+    overlay.saw_json = True
+    var resolved = resolve_config(
+        RunnerConfig.default(),
+        file,
+        ConfigEnvironment.empty(),
+        overlay,
+    )
+    var rendered = render_config_show(resolved, state_present=False)
+    assert_true('md = "out.md"  # (mtest.toml)' in rendered)
+    assert_true('json = "out.md"  # (cli)' in rendered)
 
 
 def test_config_show_help_and_version_flags_keep_global_meaning() raises:
@@ -156,6 +184,9 @@ def test_config_show_defaults_render_every_key_in_fixed_order() raises:
             "# junit-xml = (unset)\n"
             "# json = (unset)\n"
             'gh-annotations = "auto"  # (default)\n'
+            "# md = (unset)\n"
+            "# html = (unset)\n"
+            'style = "concise"  # (default)\n'
             "\n"
             "# config file: none\n"
             "# state file: .mtest-cache/lastrun (absent)\n"
@@ -180,6 +211,12 @@ def test_config_show_renders_all_provenance_labels_and_no_color() raises:
     file.saw_json = True
     file.gh_annotations = AnnotationsMode.OFF
     file.saw_gh_annotations = True
+    file.report_md_dest = "file.md"
+    file.saw_report_md = True
+    file.report_html_dest = "file.html"
+    file.saw_report_html = True
+    file.report_style = ReportStyle.FULL
+    file.saw_report_style = True
     var overlay = CliOverlay.default()
     overlay.timeout_secs = 9
     overlay.saw_timeout = True
@@ -203,6 +240,9 @@ def test_config_show_renders_all_provenance_labels_and_no_color() raises:
     assert_true('junit-xml = "file.xml"  # (mtest.toml)' in rendered)
     assert_true('json = "file.ndjson"  # (mtest.toml)' in rendered)
     assert_true('gh-annotations = "off"  # (mtest.toml)' in rendered)
+    assert_true('md = "file.md"  # (mtest.toml)' in rendered)
+    assert_true('html = "file.html"  # (mtest.toml)' in rendered)
+    assert_true('style = "full"  # (mtest.toml)' in rendered)
     assert_true("workers = 1  # (default)" in rendered)
     assert_true("# config file: mtest.toml" in rendered)
     assert_true("# state file: .mtest-cache/lastrun (present)" in rendered)

@@ -1612,6 +1612,8 @@ Reporting:
   --format FORMAT             Collect output format: lines (default) or json.
   --json PATH|-               Write NDJSON events to PATH or stdout.
   --junit-xml PATH            Write a JUnit XML report.
+  --report FORMAT:PATH        Write a md or html run report (once each).
+  --report-style STYLE        Choose concise|full report detail.
   --gh-annotations MODE       Choose off|on|auto GitHub annotations.
 
 Session state:

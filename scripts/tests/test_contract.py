@@ -632,6 +632,12 @@ class CheckRosterTests(unittest.TestCase):
                 "init: --ci github bootstraps a runnable project",
                 "init: a second run skips every artifact, still 0",
                 "init: --ci gitlab -> 4",
+                "report: --report md publishes a document for a green run",
+                "report: --report md+html describes a failing run in both formats",
+                "report: --report-style full sections a file concise leaves out",
+                "determinism: two --report runs agree once durations are normalized",
+                "report: an unwritable --report target exits 3, prior report intact",
+                "config show: colliding destinations render with provenance, exit 0",
                 "interrupt: SIGINT frees the owned process group",
             ],
         )
@@ -808,6 +814,34 @@ class CheckRosterTests(unittest.TestCase):
                 self._perform("init: --ci github bootstraps a runnable project")
                 self._perform("init: a second run skips every artifact, still 0")
                 self._perform("init: --ci gitlab -> 4")
+
+            def check_run_report(self) -> None:
+                self._perform(
+                    "report: --report md publishes a document for a green run"
+                )
+                self._perform(
+                    "report: --report md+html describes a failing run in both"
+                    " formats"
+                )
+                self._perform(
+                    "report: --report-style full sections a file concise leaves out"
+                )
+                self._perform(
+                    "determinism: two --report runs agree once durations are"
+                    " normalized"
+                )
+
+            def check_run_report_construction_failure(self) -> None:
+                self._perform(
+                    "report: an unwritable --report target exits 3, prior report"
+                    " intact"
+                )
+
+            def check_config_show_report(self) -> None:
+                self._perform(
+                    "config show: colliding destinations render with provenance,"
+                    " exit 0"
+                )
 
             def check_interrupt(self, _strict: bool) -> None:
                 self._perform("interrupt: SIGINT frees the owned process group")

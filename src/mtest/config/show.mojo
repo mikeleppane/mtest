@@ -3,6 +3,7 @@ from mtest.config.annotations_mode import AnnotationsMode
 from mtest.config.color_when import ColorWhen
 from mtest.config.precompile import Precompile
 from mtest.config.provenance import Provenance
+from mtest.config.report_style import ReportStyle
 from mtest.config.resolve import ResolvedConfig
 from mtest.config.show_output import ShowOutput
 from mtest.config.verbosity import Verbosity
@@ -166,6 +167,13 @@ def _annotations(value: AnnotationsMode) -> String:
     if value == AnnotationsMode.ON:
         return '"on"'
     return '"auto"'
+
+
+def _report_style(value: ReportStyle) -> String:
+    """Render the accepted lowercase run-report style spelling."""
+    if value == ReportStyle.FULL:
+        return '"full"'
+    return '"concise"'
 
 
 def _comment_text(value: String) -> String:
@@ -336,6 +344,27 @@ def render_config_show(resolved: ResolvedConfig, state_present: Bool) -> String:
         "gh-annotations = "
         + _annotations(config.gh_annotations)
         + _comment(sources.gh_annotations)
+    )
+    if config.report_md_dest == "":
+        rendered += "# md = (unset)\n"
+    else:
+        rendered += (
+            "md = "
+            + _toml_string(config.report_md_dest)
+            + _comment(sources.report_md_dest)
+        )
+    if config.report_html_dest == "":
+        rendered += "# html = (unset)\n"
+    else:
+        rendered += (
+            "html = "
+            + _toml_string(config.report_html_dest)
+            + _comment(sources.report_html_dest)
+        )
+    rendered += (
+        "style = "
+        + _report_style(config.report_style)
+        + _comment(sources.report_style)
     )
 
     for override in resolved.overrides:

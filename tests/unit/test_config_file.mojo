@@ -12,6 +12,7 @@ from mtest.config import (
     ConfigDiagnostic,
     ConfigFailureKind,
     FileConfig,
+    ReportStyle,
     TOML_SOURCE_MAX_BYTES,
     ShowOutput,
     Verbosity,
@@ -184,6 +185,9 @@ def test_full_document_converts_every_key_to_typed_values() raises:
         'junit-xml = "reports/junit.xml"\n'
         'json = "-"\n'
         'gh-annotations = "off"\n'
+        'md = "reports/run.md"\n'
+        'html = "reports/run.html"\n'
+        'style = "full"\n'
         "\n"
         "[[override]]\n"
         'files = "tests/gpu_*"\n'
@@ -245,6 +249,12 @@ def test_full_document_converts_every_key_to_typed_values() raises:
     assert_equal(config.json_dest, "-")
     assert_true(config.saw_gh_annotations)
     assert_true(config.gh_annotations == AnnotationsMode.OFF)
+    assert_true(config.saw_report_md)
+    assert_equal(config.report_md_dest, "reports/run.md")
+    assert_true(config.saw_report_html)
+    assert_equal(config.report_html_dest, "reports/run.html")
+    assert_true(config.saw_report_style)
+    assert_true(config.report_style == ReportStyle.FULL)
 
     assert_equal(len(config.overrides), 2)
     assert_equal(config.overrides[0].files[0], "tests/gpu_*")
@@ -319,6 +329,16 @@ def test_unknown_tables_and_keys_fail_closed() raises:
         InvalidCase(
             text='[report]\nformat = "x"\n',
             expected="[report] key 'format': unknown key",
+        ),
+        # The legal-key list a `[report]` typo is measured against. The
+        # whitelist and this message are two hand-written lists that can
+        # silently disagree, so the literal is pinned here.
+        InvalidCase(
+            text='[report]\nreport-md = "x"\n',
+            expected=(
+                "expected color, show-output, verbosity, durations,"
+                " junit-xml, json, gh-annotations, md, html, or style"
+            ),
         ),
         InvalidCase(
             text='[[override]]\nfiles = "*"\npriority = 1\n',
@@ -550,6 +570,30 @@ def test_every_key_family_rejects_wrong_types_and_domains() raises:
         InvalidCase(
             text="[report]\ngh-annotations = false\n",
             expected="[report] key 'gh-annotations': expected off|on|auto",
+        ),
+        InvalidCase(
+            text="[report]\nmd = 1\n",
+            expected="[report] key 'md': expected non-empty string",
+        ),
+        InvalidCase(
+            text='[report]\nmd = ""\n',
+            expected="[report] key 'md': expected non-empty string",
+        ),
+        InvalidCase(
+            text="[report]\nhtml = []\n",
+            expected="[report] key 'html': expected non-empty string",
+        ),
+        InvalidCase(
+            text='[report]\nhtml = ""\n',
+            expected="[report] key 'html': expected non-empty string",
+        ),
+        InvalidCase(
+            text='[report]\nstyle = "verbose"\n',
+            expected="[report] key 'style': expected concise|full",
+        ),
+        InvalidCase(
+            text="[report]\nstyle = 1\n",
+            expected="[report] key 'style': expected concise|full",
         ),
     ]
     for invalid in cases:

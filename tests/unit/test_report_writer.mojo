@@ -10,8 +10,8 @@ not-run records survive the row-index filter, that a section's assembly order is
 the sorted row order, and that a failing sink never publishes while its sibling
 still does.
 """
-from std.os import mkdir
-from std.os.path import exists
+from std.os import listdir, mkdir
+from std.os.path import exists, isdir
 from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.model import (
@@ -32,9 +32,10 @@ from mtest.report import (
     ReportFinalizeResult,
     ReportHeaderFacts,
     ReportWriter,
+    open_report_spool,
 )
 
-from tmptree import temp_root
+from tmptree import remove_tree, temp_root
 
 
 def _facts() -> ReportHeaderFacts:
@@ -519,6 +520,45 @@ def test_inert_writer_does_nothing_and_finalizes_clean() raises:
     assert_equal(result.md_detail, "")
     assert_false(result.html_failed, "an inert sink never fails")
     assert_equal(result.html_detail, "")
+
+
+# --- The spool directory the writer is handed --------------------------------
+
+
+def test_open_report_spool_creates_a_fresh_empty_directory() raises:
+    var spool = open_report_spool()
+    try:
+        assert_true(
+            isdir(spool), "the spool path names a real directory: " + spool
+        )
+        assert_equal(len(listdir(spool)), 0, "a fresh spool starts empty")
+    finally:
+        remove_tree(spool)
+
+
+def test_open_report_spool_does_not_collide_within_one_process() raises:
+    # One process opens one report spool per run, but the aggregate test binary
+    # opens many; the per-attempt clock reading is what keeps them apart.
+    var first = open_report_spool()
+    var second = open_report_spool()
+    try:
+        assert_true(first != second, "two spools in one process differ")
+    finally:
+        remove_tree(first)
+        remove_tree(second)
+
+
+def test_open_report_spool_is_named_apart_from_the_junit_spool() raises:
+    # A stray directory has to say which reporter left it, and two spools open
+    # in one run must never be the same directory.
+    var spool = open_report_spool()
+    try:
+        assert_true(
+            "/mtest-run report-" in spool,
+            "the spool carries its own run-identifying prefix: " + spool,
+        )
+    finally:
+        remove_tree(spool)
 
 
 def main() raises:

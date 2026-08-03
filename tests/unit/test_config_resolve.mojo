@@ -16,6 +16,7 @@ from mtest.config import (
     OverrideRule,
     Precompile,
     Provenance,
+    ReportStyle,
     RunnerConfig,
     ShardMode,
     ShowOutput,
@@ -58,6 +59,9 @@ def _assert_all_sources(sources: ConfigProvenance, expected: Provenance) raises:
     assert_true(sources.junit_dest == expected)
     assert_true(sources.json_dest == expected)
     assert_true(sources.gh_annotations == expected)
+    assert_true(sources.report_md_dest == expected)
+    assert_true(sources.report_html_dest == expected)
+    assert_true(sources.report_style == expected)
 
 
 def _assert_all_active(keys: ActiveConfigKeys) raises:
@@ -83,6 +87,9 @@ def _assert_all_active(keys: ActiveConfigKeys) raises:
     assert_true(keys.junit_dest)
     assert_true(keys.json_dest)
     assert_true(keys.gh_annotations)
+    assert_true(keys.report_md_dest)
+    assert_true(keys.report_html_dest)
+    assert_true(keys.report_style)
 
 
 def _custom_defaults() -> RunnerConfig:
@@ -107,6 +114,9 @@ def _custom_defaults() -> RunnerConfig:
     defaults.junit_dest = String("")
     defaults.json_dest = String("")
     defaults.gh_annotations = AnnotationsMode.OFF
+    defaults.report_md_dest = String("")
+    defaults.report_html_dest = String("")
+    defaults.report_style = ReportStyle.CONCISE
     return defaults^
 
 
@@ -155,6 +165,12 @@ def _set_every_file_value(mut file: FileConfig):
     file.saw_json = True
     file.gh_annotations = AnnotationsMode.AUTO
     file.saw_gh_annotations = True
+    file.report_md_dest = "file.md"
+    file.saw_report_md = True
+    file.report_html_dest = "file.html"
+    file.saw_report_html = True
+    file.report_style = ReportStyle.FULL
+    file.saw_report_style = True
 
 
 def _set_every_cli_value(mut overlay: CliOverlay):
@@ -205,6 +221,12 @@ def _set_every_cli_value(mut overlay: CliOverlay):
     overlay.saw_json = True
     overlay.gh_annotations = AnnotationsMode.OFF
     overlay.saw_gh_annotations = True
+    overlay.report_md_dest = "cli.md"
+    overlay.saw_report_md = True
+    overlay.report_html_dest = "cli.html"
+    overlay.saw_report_html = True
+    overlay.report_style = ReportStyle.CONCISE
+    overlay.saw_report_style = True
 
 
 def test_defaults_only_resolve_every_key_with_default_provenance() raises:
@@ -239,6 +261,9 @@ def test_defaults_only_resolve_every_key_with_default_provenance() raises:
     assert_equal(config.junit_dest, "")
     assert_equal(config.json_dest, "")
     assert_true(config.gh_annotations == AnnotationsMode.OFF)
+    assert_equal(config.report_md_dest, "")
+    assert_equal(config.report_html_dest, "")
+    assert_true(config.report_style == ReportStyle.CONCISE)
     assert_equal(len(resolved.overrides), 0)
     assert_false(resolved.no_color)
     _assert_all_sources(resolved.provenance, Provenance.DEFAULT)
@@ -279,6 +304,9 @@ def test_file_values_replace_defaults_for_every_key() raises:
     assert_equal(config.junit_dest, "file.xml")
     assert_equal(config.json_dest, "file.ndjson")
     assert_true(config.gh_annotations == AnnotationsMode.AUTO)
+    assert_equal(config.report_md_dest, "file.md")
+    assert_equal(config.report_html_dest, "file.html")
+    assert_true(config.report_style == ReportStyle.FULL)
     _assert_all_sources(resolved.provenance, Provenance.MTEST_TOML)
 
 
@@ -322,6 +350,10 @@ def test_accumulated_cli_values_replace_file_values_for_every_key() raises:
     assert_equal(config.junit_dest, "cli.xml")
     assert_equal(config.json_dest, "cli.ndjson")
     assert_true(config.gh_annotations == AnnotationsMode.OFF)
+    assert_equal(config.report_md_dest, "cli.md")
+    assert_equal(config.report_html_dest, "cli.html")
+    # The file layer set FULL; the CLI layer replaces it with CONCISE.
+    assert_true(config.report_style == ReportStyle.CONCISE)
     _assert_all_sources(resolved.provenance, Provenance.CLI)
 
 
@@ -619,6 +651,9 @@ def test_collect_projection_excludes_run_and_report_only_keys() raises:
     assert_false(keys.junit_dest)
     assert_false(keys.json_dest)
     assert_false(keys.gh_annotations)
+    assert_false(keys.report_md_dest)
+    assert_false(keys.report_html_dest)
+    assert_false(keys.report_style)
 
     assert_equal(resolved.config.json_dest, "-")
     assert_true(resolved.config.gh_annotations == AnnotationsMode.AUTO)
@@ -661,6 +696,9 @@ def test_debug_projection_keeps_only_the_build_keys_and_the_deadlines() raises:
     assert_false(keys.junit_dest)
     assert_false(keys.json_dest)
     assert_false(keys.gh_annotations)
+    assert_false(keys.report_md_dest)
+    assert_false(keys.report_html_dest)
+    assert_false(keys.report_style)
 
 
 def test_debug_projection_makes_the_stdout_stream_conflict_inert() raises:
