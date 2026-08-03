@@ -6,9 +6,12 @@ pure and policy-free: these tests pin its behavior across every separator count
 the session's classifier depends on (0/1/2/3, plus the empty-part edges).
 
 `split_rendered_node_id` is the inverse of `render()` and splits at the LAST
-separator instead, so a path that itself contains `::` round-trips. The
-round-trip property is pinned directly, since that is the whole reason the two
-splitters differ.
+separator instead, because a test NAME can never contain one while the text
+before it is whatever the producer put there. Discovery refuses a path carrying
+the separator (§5), so an id this runner emits holds exactly one and the two
+splitters agree on it; the round-trip cases below pin the function on the
+harder inputs anyway, since it is the inverse of `render()` for any id and not
+only for the ones this build can produce.
 """
 from std.testing import assert_equal, assert_true, assert_false, TestSuite
 
