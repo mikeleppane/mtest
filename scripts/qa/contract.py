@@ -827,6 +827,8 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "report: --report-style full sections a file concise leaves out",
     "determinism: two --report runs agree once durations are normalized",
     "report: an unwritable --report target exits 3, prior report intact",
+    "report: a configured md destination with a missing parent -> 4",
+    "report: a configured html destination with a missing parent -> 4",
     "config show: colliding destinations render with provenance, exit 0",
     "interrupt: SIGINT frees the owned process group",
 )
@@ -841,8 +843,9 @@ SIGINT clause untested. Same shape as `package_consumption.GATE_STAGE_IDS`
 against its stage ledger.
 
 `check_help_stream` records two entries from one dispatch (`--help`, then
-`-V`), so those names are adjacent here and move together, and
-`check_init_scaffold` records three the same way.
+`-V`), so those names are adjacent here and move together;
+`check_init_scaffold` records three the same way, `check_run_report` records
+four, and `check_run_report_configured_missing_parent` records two.
 """
 
 
@@ -3021,6 +3024,62 @@ class Runner:
             os.chmod(locked, 0o700)
         self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
 
+    def check_run_report_configured_missing_parent(self) -> None:
+        """Assert a CONFIGURED report destination's parent is checked pre-run.
+
+        The command-line spelling of this is masked: the parser validates
+        `--report FORMAT:PATH` as it parses it, so a missing parent supplied on
+        the command line never reaches resolved validation at all. A project
+        file's `[report]` destination has no such parser, which makes the
+        config layer the only origin that exercises the resolved check — and
+        the origin where a gap would surface as exit 3 from the temp creation
+        instead of the exit 4 §15.5 and §24.4 both promise.
+
+        Both formats are asserted independently rather than together, because
+        one branch present and one absent is exactly the shape this defect had.
+        The `[report] junit-xml` sibling in the same table is the control: it is
+        the behavior the two report destinations must match.
+        """
+        ref = "§15.5/§24.4 a nonexistent destination parent is a pre-run exit 4"
+        project = self.root / "cfgparent"
+        project.mkdir(exist_ok=True)
+        (project / "tests").mkdir(exist_ok=True)
+        # The control, run first and folded into BOTH verdicts: the sibling
+        # destination in the SAME table, whose exit code the two report
+        # destinations must equal. A change that regressed all three together
+        # would otherwise leave the pair looking self-consistent.
+        (project / "mtest.toml").write_text('[report]\njunit-xml = "nodir/r.xml"\n')
+        sibling = self.mtest([*I_FLAGS, "tests"], cwd=project)
+        control: list[str] = []
+        if sibling.returncode != 4:
+            control.append(
+                f"the [report] junit-xml control exited {sibling.returncode}, want 4"
+            )
+        for fmt, name in (
+            ("md", "report: a configured md destination with a missing parent -> 4"),
+            (
+                "html",
+                "report: a configured html destination with a missing parent -> 4",
+            ),
+        ):
+            (project / "mtest.toml").write_text(f'[report]\n{fmt} = "nodir/run.out"\n')
+            run = self.mtest([*I_FLAGS, "tests"], cwd=project)
+            probs: list[str] = [*control]
+            if run.returncode != 4:
+                probs.append(f"exit {run.returncode}, want 4")
+            probs += [
+                f"stderr omits {needed!r}: {run.stderr!r}"
+                for needed in (
+                    "config: ",
+                    f"[report] {fmt}",
+                    "destination parent directory does not exist",
+                )
+                if needed not in run.stderr
+            ]
+            if "internal error" in run.stderr.lower():
+                probs.append("refused as an internal error rather than a usage error")
+            self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
+
     def check_config_show_report(self) -> None:
         """Assert `config show` renders a collision instead of refusing it.
 
@@ -3808,6 +3867,10 @@ def main() -> int:
             runner.check_run_report()
         if wanted("report: an unwritable --report target exits 3, prior report intact"):
             runner.check_run_report_construction_failure()
+        if wanted(
+            "report: a configured md destination with a missing parent -> 4"
+        ) or wanted("report: a configured html destination with a missing parent -> 4"):
+            runner.check_run_report_configured_missing_parent()
         if wanted("config show: colliding destinations render with provenance, exit 0"):
             runner.check_config_show_report()
         if wanted("interrupt: SIGINT frees the owned process group"):

@@ -363,6 +363,26 @@ def _origin_label(
 def _resolved_destination_error(
     resolved: ResolvedConfig,
 ) -> Optional[String]:
+    """Refuse an active destination whose parent directory does not exist.
+
+    Every active file destination is checked, not only the ones a flag can
+    spell. `--report FORMAT:PATH` is validated as the parser reads it, so a
+    command-line value with a missing parent never reaches here — but a
+    `[report]` destination that came from the project file has no parser of its
+    own, and without a branch here it would sail past resolved validation into
+    the session's temp creation and surface as an internal error, exit 3, where
+    §15.5 and §24.4 both promise a pre-run usage error, exit 4. Its two sibling
+    keys in the same table already give 4, so the gap was also an inconsistency
+    between two halves of one feature.
+
+    Args:
+        resolved: The layered configuration, after the command projection was
+            applied. Not mutated.
+
+    Returns:
+        A complete usage diagnostic naming the offending value the way its own
+        layer spells it, or none when every active destination can be created.
+    """
     if (
         resolved.active_keys.json_dest
         and resolved.config.json_dest != ""
@@ -387,6 +407,34 @@ def _resolved_destination_error(
                     resolved.provenance.junit_dest,
                     "report",
                     "junit-xml",
+                )
+                + " destination parent directory does not exist: '"
+                + _safe_path_label(parent)
+                + "' (see mtest --help)"
+            )
+    if (
+        resolved.active_keys.report_md_dest
+        and resolved.config.report_md_dest != ""
+    ):
+        var parent = String(dirname(resolved.config.report_md_dest))
+        if parent != "" and not isdir(parent):
+            return Optional[String](
+                _report_origin_label(
+                    resolved, resolved.provenance.report_md_dest, "md"
+                )
+                + " destination parent directory does not exist: '"
+                + _safe_path_label(parent)
+                + "' (see mtest --help)"
+            )
+    if (
+        resolved.active_keys.report_html_dest
+        and resolved.config.report_html_dest != ""
+    ):
+        var parent = String(dirname(resolved.config.report_html_dest))
+        if parent != "" and not isdir(parent):
+            return Optional[String](
+                _report_origin_label(
+                    resolved, resolved.provenance.report_html_dest, "html"
                 )
                 + " destination parent directory does not exist: '"
                 + _safe_path_label(parent)

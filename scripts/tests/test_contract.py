@@ -637,6 +637,8 @@ class CheckRosterTests(unittest.TestCase):
                 "report: --report-style full sections a file concise leaves out",
                 "determinism: two --report runs agree once durations are normalized",
                 "report: an unwritable --report target exits 3, prior report intact",
+                "report: a configured md destination with a missing parent -> 4",
+                "report: a configured html destination with a missing parent -> 4",
                 "config show: colliding destinations render with provenance, exit 0",
                 "interrupt: SIGINT frees the owned process group",
             ],
@@ -832,6 +834,14 @@ class CheckRosterTests(unittest.TestCase):
             def check_run_report_construction_failure(self) -> None:
                 self._perform(
                     "report: an unwritable --report target exits 3, prior report intact"
+                )
+
+            def check_run_report_configured_missing_parent(self) -> None:
+                self._perform(
+                    "report: a configured md destination with a missing parent -> 4"
+                )
+                self._perform(
+                    "report: a configured html destination with a missing parent -> 4"
                 )
 
             def check_config_show_report(self) -> None:
