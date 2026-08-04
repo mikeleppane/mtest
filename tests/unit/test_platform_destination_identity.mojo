@@ -13,8 +13,8 @@ was yes. These tests build that ground truth from the standard library rather
 than from the function under test, so they assert the same property on a
 case-sensitive and a case-insensitive host alike.
 """
-from std.os import listdir, remove
-from std.os.path import exists
+from std.os import listdir, mkdir, remove, symlink
+from std.os.path import exists, realpath
 from std.pathlib import cwd
 from std.testing import (
     assert_equal,
@@ -64,13 +64,63 @@ def test_a_relative_parent_resolves_to_its_absolute_form() raises:
     )
 
 
-def test_an_absolute_path_keeps_its_basename_verbatim() raises:
-    assert_equal(destination_identity("/tmp/out.md"), "/tmp/out.md")
+def test_a_canonical_absolute_parent_keeps_the_basename_verbatim() raises:
+    """A parent that resolves to itself is left alone, and the basename after
+    it is appended byte for byte.
+
+    The canonical parent is BUILT rather than named. A literal such as
+    `/tmp/out.md` states a property of one platform's filesystem layout instead
+    of one of this function's: `/tmp` is a real directory on Linux and a symlink
+    to `/private/tmp` on macOS, where resolving it is the correct behavior and
+    the literal is simply wrong.
+    """
+    var root = temp_root()
+    try:
+        var canonical = realpath(root)
+        # The precondition this test needs, asserted rather than assumed:
+        # `canonical` has no symlink left in it for `destination_identity` to
+        # resolve, so anything it changes is a change this test can attribute.
+        assert_equal(canonical, realpath(canonical))
+        assert_equal(
+            destination_identity(canonical + "/out.md"), canonical + "/out.md"
+        )
+    finally:
+        remove_tree(root)
+
+
+def test_a_symlinked_parent_resolves_to_what_it_points_at() raises:
+    """The other half, which a canonical parent cannot show: two spellings of
+    one directory produce one key.
+
+    This is the property macOS's `/tmp` -> `/private/tmp` link was demonstrating
+    by accident, asserted here on a link this test owns, so it holds on every
+    platform rather than on whichever one ships a symlinked `/tmp`.
+    """
+    var root = temp_root()
+    try:
+        var canonical = realpath(root)
+        mkdir(canonical + "/real", 0o700)
+        symlink(canonical + "/real", canonical + "/link")
+        assert_equal(
+            destination_identity(canonical + "/link/out.md"),
+            canonical + "/real/out.md",
+        )
+        assert_equal(
+            destination_identity(canonical + "/link/out.md"),
+            destination_identity(canonical + "/real/out.md"),
+        )
+    finally:
+        remove_tree(root)
 
 
 def test_an_unresolvable_parent_falls_back_to_the_lexical_form() raises:
     """A missing parent is exit 4 on the run path, so the key only has to be
-    total and stable here, never canonical."""
+    total and stable here, never canonical.
+
+    The literal is safe on every platform precisely because the path does not
+    resolve: there is no component for `realpath` to rewrite, so the lexical
+    fallback is the whole answer.
+    """
     assert_equal(
         destination_identity("/no/such/dir/out.md"), "/no/such/dir/out.md"
     )
@@ -107,7 +157,12 @@ def test_case_folded_identity_is_idempotent() raises:
 
 def test_two_case_flipped_spellings_share_one_folded_key() raises:
     """The pair that publishes twice onto one file on a case-insensitive
-    volume: the exact keys differ, the folded keys must not."""
+    volume: the exact keys differ, the folded keys must not.
+
+    Both assertions are relations between two keys from the same parent, so
+    whatever that parent resolves to cancels out and no filesystem layout is
+    assumed.
+    """
     var upper = destination_identity("/tmp/Run.out")
     var lower = destination_identity("/tmp/run.out")
     assert_not_equal(upper, lower)
