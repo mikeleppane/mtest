@@ -23,11 +23,23 @@ until then, because `mtest config` alone is a usage error.
 Value completion is keyed on `command:flag` rather than on the flag alone, so
 `mtest doctor --report-style <TAB>` offers nothing: the pair never existed. Per
 kind: a closed list becomes its words, a `PATH` becomes filesystem completion,
-a `PREFIX_CHOICE` becomes its prefixes and then a path after the separator, and
-`OTHER` deliberately offers nothing, because a kind that cannot express what is
-legal must not guess. One value the tables cannot express is `--json`'s bare
-`-` for stdout; its row says why the kind stays `PATH`, and this module does
-not invent a kind for it.
+and `OTHER` deliberately offers nothing, because a kind that cannot express
+what is legal must not guess. One value the tables cannot express is `--json`'s
+bare `-` for stdout; its row says why the kind stays `PATH`, and this module
+does not invent a kind for it.
+
+A `PREFIX_CHOICE` is the one kind whose completion cannot be the same shape in
+all three shells, because reaching the path after the separator means
+completing a word without ending it. bash and zsh can, so both offer the
+prefix first and the path second — and both need help to do it. bash splits
+`COMP_WORDS` at every `COMP_WORDBREAKS` character, and that set contains `:`,
+so `--report md:pl` reaches a completion function as `prev=:` and no value arm
+would fire twice; the logical words are therefore recovered from `COMP_LINE`,
+which readline never splits, and the candidates are trimmed back to what
+readline will actually replace. zsh's `compset -P` does the same job in one
+builtin. fish can neither suppress the trailing space nor re-split the word,
+so it assembles the whole `PREFIX:PATH` candidate at once and needs no second
+stage.
 
 **Escaping is two-level where the shell expands twice.** These scripts are
 `eval`'d into an interactive shell, and three of the positions a table value
@@ -42,7 +54,10 @@ it. Every such value is escaped for the re-expansion first
 backslashes everything outside a small alphanumeric-and-punctuation set) and
 only then for the literal quoting the script source needs. Positions that are
 expanded once — a bash `case` pattern, a zsh bracketed description, a fish
-`-d` description — get the single level that position actually needs.
+`-d` description, a value interpolated into a generated function body — get
+the single level that position actually needs. **No table value reaches script
+text without passing an escaper**, including the head tokens that end up as
+`case` labels, and that rule is what the whole module is for.
 
 Every file completion additionally rides a quoted read loop, because an
 unquoted `COMPREPLY=($(compgen -f …))` word-splits a filename containing a
@@ -174,6 +189,22 @@ def _head_name(subcommand: Int) -> String:
     if subcommand == Subcommand.DEBUG:
         return "debug"
     return "run"
+
+
+def _resolved_head_tokens() -> List[String]:
+    """Every leading token `_head_state` maps to a head of its own.
+
+    Stated as a list as well as as branches so a rename can be caught: this
+    mapping is prose, so renaming a flag-bearing subcommand in
+    `subcommand_specs()` would otherwise drop that head to `none` — offering
+    nothing after it — with every derived assertion still green.
+    `test_cli_completions` checks each token here still names a real
+    subcommand row.
+
+    Returns:
+        A freshly allocated list of the tokens that resolve to a head.
+    """
+    return ["run", "collect", "config", "doctor", "debug", "completions"]
 
 
 def _head_state(token: String) -> String:
@@ -494,6 +525,21 @@ def _zsh_action_word(text: String) -> String:
     return _backslash_escaped(text, True)
 
 
+def _zsh_action_words(values: List[String]) -> List[String]:
+    """Escape every candidate of a zsh completion action.
+
+    Args:
+        values: The candidate values. Not mutated.
+
+    Returns:
+        A freshly allocated list of escaped words.
+    """
+    var escaped = List[String]()
+    for value in values:
+        escaped.append(_zsh_action_word(value))
+    return escaped^
+
+
 def _zsh_quoted(text: String) -> String:
     """Wrap `text` in zsh single quotes, escaping any quote it contains.
 
@@ -626,32 +672,69 @@ def render_bash_completions() -> String:
     script += '    COMPREPLY+=("$_mtest_line")\n'
     script += "  done\n"
     script += "}\n"
+    # readline replaces only the text after the last COMP_WORDBREAKS character
+    # it found, and that set contains `:`, so a candidate carrying the prefix
+    # would be inserted *after* the prefix already on the line, yielding
+    # `md:md:report.md`. Trimming the candidates is the same fix bash's own
+    # completion library makes, for the same reason.
+    script += "_mtest_ltrim_colon() {\n"
+    script += '  local trimmed="${1%"${1##*:}"}" _mtest_index\n'
+    script += '  [ -z "$trimmed" ] && return\n'
+    script += "  for ((_mtest_index = 0;"
+    script += " _mtest_index < ${#COMPREPLY[@]}; _mtest_index++)); do\n"
+    script += '    COMPREPLY[_mtest_index]="${COMPREPLY[_mtest_index]'
+    script += '#"$trimmed"}"\n'
+    script += "  done\n"
+    script += "}\n"
     script += "_mtest_complete() {\n"
-    script += "  local cur prev cmd word\n"
-    script += '  cur="${COMP_WORDS[COMP_CWORD]}"\n'
-    script += '  prev="${COMP_WORDS[COMP_CWORD-1]}"\n'
+    script += "  local cur prev cmd word typed count index\n"
+    script += "  local -a lwords\n"
+    # COMP_WORDS is split at every COMP_WORDBREAKS character, and that set
+    # contains `:` — `--report md:pl` arrives as five words, so `prev` is `:`
+    # and no value arm could ever fire a second time. The command line itself
+    # is never split, so the logical words are recovered from it: the same
+    # whitespace split the runner's own argv came from.
+    script += '  typed="${COMP_LINE:0:COMP_POINT}"\n'
+    script += '  read -r -a lwords <<< "$typed"\n'
+    script += "  count=${#lwords[@]}\n"
+    script += '  case "$typed" in\n'
+    script += "    *[![:space:]]) index=$(( count > 0 ? count - 1 : 0 )) ;;\n"
+    script += "    *) index=$count ;;\n"
+    script += "  esac\n"
+    script += '  cur="${lwords[index]-}"\n'
+    script += '  prev=""\n'
+    script += '  [ "$index" -gt 0 ] && prev="${lwords[index-1]-}"\n'
     script += '  cmd="run"\n'
-    script += '  case "${COMP_WORDS[1]-}" in\n'
+    script += '  case "${lwords[1]-}" in\n'
     for head in _subcommand_word_list():
         var state = _head_state(head)
         if state == "none":
             continue
         if head == "config":
             # The sole two-token subcommand: pending until `show` arrives.
-            script += "    config)\n"
-            script += '      if [ "${COMP_WORDS[2]-}" = "show" ]; then\n'
+            script += "    " + _bash_pattern(head) + ")\n"
+            script += '      if [ "${lwords[2]-}" = "show" ]; then\n'
             script += '        cmd="config-show"\n'
             script += "      else\n"
             script += '        cmd="config-pending"\n'
             script += "      fi ;;\n"
             continue
-        script += "    " + head + ') cmd="' + state + '" ;;\n'
-    script += "    " + _joined_with(_none_tokens(), "|") + ') cmd="none" ;;\n'
+        script += (
+            "    "
+            + _bash_pattern(head)
+            + ') cmd="'
+            + _bash_word(state)
+            + '" ;;\n'
+        )
+    var none_patterns = List[String]()
+    for token in _none_tokens():
+        none_patterns.append(_bash_pattern(token))
+    script += "    " + _joined_with(none_patterns, "|") + ') cmd="none" ;;\n'
     script += "  esac\n"
     # The effective head: a run carrying --collect-only is a collection, so it
     # gains --format and loses every flag that mode refuses.
     script += '  if [ "$cmd" = "run" ]; then\n'
-    script += '    for word in "${COMP_WORDS[@]}"; do\n'
+    script += '    for word in "${lwords[@]}"; do\n'
     script += (
         '      if [ "$word" = "'
         + _bash_word(_spelling_of(FlagId.COLLECT_ONLY))
@@ -672,21 +755,24 @@ def render_bash_completions() -> String:
             script += "      compopt -o filenames\n"
             script += '      _mtest_reply < <(compgen -f -- "$cur")\n'
         elif spec.value_kind == ValueKind.PREFIX_CHOICE:
-            # Without `nospace` a unique prefix is completed with a trailing
-            # space, and the path after the separator becomes unreachable.
-            script += "      compopt -o nospace\n"
             script += '      if [[ "$cur" == *:* ]]; then\n'
             script += '        local pfx="${cur%%:*}:" rest="${cur#*:}"\n'
+            script += "        compopt -o filenames\n"
             script += (
                 '        _mtest_reply < <(compgen -P "$pfx" -f -- "$rest")\n'
             )
             script += "      else\n"
+            # Only the prefix list takes `nospace`: a completed prefix has to
+            # stay open for the path after it, while a completed path is a
+            # finished word and wants its space like any other.
+            script += "        compopt -o nospace\n"
             script += (
                 '        COMPREPLY=($(compgen -W "'
                 + _compgen_wordlist(spec.choices)
                 + '" -- "$cur"))\n'
             )
             script += "      fi\n"
+            script += '      _mtest_ltrim_colon "$cur"\n'
         else:
             script += (
                 '      COMPREPLY=($(compgen -W "'
@@ -695,7 +781,7 @@ def render_bash_completions() -> String:
             )
         script += "      return ;;\n"
     script += "  esac\n"
-    script += '  if [ "$COMP_CWORD" -eq 1 ]; then\n'
+    script += '  if [ "$index" -eq 1 ]; then\n'
     var head_words = _subcommand_word_list()
     head_words.extend(_flag_words_for(Subcommand.RUN))
     script += (
@@ -747,18 +833,75 @@ def _zsh_spec(spec: FlagSpec) -> String:
     body += spec.spelling + "[" + _zsh_description(spec.help) + "]"
     if spec.arity == 1:
         body += ":" + _zsh_message(spec.value_name) + ":"
-        var words = List[String]()
-        for choice in spec.choices:
-            words.append(_zsh_action_word(choice))
         if spec.value_kind == ValueKind.PATH:
             body += "_files"
         elif spec.value_kind == ValueKind.PREFIX_CHOICE:
-            # `compadd -S ''` is zsh's `nospace`: the path after the separator
-            # is only reachable while the prefix carries no trailing space.
-            body += '{compadd -S "" -- ' + _joined(words) + "}"
-        elif len(words) != 0:
-            body += "(" + _joined(words) + ")"
+            # A bare function name, the form `_files` itself uses. The inline
+            # `{…}` alternative is evaluated by `_arguments` as shell code —
+            # the one position in this module where an escaping slip would be
+            # command execution rather than a wrong candidate — and it also
+            # cannot hold this action at all: `_arguments` splits a spec on
+            # every unescaped colon, and a prefix action is made of colons.
+            body += _zsh_helper_name(spec.spelling)
+        elif len(spec.choices) != 0:
+            body += "(" + _joined(_zsh_action_words(spec.choices)) + ")"
     return _zsh_quoted(body)
+
+
+def _zsh_helper_name(spelling: String) -> String:
+    """The zsh completion function generated for one prefix-choice spelling.
+
+    Args:
+        spelling: The flag spelling the helper serves.
+
+    Returns:
+        A freshly allocated identifier: every codepoint outside `[A-Za-z0-9]`
+        becomes an underscore, so any spelling yields a name zsh can define.
+    """
+    var out = String("_mtest_prefix")
+    for cp in spelling.codepoints():
+        var code = Int(cp)
+        if (
+            (code >= 48 and code <= 57)
+            or (code >= 65 and code <= 90)
+            or (code >= 97 and code <= 122)
+        ):
+            out += String(cp)
+        else:
+            out += "_"
+    return out^
+
+
+def _zsh_prefix_helpers() -> String:
+    """The completion function each prefix-choice spelling dispatches to.
+
+    A generated function body is ordinary shell code, so every value
+    interpolated into one carries `_zsh_quoted` rather than the action-word
+    escaping a `(…)` candidate list would take.
+
+    Returns:
+        The freshly allocated function definitions, in table order.
+    """
+    var out = String("")
+    for spec in flag_specs():
+        if spec.value_kind != ValueKind.PREFIX_CHOICE:
+            continue
+        var quoted = List[String]()
+        for choice in spec.choices:
+            quoted.append(_zsh_quoted(choice))
+        out += _zsh_helper_name(spec.spelling) + "() {\n"
+        out += "  if [[ $PREFIX == *:* ]]; then\n"
+        # `compset -P` moves the typed prefix out of the way so `_files`
+        # completes the path after the separator.
+        out += "    compset -P '*:'\n"
+        out += "    _files\n"
+        out += "  else\n"
+        # `-S ''` is zsh's `nospace`: a prefix completed with a trailing space
+        # could never be continued into the path that follows it.
+        out += "    compadd -S '' -- " + _joined(quoted) + "\n"
+        out += "  fi\n"
+        out += "}\n"
+    return out^
 
 
 def _zsh_specs_for(subcommand: Int) -> String:
@@ -792,8 +935,9 @@ def render_zsh_completions() -> String:
         The freshly allocated script text, ending in a newline.
     """
     var script = String("#compdef mtest\n")
+    script += _zsh_prefix_helpers()
     script += "_mtest() {\n"
-    script += "  local cmd\n"
+    script += "  local cmd word\n"
     script += "  local -a heads\n"
     var heads = List[String]()
     for spec in subcommand_specs():
@@ -810,21 +954,34 @@ def render_zsh_completions() -> String:
         if state == "none":
             continue
         if head == "config":
-            script += "    config)\n"
+            script += "    " + _zsh_quoted(head) + ")\n"
             script += '      if [[ "${words[3]-}" == show ]]; then\n'
-            script += "        cmd=config-show\n"
+            script += "        cmd='config-show'\n"
             script += "      else\n"
-            script += "        cmd=config-pending\n"
+            script += "        cmd='config-pending'\n"
             script += "      fi ;;\n"
             continue
-        script += "    " + head + ") cmd=" + state + " ;;\n"
-    script += "    " + _joined_with(_none_tokens(), "|") + ") cmd=none ;;\n"
+        script += (
+            "    " + _zsh_quoted(head) + ") cmd=" + _zsh_quoted(state) + " ;;\n"
+        )
+    var none_patterns = List[String]()
+    for token in _none_tokens():
+        none_patterns.append(_zsh_quoted(token))
+    script += "    " + _joined_with(none_patterns, "|") + ") cmd=none ;;\n"
     script += "  esac\n"
-    script += "  if [[ $cmd == run ]] &&"
+    # A literal comparison rather than a `${words[(I)…]}` subscript, which
+    # would read the spelling as a pattern.
+    script += "  if [[ $cmd == run ]]; then\n"
+    script += "    for word in $words; do\n"
     script += (
-        " (( ${words[(I)" + _spelling_of(FlagId.COLLECT_ONLY) + "]} )); then\n"
+        "      if [[ $word == "
+        + _zsh_quoted(_spelling_of(FlagId.COLLECT_ONLY))
+        + " ]]; then\n"
     )
-    script += "    cmd=collect\n"
+    script += "        cmd=collect\n"
+    script += "        break\n"
+    script += "      fi\n"
+    script += "    done\n"
     script += "  fi\n"
     script += "  if (( CURRENT == 2 )); then\n"
     script += "    _describe -t commands 'mtest subcommand' heads\n"
@@ -882,7 +1039,17 @@ def _fish_value_options(spec: FlagSpec) -> String:
     if spec.value_kind == ValueKind.PATH:
         return " -r"
     if spec.value_kind == ValueKind.PREFIX_CHOICE:
-        return " -r -a " + _fish_argument_list(spec.choices)
+        # `complete` has no per-rule `nospace`, so a two-stage prefix-then-path
+        # chain is unreachable in fish. The function assembles the whole
+        # `PREFIX:PATH` candidate instead, which needs no second stage. The
+        # parentheses stay live on purpose — this is a command substitution —
+        # so the arguments inside them carry the expansion escaping.
+        var escaped = List[String]()
+        for choice in spec.choices:
+            escaped.append(_fish_expansion_word(choice))
+        return " -x -a " + _fish_quoted(
+            "(__mtest_prefixed_path " + _joined(escaped) + ")"
+        )
     if len(spec.choices) == 0:
         return " -x"
     return " -x -a " + _fish_argument_list(spec.choices)
@@ -910,25 +1077,28 @@ def render_fish_completions() -> String:
         if state == "none":
             continue
         if head == "config":
-            script += "            case config\n"
+            script += "            case " + _fish_quoted(head) + "\n"
             script += (
                 '                if set -q parts[3]; and test "$parts[3]"'
                 " = show\n"
             )
-            script += "                    set head config-show\n"
+            script += "                    set head 'config-show'\n"
             script += "                else\n"
-            script += "                    set head config-pending\n"
+            script += "                    set head 'config-pending'\n"
             script += "                end\n"
             continue
-        script += "            case " + head + "\n"
-        script += "                set head " + state + "\n"
-    script += "            case " + _joined(_none_tokens()) + "\n"
+        script += "            case " + _fish_quoted(head) + "\n"
+        script += "                set head " + _fish_quoted(state) + "\n"
+    var none_patterns = List[String]()
+    for token in _none_tokens():
+        none_patterns.append(_fish_quoted(token))
+    script += "            case " + _joined(none_patterns) + "\n"
     script += "                set head none\n"
     script += "        end\n"
     script += "    end\n"
     script += (
         '    if test "$head" = run; and contains -- '
-        + _spelling_of(FlagId.COLLECT_ONLY)
+        + _fish_quoted(_spelling_of(FlagId.COLLECT_ONLY))
         + " $parts\n"
     )
     script += "        set head collect\n"
@@ -937,6 +1107,22 @@ def render_fish_completions() -> String:
     script += "end\n"
     script += "function __mtest_head_is\n"
     script += '    test (__mtest_head) = "$argv[1]"\n'
+    script += "end\n"
+    # One candidate list rather than two stages: fish cannot suppress the space
+    # after a completed prefix, so a `PREFIX:` that had to be continued would
+    # be a dead end. Assembling `PREFIX:PATH` in one step avoids needing one.
+    script += "function __mtest_prefixed_path\n"
+    script += "    set -l token (commandline -ct)\n"
+    script += "    if not string match -q -- '*:*' $token\n"
+    script += "        printf '%s\\n' $argv\n"
+    script += "        return\n"
+    script += "    end\n"
+    script += "    set -l prefix (string replace -r ':.*' ':' -- $token)\n"
+    script += "    set -l rest (string replace -r '^[^:]*:' '' -- $token)\n"
+    script += "    for entry in (__fish_complete_path $rest)\n"
+    script += "        set -l fields (string split -m1 \\t -- $entry)\n"
+    script += "        printf '%s%s\\n' $prefix $fields[1]\n"
+    script += "    end\n"
     script += "end\n"
     for spec in subcommand_specs():
         script += (

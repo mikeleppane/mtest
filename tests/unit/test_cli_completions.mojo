@@ -41,11 +41,13 @@ from mtest.cli.completions import (
     _flags_for,
     _head_state,
     _none_tokens,
+    _resolved_head_tokens,
     _spelling_of,
     _subcommand_words,
     _zsh_action_word,
     _zsh_description,
     _zsh_message,
+    _zsh_quoted,
     _zsh_specs_for,
     render_bash_completions,
     render_fish_completions,
@@ -493,6 +495,38 @@ def test_the_head_state_table_names_every_leading_token() raises:
     assert_equal(_head_state("version"), "none")
 
 
+def test_every_resolved_head_token_is_still_a_real_subcommand() raises:
+    """Renaming a flag-bearing head must red a test, not go quietly to `none`.
+
+    `_head_state` is prose, and every other assertion in this module derives
+    from it, so a `subcommand_specs()` token renamed without touching that
+    mapping would offer nothing after the new name while everything stayed
+    green. Checking the mapping's own tokens against the table is the one
+    direction that catches it.
+    """
+    var table = _subcommand_words()
+    for token in _resolved_head_tokens():
+        assert_true(
+            _has_word(table, token),
+            "the head-state mapping names a subcommand that no longer exists: "
+            + token,
+        )
+        assert_true(
+            _head_state(token) != "none",
+            "a resolved token maps to nothing: " + token,
+        )
+
+
+def test_the_offers_nothing_group_is_exactly_these_four_heads() raises:
+    """Transcribed rather than derived, so a rename cannot rewrite both sides.
+    """
+    var expected: List[String] = ["new", "init", "help", "version"]
+    var actual = _none_tokens()
+    assert_equal(len(actual), len(expected), "the none group changed size")
+    for i in range(len(expected)):
+        assert_equal(actual[i], expected[i], "none group drift")
+
+
 def test_every_head_token_is_resolved_by_every_script() raises:
     """The generalized guard: a new subcommand cannot inherit the run grammar.
 
@@ -515,9 +549,9 @@ def test_every_head_token_is_resolved_by_every_script() raises:
             bash_none += "|"
             zsh_none += "|"
             fish_none += " "
-        bash_none += String(token)
-        zsh_none += String(token)
-        fish_none += String(token)
+        bash_none += '"' + String(token) + '"'
+        zsh_none += "'" + String(token) + "'"
+        fish_none += "'" + String(token) + "'"
     assert_true(len(none_tokens) > 0, "no flag-less head token at all")
     assert_true("    " + bash_none + ') cmd="none" ;;\n' in bash)
     assert_true("    " + zsh_none + ") cmd=none ;;\n" in zsh)
@@ -530,29 +564,32 @@ def test_every_head_token_is_resolved_by_every_script() raises:
         var state = _head_state(token)
         if state == "none":
             assert_true(
-                _has_word(fish_none, token),
+                _has_word(fish_none, "'" + token + "'"),
                 "flag-less head not in the none group: " + token,
             )
             continue
         if token == "config":
             # The sole two-token subcommand keeps its own pending branch.
-            assert_true("    config)\n" in bash, "bash lost the config branch")
-            assert_true("    config)\n" in zsh, "zsh lost the config branch")
+            assert_true('    "config")\n' in bash, "bash lost config")
+            assert_true("    'config')\n" in zsh, "zsh lost config")
             assert_true(
-                "            case config\n" in fish,
-                "fish lost the config branch",
+                "            case 'config'\n" in fish, "fish lost config"
             )
             continue
         assert_true(
-            "    " + token + ') cmd="' + state + '" ;;\n' in bash,
+            '    "' + token + '") cmd="' + state + '" ;;\n' in bash,
             "bash does not resolve the head token: " + token,
         )
         assert_true(
-            "    " + token + ") cmd=" + state + " ;;\n" in zsh,
+            "    '" + token + "') cmd='" + state + "' ;;\n" in zsh,
             "zsh does not resolve the head token: " + token,
         )
         assert_true(
-            "            case " + token + "\n                set head " + state
+            "            case '"
+            + token
+            + "'\n                set head '"
+            + state
+            + "'"
             in fish,
             "fish does not resolve the head token: " + token,
         )
@@ -560,8 +597,30 @@ def test_every_head_token_is_resolved_by_every_script() raises:
 
 def test_bash_resolves_the_head_from_the_leading_token_only() raises:
     var script = render_bash_completions()
-    assert_true('case "${COMP_WORDS[1]-}" in' in script)
-    assert_true('doctor) cmd="doctor" ;;' in script)
+    assert_true('case "${lwords[1]-}" in' in script)
+    assert_true('"doctor") cmd="doctor" ;;' in script)
+
+
+def test_bash_reads_its_words_from_the_line_readline_never_splits() raises:
+    """`COMP_WORDBREAKS` contains `:`, so `COMP_WORDS` cannot carry `md:path`.
+
+    Driven for real, `--report md:` reaches a completion function as
+    `cur=[:] prev=[md]` and `--report md:pl` as `cur=[pl] prev=[:]`: the value
+    arm is keyed on `cmd:prev`, so it never fires a second time and the path
+    after the separator is unreachable. The logical words come from
+    `COMP_LINE`, which readline does not split.
+    """
+    var script = render_bash_completions()
+    assert_true('typed="${COMP_LINE:0:COMP_POINT}"' in script)
+    assert_true('read -r -a lwords <<< "$typed"' in script)
+    assert_false(
+        "COMP_WORDS" in script,
+        "a split word array is still consulted somewhere",
+    )
+    assert_false(
+        "COMP_CWORD" in script,
+        "a split word index is still consulted somewhere",
+    )
 
 
 def test_the_collect_only_spelling_comes_from_the_flag_table() raises:
@@ -571,7 +630,7 @@ def test_the_collect_only_spelling_comes_from_the_flag_table() raises:
 def test_bash_refines_a_run_head_to_collect_under_collect_only() raises:
     """Deleting the refinement must fail this test, not merely change it."""
     var block = String('  if [ "$cmd" = "run" ]; then\n')
-    block += '    for word in "${COMP_WORDS[@]}"; do\n'
+    block += '    for word in "${lwords[@]}"; do\n'
     block += (
         '      if [ "$word" = "'
         + _spelling_of(FlagId.COLLECT_ONLY)
@@ -589,9 +648,16 @@ def test_bash_refines_a_run_head_to_collect_under_collect_only() raises:
 
 
 def test_zsh_refines_a_run_head_to_collect_under_collect_only() raises:
-    var block = String("  if [[ $cmd == run ]] && (( ${words[(I)")
+    var block = String("  if [[ $cmd == run ]]; then\n")
+    block += "    for word in $words; do\n"
+    block += "      if [[ $word == '"
     block += _spelling_of(FlagId.COLLECT_ONLY)
-    block += "]} )); then\n    cmd=collect\n  fi\n"
+    block += "' ]]; then\n"
+    block += "        cmd=collect\n"
+    block += "        break\n"
+    block += "      fi\n"
+    block += "    done\n"
+    block += "  fi\n"
     assert_true(
         block in render_zsh_completions(),
         "the zsh effective-head refinement is gone",
@@ -600,7 +666,7 @@ def test_zsh_refines_a_run_head_to_collect_under_collect_only() raises:
 
 def test_fish_refines_a_run_head_to_collect_under_collect_only() raises:
     var block = String('    if test "$head" = run; and contains -- ')
-    block += _spelling_of(FlagId.COLLECT_ONLY)
+    block += "'" + _spelling_of(FlagId.COLLECT_ONLY) + "'"
     block += " $parts\n        set head collect\n    end\n"
     assert_true(
         block in render_fish_completions(),
@@ -716,10 +782,13 @@ def test_every_closed_choice_reaches_every_script() raises:
         for choice in spec.choices:
             var word = String(choice)
             assert_true(word in bash, "bash lost a choice: " + spec.spelling)
-            assert_true(
-                _zsh_action_word(word) in zsh,
-                "zsh lost a choice: " + spec.spelling,
-            )
+            # A prefix choice reaches zsh through a generated function body,
+            # which is ordinary shell code and takes shell quoting; every
+            # other choice is an action word and takes action escaping.
+            var in_zsh = _zsh_action_word(word)
+            if spec.value_kind == ValueKind.PREFIX_CHOICE:
+                in_zsh = _zsh_quoted(word)
+            assert_true(in_zsh in zsh, "zsh lost a choice: " + spec.spelling)
             assert_true(word in fish, "fish lost a choice: " + spec.spelling)
 
 
@@ -730,18 +799,75 @@ def test_the_prefix_choice_arm_completes_a_path_after_its_prefix() raises:
 
 
 def test_the_prefix_choice_arm_leaves_no_trailing_space() raises:
-    """A prefix completed with a space cannot be continued into a path."""
+    """A prefix completed with a space cannot be continued into a path.
+
+    `nospace` belongs to the prefix list alone: a completed path is a finished
+    word and wants its space like every other candidate, so applying it to the
+    whole arm would have traded one annoyance for another.
+    """
     var bash = render_bash_completions()
-    var position = bash.find("compopt -o nospace")
-    assert_true(position != -1, "the bash prefix arm lost its nospace option")
+    var arm = String('      if [[ "$cur" == *:* ]]; then\n')
+    arm += '        local pfx="${cur%%:*}:" rest="${cur#*:}"\n'
+    arm += "        compopt -o filenames\n"
+    arm += '        _mtest_reply < <(compgen -P "$pfx" -f -- "$rest")\n'
+    arm += "      else\n"
+    arm += "        compopt -o nospace\n"
+    assert_true(arm in bash, "the bash prefix arm drifted")
     assert_true(
-        position < bash.find('if [[ "$cur" == *:* ]]; then'),
-        "nospace is applied after the branch it has to cover",
+        "compadd -S '' --" in render_zsh_completions(),
+        "the zsh prefix helper lost its empty suffix",
     )
+
+
+def test_the_prefix_choice_arm_completes_a_path_in_every_shell() raises:
+    """The second stage: a path under the prefix, once the separator is typed.
+
+    Each shell reaches it differently. bash re-derives the logical word and
+    prefixes the candidates with `compgen -P`, then trims what readline will
+    not replace. zsh moves the typed prefix aside with `compset -P` and hands
+    the remainder to `_files`. fish has no per-rule `nospace`, so it cannot
+    offer a prefix that stays open and assembles the whole `PREFIX:PATH`
+    candidate in one step instead.
+    """
+    var bash = render_bash_completions()
+    assert_true('compgen -P "$pfx" -f -- "$rest"' in bash)
+    assert_true('_mtest_ltrim_colon "$cur"' in bash)
+    assert_true("_mtest_ltrim_colon() {" in bash)
+    var zsh = render_zsh_completions()
     assert_true(
-        'compadd -S "" --' in render_zsh_completions(),
-        "the zsh prefix action lost its empty suffix",
+        "_mtest_prefix__report() {\n" in zsh,
+        "the zsh prefix helper is gone",
     )
+    assert_true("    compset -P '*:'\n    _files\n" in zsh)
+    assert_true(":_mtest_prefix__report'" in zsh, "no spec reaches the helper")
+    var fish = render_fish_completions()
+    assert_true("function __mtest_prefixed_path" in fish)
+    assert_true(
+        "-a '(__mtest_prefixed_path md: html:)'" in fish,
+        "the fish report rule does not call the candidate assembler",
+    )
+
+
+def test_every_pure_file_completion_declares_filename_semantics() raises:
+    """`-o filenames` is what makes a completed directory end in a slash.
+
+    Only the arms whose whole candidate set is filenames take it: an arm that
+    also offers flag words would have bash treat `--color` as a path.
+    """
+    var lines = render_bash_completions().split("\n")
+    var found = 0
+    for i in range(len(lines)):
+        var line = String(lines[i])
+        if "compgen " not in line or "-f " not in line:
+            continue
+        if "-W " in line:
+            continue
+        found += 1
+        assert_true(
+            i > 0 and "compopt -o filenames" in String(lines[i - 1]),
+            "a pure file completion without filename semantics: " + line,
+        )
+    assert_true(found >= 2, "no pure file completion found at all")
 
 
 # --- shell safety ----------------------------------------------------------

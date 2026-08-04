@@ -2975,8 +2975,21 @@ flag's value is completed only under a command that accepts the flag: after
 a usage error (§4). A value with a closed set completes to that set, a value
 that names a path completes against the filesystem, and a value the contract
 does not enumerate — a glob, an integer, a build argument — completes to
-nothing rather than to a guess. `--report FORMAT:PATH` completes its format
-prefix first and then a path after the separator (§15.5).
+nothing rather than to a guess. `--report FORMAT:PATH` reaches a path under
+its format prefix (§15.5) — in bash and zsh as two stages, the prefix first
+and then the path after the separator, and in fish as a single
+`FORMAT:PATH` candidate, because fish cannot complete a word without ending it
+and a prefix that ended would never reach its path.
+
+**What differs between the three scripts is the shell, not the inventory.**
+Each script offers the same flags, subcommands, and values, because all three
+are rendered from the same tables; what a shell can *do* with them differs, and
+two differences are worth naming. fish resolves the active command by
+re-reading the command line on every rule, which is why its head conditions are
+functions rather than a `case` — and it has no way to complete a word without
+appending a space, which is the reason for the single-candidate form above.
+zsh's own `_files` performs the second stage, so its path completion follows
+zsh's rules for hidden files and its own styles rather than this document's.
 
 The completions themselves are a convenience, not a contract: which candidates
 a shell shows for a given prefix is INFORMAL (§20), and the same reasoning
