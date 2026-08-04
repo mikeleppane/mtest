@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
+import inspect
 import json
 import os
 from pathlib import Path
+import pkgutil
 import re
 import shlex
 import shutil
@@ -18,6 +21,7 @@ import tomllib
 
 from scripts.build import package_consumption
 from scripts.e2e import __main__ as e2e_main
+from scripts.e2e import scenarios as e2e_scenarios
 from scripts.harness import dogfood, selfhost
 
 
@@ -411,6 +415,67 @@ def check_e2e_layout() -> None:
     }
     if any(not path.startswith("e2e/") for path in referenced):
         raise AssertionError("e2e manifest retains a path outside e2e/")
+
+
+E2E_SCENARIO_PREFIX = "s_"
+"""The naming convention every end-to-end scenario function follows."""
+
+
+def e2e_scenario_definitions() -> dict[str, object]:
+    """Every scenario function DEFINED under `scripts/e2e/scenarios/`.
+
+    Derived by importing each module in the package and reflecting over what it
+    declares, so adding a scenario costs no edit here. A function is counted
+    only where it is defined: a scenario imported into a second module for reuse
+    would otherwise be reported twice, once as an orphan.
+
+    Returns:
+        Qualified `<module>.<function>` name -> the function object.
+    """
+    found: dict[str, object] = {}
+    for module_info in pkgutil.iter_modules(e2e_scenarios.__path__):
+        module = importlib.import_module(f"{e2e_scenarios.__name__}.{module_info.name}")
+        for name, function in inspect.getmembers(module, inspect.isfunction):
+            if not name.startswith(E2E_SCENARIO_PREFIX):
+                continue
+            if function.__module__ != module.__name__:
+                continue
+            found[f"{module.__name__}.{name}"] = function
+    return found
+
+
+def check_e2e_scenario_registration() -> None:
+    """Reconcile the scenario modules on disk with the registry that runs them.
+
+    `SCENARIOS` is a hand-written tuple and the only place a scenario is written
+    down. A module that defines one and never gets its registry line simply
+    never runs: the gate stays green, the banner is quietly one scenario
+    smaller, and the deliberate no-hardcoded-total policy removes the mismatched
+    `N/N` that was the one incidental signal. `e2e/manifest.json` is already
+    reconciled against the files on disk for exactly this reason; this closes
+    the same hole on the other hand-written list.
+
+    Raises:
+        AssertionError: A defined scenario is unregistered, or a registered one
+            is defined outside the scenarios package, where nothing reflects it.
+    """
+    defined = e2e_scenario_definitions()
+    registered = {
+        f"{function.__module__}.{function.__name__}"
+        for _name, function in e2e_main.SCENARIOS
+    }
+    orphans = sorted(set(defined) - registered)
+    if orphans:
+        raise AssertionError(
+            "E2E scenarios are defined but never registered in SCENARIOS, so "
+            f"they never run: {orphans}"
+        )
+    ghosts = sorted(registered - set(defined))
+    if ghosts:
+        raise AssertionError(
+            "E2E scenarios are registered from outside "
+            f"{e2e_scenarios.__name__}, where nothing reconciles them: {ghosts}"
+        )
 
 
 def check_platform_task_overrides(repo_root: Path = REPO_ROOT) -> None:
@@ -1131,6 +1196,7 @@ def main() -> int:
         check_classified_roots_are_not_precompilable_packages()
         check_suite_layout()
         check_e2e_layout()
+        check_e2e_scenario_registration()
         check_platform_task_overrides()
         check_python_package_invocation()
         check_build_source_visibility()

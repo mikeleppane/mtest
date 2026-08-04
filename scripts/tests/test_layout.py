@@ -15,6 +15,7 @@ from unittest import mock
 
 from scripts.build import package_consumption
 from scripts.checks import layout
+from scripts.e2e import __main__ as e2e_main
 
 
 if TYPE_CHECKING:
@@ -953,6 +954,51 @@ class BuildSourceVisibilityTests(unittest.TestCase):
 
             with self.assertRaisesRegex(AssertionError, "untracked"):
                 layout.check_build_source_visibility(repo)
+
+
+class E2eScenarioRegistrationTests(unittest.TestCase):
+    """The registry is a hand-written tuple; an unregistered module is silent.
+
+    Defining a scenario and forgetting its `SCENARIOS` line yields a green gate
+    and a quietly smaller banner, and the deliberate no-hardcoded-total policy
+    removes the mismatched `N/N` that would otherwise have hinted at it. So the
+    definitions are reflected out of the package and reconciled with the
+    registry, the same way `e2e/manifest.json` is reconciled against disk.
+    """
+
+    def test_the_real_package_is_fully_registered(self) -> None:
+        layout.check_e2e_scenario_registration()
+
+    def test_every_defined_scenario_is_discovered(self) -> None:
+        defined = layout.e2e_scenario_definitions()
+
+        # Spot-checked against two modules rather than pinned as a roster: a
+        # restated list would cost an edit per scenario to re-prove the diff.
+        self.assertIn("scripts.e2e.scenarios.run_report.s_report_md", defined)
+        self.assertIn("scripts.e2e.scenarios.core.s_default_suite", defined)
+        self.assertGreater(len(defined), 1)
+
+    def test_an_unregistered_scenario_is_named(self) -> None:
+        registry = tuple(
+            entry for entry in e2e_main.SCENARIOS if entry[1].__name__ != "s_report_md"
+        )
+        self.assertEqual(len(registry), len(e2e_main.SCENARIOS) - 1)
+        with (
+            mock.patch.object(e2e_main, "SCENARIOS", registry),
+            self.assertRaisesRegex(AssertionError, "s_report_md"),
+        ):
+            layout.check_e2e_scenario_registration()
+
+    def test_a_registered_function_from_outside_the_package_is_named(self) -> None:
+        def s_impostor(_context: object) -> str:
+            return ""
+
+        registry = (*e2e_main.SCENARIOS, ("impostor", s_impostor))
+        with (
+            mock.patch.object(e2e_main, "SCENARIOS", registry),
+            self.assertRaisesRegex(AssertionError, "s_impostor"),
+        ):
+            layout.check_e2e_scenario_registration()
 
 
 if __name__ == "__main__":
