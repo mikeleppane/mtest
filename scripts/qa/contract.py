@@ -790,6 +790,9 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "served: --json accepted (not exit 4)",
     "served: collect --shard partitions (not exit 4)",
     "served: collect --serial accepted, inert (not exit 4)",
+    "served: doctor --no-cache accepted, inert (not exit 4)",
+    "served: doctor --cache-clear accepted, inert (not exit 4)",
+    "served: --collect-only --format json is a collection (not exit 4)",
     "collect: exact node-id set for tests/",
     "determinism: collect byte-identical",
     "collect: --format json agrees with the lines listing and the exit",
@@ -3780,6 +3783,37 @@ def build_matrix() -> list[Check]:
             ["collect", *I, "--serial", "tests/*", "tests"],
             0,
             any_absent=["v1 contract", "run-only flag"],
+        )
+    )
+    # The cache flags are accepted-inert under `doctor` for the same reason
+    # `--serial` is under `collect`. `doctor` renders its diagnosis and returns
+    # before the store is read or `--cache-clear` acts, so neither value is
+    # honored and neither is refused. Both sit one word away from the run,
+    # build, selection, state, and reporter flags `doctor` DOES refuse, so
+    # which side of that line they fall on needs a gate: this pair drifted
+    # between the table and the parser undetected because nothing probed it.
+    checks.extend(
+        Check(
+            f"served: doctor {flag} accepted, inert (not exit 4)",
+            "§4,§8.5,§27.2",
+            ["doctor", flag],
+            0,
+            any_absent=["v1 contract", "cannot be combined"],
+        )
+        for flag in ("--no-cache", "--cache-clear")
+    )
+    # `--format` belongs to the collection MODE, not to the `collect` head
+    # token. `--collect-only` selects that mode, so this is a listing and the
+    # flag applies; the neighboring `run: --format is collect-only -> 4` check
+    # pins the other side, where there is no listing to shape.
+    checks.append(
+        Check(
+            "served: --collect-only --format json is a collection (not exit 4)",
+            "§4,§16",
+            [*I, "--collect-only", "--format", "json", "tests"],
+            0,
+            out_has=["test_reverse_ab"],
+            any_absent=["v1 contract", "collect-only flag"],
         )
     )
     return checks

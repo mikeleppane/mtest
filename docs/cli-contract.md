@@ -194,7 +194,7 @@ only `--ci VALUE` beside them (§29).
 | `--retries N` | ✓ | — | — | — |
 | `--fail-on-flaky` | ✓ | — | — | — |
 | `--shuffle`, `--seed N` | ✓ | — | — | — |
-| `--no-cache`, `--cache-clear` | ✓ | ✓ | — | — |
+| `--no-cache`, `--cache-clear` | ✓ | ✓ | accepted, inert | — |
 | `--gate PATH` | ✓ | — | — | — |
 | `-s`, `--show-output MODE` | ✓ | — | — | — |
 | `--durations N` | ✓ | — | — | — |
@@ -218,20 +218,27 @@ probe (§5, §6) — a probe is a real process spawn with the same hang risk as 
 run.
 
 `--format lines|json` runs the other way: it shapes a listing, so it is the one
-flag that belongs to `collect` alone, and supplying it to `run`, to
-`config show`, or to `doctor` is an applicability error (exit 4). `lines` is
-the default and is the plain one-node-id-per-line listing this section
-describes; `json` selects the machine-readable stream specified in §16.
+flag that belongs to `collect` alone, and supplying it where there is no
+listing to shape is an applicability error (exit 4). What decides that is the
+mode the invocation actually selects, not the head token: `--collect-only` is
+`collect` (see the last row of the table), so `mtest --collect-only --format
+json` is a collection and is accepted, while a plain `run`, a `config show`, or
+a `doctor` has no listing and is refused. `lines` is the default and is the
+plain one-node-id-per-line listing this section describes; `json` selects the
+machine-readable stream specified in §16.
 
 `-n`/`--workers` and `--serial GLOB` are marked **accepted, inert** under
-`collect` because that is what this build does: both parse and neither is
-refused, but collection probes files one at a time, so neither value changes
-anything — and with no parallel pass there is nothing for `--serial` to pin a
-file outside of. They are recorded rather than turned into refusals because
-refusing a flag that earlier builds accepted would break invocations that pass
-a uniform flag set to both subcommands. Parallel collection is not reserved —
-it is simply not implemented yet, and whichever way it is resolved, both rows
-move with it.
+`collect`, and `--no-cache`/`--cache-clear` under `doctor`, because that is
+what this build does: each one parses and none is refused, but nothing acts on
+the value. Collection probes files one at a time, so neither worker count nor
+serial glob changes anything — and with no parallel pass there is nothing for
+`--serial` to pin a file outside of. `doctor` reports on the environment
+without building or running, and it returns before the cache is ever consulted
+or cleared, so `mtest doctor --cache-clear` deletes nothing. They are recorded
+rather than turned into refusals because refusing a flag that earlier builds
+accepted would break invocations that pass a uniform flag set to more than one
+subcommand. Parallel collection is not reserved — it is simply not implemented
+yet, and whichever way it is resolved, both `collect` rows move with it.
 
 `config show` accepts the full `run` grammar, including selection and
 per-invocation flags. It resolves the same default, project-file, environment,
