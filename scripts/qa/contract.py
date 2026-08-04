@@ -785,6 +785,7 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "completions: fish prints complete rules",
     "completions: no shell operand -> 4",
     "completions: an unrenderable shell -> 4",
+    "completions: a trailing operand after --help -> 4",
     "served: -n accepted (not exit 4)",
     "served: --workers accepted (not exit 4)",
     "served: --serial accepted (not exit 4)",
@@ -1353,9 +1354,9 @@ class Runner:
         scheduling luck is involved. Every command that writes straight to a
         descriptor rather than through a reporter is here, because each one
         publishes its own frozen exit domain and 141 is in none of them: help
-        and version (§19), `config show` and `doctor` (§27), `new` and `init`
-        (§29, which additionally promise the artifacts exist afterwards), and
-        `collect --format json` (§16).
+        and version (§19), `config show` and `doctor` (§27), `completions`
+        (§30), `new` and `init` (§29, which additionally promise the artifacts
+        exist afterwards), and `collect --format json` (§16).
 
         Both run drivers are here too, and they are the reason this check and
         `check_unwritable_output_descriptor` have to be read together: an
@@ -1373,6 +1374,7 @@ class Runner:
             ("help: --help", ["--help"], 0, ""),
             ("help: version", ["version"], 0, ""),
             ("config show", ["config", "show"], 0, ""),
+            ("completions bash", ["completions", "bash"], 0, ""),
             ("doctor", ["doctor"], 0, ""),
             ("new", ["new", "tests/test_pipe.mojo"], 0, "tests/test_pipe.mojo"),
             ("init", ["init"], 0, "mtest.toml"),
@@ -1532,8 +1534,9 @@ class Runner:
 
         Every command whose product IS its text is here, since each publishes
         its own exit domain and each admits 3 on this condition: help and
-        version (§19), `config show` and `doctor` (§27), `new` and `init`
-        (§29, whose artifacts must still exist afterwards). A run is here too,
+        version (§19), `config show` and `doctor` (§27), `completions` (§30),
+        `new` and `init` (§29, whose artifacts must still exist afterwards).
+        A run is here too,
         for both drivers: its console report is primary output, so an
         undelivered one escalates through the same delivery precedence a dead
         `--json` destination uses (§9).
@@ -1554,6 +1557,7 @@ class Runner:
             ("help: --help", ["--help"], ""),
             ("help: version", ["version"], ""),
             ("config show", ["config", "show"], ""),
+            ("completions bash", ["completions", "bash"], ""),
             ("doctor", ["doctor"], ""),
             ("new", ["new", "tests/test_closed.mojo"], "tests/test_closed.mojo"),
             ("init", ["init"], "mtest.toml"),
@@ -3772,7 +3776,7 @@ def build_matrix() -> list[Check]:
             "§30",
             ["completions", "fish"],
             0,
-            out_has=["complete -c mtest", "__mtest_head_is", "-l collect-only"],
+            out_has=["complete -c mtest", "__mtest_head_is", "-l 'collect-only'"],
         ),
         Check(
             "completions: no shell operand -> 4",
@@ -3787,6 +3791,16 @@ def build_matrix() -> list[Check]:
             ["completions", "tcsh"],
             4,
             err_has=["'completions' wants one of bash, zsh, fish", "tcsh"],
+        ),
+        # Help is a directive, not a stop: §30 permits one operand and help
+        # and nothing else, so the whole vector is judged before help wins.
+        # Returning on sight of `--help` printed help and exited 0 here.
+        Check(
+            "completions: a trailing operand after --help -> 4",
+            "§30",
+            ["completions", "bash", "--help", "garbage"],
+            4,
+            err_has=["'completions' wants one shell", "garbage"],
         ),
     ]
     # Refused v1 flags (§24.1): each names the flag and states it is the v1 contract.

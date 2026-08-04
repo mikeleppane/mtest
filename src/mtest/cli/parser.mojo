@@ -844,6 +844,27 @@ def _err_completions_shell(value: String) -> Error:
     return _err(body + ", got '" + safe_path_label(value) + "'")
 
 
+def _err_completions_repeated(value: String) -> Error:
+    """The usage error for a second shell operand.
+
+    Separate from `_err_completions_shell` because the two refusals are about
+    different things: there the value is wrong, here it may be perfectly legal
+    and the count is wrong. Naming a legal shell after "wants one of bash, zsh,
+    fish" read as a contradiction.
+
+    Args:
+        value: The extra operand, as typed.
+
+    Returns:
+        A `cli:`-prefixed usage error naming the repetition.
+    """
+    return _err(
+        "'completions' wants one shell, got a second one: '"
+        + safe_path_label(value)
+        + "'"
+    )
+
+
 def _parse_completions(argv: List[String]) raises -> ParseResult:
     """Parse the `completions` tail: one shell name, and nothing else.
 
@@ -858,7 +879,10 @@ def _parse_completions(argv: List[String]) raises -> ParseResult:
 
     Returns:
         A result whose `kind` is `COMPLETIONS`, or the help directive when
-        `--help` appears anywhere in the tail.
+        `--help` appears anywhere in an otherwise legal tail. Help does not
+        stop the walk: the whole vector is judged first, so a token this
+        grammar does not permit is a usage error whether or not help precedes
+        it.
 
     Raises:
         Error: A `cli:`-prefixed usage error for a missing, repeated, or
@@ -867,12 +891,13 @@ def _parse_completions(argv: List[String]) raises -> ParseResult:
     """
     var shell = String("")
     var saw_shell = False
+    var saw_help = False
     var i = 1
     while i < len(argv):
         var tok = argv[i]
         if not tok.startswith("-") or tok == "-":
             if saw_shell:
-                raise _err_completions_shell(tok)
+                raise _err_completions_repeated(tok)
             var known = False
             for candidate in completion_shells():
                 if candidate == tok:
@@ -893,8 +918,17 @@ def _parse_completions(argv: List[String]) raises -> ParseResult:
                 raise _err(
                     "flag '" + name + "' takes no value, got '" + tok + "'"
                 )
-            return ParseResult.show_help()
+            # Noted rather than returned. Help is a directive, but §30 permits
+            # one operand and help and nothing else, and returning here would
+            # let everything after it through unread — `completions bash
+            # --help garbage` printed help and exited 0 while the grammar
+            # calls that vector a usage error.
+            saw_help = True
+            i += 1
+            continue
         raise _err("'" + name + "' cannot be combined with 'completions'")
+    if saw_help:
+        return ParseResult.show_help()
     if not saw_shell:
         raise _err_completions_shell(String(""))
     return ParseResult.completions(shell^)
