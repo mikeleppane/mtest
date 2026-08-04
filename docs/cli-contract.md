@@ -2973,13 +2973,13 @@ because each takes at most one operand this document does not enumerate.
 
 Within a command, only the flags that command accepts are offered, and a
 flag's value is completed only under a command that accepts the flag: after
-`mtest doctor --report-style` there is nothing to offer, because that pair is
-a usage error (§4). A value with a closed set completes to that set, a value
-that names a path completes against the filesystem, and a value the contract
-does not enumerate — a glob, an integer, a build argument — completes to
-nothing rather than to a guess. `--report FORMAT:PATH` reaches a path under
-its format prefix (§15.5): the format first, and then the path after the
-separator, in all three shells.
+`mtest doctor --report-style` no style is offered — the line falls through to
+`doctor`'s own flags — because that pair is a usage error (§4). A value with a
+closed set completes to that set, a value that names a path completes against
+the filesystem, and a value the contract does not enumerate — a glob, an
+integer, a build argument — completes to nothing rather than to a guess.
+`--report FORMAT:PATH` reaches a path under its format prefix (§15.5): the
+format first, and then the path after the separator, in all three shells.
 
 **What differs between the three scripts is the shell, not the inventory.**
 Each script offers the same flags, subcommands, and values, because all three
