@@ -514,13 +514,24 @@ def test_every_flag_accepting_head_has_a_state_and_a_bit() raises:
     bit's script-side name is the row's own state, which is what lets the
     per-head flag lists and the head-resolution branches key on one table.
     """
+    var divergent = 0
     for spec in subcommand_specs():
         var state = _head_state(spec.token)
         if spec.head_bit == 0:
-            assert_true(
-                state == "none" or spec.token == "completions",
-                "a head with no flag grammar resolves to a head: " + spec.token,
-            )
+            if spec.token == "completions":
+                divergent += 1
+                assert_equal(
+                    state,
+                    "completions",
+                    "the one bitless head with a state of its own lost it",
+                )
+            else:
+                assert_equal(
+                    state,
+                    "none",
+                    "a head with no flag grammar resolves to a head: "
+                    + spec.token,
+                )
             continue
         assert_true(
             state != "none",
@@ -531,6 +542,9 @@ def test_every_flag_accepting_head_has_a_state_and_a_bit() raises:
             state,
             "the bit and the state disagree: " + spec.token,
         )
+    assert_equal(
+        divergent, 1, "the row the two fields exist to express is gone"
+    )
 
 
 def test_the_offers_nothing_group_is_exactly_these_four_heads() raises:
@@ -1024,7 +1038,24 @@ def _bash_value_arm(spec: FlagSpec) raises -> String:
             + '      _mtest_reply < <(compgen -f -- "$cur")\n'
         )
     if spec.value_kind == ValueKind.PREFIX_CHOICE:
-        return String('      if [[ "$cur" == *:* ]]; then\n')
+        return (
+            '      if [[ "$cur" == *:* ]]; then\n'
+            + '        local pfx="${cur%%:*}:" rest="${cur#*:}"\n'
+            + '        if [ "$cur" = "${COMP_WORDS[COMP_CWORD]}" ]; then\n'
+            + "          compopt -o nospace\n"
+            + "        else\n"
+            + "          compopt -o filenames\n"
+            + "        fi\n"
+            + '        _mtest_reply < <(compgen -P "$pfx" -f -- "$rest")\n'
+            + "      else\n"
+            + "        compopt -o nospace\n"
+            + '        COMPREPLY=($(compgen -W "'
+            + _compgen_wordlist(spec.choices)
+            + '" -- "$cur"))\n'
+            + "      fi\n"
+            + '      _mtest_trim_to_replaced "$cur"'
+            + ' "${COMP_WORDS[COMP_CWORD]}"\n'
+        )
     if (
         spec.value_kind == ValueKind.CHOICE
         or spec.value_kind == ValueKind.CHOICE_OR_OTHER
@@ -1038,20 +1069,20 @@ def _bash_value_arm(spec: FlagSpec) raises -> String:
 
 
 def _zsh_value_action(spec: FlagSpec) raises -> String:
-    """The tail one row's value kind gives its zsh `_arguments` specification.
+    """The action one row's value kind gives its zsh `_arguments` spec.
 
     Args:
         spec: The flag row to describe. Not mutated.
 
     Returns:
-        The freshly allocated text the specification must end in, before the
-        closing quote.
+        The freshly allocated text that follows the value message, empty for an
+        arity-zero flag, which has no message and no action at all.
 
     Raises:
         Error: For a `ValueKind` this module has no zsh action for.
     """
     if spec.value_kind == ValueKind.NONE:
-        return String("]")
+        return String("")
     if spec.value_kind == ValueKind.OTHER:
         return String(":")
     if spec.value_kind == ValueKind.PATH:
@@ -1126,14 +1157,23 @@ def test_every_value_kind_reaches_all_three_scripts() raises:
                 "    " + patterns + ")\n" + arm in bash,
                 "bash does not render the value of " + spec.spelling,
             )
-        var specification = _zsh_spec(spec)
-        assert_true(
-            specification.endswith(_zsh_value_action(spec) + "'"),
-            "zsh does not render the value of " + spec.spelling,
+        # Assembled from the row rather than read back off `_zsh_spec`, so
+        # both assertions are evidence about the renderer instead of about
+        # themselves: the first pins the specification's shape, the second
+        # proves that exact text reaches the script.
+        var body = String("*") if spec.repeatable else String("")
+        body += spec.spelling + "[" + _zsh_description(spec.help) + "]"
+        if spec.arity == 1:
+            body += ":" + _zsh_message(spec.value_name)
+        var specification = _zsh_quoted(body + _zsh_value_action(spec))
+        assert_equal(
+            _zsh_spec(spec),
+            specification,
+            "the zsh specification of " + spec.spelling + " drifted",
         )
         assert_true(
             specification in zsh,
-            "zsh dropped a specification: " + spec.spelling,
+            "zsh does not render the value of " + spec.spelling,
         )
         assert_true(
             _fish_flag_token(spec.spelling) + _fish_value_syntax(spec) + " -d "
