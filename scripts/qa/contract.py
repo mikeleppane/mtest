@@ -10,7 +10,7 @@ tagged with the `docs/cli-contract.md` section it enforces.
 Design:
   * The contract is the oracle. A check asserts what the contract PROMISES
     rather than what the implementation happens to render. Console wording is
-    informal (§20), so checks lean on the FROZEN surfaces: exit codes (§9), the
+    informal (§20), so checks lean on the STABLE surfaces: exit codes (§9), the
     `collect` listing (§16), stream routing (§16/§19), and outcome
     distinctions (§10).
   * The dominant defect class is SILENT test-set corruption: running the wrong
@@ -3290,7 +3290,7 @@ def build_matrix() -> list[Check]:
             0,
             out_has=["mtest 1.0.0"],
         ),
-        # Outcomes + FROZEN exit codes (§9,§10). CRASH must stay distinct from
+        # Outcomes + STABLE exit codes (§9,§10). CRASH must stay distinct from
         # FAIL (§10).
         Check(
             "outcome: passing tests/ -> 0, exact count",

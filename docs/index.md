@@ -42,7 +42,7 @@ supports.
   delivered.
 - [Shell completion](completions.md) — where each shell wants the script
   `mtest completions` prints, and what it completes once it is installed.
-- [Command-line contract](cli-contract.md) — the frozen specification of every
+- [Command-line contract](cli-contract.md) — the specification of every
   subcommand, flag, exit code, and stream.
 - [JSON event stream](json-stream.md) — the machine-readable stream, event by
   event.

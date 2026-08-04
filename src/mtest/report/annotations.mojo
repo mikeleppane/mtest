@@ -78,7 +78,7 @@ from mtest.report.signals import signal_name_for_target
 comptime _MAX_ERRORS = 10
 comptime _MAX_WARNINGS = 10
 
-# STABLE-INTENT: measured on the ESCAPED message text (after `gh_escape_message`
+# ADJUSTABLE (§20): measured on the ESCAPED message text (after `gh_escape_message`
 # has run), not the raw input — a message that escapes to exactly this many
 # bytes or fewer rides whole; anything longer is cut to fit, with the marker
 # below appended so a reader can always tell a message was shortened.
