@@ -35,7 +35,7 @@ and every value originating as raw child bytes is decoded through `lossy_utf8`
 first (see `bounded_text_from_bytes`). There is no CDATA and no second escaping
 path.
 """
-from mtest.config.lossy_utf8 import lossy_utf8
+from mtest.config import lossy_utf8
 from mtest.report.escape import xml_escape_attribute, xml_escape_text
 
 # The captured-stream head/tail windows mirror the JSON stream's bound (64 KiB

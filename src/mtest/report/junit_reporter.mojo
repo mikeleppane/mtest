@@ -37,17 +37,17 @@ no-`--junit-xml` shape, owns no spool directory and does nothing.
 from std.os import remove
 from std.os.path import basename, dirname
 
-from mtest.model.events import (
+from mtest.model import (
     AttemptFinishedPayload,
     Event,
     EventKind,
     FileFinishedPayload,
     FileStartedPayload,
+    Outcome,
     PrecompileFailedPayload,
     TestReportedPayload,
+    TestResult,
 )
-from mtest.model.outcome import Outcome
-from mtest.model.test_result import TestResult
 from mtest.platform import process_id, rename_path
 from mtest.report.file_accum import FileAccums
 from mtest.report.spool_dir import open_spool_dir

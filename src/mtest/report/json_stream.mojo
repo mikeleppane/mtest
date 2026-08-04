@@ -32,10 +32,10 @@ every value that originates as raw child-process bytes is first decoded through
 the shared `lossy_utf8` so it is valid UTF-8 before escaping. There is no
 second escaper and no second lossy path here.
 """
-from mtest.config.lossy_utf8 import lossy_utf8
-from mtest.model.attribution import AttributionDisposition
-from mtest.model.events import (
+from mtest.config import lossy_utf8
+from mtest.model import (
     AttemptFinishedPayload,
+    AttributionDisposition,
     CollectionKnownPayload,
     CrashAttributionPayload,
     Event,
@@ -43,6 +43,8 @@ from mtest.model.events import (
     FileFinishedPayload,
     FileStartedPayload,
     InternalErrorPayload,
+    Outcome,
+    ParseDisposition,
     PrecompileFailedPayload,
     SessionFinishedPayload,
     SessionStartedPayload,
@@ -50,8 +52,6 @@ from mtest.model.events import (
     TestReportedPayload,
     WarningPayload,
 )
-from mtest.model.outcome import Outcome
-from mtest.model.parse_disposition import ParseDisposition
 from mtest.report.escape import json_escape_string
 
 # --- Serialization bounds ---------------------------------------------------

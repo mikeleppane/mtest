@@ -30,8 +30,7 @@ from std.os.path import isdir
 
 from mtest.cache import BuildRegistry
 from mtest.config import ResolvedConfig, lossy_utf8
-from mtest.discover import normalize_operand, normalize_root
-from mtest.discover.result import DiscoveryResult
+from mtest.discover import DiscoveryResult, normalize_operand, normalize_root
 from mtest.exec import (
     ExecRuntime,
     ProcessResult,

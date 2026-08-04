@@ -51,18 +51,18 @@ line only when the invocation root is the repository root, which is `mtest` run
 from the repo root, the ordinary case. Run from a subdirectory the path still
 renders, but GitHub anchors it under that subdirectory.
 """
-from mtest.model.events import (
+from mtest.model import (
     AttemptFinishedPayload,
     Event,
     EventKind,
     FileFinishedPayload,
+    Outcome,
+    ParseDisposition,
     PrecompileFailedPayload,
     SessionFinishedPayload,
     TestReportedPayload,
+    TestResult,
 )
-from mtest.model.outcome import Outcome
-from mtest.model.parse_disposition import ParseDisposition
-from mtest.model.test_result import TestResult
 from mtest.report.escape import gh_escape_message, gh_escape_property
 from mtest.report.signals import signal_name_for_target
 

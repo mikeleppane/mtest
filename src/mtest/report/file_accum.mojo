@@ -21,7 +21,7 @@ payload carries.
 forward, so this module owns the keyed-lookup mechanism and makes no claim over
 what either reporter does with the state it finds.
 """
-from mtest.model.test_result import TestResult
+from mtest.model import TestResult
 
 
 @fieldwise_init

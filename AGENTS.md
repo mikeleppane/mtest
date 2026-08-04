@@ -72,6 +72,14 @@ and exit and nothing else. `exec` is the deepest module, a narrow
 process-control interface hiding pipes, concurrent draining, FFI, platform
 differences, and cleanup invariants.
 
+`scripts/checks/layering.py` enforces all of this: the rank order, the Layer 2
+siblings, deep imports that go around a facade export, the `exit()` and
+`external_call` confinements. It reports a deep import of a name the owning
+facade does not export as information rather than a failure, because there is
+no facade path to have taken. Docstrings and comments are stripped before
+matching, so the `Examples:` blocks and the prose that names `exit()` and
+`external_call` are not read as code.
+
 Three named seams:
 
 - Reporter composition is comptime. The plugin seam is a closed, typed event
@@ -229,8 +237,8 @@ pixi run version-check     # manifest, CLI, and shipped-version identity; every
                            #   pin, swept over reader-facing documentation
 pixi run harness-unit-check     # harness self-tests: runner, watchdog, comparators,
                                 #   and the two memory-lane oracles (no tools needed)
-pixi run repo-policy-check      # layout, documentation-site parity, workflow and
-                                #   published-action security, tool pins, annotations
+pixi run repo-policy-check      # layout, layering, documentation-site parity, workflow
+                                #   and published-action security, tool pins, annotations
 pixi run release-tooling-check  # attestations, release, publication, public verify
 pixi run harness-check     # the aggregate of the three groups above
 pixi run coverage-capability  # tripwire: the pinned toolchain must have no coverage
@@ -560,6 +568,7 @@ Scope vocabulary (authoritative; keep in sync as modules emerge):
 | `assertions` | source-only companion under `companions/assertions/src/mtest/assertions` |
 | `cli` | `src/mtest/cli` (arg parsing, main) |
 | `cache` | in-session build/collection reuse |
+| `checks` | `scripts/checks/` policy gates |
 | `test` | test infrastructure (`scripts/harness/{selfhost,dogfood}.py`, `scripts/build/mojo_package.sh`, shared helpers) |
 | `e2e` | end-to-end harness (`scripts/e2e/`) and its `e2e/` manifest and scenarios |
 | `qa` | the contract gate (`scripts/qa/`) and its own tests |

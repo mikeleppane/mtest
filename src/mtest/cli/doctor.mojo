@@ -31,7 +31,7 @@ from mtest.exec import (
     interrupt_requested,
     run_supervised,
 )
-from mtest.model.control_chars import is_interpreted_control
+from mtest.model import is_interpreted_control
 from mtest.platform import (
     BoundedRegularFileRead,
     close_checked_fd,

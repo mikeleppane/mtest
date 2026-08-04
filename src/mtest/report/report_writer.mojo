@@ -44,13 +44,17 @@ Two facts shape the type:
 An inert writer, the no-`--report` shape, holds no artifact at all: `handle` is
 a no-op, `finalize_reports` is a clean success, and nothing is ever opened.
 """
-from mtest.model import Event, EventKind, NotRunRecord, Outcome, TestResult
-from mtest.model.events import (
+from mtest.model import (
     AttemptFinishedPayload,
+    Event,
+    EventKind,
     FileFinishedPayload,
     FileStartedPayload,
+    NotRunRecord,
+    Outcome,
     PrecompileFailedPayload,
     TestReportedPayload,
+    TestResult,
 )
 from mtest.platform import close_checked_fd, rename_path, write_all_bytes_fd
 from mtest.report.file_accum import FileAccums

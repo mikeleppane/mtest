@@ -65,7 +65,7 @@ characters, and confusable homoglyphs. They are a rendering-layer concern with
 no single correct answer for a terminal, and escaping them would corrupt
 legitimate right-to-left test names and assertion text.
 """
-from mtest.model.control_chars import is_c1_control, is_interpreted_control
+from mtest.model import is_c1_control, is_interpreted_control
 
 
 def _hex_digit(value: Int) -> String:
