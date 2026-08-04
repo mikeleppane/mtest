@@ -20,12 +20,15 @@ the `Subcommands` block.
 
 The layer also owns `build_flags_string`, which renders a `RunnerConfig` back
 into the shell-ready flag string the console echoes in a run-failure
-`reproduce:` line.
+`reproduce:` line, and `render_completions`, which renders those same two
+tables into a bash, zsh, or fish completion script so a shell offers exactly
+what the active command accepts.
 
 The public surface is re-exported here so callers write
 `from mtest.cli import parse_args, ParseResult, build_flags_string, ...`.
 """
 from mtest.cli.build_flags import build_flags_string
+from mtest.cli.completions import completion_shells, render_completions
 from mtest.cli.flag_spec import (
     FlagGroup,
     FlagId,

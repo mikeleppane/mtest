@@ -780,6 +780,11 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "value: --report-style bad value -> 4",
     "run: --json collides with --junit-xml -> 4",
     "debug: --report rejected -> 4",
+    "completions: bash prints a sourceable function",
+    "completions: zsh prints a compdef script",
+    "completions: fish prints complete rules",
+    "completions: no shell operand -> 4",
+    "completions: an unrenderable shell -> 4",
     "served: -n accepted (not exit 4)",
     "served: --workers accepted (not exit 4)",
     "served: --serial accepted (not exit 4)",
@@ -3737,6 +3742,51 @@ def build_matrix() -> list[Check]:
             ],
             4,
             err_has=["no terminal record could be written"],
+        ),
+        # §30. Each shell gets the frame its own completion system needs, and
+        # the bash probe additionally pins the two head-resolution statements
+        # the section makes: a bare `config` completes exactly `show`, and a
+        # value arm is keyed on the command as well as the flag, so
+        # `doctor --report-style` has no arm at all.
+        Check(
+            "completions: bash prints a sourceable function",
+            "§30",
+            ["completions", "bash"],
+            0,
+            out_has=[
+                "complete -F _mtest_complete mtest",
+                'config-pending) COMPREPLY=($(compgen -W "show"',
+                '"run:--report-style"',
+            ],
+            any_absent=["doctor:--report-style"],
+        ),
+        Check(
+            "completions: zsh prints a compdef script",
+            "§30",
+            ["completions", "zsh"],
+            0,
+            out_has=["#compdef mtest", "compdef _mtest mtest", "--collect-only"],
+        ),
+        Check(
+            "completions: fish prints complete rules",
+            "§30",
+            ["completions", "fish"],
+            0,
+            out_has=["complete -c mtest", "__mtest_head_is", "-l collect-only"],
+        ),
+        Check(
+            "completions: no shell operand -> 4",
+            "§30",
+            ["completions"],
+            4,
+            err_has=["'completions' wants one of bash, zsh, fish"],
+        ),
+        Check(
+            "completions: an unrenderable shell -> 4",
+            "§30",
+            ["completions", "tcsh"],
+            4,
+            err_has=["'completions' wants one of bash, zsh, fish", "tcsh"],
         ),
     ]
     # Refused v1 flags (§24.1): each names the flag and states it is the v1 contract.

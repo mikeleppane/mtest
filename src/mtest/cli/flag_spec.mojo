@@ -129,10 +129,11 @@ def flag_group_name(group: Int) -> String:
 struct Subcommand:
     """Bit positions for flag applicability, one per flag-accepting head.
 
-    `new` and `init` are absent because neither has a flag table to describe:
-    `new` accepts only `-h`/`--help`, and `init` accepts `--ci VALUE` beside
-    them, which is deliberately not a `flag_specs()` row. `help` and `version`
-    are absent because they are directives that consume the whole vector.
+    `new`, `init`, and `completions` are absent because none has a flag table
+    to describe: `new` and `completions` accept only `-h`/`--help` beside their
+    one operand, and `init` accepts `--ci VALUE` beside them, which is
+    deliberately not a `flag_specs()` row. `help` and `version` are absent
+    because they are directives that consume the whole vector.
     """
 
     comptime RUN = 1
@@ -217,6 +218,11 @@ def subcommand_specs() -> List[SubcommandSpec]:
             token="init",
             label_args="[--ci github]",
             description="Bootstrap a project in this directory.",
+        ),
+        SubcommandSpec(
+            token="completions",
+            label_args="SHELL",
+            description="Print a bash, zsh, or fish completion script.",
         ),
         SubcommandSpec(
             token="help",

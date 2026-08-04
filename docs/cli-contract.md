@@ -107,6 +107,7 @@ mtest doctor [--config PATH | --no-config] [--color WHEN] [-q | -v]
 mtest debug PATH::TEST [build flags] [-- BUILD-ARGS...]  # hand over the terminal
 mtest new PATH                                      # scaffold one test file
 mtest init [--ci github]                            # bootstrap a project
+mtest completions bash|zsh|fish            # print a shell completion script
 mtest version
 mtest --help | mtest help
 ```
@@ -118,7 +119,9 @@ path whose name *is* a subcommand is shadowed by it and must be spelled
 `config show` is the sole two-token subcommand. `debug` is the only one that
 does not end by reporting: it prepares a single test and then replaces the
 mtest process with it (§28). `new` and `init` are the two that write source
-files rather than reading them (§29).
+files rather than reading them (§29). `completions` is the one that writes
+neither: it prints a shell script derived from this document's own flag and
+subcommand inventory (§30).
 
 ---
 
@@ -2114,8 +2117,10 @@ above — it only reports which of those surfaces are wired up yet.
 `-s`/`--show-output`,
 `--durations`, `-q`/`-v`, `--color`, `--format`,
 `-h`/`--help`, `--version`, and the `run`, `collect`, `config show`, `doctor`,
-`debug`, `new`, `init`, `version`, and `help` subcommands (`--collect-only`
-too, as an alias that behaves as `collect`), plus `init`'s own `--ci VALUE`.
+`debug`, `new`, `init`, `completions`, `version`, and `help` subcommands
+(`--collect-only`
+too, as an alias that behaves as `collect`), plus `init`'s own `--ci VALUE`
+and `completions`' own `SHELL` operand (§30).
 `--shard` applies under both `run` and `collect`. `--json` (the machine event
 stream, §15.4), `--junit-xml` (the JUnit report, §15.2), `--gh-annotations`
 (the CI annotation tail, §15.3), and `--report`/`--report-style` (the run
@@ -2128,8 +2133,8 @@ store described in §8.5, which this build reads and writes by default.
 Every flag and subcommand in the frozen contract above is now served: nothing is
 refused for being unavailable. For `run` and `collect`, exit 4 therefore covers
 exactly the frozen §9 causes. `Config show` and `doctor` use the applicability
-rules and command-specific exit domains in §27; `debug` uses §28's, and `new`
-and `init` use §29's.
+rules and command-specific exit domains in §27; `debug` uses §28's, `new`
+and `init` use §29's, and `completions` uses §30's.
 
 ### 24.2 Run and collect exit codes reachable in this build
 
@@ -2924,3 +2929,68 @@ writes what it did and what stopped it to stderr, because the record of a
 partial bootstrap belongs with the diagnostic rather than split across two
 streams. As in §29.1, the diagnostics are informal text (§20) — the exit code
 and the artifacts' presence are what this section freezes.
+
+---
+
+## 30. Shell completion — `mtest completions SHELL`
+
+`mtest completions SHELL` writes a completion script for one shell to stdout
+and stops. It is the third subcommand that produces text rather than consuming
+a suite, and the only one that produces neither a verdict nor a file: what to
+do with the script is the caller's decision.
+
+**Grammar.** Exactly one `SHELL` operand, plus `-h`/`--help` and nothing else
+(§4). `SHELL` is closed — `bash`, `zsh`, or `fish` — and any other value is a
+usage error (exit 4) raised before anything is written. No configuration is
+read, no toolchain is resolved, and no file is discovered, built, or run. The
+subcommand is recognized in the leading position only, like every other one
+(§3), so `mtest -q completions` is a run with a `completions` path operand.
+
+**What it writes.** A script for the named shell, on stdout, ending in a
+newline. Every command-line fact in it — the subcommand vocabulary, each flag
+spelling, its one-line description, its value placeholder, and the closed value
+set it accepts — is derived from the same inventory this document specifies, so
+a script can offer a flag this build does not accept only if the parser accepts
+it too.
+
+```console
+$ eval "$(mtest completions bash)"       # bash
+$ eval "$(mtest completions zsh)"        # zsh, after compinit
+$ mtest completions fish > ~/.config/fish/completions/mtest.fish
+```
+
+**What the script offers.** The active command is resolved the way `parse_args`
+resolves it: from the **leading** word alone, because that is the only position
+a subcommand is recognized in. `mtest -q doctor <TAB>` is therefore completed
+as a run, matching what it would do if executed. One refinement follows: a run
+whose words already contain `--collect-only` is a collection, so it offers
+`--format` and withdraws the flags that mode refuses. A bare `config` completes
+exactly the mandatory `show` token (§27.1), and `new`, `init`, `completions`,
+`help`, and `version` offer nothing, because each takes at most one operand
+this document does not enumerate.
+
+Within a command, only the flags that command accepts are offered, and a
+flag's value is completed only under a command that accepts the flag: after
+`mtest doctor --report-style` there is nothing to offer, because that pair is
+a usage error (§4). A value with a closed set completes to that set, a value
+that names a path completes against the filesystem, and a value the contract
+does not enumerate — a glob, an integer, a build argument — completes to
+nothing rather than to a guess. `--report FORMAT:PATH` completes its format
+prefix first and then a path after the separator (§15.5).
+
+The completions themselves are a convenience, not a contract: which candidates
+a shell shows for a given prefix is INFORMAL (§20), and the same reasoning
+applies to the script's internal structure. What is frozen is the grammar
+above, the exit codes below, and the property that the script never offers a
+flag, subcommand, or value this build refuses.
+
+**Exit codes.**
+
+| Code | Cause |
+|------|-------|
+| 0 | the script was written to stdout |
+| 4 | a missing, repeated, or unrecognized `SHELL` operand, or anything in argv beyond one operand and `-h`/`--help` |
+| 3 | the script could not be written to stdout for any reason other than a departed consumer (§9) |
+
+Nothing else is reachable. A departed consumer — a closed pipe — is not a
+failure of this command any more than it is of `--help` (§19).

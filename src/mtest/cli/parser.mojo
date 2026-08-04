@@ -23,6 +23,7 @@ from mtest.cli.flag_spec import (
     flag_specs,
     subcommand_specs,
 )
+from mtest.cli.completions import completion_shells
 from mtest.cli.parse_result import ParseResult
 from mtest.model import split_node_token
 from mtest.config import (
@@ -89,7 +90,8 @@ def help_text() -> String:
         ),
         "       mtest debug PATH::TEST [build flags] [-- BUILD-ARGS...]\n",
         "       mtest new PATH\n",
-        "       mtest init [--ci github]\n\n",
+        "       mtest init [--ci github]\n",
+        "       mtest completions bash|zsh|fish\n\n",
         "Subcommands:\n",
     )
     # The usage lines above stay hand-written — each states a different subset
@@ -829,13 +831,83 @@ def _parse_init(argv: List[String]) raises -> ParseResult:
     return ParseResult.bootstrap(ci^)
 
 
+def _err_completions_shell(value: String) -> Error:
+    """The usage error for a missing or unrenderable shell operand."""
+    var body = String("'completions' wants one of ")
+    var shells = completion_shells()
+    for i in range(len(shells)):
+        if i != 0:
+            body += ", "
+        body += shells[i]
+    if value == "":
+        return _err(body)
+    return _err(body + ", got '" + safe_path_label(value) + "'")
+
+
+def _parse_completions(argv: List[String]) raises -> ParseResult:
+    """Parse the `completions` tail: one shell name, and nothing else.
+
+    Printing a completion script reads no configuration, builds nothing, and
+    runs nothing, so there is no flag whose value could reach it — the same
+    reasoning that gives `new` its own narrow walk. `-h`/`--help` is the
+    exception, because it describes a command rather than acting on one.
+
+    Args:
+        argv: The complete argument vector; the `completions` head token is
+            skipped.
+
+    Returns:
+        A result whose `kind` is `COMPLETIONS`, or the help directive when
+        `--help` appears anywhere in the tail.
+
+    Raises:
+        Error: A `cli:`-prefixed usage error for a missing, repeated, or
+            unrenderable shell operand, or for any flag other than
+            `-h`/`--help`.
+    """
+    var shell = String("")
+    var saw_shell = False
+    var i = 1
+    while i < len(argv):
+        var tok = argv[i]
+        if not tok.startswith("-") or tok == "-":
+            if saw_shell:
+                raise _err_completions_shell(tok)
+            var known = False
+            for candidate in completion_shells():
+                if candidate == tok:
+                    known = True
+            if not known:
+                raise _err_completions_shell(tok)
+            shell = tok
+            saw_shell = True
+            i += 1
+            continue
+        var name = tok
+        var has_inline = False
+        if tok.find("=") != -1:
+            name = String(tok.split("=", 1)[0])
+            has_inline = True
+        if name == "-h" or name == "--help":
+            if has_inline:
+                raise _err(
+                    "flag '" + name + "' takes no value, got '" + tok + "'"
+                )
+            return ParseResult.show_help()
+        raise _err("'" + name + "' cannot be combined with 'completions'")
+    if not saw_shell:
+        raise _err_completions_shell(String(""))
+    return ParseResult.completions(shell^)
+
+
 def parse_args(argv: List[String]) raises -> ParseResult:
     """Parse `argv` into a run, inspection, scaffolding, or directive result.
 
     A leading `help` or `version` token returns that directive immediately. A
     leading `run`, `collect`, or `doctor` token is consumed as a subcommand,
-    with `collect` equivalent to `--collect-only`. A leading `debug`, `new`, or
-    `init` token hands the rest of the vector to that subcommand's own narrow
+    with `collect` equivalent to `--collect-only`. A leading `debug`, `new`,
+    `init`, or `completions` token hands the rest of the vector to that
+    subcommand's own narrow
     walk, and a leading `config show` pair requests resolution-only display
     while reusing the run grammar. Any other
     first token is left to the general token loop, which reads it as a flag
@@ -852,7 +924,8 @@ def parse_args(argv: List[String]) raises -> ParseResult:
 
     Returns:
         A configured run, config-display request, doctor request, debug
-        request, scaffolding or bootstrap request, or help/version directive.
+        request, scaffolding, bootstrap, or completion-script request, or
+        help/version directive.
 
     Raises:
         Error: A `cli:`-prefixed usage error, raised for an unknown flag, a
@@ -865,7 +938,9 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             reporter flag combined with doctor, under `new` anything but
             exactly one path operand and any flag but `-h`/`--help`, or —
             under `init` — a path operand, an empty or unrecognized `--ci`
-            value, and any flag but `--ci`/`-h`/`--help`.
+            value, and any flag but `--ci`/`-h`/`--help`; and — under
+            `completions` — a missing, repeated, or unrenderable shell operand
+            and any flag but `-h`/`--help`.
 
     Examples:
 
@@ -910,6 +985,10 @@ def parse_args(argv: List[String]) raises -> ParseResult:
             # `init` owns its tail because its one flag is deliberately not in
             # the table: a `--ci` row there would also make it a `run` flag.
             return _parse_init(argv)
+        if head == "completions":
+            # `completions` owns its tail for `new`'s reason: it accepts no
+            # flag at all, so the general loop's whole table is wrong for it.
+            return _parse_completions(argv)
         if head == "config":
             if len(argv) < 2 or argv[1] != "show":
                 raise _err(

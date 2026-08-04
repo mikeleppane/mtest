@@ -47,6 +47,7 @@ from mtest.cli import (
     help_text,
     host_platform_label,
     parse_args,
+    render_completions,
     run_doctor,
     run_init,
     run_new,
@@ -1117,6 +1118,22 @@ def main():
         _exit_with_output(help_text(), 1, 0)
     if result.is_version():
         _exit_with_output(version_text() + "\n", 1, 0)
+    # Beside help and version, and above the invocation root for the same
+    # reason: a completion script is rendered from the command-line spec tables
+    # alone, so no root, no project configuration, and no file on disk can
+    # change a byte of it. The parser already refused every shell this build
+    # does not render, so the raise below is unreachable through argv; it is
+    # caught rather than declared away because the renderer is also a library
+    # call, and an escaping error would leave on exit 1 — the one code that
+    # reads as "your test failed".
+    if result.is_completions():
+        var script = String("")
+        try:
+            script = render_completions(result.shell)
+        except e:
+            _eprintln(String(e))
+            exit(EXIT_USAGE_ERROR)
+        _exit_with_output(script, 1, 0)
     if result.is_doctor():
         var diagnosis = run_doctor(result, MTEST_VERSION)
         var rendered = String("")

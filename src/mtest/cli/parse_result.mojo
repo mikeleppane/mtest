@@ -2,9 +2,10 @@
 
 Parsing either yields a configured run, `config show`, `doctor`, or `debug`
 request with both its typed argv overlay and defaults-folded compatibility
-config, a `new` or `init` scaffolding request, or a non-error directive to
-print help or the version. A usage error is not a `ParseResult`: it is raised.
-`main` handles each result; this layer never prints or exits.
+config, a `new` or `init` scaffolding request, a `completions` request naming
+one shell, or a non-error directive to print help or the version. A usage error
+is not a `ParseResult`: it is raised. `main` handles each result; this layer
+never prints or exits.
 """
 from mtest.config import CliOverlay, RunnerConfig
 
@@ -17,8 +18,9 @@ struct ParseResult(Copyable, Movable):
     `DEBUG`, `overlay` holds argv presence and values while `config` holds
     their defaults-folded compatibility view. `DEBUG` additionally carries the
     one node id it was given in `operand`, `NEW` carries the one path it was
-    given there, and `INIT` carries its `--ci` value in `ci`. Help, version,
-    `NEW`, and `INIT` carry placeholder fields.
+    given there, `INIT` carries its `--ci` value in `ci`, and `COMPLETIONS`
+    carries the shell it names in `shell`. Help, version, `NEW`, `INIT`, and
+    `COMPLETIONS` carry placeholder fields.
 
     Examples:
 
@@ -63,6 +65,13 @@ struct ParseResult(Copyable, Movable):
     tests` would parse as a run carrying a value nothing reads. `init` parses
     it in its own walk, and it lands here."""
 
+    var shell: String
+    """The shell `COMPLETIONS` renders for, or empty; empty for every other kind.
+
+    Like `ci`, it has no flag-spec row and no place in the overlay: it is the
+    operand of its own subcommand rather than a flag, and the closed value set
+    it is drawn from is `completion_shells()`."""
+
     comptime RUN = 0
     comptime SHOW_HELP = 1
     comptime SHOW_VERSION = 2
@@ -71,6 +80,7 @@ struct ParseResult(Copyable, Movable):
     comptime DEBUG = 5
     comptime NEW = 6
     comptime INIT = 7
+    comptime COMPLETIONS = 8
 
     @staticmethod
     def run(
@@ -100,6 +110,7 @@ struct ParseResult(Copyable, Movable):
             no_config=no_config,
             operand=String(""),
             ci=String(""),
+            shell=String(""),
         )
 
     @staticmethod
@@ -113,6 +124,7 @@ struct ParseResult(Copyable, Movable):
             no_config=False,
             operand=String(""),
             ci=String(""),
+            shell=String(""),
         )
 
     @staticmethod
@@ -126,6 +138,7 @@ struct ParseResult(Copyable, Movable):
             no_config=False,
             operand=String(""),
             ci=String(""),
+            shell=String(""),
         )
 
     @staticmethod
@@ -154,6 +167,7 @@ struct ParseResult(Copyable, Movable):
             no_config=no_config,
             operand=String(""),
             ci=String(""),
+            shell=String(""),
         )
 
     @staticmethod
@@ -182,6 +196,7 @@ struct ParseResult(Copyable, Movable):
             no_config=no_config,
             operand=String(""),
             ci=String(""),
+            shell=String(""),
         )
 
     @staticmethod
@@ -212,6 +227,7 @@ struct ParseResult(Copyable, Movable):
             no_config=no_config,
             operand=operand^,
             ci=String(""),
+            shell=String(""),
         )
 
     @staticmethod
@@ -235,6 +251,7 @@ struct ParseResult(Copyable, Movable):
             no_config=False,
             operand=operand^,
             ci=String(""),
+            shell=String(""),
         )
 
     @staticmethod
@@ -260,6 +277,32 @@ struct ParseResult(Copyable, Movable):
             no_config=False,
             operand=String(""),
             ci=ci^,
+            shell=String(""),
+        )
+
+    @staticmethod
+    def completions(var shell: String) -> ParseResult:
+        """A result asking `main` to print one shell's completion script.
+
+        Its config and overlay are placeholders: the script is rendered from
+        the command-line spec tables alone, so no project configuration, no
+        toolchain, and no file on disk can change a byte of it.
+
+        Args:
+            shell: The shell to render for. Consumed.
+
+        Returns:
+            A result whose `kind` is `COMPLETIONS`.
+        """
+        return ParseResult(
+            kind=Self.COMPLETIONS,
+            config=RunnerConfig.default(),
+            overlay=CliOverlay.default(),
+            config_path="",
+            no_config=False,
+            operand=String(""),
+            ci=String(""),
+            shell=shell^,
         )
 
     def is_run(self) -> Bool:
@@ -293,3 +336,7 @@ struct ParseResult(Copyable, Movable):
     def is_init(self) -> Bool:
         """Whether this result asks to bootstrap a project."""
         return self.kind == Self.INIT
+
+    def is_completions(self) -> Bool:
+        """Whether this result asks for one shell's completion script."""
+        return self.kind == Self.COMPLETIONS

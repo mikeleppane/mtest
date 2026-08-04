@@ -1680,6 +1680,7 @@ usage: mtest [run] [PATHS...] [flags] [-- BUILD-ARGS...]
        mtest debug PATH::TEST [build flags] [-- BUILD-ARGS...]
        mtest new PATH
        mtest init [--ci github]
+       mtest completions bash|zsh|fish
 
 Subcommands:
   run [PATHS...] [flags]      Run tests (the default subcommand).
@@ -1689,6 +1690,7 @@ Subcommands:
   debug PATH::TEST            Run one test with the terminal handed over.
   new PATH                    Create one runnable test file.
   init [--ci github]          Bootstrap a project in this directory.
+  completions SHELL           Print a bash, zsh, or fish completion script.
   help                        Show this help and exit.
   version                     Show the version and exit.
 
