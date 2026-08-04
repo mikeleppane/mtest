@@ -59,7 +59,7 @@ commands below for local iteration; `pixi run contract-check-strict` is
 what actually gates a merge.
 
 ```bash
-pixi run contract-check --                 # rebuild-if-stale, run all ~60 checks
+pixi run contract-check --                 # rebuild-if-stale, run the whole roster
 pixi run contract-check -- -k select       # filter by check name
 pixi run contract-check -- --strict        # safety-critical SKIP fails
 pixi run contract-check -- -v --keep       # dump streams, keep scaffold
@@ -227,6 +227,12 @@ container there — and only there.
   a parent, an unwritable destination, a read-only directory — is a **no-op for
   root**, so the failure you meant to provoke never happens and the run comes
   back green. Pass `--user "$(id -u):$(id -g)"`, or drop privileges inside.
+  **Drop them after the image is built, never at `docker run` time for a
+  container that still has to install anything**: `--user` also strips the
+  privilege `apt-get` needs, so the same flag that makes a permission probe
+  meaningful makes provisioning fail. Install as root in the `Dockerfile`, then
+  run the probe with `--user`. That cost a round when the fish scripts were
+  first driven headlessly.
 - **Mount read-only unless you mean to write.** `-v "$PWD":/w:ro` is the
   default posture; a writable mount lets a container-side build scribble
   root-owned artifacts into the host tree.
@@ -282,6 +288,7 @@ Every row below is a check in `scripts/qa/contract.py` unless marked *(manual)*.
 | collect stream *(manual)* | `--format lines` **byte-identical** to the flagless listing; JSON node order == lines order; whole stream byte-identical across runs; terminal `exit_code` == process exit at 0/1/2/3/5; a usage error emits **no stream at all**; stdout carries stream bytes only | 16 |
 | debug *(manual)* | two `build:`/`run:` lines, then the debuggee's own status (a crasher exits 139 with no band); paste both lines back and they work; every out-of-grammar flag → 4, reporter refusals naming the reason; `[report]` keys write nothing and `lastrun` stays `cmp`-clean; a malformed doc is still 4 | 28 |
 | new / init *(manual)* | `new` refuses `::`, a non-`.mojo` name, an uncollectable basename, and an existing target (4), and what it writes **passes**; `init` re-run is an all-skip at 0, its workflow diffs clean against the first `docs/ci.md` YAML fence, and every `.gitignore` decision agrees with real `git check-ignore` | 29 |
+| completions | each shell renders and **parses** (`bash -n`/`zsh -n`/`fish -n`); a missing, repeated, or unrenderable operand → 4, and so does anything past one operand and `-h`; a closed pipe leaves 0 and an unwritable stdout gives 3. Beyond the oracle, `pixi run completions-check` drives the rendered scripts in real shells and asserts the **readline buffer after TAB**, not a candidate list — every defect this feature shipped said the right thing and did the wrong one | 30 |
 
 Still worth a *manual* probe beyond the oracle: `--collect-only` alias
 equivalence; exclusion winning over `--gate`/explicit operand (§12); valid
