@@ -64,9 +64,14 @@ struct InvRow(Copyable, Movable):
 def frozen_inventory() -> List[InvRow]:
     """Every flag spelling the command-line contract carries, by hand.
 
-    Every field is a contract fact authored independently from `flag_specs()`.
-    `help_label` is the complete label for the physical help row, so aliases
-    intentionally share one expected label.
+    Every field but one is a contract fact authored independently from
+    `flag_specs()`. `help_label` is the complete label for the physical help
+    row, so aliases intentionally share one expected label.
+
+    `applicability` is the exception, and re-transcribing it from the contract
+    alone will not reproduce it. It models what `parse_args` refuses, which the
+    drift tests below hold it to; where the contract's §4 table and the parser
+    disagree, the parser wins here and the row carries a comment saying so.
     """
     return [
         InvRow(
@@ -457,6 +462,14 @@ def frozen_inventory() -> List[InvRow]:
             Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         # CLI-only: never read from mtest.toml (build cache).
+        #
+        # The DOCTOR bit on both rows is deliberate and is NOT a transcription
+        # slip. `doctor` renders its diagnosis and returns before the build
+        # store is read or cleared, so it accepts both flags and honors
+        # neither — the accepted-inert cell §4 also gives `-n` and `--serial`
+        # under `collect`. Clearing the bit to match an older reading of the
+        # table reds both drift tests, because `mtest doctor --no-cache` and
+        # `mtest doctor --cache-clear` really do parse.
         InvRow(
             "--no-cache",
             0,
@@ -1629,32 +1642,50 @@ def frozen_subcommands() -> List[SubcommandSpec]:
     """The nine Subcommands rows, transcribed from the contract by hand."""
     return [
         SubcommandSpec(
-            "run", "[PATHS...] [flags]", "Run tests (the default subcommand)."
+            token="run",
+            label_args="[PATHS...] [flags]",
+            description="Run tests (the default subcommand).",
         ),
         SubcommandSpec(
-            "collect",
-            "[PATHS...] [flags]",
-            "List node ids without running tests.",
+            token="collect",
+            label_args="[PATHS...] [flags]",
+            description="List node ids without running tests.",
         ),
         SubcommandSpec(
-            "config", "show [PATHS...]", "Show resolved configuration."
+            token="config",
+            label_args="show [PATHS...]",
+            description="Show resolved configuration.",
         ),
         SubcommandSpec(
-            "doctor",
-            "[flags]",
-            "Diagnose the environment without running tests.",
+            token="doctor",
+            label_args="[flags]",
+            description="Diagnose the environment without running tests.",
         ),
         SubcommandSpec(
-            "debug",
-            "PATH::TEST",
-            "Run one test with the terminal handed over.",
+            token="debug",
+            label_args="PATH::TEST",
+            description="Run one test with the terminal handed over.",
         ),
-        SubcommandSpec("new", "PATH", "Create one runnable test file."),
         SubcommandSpec(
-            "init", "[--ci github]", "Bootstrap a project in this directory."
+            token="new",
+            label_args="PATH",
+            description="Create one runnable test file.",
         ),
-        SubcommandSpec("help", "", "Show this help and exit."),
-        SubcommandSpec("version", "", "Show the version and exit."),
+        SubcommandSpec(
+            token="init",
+            label_args="[--ci github]",
+            description="Bootstrap a project in this directory.",
+        ),
+        SubcommandSpec(
+            token="help",
+            label_args="",
+            description="Show this help and exit.",
+        ),
+        SubcommandSpec(
+            token="version",
+            label_args="",
+            description="Show the version and exit.",
+        ),
     ]
 
 
@@ -1821,8 +1852,19 @@ def _applicability_argv(
     if arity == 1:
         argv.append(_probe_value(spelling))
     if spelling == "--seed":
-        # A lone `--seed` is refused everywhere for wanting `--shuffle`, which
-        # would answer a different question than this probe asks.
+        # A lone `--seed` is refused everywhere, `run` included, for wanting
+        # `--shuffle` — an answer about a different rule than this probe asks
+        # about — so the pair goes in together.
+        #
+        # That makes `--seed` the one probe carrying a second flag that is
+        # itself inapplicable under `collect`, `doctor`, and `debug`, so the
+        # pair stays decidable only because each refusal that fires names BOTH
+        # spellings: `'--shuffle' and '--seed' are run-only flags…` under
+        # collect, `…are run flags…` under doctor, and under debug the general
+        # `'--seed' cannot be combined with 'debug'` (the loop reaches `--seed`
+        # first, since it is appended first). Reword any of those three to drop
+        # `--seed` and this probe stops proving anything about `--seed`; the
+        # names-the-flag assertion in direction two is what catches that.
         argv.append("--shuffle")
     return argv^
 
@@ -1851,8 +1893,14 @@ def test_every_flag_applies_somewhere_and_names_no_unknown_head() raises:
         )
 
 
-def test_config_show_accepts_exactly_the_run_grammar() raises:
-    """`config show` resolves the run grammar, so the two bits move together."""
+def test_the_mask_never_separates_run_from_config_show() raises:
+    """A mask-shape invariant, not a parser probe.
+
+    `config show` resolves the run grammar and adds no refusal of its own, so
+    no row may set one bit without the other. The two drift tests below are
+    what check that claim against `parse_args`; this one only stops a row from
+    being written in a shape the parser could never produce.
+    """
     for spec in flag_specs():
         assert_true(
             ((spec.applicability & Subcommand.RUN) != 0)
@@ -1911,8 +1959,14 @@ def test_every_unmasked_flag_is_refused_by_name_under_that_subcommand() raises:
                 + " "
                 + spec.spelling,
             )
+            # Quoted, because every refusal quotes the spelling it names and a
+            # bare substring would not mean what this assertion says: `-s`
+            # occurs inside `--show-output`, and `--report` inside
+            # `--report-style`, so an unquoted probe would accept a refusal
+            # about the neighbouring flag as if it named this one.
+            var quoted = "'" + spec.spelling + "'"
             assert_true(
-                spec.spelling in message,
+                quoted in message,
                 "refusal does not name the flag: "
                 + _head_name(subcommand)
                 + " "
