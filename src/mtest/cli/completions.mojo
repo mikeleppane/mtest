@@ -746,9 +746,11 @@ def render_bash_completions() -> String:
             continue
         if head == "config":
             # The sole two-token subcommand: pending until `show` arrives.
+            # The resolved state is still the row's, only the waiting one is
+            # this script's own.
             script += "    " + _bash_pattern(head) + ")\n"
             script += '      if [ "${lwords[2]-}" = "show" ]; then\n'
-            script += '        cmd="config-show"\n'
+            script += '        cmd="' + _bash_word(state) + '"\n'
             script += "      else\n"
             script += '        cmd="config-pending"\n'
             script += "      fi ;;\n"
@@ -1003,7 +1005,7 @@ def render_zsh_completions() -> String:
         if head == "config":
             script += "    " + _zsh_quoted(head) + ")\n"
             script += '      if [[ "${words[3]-}" == show ]]; then\n'
-            script += "        cmd='config-show'\n"
+            script += "        cmd=" + _zsh_quoted(state) + "\n"
             script += "      else\n"
             script += "        cmd='config-pending'\n"
             script += "      fi ;;\n"
@@ -1128,7 +1130,9 @@ def render_fish_completions() -> String:
                 '                if set -q parts[3]; and test "$parts[3]"'
                 " = show\n"
             )
-            script += "                    set head 'config-show'\n"
+            script += (
+                "                    set head " + _fish_quoted(state) + "\n"
+            )
             script += "                else\n"
             script += "                    set head 'config-pending'\n"
             script += "                end\n"
