@@ -12,7 +12,7 @@ present — because this is the product contract, and an exit code is right or i
 is a lie. The named tests beside the table pin each individual rule at literal
 values, so the table's expectation ladder is never the only witness.
 """
-from std.testing import assert_equal, TestSuite
+from std.testing import assert_equal, assert_true, TestSuite
 
 from mtest.model import (
     Outcome,
@@ -23,6 +23,7 @@ from mtest.model import (
     EXIT_FAILURE,
     EXIT_NOTHING_RAN,
     EXIT_INTERNAL_ERROR,
+    EXIT_USAGE_ERROR,
 )
 from mtest.model.exit_code import EXIT_INTERRUPTED
 
@@ -81,6 +82,15 @@ def test_exit_code_constants() raises:
     assert_equal(EXIT_NOTHING_RAN, 5)
     assert_equal(EXIT_INTERRUPTED, 2)
     assert_equal(EXIT_INTERNAL_ERROR, 3)
+
+
+def test_exit_usage_error_is_named_and_distinct() raises:
+    assert_equal(EXIT_USAGE_ERROR, 4)
+    assert_true(EXIT_USAGE_ERROR != EXIT_SUCCESS)
+    assert_true(EXIT_USAGE_ERROR != EXIT_FAILURE)
+    assert_true(EXIT_USAGE_ERROR != EXIT_INTERRUPTED)
+    assert_true(EXIT_USAGE_ERROR != EXIT_INTERNAL_ERROR)
+    assert_true(EXIT_USAGE_ERROR != EXIT_NOTHING_RAN)
 
 
 def test_empty_multiset_is_nothing_ran() raises:

@@ -9,8 +9,10 @@ file that passed only after retries must fail the run) into the single code the
 process exits with. Every caller that reaches an exit code goes
 through it, so the precedence is stated once and re-derived nowhere.
 
-Code 4 is the one exception, and it stays with the entry point: a usage error is
-refused before any run exists, so there are no outcomes and no facts to resolve.
+Code 4 is the one exception: `resolve_exit_code` never produces it, because a
+usage refusal happens before any run exists and there are no outcomes to
+resolve. The refusal can be classified anywhere above this layer; only `main`
+calls `exit()` with it.
 
 The multiset callers pass is run outcomes at test granularity: one entry per
 test that actually ran (PASS/FAIL/SKIP/…), plus one file-level outcome for each
@@ -31,6 +33,14 @@ comptime EXIT_INTERRUPTED = 2
 """The run was cut short by an interrupt: the accounting is truncated."""
 comptime EXIT_INTERNAL_ERROR = 3
 """The runner failed, a report drifted, or an artifact was not delivered."""
+comptime EXIT_USAGE_ERROR = 4
+"""The invocation was refused before any run existed: a usage error.
+
+Produced only by the entry point's refusal paths, never by
+`resolve_exit_code`: with no run there are no outcomes and no facts to
+resolve. Named here so every exit code the process can produce has exactly
+one definition.
+"""
 
 
 def exit_code_for(outcomes: List[Outcome]) -> Int:

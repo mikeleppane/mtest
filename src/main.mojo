@@ -83,6 +83,7 @@ from mtest.config import (
 from mtest.model import (
     EXIT_INTERNAL_ERROR,
     EXIT_INTERRUPTED,
+    EXIT_USAGE_ERROR,
     TerminalFacts,
     resolve_exit_code,
     split_rendered_node_id,
@@ -145,15 +146,6 @@ comptime _STATE_MAX_BYTES = 1024 * 1024
 Matches the doctor check's ceiling so the two agree on what a usable state
 file is. State is an accelerator, never a verdict input, so an oversized or
 non-regular file is ignored loudly rather than treated as a failure.
-"""
-
-
-comptime EXIT_USAGE_ERROR = 4
-"""The invocation was refused before any run existed: a usage error.
-
-The one exit code that is not the model's to resolve, and so the one that lives
-here. It is decided before there are any run outcomes or run facts to rank, and
-it dominates every code a run could have produced because no run happened.
 """
 
 

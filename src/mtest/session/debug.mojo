@@ -27,6 +27,7 @@ from mtest.model import (
     EXIT_INTERNAL_ERROR,
     EXIT_INTERRUPTED,
     EXIT_FAILURE,
+    EXIT_USAGE_ERROR,
     EventKind,
     FileFinishedPayload,
     Outcome,
@@ -48,13 +49,6 @@ from mtest.session.effective_settings import (
 )
 from mtest.session.precompile import PrecompileResult, _run_precompile
 from mtest.session.store import CacheContext, finalize_includes
-
-comptime _EXIT_USAGE_ERROR = 4
-"""The pre-handoff usage refusal, decided before any test could have run.
-
-Stated here rather than imported because it is not the model's to resolve: like
-`main`'s own copy, it is decided before there are any run facts to rank.
-"""
 
 
 @fieldwise_init
@@ -349,7 +343,7 @@ def prepare_debug(
     var split = split_node_token(node)
     if split.sep_count != 1 or split.file_part == "" or split.name_part == "":
         return DebugOutcome.refused(
-            _EXIT_USAGE_ERROR,
+            EXIT_USAGE_ERROR,
             "debug: malformed node id '"
             + escape_one_line(node)
             + "': a node id is PATH::TEST with a single '::' (see mtest"
@@ -378,10 +372,10 @@ def prepare_debug(
         # Every `discover:` raise is the exit-4 class: a nonexistent path, an
         # operand escaping the root, a node id naming a directory, or a file
         # type mtest cannot run.
-        return DebugOutcome.refused(_EXIT_USAGE_ERROR, String(e))
+        return DebugOutcome.refused(EXIT_USAGE_ERROR, String(e))
     if len(disc.run_files) != 1:
         return DebugOutcome.refused(
-            _EXIT_USAGE_ERROR,
+            EXIT_USAGE_ERROR,
             "debug: '"
             + escape_one_line(node)
             + "' did not resolve to exactly one test file",
@@ -481,7 +475,7 @@ def prepare_debug(
     try:
         _ = select_from(po.universe, rel, FileIntent.named(names^), String(""))
     except e:
-        return DebugOutcome.refused(_EXIT_USAGE_ERROR, String(e))
+        return DebugOutcome.refused(EXIT_USAGE_ERROR, String(e))
 
     var run_argv = List[String]()
     run_argv.append(bo.binary)
