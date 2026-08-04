@@ -250,6 +250,11 @@ def test_document_open_states_that_paths_are_root_relative() raises:
     var out = html_document_open(_facts(), _ctx())
     assert_true(out.find("relative to the run root") != -1)
     assert_true(out.find("relative to the run root") < out.find("<table"))
+    # And it claims only what the report composes: a section's `build:` line
+    # is the build argv verbatim and a captured stream is the child's own
+    # bytes, so neither is rewritten against the root.
+    assert_true(out.find("captured output") != -1)
+    assert_true(out.find("<code>build:</code>") != -1)
 
 
 def test_document_open_has_meta_charset() raises:

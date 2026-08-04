@@ -47,8 +47,13 @@ def md_header(facts: ReportHeaderFacts, ctx: ReportFinalizeContext) -> String:
     interrupt, no drift) renders no line at all, so a plain run's header
     stays short.
 
-    The header also states, once, that every path in the document is
-    relative to the run root. It belongs here rather than on a file section
+    The header also states, once, which of the document's paths are
+    relative to the run root: the ones the report composes itself, which is
+    every path it derives from a `NodeId` plus the backtrace `At` line
+    `normalize_detail` rewrites. Captured output and the `build:` line are
+    reproduced as the child and the build argv produced them, absolute
+    paths included, so the note says so rather than claiming the whole
+    document. It belongs here rather than on a file section
     because sections are spooled as their files finish and assembled in
     sorted path order, so no section can know it is the first one a reader
     meets; attaching the note to one of them would make the document depend
@@ -71,8 +76,11 @@ def md_header(facts: ReportHeaderFacts, ctx: ReportFinalizeContext) -> String:
         + ")\n\n"
     )
     out += (
-        "> File paths in this report, including a backtrace `At` line inside"
-        " a failure detail, are shown relative to the run root.\n\n"
+        "> Paths this report composes — table rows, headings, node ids,"
+        " reproduce commands, and the backtrace `At` line rewritten inside a"
+        " failure detail — are relative to the run root; captured output and"
+        " the `build:` line are reproduced as they were produced and may"
+        " carry absolute paths.\n\n"
     )
     out += "wall time: " + format_seconds(ctx.wall_seconds) + "s\n"
     out += (

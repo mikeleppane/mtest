@@ -26,11 +26,13 @@ not the reports.
 
 ## What the document says
 
-It opens with the run's facts — the version, the platform, the wall time, the
-test and file counts, and each of builds, flaky files, workers, shuffle seed,
-shard, interrupt and drift that applied — followed by one line saying that
-every path it shows is relative to the run root. Then a summary table, one row
-per file:
+It opens with its title, the version and the platform, then one line naming
+which of its paths are relative to the run root — the ones it composes itself,
+including a failure detail's `At` line, but not the captured output or the
+`build:` command it reproduces as they were produced. The run's facts follow:
+the wall time, the test and file counts, and each of builds, flaky files,
+workers, shuffle seed, shard, interrupt and drift that applied. Then a summary
+table, one row per file:
 
 ```markdown
 | Path | Outcome | Duration (s) | Passed | Failed | Skipped | Attempts |
@@ -47,8 +49,8 @@ per file:
 Below the table, a section per file that needs a second look carries the
 failed tests with their detail, the captured streams, the build command, and
 the reproduce and debug commands for that file. The compiler bakes an absolute
-path into a backtrace; the report rewrites it against the run root, so the
-document reads the same from any checkout:
+path into a backtrace; the report rewrites that line against the run root, so
+it reads the same from any checkout:
 
 ````markdown
 ## `e2e/suite/test_failing.mojo` — FAIL

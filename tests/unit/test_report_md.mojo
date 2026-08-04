@@ -352,15 +352,27 @@ def test_not_run_line_escapes_a_hostile_leading_dash() raises:
 
 
 def test_header_states_that_paths_are_root_relative() raises:
-    # Every path the document renders is root-relative, including the `At`
+    # The paths the report composes are root-relative, including the `At`
     # line rewritten inside a failure detail. Saying so once at the head is
-    # what makes the whole document readable from a checkout of the run root.
+    # what makes those paths readable from a checkout of the run root.
+    var facts = ReportHeaderFacts(version="x.y.z", platform="Linux x86_64")
+    # Assembled the way the writer assembles it, because the ordering is the
+    # property under test: a note below the summary table is a note a reader
+    # meets after every path it explains.
+    var document = md_header(facts, _ctx()) + md_summary_table_header()
+    var note = document.find("relative to the run root")
+    assert_true(note != -1)
+    assert_true(note < document.find("| Path |"))
+
+
+def test_header_note_does_not_claim_the_reproduced_text() raises:
+    # A section's `build:` line is the build argv verbatim and a captured
+    # stream is the child's own bytes; neither is rewritten, so a note
+    # promising the whole document would be false as written.
     var facts = ReportHeaderFacts(version="x.y.z", platform="Linux x86_64")
     var out = md_header(facts, _ctx())
-    assert_true(out.find("relative to the run root") != -1)
-    # Above the summary table, which the writer appends straight after the
-    # header: a note under the table is a note a reader meets too late.
-    assert_true(out.find("| Path |") == -1)
+    assert_true(out.find("captured output") != -1)
+    assert_true(out.find("`build:`") != -1)
 
 
 def test_header_names_shuffle_seed_only_when_shuffled() raises:

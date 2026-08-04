@@ -161,9 +161,11 @@ def html_document_open(
     Mirrors `md_header`'s conditional-fact policy exactly: every count below
     the title is conditional except the tests and wall-time lines, so a
     plain run's header stays short. It carries `md_header`'s root-relativity
-    note too, and for the same reason: sections are spooled as their files
-    finish and assembled in sorted path order, so no section can know it is
-    the first one a reader meets. Ends by opening the summary table
+    note too, in the same narrow form — the paths the report composes, not
+    the captured output or the `build:` line it reproduces verbatim — and
+    for the same reason: sections are spooled as their files finish and
+    assembled in sorted path order, so no section can know it is the first
+    one a reader meets. Ends by opening the summary table
     (`<thead>` with the column labels, then an unclosed `<tbody>`) for
     `html_summary_row` to append into; `html_document_close` is the only
     function that closes it.
@@ -189,9 +191,12 @@ def html_document_open(
         + ")</p>\n"
     )
     out += (
-        '<p class="note">File paths in this report, including a backtrace'
-        " <code>At</code> line inside a failure detail, are shown relative"
-        " to the run root.</p>\n"
+        '<p class="note">Paths this report composes — table rows, headings,'
+        " node ids, reproduce commands, and the backtrace <code>At</code>"
+        " line rewritten inside a failure detail — are relative to the run"
+        " root; captured output and the <code>build:</code> line are"
+        " reproduced as they were produced and may carry absolute"
+        " paths.</p>\n"
     )
     out += '<ul class="facts">\n'
     out += "<li>wall time: " + format_seconds(ctx.wall_seconds) + "s</li>\n"
