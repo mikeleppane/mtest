@@ -780,6 +780,12 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "value: --report-style bad value -> 4",
     "run: --json collides with --junit-xml -> 4",
     "debug: --report rejected -> 4",
+    "completions: bash prints a sourceable function",
+    "completions: zsh prints a compdef script",
+    "completions: fish prints complete rules",
+    "completions: no shell operand -> 4",
+    "completions: an unrenderable shell -> 4",
+    "completions: a trailing operand after --help -> 4",
     "served: -n accepted (not exit 4)",
     "served: --workers accepted (not exit 4)",
     "served: --serial accepted (not exit 4)",
@@ -790,6 +796,9 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "served: --json accepted (not exit 4)",
     "served: collect --shard partitions (not exit 4)",
     "served: collect --serial accepted, inert (not exit 4)",
+    "served: doctor --no-cache accepted, inert (not exit 4)",
+    "served: doctor --cache-clear accepted, inert (not exit 4)",
+    "served: --collect-only --format json is a collection (not exit 4)",
     "collect: exact node-id set for tests/",
     "determinism: collect byte-identical",
     "collect: --format json agrees with the lines listing and the exit",
@@ -1345,9 +1354,9 @@ class Runner:
         scheduling luck is involved. Every command that writes straight to a
         descriptor rather than through a reporter is here, because each one
         publishes its own frozen exit domain and 141 is in none of them: help
-        and version (§19), `config show` and `doctor` (§27), `new` and `init`
-        (§29, which additionally promise the artifacts exist afterwards), and
-        `collect --format json` (§16).
+        and version (§19), `config show` and `doctor` (§27), `completions`
+        (§30), `new` and `init` (§29, which additionally promise the artifacts
+        exist afterwards), and `collect --format json` (§16).
 
         Both run drivers are here too, and they are the reason this check and
         `check_unwritable_output_descriptor` have to be read together: an
@@ -1365,6 +1374,7 @@ class Runner:
             ("help: --help", ["--help"], 0, ""),
             ("help: version", ["version"], 0, ""),
             ("config show", ["config", "show"], 0, ""),
+            ("completions bash", ["completions", "bash"], 0, ""),
             ("doctor", ["doctor"], 0, ""),
             ("new", ["new", "tests/test_pipe.mojo"], 0, "tests/test_pipe.mojo"),
             ("init", ["init"], 0, "mtest.toml"),
@@ -1524,8 +1534,9 @@ class Runner:
 
         Every command whose product IS its text is here, since each publishes
         its own exit domain and each admits 3 on this condition: help and
-        version (§19), `config show` and `doctor` (§27), `new` and `init`
-        (§29, whose artifacts must still exist afterwards). A run is here too,
+        version (§19), `config show` and `doctor` (§27), `completions` (§30),
+        `new` and `init` (§29, whose artifacts must still exist afterwards).
+        A run is here too,
         for both drivers: its console report is primary output, so an
         undelivered one escalates through the same delivery precedence a dead
         `--json` destination uses (§9).
@@ -1546,6 +1557,7 @@ class Runner:
             ("help: --help", ["--help"], ""),
             ("help: version", ["version"], ""),
             ("config show", ["config", "show"], ""),
+            ("completions bash", ["completions", "bash"], ""),
             ("doctor", ["doctor"], ""),
             ("new", ["new", "tests/test_closed.mojo"], "tests/test_closed.mojo"),
             ("init", ["init"], "mtest.toml"),
@@ -3735,6 +3747,61 @@ def build_matrix() -> list[Check]:
             4,
             err_has=["no terminal record could be written"],
         ),
+        # §30. Each shell gets the frame its own completion system needs, and
+        # the bash probe additionally pins the two head-resolution statements
+        # the section makes: a bare `config` completes exactly `show`, and a
+        # value arm is keyed on the command as well as the flag, so
+        # `doctor --report-style` has no arm at all.
+        Check(
+            "completions: bash prints a sourceable function",
+            "§30",
+            ["completions", "bash"],
+            0,
+            out_has=[
+                "complete -F _mtest_complete mtest",
+                'config-pending) COMPREPLY=($(compgen -W "show"',
+                '"run:--report-style"',
+            ],
+            any_absent=["doctor:--report-style"],
+        ),
+        Check(
+            "completions: zsh prints a compdef script",
+            "§30",
+            ["completions", "zsh"],
+            0,
+            out_has=["#compdef mtest", "compdef _mtest mtest", "--collect-only"],
+        ),
+        Check(
+            "completions: fish prints complete rules",
+            "§30",
+            ["completions", "fish"],
+            0,
+            out_has=["complete -c mtest", "__mtest_head_is", "-l 'collect-only'"],
+        ),
+        Check(
+            "completions: no shell operand -> 4",
+            "§30",
+            ["completions"],
+            4,
+            err_has=["'completions' wants one of bash, zsh, fish"],
+        ),
+        Check(
+            "completions: an unrenderable shell -> 4",
+            "§30",
+            ["completions", "tcsh"],
+            4,
+            err_has=["'completions' wants one of bash, zsh, fish", "tcsh"],
+        ),
+        # Help is a directive, not a stop: §30 permits one operand and help
+        # and nothing else, so the whole vector is judged before help wins.
+        # Returning on sight of `--help` printed help and exited 0 here.
+        Check(
+            "completions: a trailing operand after --help -> 4",
+            "§30",
+            ["completions", "bash", "--help", "garbage"],
+            4,
+            err_has=["'completions' wants one shell", "garbage"],
+        ),
     ]
     # Refused v1 flags (§24.1): each names the flag and states it is the v1 contract.
     for flag, val, _cap in refused:
@@ -3780,6 +3847,37 @@ def build_matrix() -> list[Check]:
             ["collect", *I, "--serial", "tests/*", "tests"],
             0,
             any_absent=["v1 contract", "run-only flag"],
+        )
+    )
+    # The cache flags are accepted-inert under `doctor` for the same reason
+    # `--serial` is under `collect`. `doctor` renders its diagnosis and returns
+    # before the store is read or `--cache-clear` acts, so neither value is
+    # honored and neither is refused. Both sit one word away from the run,
+    # build, selection, state, and reporter flags `doctor` DOES refuse, so
+    # which side of that line they fall on needs a gate: this pair drifted
+    # between the table and the parser undetected because nothing probed it.
+    checks.extend(
+        Check(
+            f"served: doctor {flag} accepted, inert (not exit 4)",
+            "§4,§8.5,§27.2",
+            ["doctor", flag],
+            0,
+            any_absent=["v1 contract", "cannot be combined"],
+        )
+        for flag in ("--no-cache", "--cache-clear")
+    )
+    # `--format` belongs to the collection MODE, not to the `collect` head
+    # token. `--collect-only` selects that mode, so this is a listing and the
+    # flag applies; the neighboring `run: --format is collect-only -> 4` check
+    # pins the other side, where there is no listing to shape.
+    checks.append(
+        Check(
+            "served: --collect-only --format json is a collection (not exit 4)",
+            "§4,§16",
+            [*I, "--collect-only", "--format", "json", "tests"],
+            0,
+            out_has=["test_reverse_ab"],
+            any_absent=["v1 contract", "collect-only flag"],
         )
     )
     return checks

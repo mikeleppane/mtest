@@ -40,6 +40,8 @@ supports.
 - [Run reports](reports.md) — the self-contained Markdown or HTML document
   `--report` writes for a reader, and what happens when it cannot be
   delivered.
+- [Shell completion](completions.md) — where each shell wants the script
+  `mtest completions` prints, and what it completes once it is installed.
 - [Command-line contract](cli-contract.md) — the frozen specification of every
   subcommand, flag, exit code, and stream.
 - [JSON event stream](json-stream.md) — the machine-readable stream, event by

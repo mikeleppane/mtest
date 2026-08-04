@@ -16,6 +16,28 @@ matrix under [Installation](README.md#installation).
 
 ### Added
 
+- `--report FORMAT:PATH`, writing a self-contained Markdown or HTML run report
+  ([§15.5](docs/cli-contract.md), [docs/reports.md](docs/reports.md)). Both
+  formats may be requested at once, `--report-style` chooses between the
+  concise and the full document, and the HTML one embeds its own styling so it
+  needs no network. A destination is prepared before the run and published by
+  rename, so a run either delivers every artifact it was asked for or exits
+  nonzero saying which it could not.
+- `mtest completions bash|zsh|fish`, writing a completion script to stdout
+  ([§30](docs/cli-contract.md),
+  [docs/completions.md](docs/completions.md)). Every fact in the script — the
+  subcommand vocabulary, each flag spelling, its description, its value
+  placeholder, and its closed value set — is rendered from the same tables the
+  parser uses, so a script cannot offer a flag or value this build refuses.
+  Nothing changes for a user who never runs the subcommand, other than that a
+  directory named `completions` is now shadowed by it at the leading position,
+  which is the documented policy for every head token (§3).
+  - Known limit, deferred deliberately: in a directory holding one named after
+    a head token — `config/` and `run/` are ordinary project directories —
+    completing that token can insert `run/` rather than the bare token, which
+    is a run with a path operand rather than the subcommand. Which candidates
+    a shell shows is INFORMAL (§20), and the fix changes what the mixed
+    subcommand-and-path arm offers, so it is being taken on its own.
 - A composite GitHub Action at the repository root. `uses: mikeleppane/mtest@v1`
   with `paths` and `args` replaces writing the invocation out; `args` is
   appended verbatim, so every flag stays reachable and none is promoted to an
@@ -31,6 +53,15 @@ matrix under [Installation](README.md#installation).
 
 ### Changed
 
+- `--json` and `--junit-xml` naming the same destination is now a pre-run
+  usage error (exit 4) rather than a run. The rule governs every active file
+  destination, so it applies to argument vectors carrying no `--report` flag;
+  on a case-insensitive volume it also refuses `Out.json` against `out.json`
+  ([§15.2](docs/cli-contract.md), §15.4, §15.5).
+- Under `doctor`, `--no-cache` and `--cache-clear` are documented as accepted
+  and inert rather than as usage errors, which is what the parser has always
+  done. §4's own policy exists so one flag set can be handed to every
+  subcommand in CI; the contract text disagreed with it (§4, §9).
 - The README now opens with installation and a first passing run before the
   rationale, and states the ten-error/ten-warning per-step cap that GitHub
   applies to inline annotations where the flag is introduced rather than only

@@ -107,6 +107,7 @@ mtest doctor [--config PATH | --no-config] [--color WHEN] [-q | -v]
 mtest debug PATH::TEST [build flags] [-- BUILD-ARGS...]  # hand over the terminal
 mtest new PATH                                      # scaffold one test file
 mtest init [--ci github]                            # bootstrap a project
+mtest completions bash|zsh|fish            # print a shell completion script
 mtest version
 mtest --help | mtest help
 ```
@@ -118,7 +119,9 @@ path whose name *is* a subcommand is shadowed by it and must be spelled
 `config show` is the sole two-token subcommand. `debug` is the only one that
 does not end by reporting: it prepares a single test and then replaces the
 mtest process with it (§28). `new` and `init` are the two that write source
-files rather than reading them (§29).
+files rather than reading them (§29). `completions` is the one that writes
+neither: it prints a shell script derived from this document's own flag and
+subcommand inventory (§30).
 
 ---
 
@@ -194,7 +197,7 @@ only `--ci VALUE` beside them (§29).
 | `--retries N` | ✓ | — | — | — |
 | `--fail-on-flaky` | ✓ | — | — | — |
 | `--shuffle`, `--seed N` | ✓ | — | — | — |
-| `--no-cache`, `--cache-clear` | ✓ | ✓ | — | — |
+| `--no-cache`, `--cache-clear` | ✓ | ✓ | accepted, inert | — |
 | `--gate PATH` | ✓ | — | — | — |
 | `-s`, `--show-output MODE` | ✓ | — | — | — |
 | `--durations N` | ✓ | — | — | — |
@@ -218,20 +221,29 @@ probe (§5, §6) — a probe is a real process spawn with the same hang risk as 
 run.
 
 `--format lines|json` runs the other way: it shapes a listing, so it is the one
-flag that belongs to `collect` alone, and supplying it to `run`, to
-`config show`, or to `doctor` is an applicability error (exit 4). `lines` is
-the default and is the plain one-node-id-per-line listing this section
-describes; `json` selects the machine-readable stream specified in §16.
+flag that belongs to `collect` alone, and supplying it where there is no
+listing to shape is an applicability error (exit 4). What decides that is the
+mode the invocation actually selects, not the head token: `--collect-only` is
+`collect` (see the last row of the table), so `mtest --collect-only --format
+json` is a collection and is accepted, while a plain `run`, a `config show`, or
+a `doctor` has no listing and is refused. `lines` is the default and is the
+plain one-node-id-per-line listing this section describes; `json` selects the
+machine-readable stream specified in §16.
 
 `-n`/`--workers` and `--serial GLOB` are marked **accepted, inert** under
-`collect` because that is what this build does: both parse and neither is
-refused, but collection probes files one at a time, so neither value changes
-anything — and with no parallel pass there is nothing for `--serial` to pin a
-file outside of. They are recorded rather than turned into refusals because
-refusing a flag that earlier builds accepted would break invocations that pass
-a uniform flag set to both subcommands. Parallel collection is not reserved —
-it is simply not implemented yet, and whichever way it is resolved, both rows
-move with it.
+`collect`, and `--no-cache`/`--cache-clear` under `doctor`, because that is
+what this build does: each one parses and none is refused, but nothing acts on
+the value. Collection probes files one at a time, so neither worker count nor
+serial glob changes anything — and with no parallel pass there is nothing for
+`--serial` to pin a file outside of. `doctor` reports on the environment
+without building or running; its `state` check does stat `.mtest-cache/`, probe
+it for writability, and read `lastrun` (§27.2), but it never consults the build
+store under `.mtest-cache/build-v1/` and deletes nothing it did not itself
+create, so `mtest doctor --cache-clear` clears no cache. They are recorded
+rather than turned into refusals because refusing a flag that earlier builds
+accepted would break invocations that pass a uniform flag set to more than one
+subcommand. Parallel collection is not reserved — it is simply not implemented
+yet, and whichever way it is resolved, both `collect` rows move with it.
 
 `config show` accepts the full `run` grammar, including selection and
 per-invocation flags. It resolves the same default, project-file, environment,
@@ -821,7 +833,7 @@ grow:
 | 1 | at least one selected outcome is FAIL, CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT, MALFORMED-SUITE, or PRECOMPILE-ERROR; or the session would otherwise exit 0 and, under `--fail-on-flaky` (§13), counted at least one FLAKY file |
 | 2 | interrupted (SIGINT/SIGTERM); a partial summary is printed |
 | 3 | internal `mtest` error — including protocol drift (a report present but off-grammar) and an environment/I-O failure such as a runtime report-destination open/write failure (a `--json` destination that cannot be opened at session start, or whose stream write later fails — a fatal abort; or a `--junit-xml` target that cannot be created at session start, or whose report cannot be finalized and renamed onto PATH; or a `--report` target that cannot be created at session start, or whose document cannot be finalized and renamed onto PATH), or a direct write to stdout or stderr that the destination could not take at all (a closed descriptor, a full filesystem — anything but a departed consumer, below) |
-| 4 | pre-run usage error (unknown flag, bad value, nonexistent path, an explicit operand of a file type mtest cannot run (a FIFO, socket, or device, §5), a path discovery cannot inspect (§5), unknown node id, forbidden build argument, mutually exclusive `--config`/`--no-config`, `--seed` without `--shuffle`, `--shuffle` beside `--lf`/`--ff` (§18), a flag applied to a subcommand it does not belong to (§4) — a run-only flag `collect` marks `—`, `--format` outside `collect`, or any run, build, selection, state, or reporter flag under `doctor` — a `--format` value that is neither `lines` nor `json`, a selected project config that is missing, unreadable, malformed, or has an invalid key/value, a syntactically invalid `--json` or `--junit-xml` report destination — an empty value or a nonexistent parent directory, a `--report` value that is not `md:PATH` or `html:PATH` or names a format twice or a nonexistent parent directory, a `--report-style` value that is neither `concise` nor `full`, two active file destinations that name the same file (§15.5), the machine-stdout conflict — `--json -` without an explicit `--gh-annotations off`, since the byte-pure stream and the annotation tail cannot share stdout, or a `--cache-clear` target mtest can see and cannot prove it owns, or can prove and cannot delete, §8.5 — a target it cannot characterize at all is treated as absent and exits `0`) — detected **before any test runs** |
+| 4 | pre-run usage error (unknown flag, bad value, nonexistent path, an explicit operand of a file type mtest cannot run (a FIFO, socket, or device, §5), a path discovery cannot inspect (§5), unknown node id, forbidden build argument, mutually exclusive `--config`/`--no-config`, `--seed` without `--shuffle`, `--shuffle` beside `--lf`/`--ff` (§18), a flag applied to a subcommand it does not belong to (§4) — a run-only flag `collect` marks `—`, `--format` outside `collect`, or any run, build, selection, state, or reporter flag under `doctor` except `--no-cache` and `--cache-clear`, which §4 marks accepted, inert — a `--format` value that is neither `lines` nor `json`, a selected project config that is missing, unreadable, malformed, or has an invalid key/value, a syntactically invalid `--json` or `--junit-xml` report destination — an empty value or a nonexistent parent directory, a `--report` value that is not `md:PATH` or `html:PATH` or names a format twice or a nonexistent parent directory, a `--report-style` value that is neither `concise` nor `full`, two active file destinations that name the same file (§15.5), the machine-stdout conflict — `--json -` without an explicit `--gh-annotations off`, since the byte-pure stream and the annotation tail cannot share stdout, or a `--cache-clear` target mtest can see and cannot prove it owns, or can prove and cannot delete, §8.5 — a target it cannot characterize at all is treated as absent and exits `0`) — detected **before any test runs** |
 | 5 | no tests collected (empty walk, `-k` matched nothing, everything excluded) |
 
 **Precedence** when outcomes mix. A usage error aborts before the run with 4.
@@ -2107,8 +2119,10 @@ above — it only reports which of those surfaces are wired up yet.
 `-s`/`--show-output`,
 `--durations`, `-q`/`-v`, `--color`, `--format`,
 `-h`/`--help`, `--version`, and the `run`, `collect`, `config show`, `doctor`,
-`debug`, `new`, `init`, `version`, and `help` subcommands (`--collect-only`
-too, as an alias that behaves as `collect`), plus `init`'s own `--ci VALUE`.
+`debug`, `new`, `init`, `completions`, `version`, and `help` subcommands
+(`--collect-only`
+too, as an alias that behaves as `collect`), plus `init`'s own `--ci VALUE`
+and `completions`' own `SHELL` operand (§30).
 `--shard` applies under both `run` and `collect`. `--json` (the machine event
 stream, §15.4), `--junit-xml` (the JUnit report, §15.2), `--gh-annotations`
 (the CI annotation tail, §15.3), and `--report`/`--report-style` (the run
@@ -2121,8 +2135,8 @@ store described in §8.5, which this build reads and writes by default.
 Every flag and subcommand in the frozen contract above is now served: nothing is
 refused for being unavailable. For `run` and `collect`, exit 4 therefore covers
 exactly the frozen §9 causes. `Config show` and `doctor` use the applicability
-rules and command-specific exit domains in §27; `debug` uses §28's, and `new`
-and `init` use §29's.
+rules and command-specific exit domains in §27; `debug` uses §28's, `new`
+and `init` use §29's, and `completions` uses §30's.
 
 ### 24.2 Run and collect exit codes reachable in this build
 
@@ -2917,3 +2931,86 @@ writes what it did and what stopped it to stderr, because the record of a
 partial bootstrap belongs with the diagnostic rather than split across two
 streams. As in §29.1, the diagnostics are informal text (§20) — the exit code
 and the artifacts' presence are what this section freezes.
+
+---
+
+## 30. Shell completion — `mtest completions SHELL`
+
+`mtest completions SHELL` writes a completion script for one shell to stdout
+and stops. It is the third subcommand that produces text rather than consuming
+a suite, and the only one that produces neither a verdict nor a file: what to
+do with the script is the caller's decision.
+
+**Grammar.** Exactly one `SHELL` operand, plus `-h`/`--help` and nothing else
+(§4). `SHELL` is closed — `bash`, `zsh`, or `fish` — and any other value is a
+usage error (exit 4) raised before anything is written. No configuration is
+read, no toolchain is resolved, and no file is discovered, built, or run. The
+subcommand is recognized in the leading position only, like every other one
+(§3), so `mtest -q completions` is a run with a `completions` path operand.
+
+**What it writes.** A script for the named shell, on stdout, ending in a
+newline. Every command-line fact in it — the subcommand vocabulary, each flag
+spelling, its one-line description, its value placeholder, and the closed value
+set it accepts — is derived from the same inventory this document specifies, so
+a script can offer a flag this build does not accept only if the parser accepts
+it too.
+
+```console
+$ eval "$(mtest completions bash)"       # bash
+$ eval "$(mtest completions zsh)"        # zsh, after compinit
+$ mtest completions fish > ~/.config/fish/completions/mtest.fish
+```
+
+**What the script offers.** The active command is resolved the way `parse_args`
+resolves it: from the **leading** word alone, because that is the only position
+a subcommand is recognized in. `mtest -q doctor <TAB>` is therefore completed
+as a run, matching what it would do if executed. One refinement follows: a run
+whose words already contain `--collect-only` is a collection, so it offers
+`--format` and withdraws the flags that mode refuses. A bare `config` completes
+exactly the mandatory `show` token (§27.1); `completions` completes the three
+shell names above; and `new`, `init`, `help`, and `version` offer nothing,
+because each takes at most one operand this document does not enumerate.
+
+Within a command, only the flags that command accepts are offered, and a
+flag's value is completed only under a command that accepts the flag: after
+`mtest doctor --report-style` no style is offered — the line falls through to
+`doctor`'s own flags — because that pair is a usage error (§4). A value with a
+closed set completes to that set, a value that names a path completes against
+the filesystem, and a value the contract does not enumerate — a glob, an
+integer, a build argument — completes to nothing rather than to a guess.
+`-I PATH` is in that last group rather than with the paths, and deliberately:
+§8.2 refuses a Mojo source file there because the runner owns its source list,
+so filesystem completion would offer values this build exits 4 on.
+`--report FORMAT:PATH` reaches a path under its format prefix (§15.5): the
+format first, and then the path after the separator, in all three shells.
+
+**What differs between the three scripts is the shell, not the inventory.**
+Each script offers the same flags, subcommands, and values, because all three
+are rendered from the same tables; what a shell can *do* with them differs, and
+three differences are worth naming. fish resolves the active command by
+re-reading the command line on every rule, which is why its head conditions are
+functions rather than a `case`, and its rules supply the whole `FORMAT:PATH`
+word rather than a prefix and then a path. zsh's own `_files` performs the
+second stage there, so path completion follows the reader's zsh styles rather
+than anything specified here. And bash is the one shell that splits a word at
+the `:` before the completion ever sees it, so what it inserts is the part
+after the separator while the other two replace the whole word — visible if a
+value is ever completed inside quotes, where bash does not split and the
+inserted text carries the prefix instead.
+
+The completions themselves are a convenience, not a contract: which candidates
+a shell shows for a given prefix is INFORMAL (§20), and the same reasoning
+applies to the script's internal structure. What is frozen is the grammar
+above, the exit codes below, and the property that the script never offers a
+flag, subcommand, or value this build refuses.
+
+**Exit codes.**
+
+| Code | Cause |
+|------|-------|
+| 0 | the script was written to stdout |
+| 4 | a missing, repeated, or unrecognized `SHELL` operand, or anything in argv beyond one operand and `-h`/`--help` |
+| 3 | the script could not be written to stdout for any reason other than a departed consumer (§9) |
+
+Nothing else is reachable. A departed consumer — a closed pipe — is not a
+failure of this command any more than it is of `--help` (§19).

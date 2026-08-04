@@ -7,15 +7,40 @@ row-for-row bijection with this frozen list, so a drifted arity or dropped
 spelling fails loudly and the spec table can never be its own oracle. The help
 tests independently require complete metadata and one aligned, bounded line per
 spelling.
+
+Each row also transcribes how the flag's value completes and, for a closed
+vocabulary, exactly which values it accepts. That half of the table is only
+worth carrying while it is true, so it is checked twice: against the frozen
+transcription for drift, and against `parse_args` itself, which must accept
+every declared choice and refuse a value just outside the declared set.
+
+The last field, `applicability`, is the same idea applied to the subcommands: a
+bitmask of the heads that accept the spelling. The parser's per-flag refusals
+are hand-written prose and cannot be generated from a mask, so the mask is
+checked against them in both directions — every masked pair parses, and every
+unmasked pair is refused by a message naming the spelling. Either direction
+failing alone is the defect the pair exists to catch: a completion renderer
+reading a drifted mask would offer a flag the parser rejects, or hide one that
+works.
 """
-from std.testing import assert_equal, assert_raises, assert_true, TestSuite
+from std.testing import (
+    assert_equal,
+    assert_false,
+    assert_raises,
+    assert_true,
+    TestSuite,
+)
 
 from mtest.cli import (
     FlagGroup,
+    Subcommand,
+    SubcommandSpec,
+    ValueKind,
     flag_group_name,
     flag_specs,
     help_text,
     parse_args,
+    subcommand_specs,
 )
 from mtest.config import AnnotationsMode, ReportStyle, ShardMode
 
@@ -31,14 +56,23 @@ struct InvRow(Copyable, Movable):
     var group: Int
     var help: String
     var help_label: String
+    var value_kind: ValueKind
+    var choices: List[String]
+    var applicability: Int
 
 
 def frozen_inventory() -> List[InvRow]:
     """Every flag spelling the command-line contract carries, by hand.
 
-    Every field is a contract fact authored independently from `flag_specs()`.
-    `help_label` is the complete label for the physical help row, so aliases
-    intentionally share one expected label.
+    Every field but one is a contract fact authored independently from
+    `flag_specs()`. `help_label` is the complete label for the physical help
+    row, so aliases intentionally share one expected label.
+
+    `applicability` is the exception, and re-transcribing it from the contract
+    alone will not reproduce it. It models what `parse_args` refuses, which the
+    drift tests below hold it to, and the contract's §4 table records the same
+    cells, accepted-inert ones included. Should the two part again, the parser
+    wins here and the row carries a comment saying so.
     """
     return [
         InvRow(
@@ -49,6 +83,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.SELECTION,
             "Exclude matching files (repeatable).",
             "--exclude GLOB",
+            ValueKind.OTHER,
+            List[String](),
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "-I",
@@ -58,6 +95,12 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.BUILDING,
             "Add a Mojo include path (repeatable).",
             "-I PATH",
+            ValueKind.OTHER,
+            List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DEBUG,
         ),
         InvRow(
             "--build-arg",
@@ -67,6 +110,12 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.BUILDING,
             "Forward one argument to mojo build (repeatable).",
             "--build-arg ARG",
+            ValueKind.OTHER,
+            List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DEBUG,
         ),
         InvRow(
             "--gate",
@@ -76,6 +125,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.SELECTION,
             "Run PATH before ordinary files (repeatable).",
             "--gate PATH",
+            ValueKind.PATH,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "--precompile",
@@ -85,6 +137,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.BUILDING,
             "Precompile package before builds (repeatable).",
             "--precompile SRC[:OUT]",
+            ValueKind.PATH,
+            List[String](),
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "--mojo",
@@ -94,6 +149,12 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.BUILDING,
             "Use this Mojo executable.",
             "--mojo PATH",
+            ValueKind.PATH,
+            List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DEBUG,
         ),
         InvRow(
             "-x",
@@ -103,6 +164,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.EXECUTION,
             "Stop after the first failing file.",
             "-x, --exitfirst",
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "--exitfirst",
@@ -112,6 +176,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.EXECUTION,
             "Stop after the first failing file.",
             "-x, --exitfirst",
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "--timeout",
@@ -121,6 +188,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.EXECUTION,
             "Set per-file run timeout (0 disables).",
             "--timeout SECS",
+            ValueKind.OTHER,
+            List[String](),
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "-s",
@@ -130,6 +200,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.REPORTING,
             "Show captured output for all files.",
             "-s",
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "--show-output",
@@ -139,6 +212,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.REPORTING,
             "Choose failures|all|none captured output.",
             "--show-output MODE",
+            ValueKind.CHOICE,
+            ["failures", "all", "none"],
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "-q",
@@ -148,6 +224,13 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.REPORTING,
             "Suppress passing file rows.",
             "-q",
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR
+            | Subcommand.DEBUG,
         ),
         InvRow(
             "-v",
@@ -157,6 +240,13 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.REPORTING,
             "Show build commands and step timings.",
             "-v",
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR
+            | Subcommand.DEBUG,
         ),
         InvRow(
             "--color",
@@ -166,6 +256,12 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.REPORTING,
             "Choose auto|always|never color output.",
             "--color WHEN",
+            ValueKind.CHOICE,
+            ["auto", "always", "never"],
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR,
         ),
         InvRow(
             "-h",
@@ -175,6 +271,13 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.GENERAL,
             "Show this help and exit.",
             "-h, --help",
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR
+            | Subcommand.DEBUG,
         ),
         InvRow(
             "--help",
@@ -184,6 +287,13 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.GENERAL,
             "Show this help and exit.",
             "-h, --help",
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR
+            | Subcommand.DEBUG,
         ),
         InvRow(
             "--version",
@@ -193,6 +303,12 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.GENERAL,
             "Show the version and exit.",
             "--version",
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR,
         ),
         InvRow(
             "-k",
@@ -202,6 +318,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.SELECTION,
             "Select node ids containing STR.",
             "-k STR",
+            ValueKind.OTHER,
+            List[String](),
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "--maxfail",
@@ -211,6 +330,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.EXECUTION,
             "Stop after N failed tests (0 disables).",
             "--maxfail N",
+            ValueKind.OTHER,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         # `--durations N`: non-negative int; 0 disables.
         InvRow(
@@ -221,6 +343,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.REPORTING,
             "Show N slowest file durations (0 disables).",
             "--durations N",
+            ValueKind.OTHER,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         # `--shard [hash:|slice:]M/N`: 1<=M<=N, last-wins.
         InvRow(
@@ -231,6 +356,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.SELECTION,
             "Run only the selected shard.",
             "--shard [hash:|slice:]M/N",
+            ValueKind.OTHER,
+            List[String](),
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         # `--retries N`: non-negative int; 0 disables.
         InvRow(
@@ -241,6 +369,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.EXECUTION,
             "Retry crash-class outcomes N times.",
             "--retries N",
+            ValueKind.OTHER,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         # `--fail-on-flaky`: valueless; a FLAKY file turns a would-be 0 into 1.
         InvRow(
@@ -251,6 +382,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.EXECUTION,
             "Exit 1 when any file passed only after retries.",
             "--fail-on-flaky",
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         # `--compile-timeout SECS`: non-negative int; 0 disables.
         InvRow(
@@ -261,6 +395,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.BUILDING,
             "Set per-file build timeout (0 disables).",
             "--compile-timeout SECS",
+            ValueKind.OTHER,
+            List[String](),
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         # `-n`/`--workers N|auto`: served, last-wins.
         InvRow(
@@ -271,6 +408,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.EXECUTION,
             "Set worker count (default: 1).",
             "-n, --workers N|auto",
+            ValueKind.CHOICE_OR_OTHER,
+            ["auto"],
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "--workers",
@@ -280,6 +420,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.EXECUTION,
             "Set worker count (default: 1).",
             "-n, --workers N|auto",
+            ValueKind.CHOICE_OR_OTHER,
+            ["auto"],
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         # `--serial GLOB`: repeatable, now served.
         InvRow(
@@ -290,6 +433,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.EXECUTION,
             "Run matching files serially (repeatable).",
             "--serial GLOB",
+            ValueKind.OTHER,
+            List[String](),
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         # CLI-only: never read from mtest.toml (order randomization).
         InvRow(
@@ -300,6 +446,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.EXECUTION,
             "Randomize run-file order (gates keep theirs).",
             "--shuffle",
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "--seed",
@@ -309,8 +458,22 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.EXECUTION,
             "Fix the --shuffle order to a reproducible seed.",
             "--seed N",
+            ValueKind.OTHER,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         # CLI-only: never read from mtest.toml (build cache).
+        #
+        # The DOCTOR bit on both rows is deliberate and is NOT a transcription
+        # slip. `doctor` renders its diagnosis and returns before the build
+        # store is read or cleared, so it accepts both flags and honors
+        # neither — the accepted-inert cell §4 also gives `-n` and `--serial`
+        # under `collect`. Clearing the bit here reds the applicability
+        # comparison against `flag_specs()`; clearing it in that table too reds
+        # the unmasked-is-refused direction, because `mtest doctor --no-cache`
+        # and `mtest doctor --cache-clear` really do parse. The masked-parses
+        # direction stays green under either edit, so this is one drift test,
+        # not both.
         InvRow(
             "--no-cache",
             0,
@@ -319,6 +482,12 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.EXECUTION,
             "Build without reading/writing the build cache.",
             "--no-cache",
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR,
         ),
         InvRow(
             "--cache-clear",
@@ -328,6 +497,12 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.EXECUTION,
             "Delete .mtest-cache (cache/last-run state), run.",
             "--cache-clear",
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR,
         ),
         # `--report FORMAT:PATH` and `--report-style concise|full`: now served.
         InvRow(
@@ -338,6 +513,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.REPORTING,
             "Write an md or html run report (once each).",
             "--report FORMAT:PATH",
+            ValueKind.PREFIX_CHOICE,
+            ["md:", "html:"],
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "--report-style",
@@ -347,6 +525,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.REPORTING,
             "Choose concise|full report detail.",
             "--report-style STYLE",
+            ValueKind.CHOICE,
+            ["concise", "full"],
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         # `--gh-annotations off|on|auto`: now served.
         InvRow(
@@ -357,6 +538,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.REPORTING,
             "Choose off|on|auto GitHub annotations.",
             "--gh-annotations MODE",
+            ValueKind.CHOICE,
+            ["off", "on", "auto"],
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         # `--format lines|json`: collect-only; `lines` is the default.
         InvRow(
@@ -367,6 +551,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.REPORTING,
             "Collect output format: lines (default) or json.",
             "--format FORMAT",
+            ValueKind.CHOICE,
+            ["lines", "json"],
+            Subcommand.COLLECT,
         ),
         # `--json PATH|-`: now served.
         InvRow(
@@ -377,6 +564,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.REPORTING,
             "Write NDJSON events to PATH or stdout.",
             "--json PATH|-",
+            ValueKind.PATH,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         # `--junit-xml PATH`: now served.
         InvRow(
@@ -387,6 +577,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.REPORTING,
             "Write a JUnit XML report.",
             "--junit-xml PATH",
+            ValueKind.PATH,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         # Served by this build (collect mode).
         InvRow(
@@ -397,6 +590,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.GENERAL,
             "List node ids without running tests.",
             "--collect-only",
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "--config",
@@ -406,6 +602,13 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.SESSION_STATE,
             "Use this project configuration file.",
             "--config PATH",
+            ValueKind.PATH,
+            List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR
+            | Subcommand.DEBUG,
         ),
         InvRow(
             "--no-config",
@@ -415,6 +618,13 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.SESSION_STATE,
             "Disable project configuration discovery.",
             "--no-config",
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR
+            | Subcommand.DEBUG,
         ),
         InvRow(
             "--lf",
@@ -424,6 +634,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.SESSION_STATE,
             "Run only entries from the last-failed state.",
             "--lf, --last-failed",
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "--last-failed",
@@ -433,6 +646,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.SESSION_STATE,
             "Run only entries from the last-failed state.",
             "--lf, --last-failed",
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "--ff",
@@ -442,6 +658,9 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.SESSION_STATE,
             "Run last-failed entries before the rest.",
             "--ff, --failed-first",
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "--failed-first",
@@ -451,8 +670,86 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.SESSION_STATE,
             "Run last-failed entries before the rest.",
             "--ff, --failed-first",
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
     ]
+
+
+def _joined(values: List[String]) -> String:
+    """Render a choice list as one `|`-separated line for exact comparison."""
+    var rendered = String("")
+    for i in range(len(values)):
+        if i > 0:
+            rendered += "|"
+        rendered += values[i]
+    return rendered^
+
+
+def _spellings_with_kind(kind: ValueKind) -> String:
+    """Every spelling declaring `kind`, `|`-separated in table order."""
+    var rendered = String("")
+    for spec in flag_specs():
+        if spec.value_kind == kind:
+            if rendered != "":
+                rendered += "|"
+            rendered += spec.spelling
+    return rendered^
+
+
+def _undeclared_probe(kind: ValueKind) -> String:
+    """A value shaped for `kind` that no row declares.
+
+    The probe has to be well-formed for its kind's own grammar, or the parser
+    refuses it on a structural rule before the choice list is ever consulted
+    and the list stays unconstrained. A bare `not-a-declared-choice` is refused
+    by `--report` for carrying no `:` at all, which would leave the prefix list
+    free to gain a bogus entry without any test noticing.
+
+    Args:
+        kind: The value kind the probe must be well-formed for.
+
+    Returns:
+        A newly allocated value the parser must refuse for that kind's own
+        reason.
+    """
+    if kind == ValueKind.PREFIX_CHOICE:
+        # A complete FORMAT:PATH value; only the prefix is undeclared, so the
+        # prefix list is the only thing that can refuse it.
+        return "txt:probe.out"
+    # A bare word. The free arm of CHOICE_OR_OTHER is a positive decimal and
+    # can never accept one, so closed-list membership is the only route in.
+    return "not-a-declared-choice"
+
+
+def _near_miss(kind: ValueKind, choice: String) -> String:
+    """A one-character perturbation of `choice`, still shaped for `kind`.
+
+    Args:
+        kind: The value kind the perturbation must stay well-formed for.
+        choice: One declared choice to perturb.
+
+    Returns:
+        A newly allocated value that differs from every declared choice.
+    """
+    if kind == ValueKind.PREFIX_CHOICE:
+        # Perturb inside the prefix, not after it: `md:x` would be a legal
+        # value with `x` as the path.
+        var stem = String(choice[byte = : choice.byte_length() - 1])
+        return stem + "x:probe.out"
+    return choice + "x"
+
+
+def _argv_for(spelling: String, value: String) -> List[String]:
+    """The shortest argument vector that offers `value` to `spelling`."""
+    var argv = List[String]()
+    # `--format` shapes a listing, so the parser refuses it outside collect.
+    if spelling == "--format":
+        argv.append("collect")
+    argv.append(spelling)
+    argv.append(value)
+    return argv^
 
 
 def test_spec_table_matches_frozen_inventory_count() raises:
@@ -488,6 +785,20 @@ def test_every_spec_row_is_in_the_frozen_inventory() raises:
                     spec.help,
                     row.help,
                     "help description drift: " + spec.spelling,
+                )
+                assert_true(
+                    spec.value_kind == row.value_kind,
+                    "value kind drift: " + spec.spelling,
+                )
+                assert_equal(
+                    _joined(spec.choices),
+                    _joined(row.choices),
+                    "choice list drift: " + spec.spelling,
+                )
+                assert_equal(
+                    spec.applicability,
+                    row.applicability,
+                    "applicability drift: " + spec.spelling,
                 )
         assert_true(found, "spec not in inventory: " + spec.spelling)
 
@@ -575,6 +886,7 @@ def test_help_has_grouped_sections_and_clear_subcommands() raises:
     assert_true("  debug PATH::TEST" in rendered)
     assert_true("  new PATH" in rendered)
     assert_true("  init [--ci github]" in rendered)
+    assert_true("  completions SHELL" in rendered)
     var previous_group_position = -1
     for group in [
         "Selection",
@@ -615,6 +927,205 @@ def test_help_lines_never_exceed_78_columns() raises:
             line.count_codepoints() <= 78,
             "overlong help line: " + line,
         )
+
+
+def test_every_physical_help_label_fits_before_the_help_column() raises:
+    """A label of 28+ codepoints would run into the 30-column help text.
+
+    `_help_row` pads `"  " + label` out to column 30, so a 28-codepoint label
+    leaves no separating space and a longer one pushes the description right
+    and breaks the alignment every other row keeps.
+    """
+    for row in frozen_inventory():
+        assert_true(
+            row.help_label.count_codepoints() <= 27,
+            "overlong help label: " + row.help_label,
+        )
+
+
+# --- typed value metadata: the kind and the closed list per spelling ---
+
+
+def test_value_kind_discriminants_are_stable() raises:
+    assert_equal(ValueKind.NONE.code, 0)
+    assert_equal(ValueKind.PATH.code, 1)
+    assert_equal(ValueKind.CHOICE.code, 2)
+    assert_equal(ValueKind.CHOICE_OR_OTHER.code, 3)
+    assert_equal(ValueKind.PREFIX_CHOICE.code, 4)
+    assert_equal(ValueKind.OTHER.code, 5)
+
+
+def test_value_kind_compares_by_discriminant() raises:
+    assert_true(ValueKind.PATH == ValueKind(1))
+    assert_true(ValueKind.PATH != ValueKind.OTHER)
+    assert_false(ValueKind.PATH == ValueKind.OTHER)
+    assert_false(ValueKind.PATH != ValueKind(1))
+
+
+def test_valueless_flags_declare_no_value_kind_and_no_choices() raises:
+    for spec in flag_specs():
+        if spec.arity == 0:
+            assert_true(
+                spec.value_kind == ValueKind.NONE,
+                "arity-0 flag completes a value: " + spec.spelling,
+            )
+            assert_equal(
+                len(spec.choices),
+                0,
+                "arity-0 flag carries choices: " + spec.spelling,
+            )
+
+
+def test_value_taking_flags_never_declare_the_valueless_kind() raises:
+    for spec in flag_specs():
+        if spec.arity == 1:
+            assert_true(
+                spec.value_kind != ValueKind.NONE,
+                "arity-1 flag declares no value kind: " + spec.spelling,
+            )
+
+
+def test_only_the_closed_kinds_carry_a_choice_list() raises:
+    """A list on an open kind would be offered as if it were exhaustive."""
+    for spec in flag_specs():
+        var closed = (
+            spec.value_kind == ValueKind.CHOICE
+            or spec.value_kind == ValueKind.CHOICE_OR_OTHER
+            or spec.value_kind == ValueKind.PREFIX_CHOICE
+        )
+        if closed:
+            assert_true(
+                len(spec.choices) > 0,
+                "closed kind with an empty list: " + spec.spelling,
+            )
+        else:
+            assert_equal(
+                len(spec.choices),
+                0,
+                "open kind with a choice list: " + spec.spelling,
+            )
+
+
+def test_choice_flags_are_exactly_the_five_closed_vocabularies() raises:
+    assert_equal(
+        _spellings_with_kind(ValueKind.CHOICE),
+        "--show-output|--color|--format|--report-style|--gh-annotations",
+    )
+
+
+def test_path_flags_are_exactly_the_six_destination_takers() raises:
+    assert_equal(
+        _spellings_with_kind(ValueKind.PATH),
+        "--gate|--precompile|--mojo|--json|--junit-xml|--config",
+    )
+
+
+def test_no_path_flag_routes_its_value_through_the_source_list_rule() raises:
+    """`PATH` promises the filesystem, and one rule takes part of it back.
+
+    `_check_build_arg` refuses any value ending `.mojo` or `.🔥` because mtest
+    owns the source list, and a `PATH` row wearing that rule offers `.mojo`
+    files in every shell and then exits 4 on the one the reader picks — which
+    is the §30 property "never offers a value this build refuses", broken by
+    metadata rather than by a renderer. `-I` wore it until this test existed.
+
+    A refusal for some other reason is fine and expected here — a missing
+    parent, an unreadable file — so the assertion is on the diagnostic, not on
+    acceptance.
+    """
+    for spec in flag_specs():
+        if spec.value_kind != ValueKind.PATH:
+            continue
+        var message = String("")
+        try:
+            _ = parse_args(_argv_for(spec.spelling, "vendor/pkg/thing.mojo"))
+        except e:
+            message = String(e)
+        assert_false(
+            "owns the source list" in message,
+            (
+                "a PATH flag refuses the .mojo files completion offers it: "
+                + spec.spelling
+            ),
+        )
+
+
+def test_workers_is_the_only_closed_list_beside_free_text() raises:
+    assert_equal(
+        _spellings_with_kind(ValueKind.CHOICE_OR_OTHER), "-n|--workers"
+    )
+
+
+def test_report_is_the_only_prefix_choice() raises:
+    assert_equal(_spellings_with_kind(ValueKind.PREFIX_CHOICE), "--report")
+
+
+def test_every_declared_choice_is_accepted_by_the_parser() raises:
+    """The published list may never contain a value the parser refuses."""
+    for spec in flag_specs():
+        for choice in spec.choices:
+            var value = choice.copy()
+            if spec.value_kind == ValueKind.PREFIX_CHOICE:
+                value += "out.txt"
+            var accepted = True
+            try:
+                _ = parse_args(_argv_for(spec.spelling, value))
+            except:
+                accepted = False
+            assert_true(
+                accepted,
+                "declared choice refused: " + spec.spelling + " " + value,
+            )
+
+
+def test_a_value_outside_every_closed_list_is_refused() raises:
+    """A list is only closed while the parser refuses what it omits.
+
+    The probe is shaped for the row's own kind (`_undeclared_probe`), so the
+    refusal comes from the choice list rather than from a structural rule the
+    list plays no part in.
+    """
+    for spec in flag_specs():
+        if len(spec.choices) == 0:
+            continue
+        var probe = _undeclared_probe(spec.value_kind)
+        var refused = False
+        try:
+            _ = parse_args(_argv_for(spec.spelling, probe))
+        except:
+            refused = True
+        assert_true(
+            refused,
+            "declared list is not closed: " + spec.spelling + " " + probe,
+        )
+
+
+def test_a_near_miss_on_a_declared_choice_is_refused() raises:
+    """Membership is exact: no prefix match, no fuzzy match, per member.
+
+    One fixed probe per row cannot prove that; perturbing each declared member
+    in turn constrains every entry of every list rather than only the row.
+    """
+    for spec in flag_specs():
+        for choice in spec.choices:
+            var probe = _near_miss(spec.value_kind, choice)
+            var refused = False
+            try:
+                _ = parse_args(_argv_for(spec.spelling, probe))
+            except:
+                refused = True
+            assert_true(
+                refused,
+                "near miss accepted: " + spec.spelling + " " + probe,
+            )
+
+
+def test_workers_free_arm_is_open_beside_its_closed_arm() raises:
+    """CHOICE_OR_OTHER means both arms parse: `auto` and a bare integer."""
+    var closed: List[String] = ["--workers", "auto"]
+    var free: List[String] = ["--workers", "7"]
+    assert_equal(parse_args(closed).config.workers, 0)
+    assert_equal(parse_args(free).config.workers, 7)
 
 
 def test_workers_short_parses_count() raises:
@@ -1157,6 +1668,407 @@ def test_workers_equals_form_parses_count() raises:
     var argv: List[String] = ["--workers=3"]
     var r = parse_args(argv)
     assert_equal(r.config.workers, 3)
+
+
+# --- the Subcommands help rows ---
+
+
+def frozen_subcommands() -> List[SubcommandSpec]:
+    """The ten Subcommands rows, transcribed from the contract by hand.
+
+    The head bit and the completion state are transcribed too: they are what
+    the completion scripts key their per-head flag lists and head-resolution
+    branches on, so a row that gained the wrong one would offer a head the
+    wrong grammar with every derived assertion still green.
+    """
+    return [
+        SubcommandSpec(
+            token="run",
+            label_args="[PATHS...] [flags]",
+            description="Run tests (the default subcommand).",
+            head_bit=Subcommand.RUN,
+            completion_state="run",
+        ),
+        SubcommandSpec(
+            token="collect",
+            label_args="[PATHS...] [flags]",
+            description="List node ids without running tests.",
+            head_bit=Subcommand.COLLECT,
+            completion_state="collect",
+        ),
+        SubcommandSpec(
+            token="config",
+            label_args="show [PATHS...]",
+            description="Show resolved configuration.",
+            head_bit=Subcommand.CONFIG_SHOW,
+            completion_state="config-show",
+        ),
+        SubcommandSpec(
+            token="doctor",
+            label_args="[flags]",
+            description="Diagnose the environment without running tests.",
+            head_bit=Subcommand.DOCTOR,
+            completion_state="doctor",
+        ),
+        SubcommandSpec(
+            token="debug",
+            label_args="PATH::TEST",
+            description="Run one test with the terminal handed over.",
+            head_bit=Subcommand.DEBUG,
+            completion_state="debug",
+        ),
+        SubcommandSpec(
+            token="new",
+            label_args="PATH",
+            description="Create one runnable test file.",
+            head_bit=0,
+            completion_state="",
+        ),
+        SubcommandSpec(
+            token="init",
+            label_args="[--ci github]",
+            description="Bootstrap a project in this directory.",
+            head_bit=0,
+            completion_state="",
+        ),
+        SubcommandSpec(
+            token="completions",
+            label_args="SHELL",
+            description="Print a bash, zsh, or fish completion script.",
+            head_bit=0,
+            completion_state="completions",
+        ),
+        SubcommandSpec(
+            token="help",
+            label_args="",
+            description="Show this help and exit.",
+            head_bit=0,
+            completion_state="",
+        ),
+        SubcommandSpec(
+            token="version",
+            label_args="",
+            description="Show the version and exit.",
+            head_bit=0,
+            completion_state="",
+        ),
+    ]
+
+
+def _subcommand_label(spec: SubcommandSpec) -> String:
+    """The physical help-row label for one Subcommands row."""
+    if spec.label_args == "":
+        return spec.token.copy()
+    return spec.token + " " + spec.label_args
+
+
+def test_subcommand_specs_match_the_frozen_rows_in_order() raises:
+    var specs = subcommand_specs()
+    var frozen = frozen_subcommands()
+    assert_equal(len(specs), len(frozen))
+    for i in range(len(frozen)):
+        assert_equal(
+            specs[i].token, frozen[i].token, "token drift at " + String(i)
+        )
+        assert_equal(
+            specs[i].label_args,
+            frozen[i].label_args,
+            "label args drift: " + frozen[i].token,
+        )
+        assert_equal(
+            specs[i].description,
+            frozen[i].description,
+            "description drift: " + frozen[i].token,
+        )
+        assert_equal(
+            specs[i].head_bit,
+            frozen[i].head_bit,
+            "head bit drift: " + frozen[i].token,
+        )
+        assert_equal(
+            specs[i].completion_state,
+            frozen[i].completion_state,
+            "completion state drift: " + frozen[i].token,
+        )
+
+
+def test_every_subcommand_row_is_rendered_once_into_the_help() raises:
+    var rendered = help_text()
+    for spec in frozen_subcommands():
+        var expected_line = "  " + _subcommand_label(spec)
+        for _ in range(30 - expected_line.count_codepoints()):
+            expected_line += " "
+        expected_line += spec.description
+        var matches = 0
+        for line_slice in rendered.split("\n"):
+            if String(line_slice) == expected_line:
+                matches += 1
+        assert_equal(matches, 1, "subcommand row coverage drift: " + spec.token)
+
+
+def test_subcommand_rows_fit_the_help_column_and_the_help_width() raises:
+    for spec in subcommand_specs():
+        assert_true(
+            spec.token.byte_length() > 0, "subcommand row with no token"
+        )
+        assert_true(
+            spec.description.byte_length() > 0,
+            "subcommand row with no description: " + spec.token,
+        )
+        assert_true(
+            _subcommand_label(spec).count_codepoints() <= 27,
+            "overlong subcommand label: " + spec.token,
+        )
+        assert_true(
+            spec.description.count_codepoints() <= 48,
+            "overlong subcommand description: " + spec.token,
+        )
+
+
+# --- applicability: the mask against the parser's own refusals ---
+
+
+def subcommand_bits() -> List[Int]:
+    """Every flag-accepting head, as its applicability bit."""
+    return [
+        Subcommand.RUN,
+        Subcommand.COLLECT,
+        Subcommand.CONFIG_SHOW,
+        Subcommand.DOCTOR,
+        Subcommand.DEBUG,
+    ]
+
+
+def test_the_head_rows_claim_exactly_the_applicability_bits() raises:
+    """Every bit belongs to one row, in help order, and no row invents one.
+
+    The completion scripts read their per-head flag lists off these rows, so a
+    bit no row claims would serve no head at all for a grammar the parser still
+    accepts, and a bit two rows claimed would name the wrong head for it.
+    """
+    var bits = subcommand_bits()
+    var claimed = List[Int]()
+    for spec in subcommand_specs():
+        if spec.head_bit != 0:
+            claimed.append(spec.head_bit)
+    assert_equal(
+        len(claimed), len(bits), "the flag-accepting head set changed size"
+    )
+    for i in range(len(bits)):
+        assert_equal(claimed[i], bits[i], "head bit drift at row " + String(i))
+
+
+def _head_tokens(subcommand: Int) -> List[String]:
+    """The leading tokens that select `subcommand`, exactly as typed."""
+    if subcommand == Subcommand.COLLECT:
+        return ["collect"]
+    if subcommand == Subcommand.CONFIG_SHOW:
+        return ["config", "show"]
+    if subcommand == Subcommand.DOCTOR:
+        return ["doctor"]
+    if subcommand == Subcommand.DEBUG:
+        # `debug` wants exactly one node id, so the probe carries one. The
+        # parser never touches the filesystem for it.
+        return ["debug", "probe.mojo::test_probe"]
+    return ["run"]
+
+
+def _head_name(subcommand: Int) -> String:
+    """A readable name for `subcommand`, for assertion messages."""
+    if subcommand == Subcommand.COLLECT:
+        return "collect"
+    if subcommand == Subcommand.CONFIG_SHOW:
+        return "config show"
+    if subcommand == Subcommand.DOCTOR:
+        return "doctor"
+    if subcommand == Subcommand.DEBUG:
+        return "debug"
+    return "run"
+
+
+def _probe_value(spelling: String) -> String:
+    """A value every subcommand's grammar accepts for `spelling`.
+
+    The probe has to be valid on its own terms, or the argument vector could be
+    refused for the value rather than for applicability and the mask would go
+    unconstrained. Bare filenames are deliberate: a destination with no
+    directory part skips the parent-directory check.
+
+    Args:
+        spelling: The flag spelling the value is offered to.
+
+    Returns:
+        A newly allocated value the flag's own validator accepts.
+    """
+    if spelling == "--shard":
+        return "1/2"
+    if spelling == "--show-output":
+        return "all"
+    if spelling == "--color":
+        return "auto"
+    if spelling == "--format":
+        return "lines"
+    if spelling == "--gh-annotations":
+        return "off"
+    if spelling == "--report":
+        return "md:probe.md"
+    if spelling == "--report-style":
+        return "concise"
+    if spelling == "--json":
+        return "probe.ndjson"
+    if spelling == "--junit-xml":
+        return "probe.xml"
+    if spelling == "--build-arg":
+        return "-O0"
+    if spelling == "--precompile" or spelling == "-I":
+        return "src"
+    if spelling == "--mojo":
+        return "mojo"
+    if spelling == "--config":
+        return "mtest.toml"
+    if spelling == "--gate":
+        return "probe_gate.mojo"
+    if spelling == "-k":
+        return "probe"
+    if spelling == "--exclude" or spelling == "--serial":
+        return "*probe*"
+    if spelling == "-n" or spelling == "--workers":
+        return "2"
+    # Everything left takes a non-negative integer.
+    return "1"
+
+
+def _applicability_argv(
+    spelling: String, arity: Int, subcommand: Int
+) -> List[String]:
+    """The shortest vector that offers `spelling` to `subcommand`."""
+    var argv = _head_tokens(subcommand)
+    argv.append(spelling)
+    if arity == 1:
+        argv.append(_probe_value(spelling))
+    if spelling == "--seed":
+        # A lone `--seed` is refused everywhere, `run` included, for wanting
+        # `--shuffle` — an answer about a different rule than this probe asks
+        # about — so the pair goes in together.
+        #
+        # That makes `--seed` the one probe carrying a second flag that is
+        # itself inapplicable under `collect`, `doctor`, and `debug`, so the
+        # pair stays decidable only because each refusal that fires names BOTH
+        # spellings: `'--shuffle' and '--seed' are run-only flags…` under
+        # collect, `…are run flags…` under doctor, and under debug the general
+        # `'--seed' cannot be combined with 'debug'` (the loop reaches `--seed`
+        # first, since it is appended first). Reword any of those three to drop
+        # `--seed` and this probe stops proving anything about `--seed`; the
+        # names-the-flag assertion in direction two is what catches that.
+        argv.append("--shuffle")
+    return argv^
+
+
+def test_subcommand_bits_are_stable_and_disjoint() raises:
+    assert_equal(Subcommand.RUN, 1)
+    assert_equal(Subcommand.COLLECT, 2)
+    assert_equal(Subcommand.CONFIG_SHOW, 4)
+    assert_equal(Subcommand.DOCTOR, 8)
+    assert_equal(Subcommand.DEBUG, 16)
+
+
+def test_every_flag_applies_somewhere_and_names_no_unknown_head() raises:
+    var every = 0
+    for bit in subcommand_bits():
+        every |= bit
+    for spec in flag_specs():
+        assert_true(
+            spec.applicability != 0,
+            "flag applies to no subcommand: " + spec.spelling,
+        )
+        assert_equal(
+            spec.applicability & every,
+            spec.applicability,
+            "applicability names an unknown subcommand: " + spec.spelling,
+        )
+
+
+def test_the_mask_never_separates_run_from_config_show() raises:
+    """A mask-shape invariant, not a parser probe.
+
+    `config show` resolves the run grammar and adds no refusal of its own, so
+    no row may set one bit without the other. The two drift tests below are
+    what check that claim against `parse_args`; this one only stops a row from
+    being written in a shape the parser could never produce.
+    """
+    for spec in flag_specs():
+        assert_true(
+            ((spec.applicability & Subcommand.RUN) != 0)
+            == ((spec.applicability & Subcommand.CONFIG_SHOW) != 0),
+            "run and config show disagree: " + spec.spelling,
+        )
+
+
+def test_every_masked_flag_parses_under_that_subcommand() raises:
+    """Direction one: a mask bit may never promise a flag the parser refuses."""
+    for spec in flag_specs():
+        for subcommand in subcommand_bits():
+            if (spec.applicability & subcommand) == 0:
+                continue
+            var argv = _applicability_argv(
+                spec.spelling, spec.arity, subcommand
+            )
+            var message = String("")
+            var refused = False
+            try:
+                _ = parse_args(argv)
+            except e:
+                refused = True
+                message = String(e)
+            assert_false(
+                refused,
+                "masked applicable but refused: "
+                + _head_name(subcommand)
+                + " "
+                + spec.spelling
+                + ": "
+                + message,
+            )
+
+
+def test_every_unmasked_flag_is_refused_by_name_under_that_subcommand() raises:
+    """Direction two: every refusal the parser performs is a cleared bit."""
+    for spec in flag_specs():
+        for subcommand in subcommand_bits():
+            if (spec.applicability & subcommand) != 0:
+                continue
+            var argv = _applicability_argv(
+                spec.spelling, spec.arity, subcommand
+            )
+            var message = String("")
+            var refused = False
+            try:
+                _ = parse_args(argv)
+            except e:
+                refused = True
+                message = String(e)
+            assert_true(
+                refused,
+                "masked inapplicable but accepted: "
+                + _head_name(subcommand)
+                + " "
+                + spec.spelling,
+            )
+            # Quoted, because every refusal quotes the spelling it names and a
+            # bare substring would not mean what this assertion says: `-s`
+            # occurs inside `--show-output`, and `--report` inside
+            # `--report-style`, so an unquoted probe would accept a refusal
+            # about the neighbouring flag as if it named this one.
+            var quoted = "'" + spec.spelling + "'"
+            assert_true(
+                quoted in message,
+                "refusal does not name the flag: "
+                + _head_name(subcommand)
+                + " "
+                + spec.spelling
+                + ": "
+                + message,
+            )
 
 
 def main() raises:

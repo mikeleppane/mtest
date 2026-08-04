@@ -34,7 +34,7 @@ TRACKED_FILES = (docs_parity.README_PATH, *docs_parity.SITE_PAGES)
 class RepositoryParityTests(unittest.TestCase):
     """The declarations, and the live tree they describe."""
 
-    def test_site_pages_are_the_four_landing_pages(self) -> None:
+    def test_site_pages_are_the_five_landing_pages(self) -> None:
         self.assertEqual(
             docs_parity.SITE_PAGES,
             (
@@ -42,6 +42,7 @@ class RepositoryParityTests(unittest.TestCase):
                 Path("docs/getting-started.md"),
                 Path("docs/ci.md"),
                 Path("docs/reports.md"),
+                Path("docs/completions.md"),
             ),
         )
 
@@ -78,6 +79,7 @@ class RepositoryParityTests(unittest.TestCase):
                 Path("docs/getting-started.md"): 4,
                 Path("docs/ci.md"): 3,
                 Path("docs/reports.md"): 4,
+                Path("docs/completions.md"): 4,
             },
         )
 

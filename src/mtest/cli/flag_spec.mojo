@@ -1,13 +1,42 @@
 """The flag-spec table: the single source of truth for every flag spelling.
 
 The parser is table-driven rather than a pile of ad-hoc branches. Each accepted
-*spelling* is one `FlagSpec` row carrying its arity, repetition behavior, and
-owned help metadata. Two spellings of the same flag (`-x` and `--exitfirst`)
-are two rows sharing one `id`.
+*spelling* is one `FlagSpec` row carrying its arity, repetition behavior, owned
+help metadata, and how its value is shaped. Two spellings of the same flag
+(`-x` and `--exitfirst`) are two rows sharing one `id`.
+
+A row's `applicability` names the subcommands whose grammar accepts the
+spelling, as a bitmask over `Subcommand`. It is a description of the parser's
+refusals, not their source: each refusal is hand-written prose naming the flag
+and stating why that command cannot honor it, and a bit cannot reconstruct
+prose. `tests/unit/test_cli_inventory.mojo` holds the two-directional check that
+keeps the two from drifting — every masked pair parses, every unmasked pair is
+refused. `subcommand_specs()` is the matching table for the heads themselves:
+the `Subcommands` help block is rendered from it, and each row also carries the
+applicability bit its token selects and the state a completion script enters
+after it, so the token-to-head mapping is a field on the row rather than a
+branch in whatever consumes it.
+
+A row's `value_kind` and `choices` describe what the parser actually accepts,
+never an idealized domain: a `CHOICE` row's list is the exact closed set the
+matching `parse_*_value` validates against, taken from `mtest.config` rather
+than restated here, so the two cannot drift. Where the parser accepts more than
+a kind can express, the row says so by naming the wider kind — `OTHER` for a
+value with no useful completion, `CHOICE_OR_OTHER` where a closed arm sits
+beside free text.
 
 `flag_specs()` exposes the whole table so the command-line contract can be
 checked against an independently written inventory rather than against itself.
 """
+from mtest.config import (
+    annotations_choices,
+    collect_format_choices,
+    color_choices,
+    report_format_prefixes,
+    report_style_choices,
+    show_output_choices,
+    workers_choices,
+)
 
 
 struct FlagId:
@@ -100,11 +129,210 @@ def flag_group_name(group: Int) -> String:
     return "Invalid"
 
 
+struct Subcommand:
+    """Bit positions for flag applicability, one per flag-accepting head.
+
+    `new`, `init`, and `completions` are absent because none has a flag table
+    to describe: `new` and `completions` accept only `-h`/`--help` beside their
+    one operand, and `init` accepts `--ci VALUE` beside them, which is
+    deliberately not a `flag_specs()` row. `help` and `version` are absent
+    because they are directives that consume the whole vector.
+    """
+
+    comptime RUN = 1
+    """The default run mode (head token `run`, or no head token at all)."""
+    comptime COLLECT = 2
+    """The `collect` listing mode, and the `--collect-only` spelling of it."""
+    comptime CONFIG_SHOW = 4
+    """The two-token `config show` resolution display."""
+    comptime DOCTOR = 8
+    """The `doctor` environment diagnosis."""
+    comptime DEBUG = 16
+    """The `debug` single-test terminal handover."""
+
+
+@fieldwise_init
+struct SubcommandSpec(Copyable, Movable):
+    """One head token: its help row, its flag grammar, and its completion.
+
+    The usage lines above that block stay hand-written: each one spells out a
+    different subset of a command's grammar, which is prose rather than a
+    field. Owns its `String` fields, so every copy is an explicit `.copy()`.
+
+    Examples:
+
+    ```mojo
+    from mtest.cli import subcommand_specs
+
+    for spec in subcommand_specs():
+        print(spec.token, spec.description)
+    ```
+    """
+
+    var token: String
+    """The head token; `config` carries its `show` tail in `label_args`."""
+
+    var label_args: String
+    """The argument part of the row's label, or empty when it takes none."""
+
+    var description: String
+    """The row's help text, at most 48 codepoints so the row fits 78."""
+
+    var head_bit: Int
+    """The `Subcommand` bit this token selects, or `0` for a token with none.
+
+    Zero says the token has no flag grammar to describe, which is why the
+    `Subcommand` namespace above holds five bits and this table ten rows. A
+    nonzero bit is the same one `flag_specs()` masks against, so the head a
+    completion script offers flags for and the head whose refusals the mask
+    describes are one fact rather than two lists that agree today."""
+
+    var completion_state: String
+    """The state a completion script enters after this token, empty for none.
+
+    Empty means the script offers nothing after the token, which is what makes
+    a subcommand added to this table offer nothing rather than silently
+    inheriting the run grammar. It is not derivable from `head_bit` and is
+    deliberately a second field: `completions` has no bit at all yet completes
+    its shell operand, so a token can carry a state without a grammar."""
+
+
+def subcommand_specs() -> List[SubcommandSpec]:
+    """The `Subcommands` help block, one row per head, in help order.
+
+    Returns:
+        A freshly allocated list holding every subcommand row, in the order
+        `help_text` renders them.
+    """
+    return [
+        SubcommandSpec(
+            token="run",
+            label_args="[PATHS...] [flags]",
+            description="Run tests (the default subcommand).",
+            head_bit=Subcommand.RUN,
+            completion_state="run",
+        ),
+        SubcommandSpec(
+            token="collect",
+            label_args="[PATHS...] [flags]",
+            description="List node ids without running tests.",
+            head_bit=Subcommand.COLLECT,
+            completion_state="collect",
+        ),
+        SubcommandSpec(
+            token="config",
+            label_args="show [PATHS...]",
+            description="Show resolved configuration.",
+            head_bit=Subcommand.CONFIG_SHOW,
+            completion_state="config-show",
+        ),
+        SubcommandSpec(
+            token="doctor",
+            label_args="[flags]",
+            description="Diagnose the environment without running tests.",
+            head_bit=Subcommand.DOCTOR,
+            completion_state="doctor",
+        ),
+        SubcommandSpec(
+            token="debug",
+            label_args="PATH::TEST",
+            description="Run one test with the terminal handed over.",
+            head_bit=Subcommand.DEBUG,
+            completion_state="debug",
+        ),
+        SubcommandSpec(
+            token="new",
+            label_args="PATH",
+            description="Create one runnable test file.",
+            head_bit=0,
+            completion_state="",
+        ),
+        SubcommandSpec(
+            token="init",
+            label_args="[--ci github]",
+            description="Bootstrap a project in this directory.",
+            head_bit=0,
+            completion_state="",
+        ),
+        # The row where the two fields genuinely diverge: no flag grammar to
+        # mask against, but a closed shell vocabulary to complete after it.
+        SubcommandSpec(
+            token="completions",
+            label_args="SHELL",
+            description="Print a bash, zsh, or fish completion script.",
+            head_bit=0,
+            completion_state="completions",
+        ),
+        SubcommandSpec(
+            token="help",
+            label_args="",
+            description="Show this help and exit.",
+            head_bit=0,
+            completion_state="",
+        ),
+        SubcommandSpec(
+            token="version",
+            label_args="",
+            description="Show the version and exit.",
+            head_bit=0,
+            completion_state="",
+        ),
+    ]
+
+
+@fieldwise_init
+struct ValueKind(Equatable, ImplicitlyCopyable, Movable):
+    """How a flag's value completes.
+
+    A wrapper over a stable integer discriminant, so the vocabulary is a closed
+    set of named constants that compare by value. The kind describes the
+    parser's real accepting behavior, which is what makes it safe for a
+    completion renderer to act on: a kind that promised less than the parser
+    accepts would refuse to offer a legal value, and one that promised more
+    would offer a value the parser rejects.
+
+    Examples:
+
+    ```mojo
+    from mtest.cli import ValueKind, flag_specs
+
+    for spec in flag_specs():
+        if spec.value_kind == ValueKind.CHOICE:
+            print(spec.spelling, len(spec.choices))
+    ```
+    """
+
+    var code: Int
+    """The stable integer discriminant."""
+
+    comptime NONE = Self(0)
+    """Arity-0: the flag takes no value at all."""
+    comptime PATH = Self(1)
+    """A filesystem path: complete against the filesystem."""
+    comptime CHOICE = Self(2)
+    """Exactly the row's closed choice list, and nothing else."""
+    comptime CHOICE_OR_OTHER = Self(3)
+    """The closed list plus free text the list cannot enumerate."""
+    comptime PREFIX_CHOICE = Self(4)
+    """One of the row's closed prefixes, then a free path after it."""
+    comptime OTHER = Self(5)
+    """Free text with no useful completion: offer nothing."""
+
+    def __eq__(self, other: Self) -> Bool:
+        """Two kinds are equal when their discriminants are equal."""
+        return self.code == other.code
+
+    def __ne__(self, other: Self) -> Bool:
+        """Negation of `__eq__`."""
+        return self.code != other.code
+
+
 @fieldwise_init
 struct FlagSpec(Copyable, Movable):
     """One accepted flag spelling and everything the parser needs about it.
 
-    Owns its `String` fields, so every copy is an explicit `.copy()`.
+    Owns its `String` and `List` fields, so every copy is an explicit
+    `.copy()`.
 
     Examples:
 
@@ -142,6 +370,25 @@ struct FlagSpec(Copyable, Movable):
     var group: Int
     """The closed `FlagGroup` identity that owns this spelling."""
 
+    var value_kind: ValueKind
+    """How this spelling's value completes; `NONE` for an arity-zero flag."""
+
+    var choices: List[String]
+    """The closed values this spelling accepts, empty unless the kind is closed.
+
+    Non-empty exactly for `CHOICE`, `CHOICE_OR_OTHER`, and `PREFIX_CHOICE`, and
+    always the same list the matching `mtest.config` validator decides
+    membership against, never a second transcription of it."""
+
+    var applicability: Int
+    """The `Subcommand` bits whose grammar accepts this spelling.
+
+    A set bit means the parser does not refuse the spelling under that head,
+    which includes the flags it accepts and ignores: `-q` under `debug` and
+    `--serial` under `collect` are applicable because they parse, even though
+    neither changes anything. A cleared bit means some hand-written refusal in
+    `parse_args` names this flag for that head."""
+
 
 def flag_specs() -> List[FlagSpec]:
     """The whole flag-spec table, one row per accepted spelling.
@@ -160,6 +407,9 @@ def flag_specs() -> List[FlagSpec]:
             "Exclude matching files (repeatable).",
             "GLOB",
             FlagGroup.SELECTION,
+            ValueKind.OTHER,
+            List[String](),
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         FlagSpec(
             "-k",
@@ -169,6 +419,9 @@ def flag_specs() -> List[FlagSpec]:
             "Select node ids containing STR.",
             "STR",
             FlagGroup.SELECTION,
+            ValueKind.OTHER,
+            List[String](),
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         FlagSpec(
             "--gate",
@@ -178,6 +431,9 @@ def flag_specs() -> List[FlagSpec]:
             "Run PATH before ordinary files (repeatable).",
             "PATH",
             FlagGroup.SELECTION,
+            ValueKind.PATH,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         FlagSpec(
             "--shard",
@@ -187,6 +443,9 @@ def flag_specs() -> List[FlagSpec]:
             "Run only the selected shard.",
             "[hash:|slice:]M/N",
             FlagGroup.SELECTION,
+            ValueKind.OTHER,
+            List[String](),
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         # Execution.
         FlagSpec(
@@ -197,6 +456,9 @@ def flag_specs() -> List[FlagSpec]:
             "Stop after the first failing file.",
             "",
             FlagGroup.EXECUTION,
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         FlagSpec(
             "--exitfirst",
@@ -206,6 +468,9 @@ def flag_specs() -> List[FlagSpec]:
             "Stop after the first failing file.",
             "",
             FlagGroup.EXECUTION,
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         FlagSpec(
             "--maxfail",
@@ -215,6 +480,9 @@ def flag_specs() -> List[FlagSpec]:
             "Stop after N failed tests (0 disables).",
             "N",
             FlagGroup.EXECUTION,
+            ValueKind.OTHER,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         FlagSpec(
             "--timeout",
@@ -224,6 +492,9 @@ def flag_specs() -> List[FlagSpec]:
             "Set per-file run timeout (0 disables).",
             "SECS",
             FlagGroup.EXECUTION,
+            ValueKind.OTHER,
+            List[String](),
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         FlagSpec(
             "--retries",
@@ -233,6 +504,9 @@ def flag_specs() -> List[FlagSpec]:
             "Retry crash-class outcomes N times.",
             "N",
             FlagGroup.EXECUTION,
+            ValueKind.OTHER,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         FlagSpec(
             "--fail-on-flaky",
@@ -242,6 +516,9 @@ def flag_specs() -> List[FlagSpec]:
             "Exit 1 when any file passed only after retries.",
             "",
             FlagGroup.EXECUTION,
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         FlagSpec(
             "-n",
@@ -251,6 +528,9 @@ def flag_specs() -> List[FlagSpec]:
             "Set worker count (default: 1).",
             "N|auto",
             FlagGroup.EXECUTION,
+            ValueKind.CHOICE_OR_OTHER,
+            workers_choices(),
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         FlagSpec(
             "--workers",
@@ -260,6 +540,9 @@ def flag_specs() -> List[FlagSpec]:
             "Set worker count (default: 1).",
             "N|auto",
             FlagGroup.EXECUTION,
+            ValueKind.CHOICE_OR_OTHER,
+            workers_choices(),
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         FlagSpec(
             "--serial",
@@ -269,6 +552,9 @@ def flag_specs() -> List[FlagSpec]:
             "Run matching files serially (repeatable).",
             "GLOB",
             FlagGroup.EXECUTION,
+            ValueKind.OTHER,
+            List[String](),
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         FlagSpec(
             "--shuffle",
@@ -278,6 +564,9 @@ def flag_specs() -> List[FlagSpec]:
             "Randomize run-file order (gates keep theirs).",
             "",
             FlagGroup.EXECUTION,
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         FlagSpec(
             "--seed",
@@ -287,6 +576,9 @@ def flag_specs() -> List[FlagSpec]:
             "Fix the --shuffle order to a reproducible seed.",
             "N",
             FlagGroup.EXECUTION,
+            ValueKind.OTHER,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         # CLI-only, exempt from mtest.toml by design (build cache).
         FlagSpec(
@@ -297,6 +589,12 @@ def flag_specs() -> List[FlagSpec]:
             "Build without reading/writing the build cache.",
             "",
             FlagGroup.EXECUTION,
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR,
         ),
         FlagSpec(
             "--cache-clear",
@@ -306,8 +604,22 @@ def flag_specs() -> List[FlagSpec]:
             "Delete .mtest-cache (cache/last-run state), run.",
             "",
             FlagGroup.EXECUTION,
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR,
         ),
         # Building.
+        # `PATH` would be a lie here, and the reason is the rule below it:
+        # `-I` and `--build-arg` are validated by the same `_check_build_arg`,
+        # which refuses any value ending `.mojo` or `.🔥` because mtest owns
+        # the source list. A filesystem completion in a source directory would
+        # therefore offer values this build exits 4 on, which is exactly what
+        # the kind exists to prevent. What `-I` really takes is a directory,
+        # and no kind expresses that, so it takes the kind its sibling under
+        # the same rule already takes and offers nothing rather than a guess.
         FlagSpec(
             "-I",
             FlagId.INCLUDE,
@@ -316,6 +628,12 @@ def flag_specs() -> List[FlagSpec]:
             "Add a Mojo include path (repeatable).",
             "PATH",
             FlagGroup.BUILDING,
+            ValueKind.OTHER,
+            List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DEBUG,
         ),
         FlagSpec(
             "--build-arg",
@@ -325,7 +643,20 @@ def flag_specs() -> List[FlagSpec]:
             "Forward one argument to mojo build (repeatable).",
             "ARG",
             FlagGroup.BUILDING,
+            ValueKind.OTHER,
+            List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DEBUG,
         ),
+        # `PATH` understates this row the way it understates `--json`, and in
+        # the other direction: the grammar is `SRC[:OUT]`, so a completed path
+        # that happens to contain a colon is split at the FIRST one and
+        # accepted as two — a directory named `odd:dir/pkg` parses as
+        # `src="odd"`, `out="dir/pkg"` with no diagnostic. `PREFIX_CHOICE` is
+        # not the shape either: the prefix set here is open. Path completion is
+        # the useful behavior and stays.
         FlagSpec(
             "--precompile",
             FlagId.PRECOMPILE,
@@ -334,6 +665,9 @@ def flag_specs() -> List[FlagSpec]:
             "Precompile package before builds (repeatable).",
             "SRC[:OUT]",
             FlagGroup.BUILDING,
+            ValueKind.PATH,
+            List[String](),
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         FlagSpec(
             "--mojo",
@@ -343,6 +677,12 @@ def flag_specs() -> List[FlagSpec]:
             "Use this Mojo executable.",
             "PATH",
             FlagGroup.BUILDING,
+            ValueKind.PATH,
+            List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DEBUG,
         ),
         FlagSpec(
             "--compile-timeout",
@@ -352,6 +692,9 @@ def flag_specs() -> List[FlagSpec]:
             "Set per-file build timeout (0 disables).",
             "SECS",
             FlagGroup.BUILDING,
+            ValueKind.OTHER,
+            List[String](),
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         # Reporting.
         FlagSpec(
@@ -362,6 +705,9 @@ def flag_specs() -> List[FlagSpec]:
             "Show captured output for all files.",
             "",
             FlagGroup.REPORTING,
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         FlagSpec(
             "--show-output",
@@ -371,6 +717,9 @@ def flag_specs() -> List[FlagSpec]:
             "Choose failures|all|none captured output.",
             "MODE",
             FlagGroup.REPORTING,
+            ValueKind.CHOICE,
+            show_output_choices(),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         FlagSpec(
             "--durations",
@@ -380,6 +729,9 @@ def flag_specs() -> List[FlagSpec]:
             "Show N slowest file durations (0 disables).",
             "N",
             FlagGroup.REPORTING,
+            ValueKind.OTHER,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         FlagSpec(
             "-q",
@@ -389,6 +741,13 @@ def flag_specs() -> List[FlagSpec]:
             "Suppress passing file rows.",
             "",
             FlagGroup.REPORTING,
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR
+            | Subcommand.DEBUG,
         ),
         FlagSpec(
             "-v",
@@ -398,6 +757,13 @@ def flag_specs() -> List[FlagSpec]:
             "Show build commands and step timings.",
             "",
             FlagGroup.REPORTING,
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR
+            | Subcommand.DEBUG,
         ),
         FlagSpec(
             "--color",
@@ -407,6 +773,12 @@ def flag_specs() -> List[FlagSpec]:
             "Choose auto|always|never color output.",
             "WHEN",
             FlagGroup.REPORTING,
+            ValueKind.CHOICE,
+            color_choices(),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR,
         ),
         FlagSpec(
             "--format",
@@ -416,7 +788,16 @@ def flag_specs() -> List[FlagSpec]:
             "Collect output format: lines (default) or json.",
             "FORMAT",
             FlagGroup.REPORTING,
+            ValueKind.CHOICE,
+            collect_format_choices(),
+            Subcommand.COLLECT,
         ),
+        # `PATH` understates this one row by a single token: `--json` also
+        # accepts a bare `-` for stdout, which no other destination flag does
+        # (`--junit-xml` and `--report` are assembled and renamed, so they have
+        # no stream form). Path completion is the useful behavior and stays;
+        # a caller that wants to offer the dash too has to special-case it
+        # here rather than read it off the kind.
         FlagSpec(
             "--json",
             FlagId.JSON,
@@ -425,6 +806,9 @@ def flag_specs() -> List[FlagSpec]:
             "Write NDJSON events to PATH or stdout.",
             "PATH|-",
             FlagGroup.REPORTING,
+            ValueKind.PATH,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         FlagSpec(
             "--junit-xml",
@@ -434,6 +818,9 @@ def flag_specs() -> List[FlagSpec]:
             "Write a JUnit XML report.",
             "PATH",
             FlagGroup.REPORTING,
+            ValueKind.PATH,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         FlagSpec(
             "--report",
@@ -443,6 +830,9 @@ def flag_specs() -> List[FlagSpec]:
             "Write an md or html run report (once each).",
             "FORMAT:PATH",
             FlagGroup.REPORTING,
+            ValueKind.PREFIX_CHOICE,
+            report_format_prefixes(),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         FlagSpec(
             "--report-style",
@@ -452,6 +842,9 @@ def flag_specs() -> List[FlagSpec]:
             "Choose concise|full report detail.",
             "STYLE",
             FlagGroup.REPORTING,
+            ValueKind.CHOICE,
+            report_style_choices(),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         FlagSpec(
             "--gh-annotations",
@@ -461,6 +854,9 @@ def flag_specs() -> List[FlagSpec]:
             "Choose off|on|auto GitHub annotations.",
             "MODE",
             FlagGroup.REPORTING,
+            ValueKind.CHOICE,
+            annotations_choices(),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         # Session state.
         FlagSpec(
@@ -471,6 +867,13 @@ def flag_specs() -> List[FlagSpec]:
             "Use this project configuration file.",
             "PATH",
             FlagGroup.SESSION_STATE,
+            ValueKind.PATH,
+            List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR
+            | Subcommand.DEBUG,
         ),
         FlagSpec(
             "--no-config",
@@ -480,6 +883,13 @@ def flag_specs() -> List[FlagSpec]:
             "Disable project configuration discovery.",
             "",
             FlagGroup.SESSION_STATE,
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR
+            | Subcommand.DEBUG,
         ),
         FlagSpec(
             "--lf",
@@ -489,6 +899,9 @@ def flag_specs() -> List[FlagSpec]:
             "Run only entries from the last-failed state.",
             "",
             FlagGroup.SESSION_STATE,
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         FlagSpec(
             "--last-failed",
@@ -498,6 +911,9 @@ def flag_specs() -> List[FlagSpec]:
             "Run only entries from the last-failed state.",
             "",
             FlagGroup.SESSION_STATE,
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         FlagSpec(
             "--ff",
@@ -507,6 +923,9 @@ def flag_specs() -> List[FlagSpec]:
             "Run last-failed entries before the rest.",
             "",
             FlagGroup.SESSION_STATE,
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         FlagSpec(
             "--failed-first",
@@ -516,6 +935,9 @@ def flag_specs() -> List[FlagSpec]:
             "Run last-failed entries before the rest.",
             "",
             FlagGroup.SESSION_STATE,
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         # General.
         FlagSpec(
@@ -526,6 +948,9 @@ def flag_specs() -> List[FlagSpec]:
             "List node ids without running tests.",
             "",
             FlagGroup.GENERAL,
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         FlagSpec(
             "-h",
@@ -535,6 +960,13 @@ def flag_specs() -> List[FlagSpec]:
             "Show this help and exit.",
             "",
             FlagGroup.GENERAL,
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR
+            | Subcommand.DEBUG,
         ),
         FlagSpec(
             "--help",
@@ -544,6 +976,13 @@ def flag_specs() -> List[FlagSpec]:
             "Show this help and exit.",
             "",
             FlagGroup.GENERAL,
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR
+            | Subcommand.DEBUG,
         ),
         FlagSpec(
             "--version",
@@ -553,5 +992,11 @@ def flag_specs() -> List[FlagSpec]:
             "Show the version and exit.",
             "",
             FlagGroup.GENERAL,
+            ValueKind.NONE,
+            List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR,
         ),
     ]

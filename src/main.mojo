@@ -47,6 +47,7 @@ from mtest.cli import (
     help_text,
     host_platform_label,
     parse_args,
+    render_completions,
     run_doctor,
     run_init,
     run_new,
@@ -179,8 +180,8 @@ def _write_direct(text: String, fd: Int) -> Bool:
 
     The one path for every byte `main` writes outside a reporter: help,
     version, the doctor lines, `new` and `init`'s artifact lines, the resolved
-    configuration, both `collect` listings, the `debug` plan, the annotation
-    epilogue, and every diagnostic. Ignoring `SIGPIPE` first is what keeps a
+    configuration, a rendered completion script, both `collect` listings, the
+    `debug` plan, the annotation epilogue, and every diagnostic. Ignoring `SIGPIPE` first is what keeps a
     consumer that stops reading — `mtest collect --format json | head -1` —
     from killing this process at signal 13, a status outside every documented
     exit domain (§9, §16, §27, §28, §29). Such a write reports delivered: the
@@ -258,8 +259,8 @@ def _exit_with_output(text: String, fd: Int, code: Int):
     """Write one command's whole output, then exit with `code` — or 3.
 
     For the commands whose product IS this text and that hold no run
-    resources: help, version, `doctor`, `config show`, and a successful `new`
-    or `init`. A destination that could not take the bytes leaves the caller
+    resources: help, version, `doctor`, `config show`, `completions`, and a
+    successful `new` or `init`. A destination that could not take the bytes leaves the caller
     with nothing, so `code` is no longer an honest answer and 3 (§9's
     environment/I-O failure) replaces it. A departed consumer is not that
     case and keeps `code`.
@@ -1117,6 +1118,22 @@ def main():
         _exit_with_output(help_text(), 1, 0)
     if result.is_version():
         _exit_with_output(version_text() + "\n", 1, 0)
+    # Beside help and version, and above the invocation root for the same
+    # reason: a completion script is rendered from the command-line spec tables
+    # alone, so no root, no project configuration, and no file on disk can
+    # change a byte of it. The parser already refused every shell this build
+    # does not render, so the raise below is unreachable through argv; it is
+    # caught rather than declared away because the renderer is also a library
+    # call, and an escaping error would leave on exit 1 — the one code that
+    # reads as "your test failed".
+    if result.is_completions():
+        var script = String("")
+        try:
+            script = render_completions(result.shell)
+        except e:
+            _eprintln(String(e))
+            exit(EXIT_USAGE_ERROR)
+        _exit_with_output(script, 1, 0)
     if result.is_doctor():
         var diagnosis = run_doctor(result, MTEST_VERSION)
         var rendered = String("")

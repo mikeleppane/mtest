@@ -11,24 +11,34 @@ source — one test file, or the handful of files a project starts from — and
 return lines and a code rather than printing or exiting.
 
 The parser is table-driven. `flag_specs()` is the single source of truth for
-every accepted spelling: its arity, whether it repeats, and its owned help text,
-value placeholder, and group. It parses the full v1 grammar, and the grouped
-help output is generated from that same table.
+every accepted spelling: its arity, whether it repeats, its owned help text,
+value placeholder, and group, and — as a typed `ValueKind` plus a closed choice
+list — what its value may be, and — as a `Subcommand` bitmask — which heads
+accept it. It parses the full v1 grammar, and the grouped help output is
+generated from that same table; `subcommand_specs()` is the matching table for
+the `Subcommands` block.
 
 The layer also owns `build_flags_string`, which renders a `RunnerConfig` back
 into the shell-ready flag string the console echoes in a run-failure
-`reproduce:` line.
+`reproduce:` line, and `render_completions`, which renders those same two
+tables into a bash, zsh, or fish completion script so a shell offers exactly
+what the active command accepts.
 
 The public surface is re-exported here so callers write
 `from mtest.cli import parse_args, ParseResult, build_flags_string, ...`.
 """
 from mtest.cli.build_flags import build_flags_string
+from mtest.cli.completions import completion_shells, render_completions
 from mtest.cli.flag_spec import (
     FlagGroup,
     FlagId,
     FlagSpec,
+    Subcommand,
+    SubcommandSpec,
+    ValueKind,
     flag_group_name,
     flag_specs,
+    subcommand_specs,
 )
 from mtest.cli.parse_result import ParseResult
 from mtest.cli.doctor import (

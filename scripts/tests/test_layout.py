@@ -651,13 +651,27 @@ class PlatformTaskOverrideTests(unittest.TestCase):
         "[tasks]\n"
         'asan-check = "python -m scripts.checks.memory.asan"\n'
         'ci-memory = "python -m scripts.checks.memory.host_support"\n'
+        'completions-check = "python -m scripts.checks.completion_shells"\n'
+        "completions-check-host-shells = "
+        '"python -m scripts.checks.completion_shells --allow-missing"\n'
     )
     LEGITIMATE = (
         "\n[target.linux-64.dependencies]\n"
         'valgrind = "==3.27.1"\n'
         "\n[target.linux-64.tasks]\n"
         'ci-memory = { depends-on = ["asan-check"] }\n'
+        "\n[target.osx-arm64.tasks]\n"
+        'completions-check = { depends-on = ["completions-check-host-shells"] }\n'
     )
+
+    def test_the_allowlist_is_the_two_reasoned_overrides(self) -> None:
+        # A pin rather than a restatement: widening this set is what buys the
+        # right to substitute a lane for one platform, so it is a decision that
+        # has to arrive in a diff beside its reason.
+        self.assertEqual(
+            layout.PLATFORM_TASK_OVERRIDES,
+            {"ci-memory", "completions-check"},
+        )
 
     def _manifest(self, body: str) -> Path:
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))

@@ -104,8 +104,8 @@ naming it. Anything outside this set is an override shape nothing in this
 repository has reasoned about.
 """
 
-PLATFORM_TASK_OVERRIDES = {"ci-memory"}
-"""The ONLY task any platform table may override.
+PLATFORM_TASK_OVERRIDES = {"ci-memory", "completions-check"}
+"""The ONLY tasks any platform table may override.
 
 A `[target.<platform>.tasks]` entry silently REPLACES the base task of the same
 name. Pixi prints no warning, and every other view of the floor (`pixi run ci`,
@@ -118,10 +118,19 @@ under `[target.linux-64.tasks]` leaves `pixi run asan-check` exiting 0 having ru
 `/bin/true`, with the hosted "ASan + LSan" required check still green.
 Reproduced on this checkout.
 
-`ci-memory` is the one legitimate member: on linux-64 it is replaced by a
-dependency edge onto the two memory lanes, and the base command
-(`scripts/checks/memory/host_support.py`) fails closed if that override is ever
-LOST. This check covers the other direction, an override that is ever GAINED.
+Two members are legitimate, and both are dependency edges onto a task that
+exists in its own right, never a substituted command:
+
+- `ci-memory`: on linux-64 it becomes the two memory lanes, and the base
+  command (`scripts/checks/memory/host_support.py`) fails closed if that
+  override is ever LOST.
+- `completions-check`: on osx-arm64 it becomes `completions-check-host-shells`,
+  which runs the same harness with `--allow-missing`, because the hermetic zsh
+  and fish are declared for linux-64 alone. Losing that override does not go
+  quiet either — it makes the macOS floor demand shells that platform has no
+  dependency for.
+
+This check covers the other direction, an override that is ever GAINED.
 """
 
 DIRECT_SCRIPT_COMMAND_RE = re.compile(

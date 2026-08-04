@@ -1,6 +1,6 @@
 ---
 name: validating-mtest
-description: Use when QA-testing or acceptance-testing the mtest runner, validating it against docs/cli-contract.md, verifying exit codes / outcome labels / determinism / the availability matrix / the collect stream / the source-writing subcommands, checking a change or a Mojo re-pin did not break a user-facing promise, or hunting for silent or contract-violating behavior before a release.
+description: Use when QA-testing or acceptance-testing the mtest runner, validating it against docs/cli-contract.md, verifying exit codes / outcome labels / determinism / the availability matrix / the collect stream / the source-writing subcommands, checking a change or a Mojo re-pin did not break a user-facing promise, or hunting for silent or contract-violating behavior before a release. Also covers clean-room validation in Docker — when a probe needs a shell or tool the host lacks, a fresh-machine install path, or an environment (non-root, hostile umask, empty PATH) this workstation cannot produce.
 ---
 
 # Validating mtest
@@ -59,7 +59,7 @@ commands below for local iteration; `pixi run contract-check-strict` is
 what actually gates a merge.
 
 ```bash
-pixi run contract-check --                 # rebuild-if-stale, run all ~60 checks
+pixi run contract-check --                 # rebuild-if-stale, run the whole roster
 pixi run contract-check -- -k select       # filter by check name
 pixi run contract-check -- --strict        # safety-critical SKIP fails
 pixi run contract-check -- -v --keep       # dump streams, keep scaffold
@@ -183,6 +183,84 @@ produced a false positive (`--color always` vs `NO_COLOR`) from a bad
 invocation; a second clean run retracted it. **Rebuild first** — an all-green run
 against a stale binary proves nothing.
 
+## Clean-room validation with Docker
+
+Some promises cannot be observed from this workstation: a shell the host does
+not have, a *fresh user's* install path, or behavior that depends on an
+environment the developer's box has already been configured out of. Reach for a
+container there — and only there.
+
+**Reach for Docker when:**
+
+- **The probe needs a tool the host lacks.** The fish completion script shipped
+  unparsed by anything for a full task because `fish` is not installed here.
+  `docker run --rm -v "$PWD":/w:ro debian:stable-slim` with
+  `apt-get install -y zsh fish` parses all three in under a minute.
+- **The claim is about a fresh machine.** "The rendered completion script works
+  when a user sources it" is a statement about a box that has never seen this
+  repo. A pristine image is the only honest oracle for it; your shell has
+  history, rc files, and a warm `PATH`.
+- **The probe would otherwise install onto the developer's machine.** Mount the
+  repo **read-only** (`:ro`) and install inside the container. Nothing you do
+  there can touch the host tree.
+- **You need an environment the host cannot produce** — a different locale, a
+  non-root user with a hostile `umask`, a directory the process genuinely cannot
+  write, an empty `PATH`.
+
+**Do NOT reach for Docker when:**
+
+- **`pixi` already provides the tool.** A conda-forge dependency under
+  `[target.linux-64.dependencies]` installs into the project's `.pixi/`, not
+  system-wide — it does not "mess up the machine" either, and it is the route CI
+  can reproduce. Docker is the fallback when a package will not solve, not the
+  default.
+- **The property is host-dependent in a way Linux cannot fake.** A container
+  cannot stand in for the macOS lane: `/tmp` is not a symlink to `/private/tmp`
+  there, and an ext4/overlay filesystem is case-**sensitive**, so a
+  case-insensitive destination collision (the APFS defect class) is
+  unreproducible. Those belong on the real macOS CI lane; a green container run
+  proves nothing about them.
+
+**Container traps that manufacture false findings:**
+
+- **You are root by default.** Every permission-refusal probe — `chmod 0500` on
+  a parent, an unwritable destination, a read-only directory — is a **no-op for
+  root**, so the failure you meant to provoke never happens and the run comes
+  back green. Pass `--user "$(id -u):$(id -g)"`, or drop privileges inside.
+  **Drop them after the image is built, never at `docker run` time for a
+  container that still has to install anything**: `--user` also strips the
+  privilege `apt-get` needs, so the same flag that makes a permission probe
+  meaningful makes provisioning fail. Install as root in the `Dockerfile`, then
+  run the probe with `--user`. That cost a round when the fish scripts were
+  first driven headlessly.
+- **Mount read-only unless you mean to write.** `-v "$PWD":/w:ro` is the
+  default posture; a writable mount lets a container-side build scribble
+  root-owned artifacts into the host tree.
+- **The binary must match the container's architecture and libc.** Mounting a
+  locally built `build/mtest` into an image works only when both are the same
+  arch and the image's glibc is new enough. If it will not run, build inside.
+- **Bare `apt-get` output is noise.** Redirect it; an installer's progress lines
+  buried a real parse error more than once.
+
+**Recipes that work headlessly** (no TTY, no interactive shell):
+
+```bash
+# bash: drive the completion function directly
+bash -c 'source ./mtest.bash
+  COMP_WORDS=(mtest -q doctor --retr); COMP_CWORD=3
+  _mtest_complete; printf "%s\n" "${COMPREPLY[@]}"'
+
+# fish: complete -C computes candidates for a command line
+fish -c 'source ./mtest.fish; complete -C "mtest --collect-only --"'
+
+# zsh: needs a pseudo-terminal — zpty is the only reliable route
+```
+
+Assert the candidate **set**, not a substring of the script's text: a renderer
+test that greps for `--collect-only` passes even if the entire feature is
+deleted, because that string is also just a flag spelling. This is the same
+exact-sets discipline the rest of this skill applies to `collect` output.
+
 ## Validation matrix (what the oracle asserts)
 
 Every row below is a check in `scripts/qa/contract.py` unless marked *(manual)*.
@@ -210,6 +288,7 @@ Every row below is a check in `scripts/qa/contract.py` unless marked *(manual)*.
 | collect stream *(manual)* | `--format lines` **byte-identical** to the flagless listing; JSON node order == lines order; whole stream byte-identical across runs; terminal `exit_code` == process exit at 0/1/2/3/5; a usage error emits **no stream at all**; stdout carries stream bytes only | 16 |
 | debug *(manual)* | two `build:`/`run:` lines, then the debuggee's own status (a crasher exits 139 with no band); paste both lines back and they work; every out-of-grammar flag → 4, reporter refusals naming the reason; `[report]` keys write nothing and `lastrun` stays `cmp`-clean; a malformed doc is still 4 | 28 |
 | new / init *(manual)* | `new` refuses `::`, a non-`.mojo` name, an uncollectable basename, and an existing target (4), and what it writes **passes**; `init` re-run is an all-skip at 0, its workflow diffs clean against the first `docs/ci.md` YAML fence, and every `.gitignore` decision agrees with real `git check-ignore` | 29 |
+| completions | each shell renders and **parses** (`bash -n`/`zsh -n`/`fish -n`); a missing, repeated, or unrenderable operand → 4, and so does anything past one operand and `-h`; a closed pipe leaves 0 and an unwritable stdout gives 3. Beyond the oracle, `pixi run completions-check` drives the rendered scripts in real shells and asserts the **readline buffer after TAB**, not a candidate list — every defect this feature shipped said the right thing and did the wrong one | 30 |
 
 Still worth a *manual* probe beyond the oracle: `--collect-only` alias
 equivalence; exclusion winning over `--gate`/explicit operand (§12); valid
