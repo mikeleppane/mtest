@@ -597,9 +597,12 @@ ci-memory = { depends-on = ["asan-check", "valgrind-check"] }
 # `completions-check` runs on both platforms -- but the hermetic zsh and fish
 # are declared for linux-64 alone, and a require-all run would make the macOS
 # floor unsatisfiable rather than informative. Here the name resolves to the
-# allow-missing arm, which checks whatever shells the host provides and says
-# which it skipped. The coverage contract that makes this honest rather than a
-# hole is stated in the harness's own docstring: linux-64, local and hosted, is
-# where all three shells are proven.
+# allow-missing arm, which checks whatever shells the host can actually drive
+# and says which it skipped and why. "Can drive" rather than "has": macOS
+# ships bash 3.2, which has neither `compopt` nor `$READLINE_LINE`, so the
+# harness reports it the way it reports an absent shell instead of failing
+# five rows against it. The coverage contract that makes this honest rather
+# than a hole is stated in the harness's own docstring: linux-64, local and
+# hosted, is where all three shells are proven.
 [target.osx-arm64.tasks]
 completions-check = { depends-on = ["completions-check-host-shells"] }

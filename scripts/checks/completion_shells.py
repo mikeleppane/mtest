@@ -10,7 +10,8 @@ was never what was wrong -- the line the shell produced from it was.
 
 So this gate asks the shells: `bash -n`/`zsh -n`/`fish -n` over the rendered
 script, five bash rows whose readline buffer after TAB is the assertion, three
-rules asserted in all three shells, and one hostile value nothing may evaluate.
+rules asserted in all three shells, and three hostile values -- one per shell --
+that nothing may evaluate.
 It is a confidence gate rather than an exhaustive matrix, and says nothing
 about how a candidate list is displayed, about other shells, or about any shape
 not in the tables below. A defect found later earns a new row here.
@@ -65,8 +66,9 @@ BUFFER_PROBES: tuple[tuple[str, str, str, str], ...] = (
     # A completed directory keeps its separator and takes no trailing space.
     ("bash", "soledir", "mtest --report md:", "mtest --report md:reports/"),
     # zsh has no headless API, so it asserts the candidate rows' three rules
-    # here: a sole candidate lands with a terminating space, which proves both
-    # what was offered and that nothing else was.
+    # here. A sole candidate landing with a terminating space proves what was
+    # offered; it does not prove nothing else was, because zsh inserts the
+    # unambiguous part of a shared prefix the same way.
     ("zsh", "probe", "mtest -q doctor --retr", "mtest -q doctor --retries "),
     ("zsh", "probe", "mtest config ", "mtest config show "),
     ("zsh", "probe", "mtest completions z", "mtest completions zsh "),
@@ -83,8 +85,36 @@ CANDIDATE_PROBES: tuple[tuple[str, tuple[str, ...], tuple[str, ...] | None], ...
 )
 """Rows run in bash and fish, the two shells with a headless completion API."""
 
-INJECTION_LINE = "mtest --report md:$(touch {marker})"
-"""A hostile value under the one arm that assembles its candidates by hand."""
+INJECTION_PROBES: tuple[tuple[str, str, str], ...] = (
+    # Shell, the hostile line, and the benign twin of the same word shape.
+    #
+    # The twin is what makes the row an assertion. A hostile value completes
+    # to nothing whichever arm reads it, so "no marker and no candidates"
+    # would pass just as well from the generic head arm -- which is what the
+    # first version of this row did, because its payload carried a space,
+    # `read -r -a` split it into three words, and `prev` became `md:$(touch`.
+    # The twin differs from the hostile line only in the value, so a candidate
+    # from the twin proves this shape reaches the prefix arm, and the marker
+    # then says what that arm does with a hostile one.
+    ("bash", "mtest --report md:$(touch${{IFS}}{marker})", "mtest --report md:"),
+    ("fish", "mtest --report md:(touch {marker})", "mtest --report md:"),
+)
+"""The `--report` prefix arm, the one place candidates are assembled by hand."""
+
+ZSH_INJECTION = "mtest --report 'md:$(touch {marker})' --retr"
+"""zsh's own row, and it puts the payload in a word already typed.
+
+Not in the word being completed, and that is not a weaker choice but the only
+honest one: stock zsh expands a command substitution inside the current word
+during completion, with no completion script loaded at all, so a current-word
+row would fail against zle rather than against anything rendered here. What
+this row covers is the position that is this script's own -- a value zsh has
+tokenized and handed over, which the head resolution compares and `_arguments`
+parses. That is also the shell whose actions are evaluated, which is why it
+gets a row rather than a note.
+"""
+
+_ZSH_INJECTION_BUFFER = "mtest --report 'md:$(touch {marker})' --retries "
 
 _BUFFER_REPORT = re.compile(r"BUF\{(.*?)\}END", re.DOTALL)
 _CONTROL_SEQUENCE = re.compile(
@@ -98,24 +128,61 @@ Generous: a flaky timeout in a blocking gate is worse than a slow one.
 """
 
 
-def resolve_shells(allow_missing: bool) -> tuple[dict[str, str], tuple[str, ...]]:
-    """Locate every shell, failing unless `allow_missing` permits a gap.
+def unusable_reason(shell: str, executable: str) -> str | None:
+    """Why `shell` cannot run these rows, or None if it can.
+
+    Present is not the same as usable, and the case that motivates this is
+    macOS: `bash` is not a pixi dependency, so `shutil.which` there finds
+    `/bin/bash`, which Apple froze at 3.2 to stay off GPLv3. Every bash row
+    depends on `compopt` and `$READLINE_LINE`, both bash 4.0, so that shell
+    cannot run them at all -- and a gate that only knows "absent" would fail
+    the `--allow-missing` arm the osx-arm64 override exists to keep
+    satisfiable. It is reported the way an absent shell is, so the floor
+    narrows and says so instead of breaking.
+
+    zsh and fish need nothing this new: `zle`, `zpty`, and `complete -C`
+    predate every release either project still names.
+    """
+    if shell != "bash":
+        return None
+    done = _run([executable, "-c", "printf %s ${BASH_VERSINFO[0]-0}"])
+    major = done.stdout.decode("utf-8", "replace").strip()
+    if major.isdigit() and int(major) >= 4:
+        return None
+    return f"bash {major or '?'}.x has no compopt and no $READLINE_LINE (needs 4.0+)"
+
+
+def resolve_shells(allow_missing: bool) -> tuple[dict[str, str], dict[str, str]]:
+    """Locate every usable shell, failing unless `allow_missing` permits a gap.
+
+    Returns:
+        The usable shells by name, and the reason each unusable one was
+        dropped -- "not installed", or what makes the installed one too old.
 
     Raises:
-        AssertionError: If a shell is missing and `allow_missing` is false.
+        AssertionError: If a shell is unusable and `allow_missing` is false.
     """
-    found = {
-        shell: path for shell in SHELLS if (path := shutil.which(shell)) is not None
-    }
-    missing = tuple(shell for shell in SHELLS if shell not in found)
-    if missing and not allow_missing:
+    found: dict[str, str] = {}
+    skipped: dict[str, str] = {}
+    for shell in SHELLS:
+        path = shutil.which(shell)
+        if path is None:
+            skipped[shell] = "not installed"
+            continue
+        reason = unusable_reason(shell, path)
+        if reason is not None:
+            skipped[shell] = reason
+            continue
+        found[shell] = path
+    if skipped and not allow_missing:
+        detail = ", ".join(f"{shell} ({why})" for shell, why in skipped.items())
         raise AssertionError(
-            f"missing shell(s) {list(missing)}: this gate proves the rendered "
+            f"unusable shell(s): {detail}. This gate proves the rendered "
             "scripts work by running them, so a shell it cannot run is coverage "
             "it does not have. Install them (linux-64 declares zsh and fish) or "
             "pass --allow-missing, the off-platform escape hatch"
         )
-    return found, missing
+    return found, skipped
 
 
 def _run(
@@ -320,9 +387,9 @@ def check_completion_shells(allow_missing: bool = False) -> None:
         AssertionError: If a shell is missing under require-all, a script does
             not parse, or any row fails.
     """
-    found, missing = resolve_shells(allow_missing)
-    for shell in missing:
-        print(f"completions-check: SKIP {shell} - not installed (--allow-missing)")
+    found, skipped = resolve_shells(allow_missing)
+    for shell, why in skipped.items():
+        print(f"completions-check: SKIP {shell} - {why} (--allow-missing)")
     failures: list[str] = []
     with tempfile.TemporaryDirectory(prefix="mtest-completions-") as raw_root:
         root = Path(raw_root)
@@ -360,14 +427,49 @@ def check_completion_shells(allow_missing: bool = False) -> None:
                         f"{shell}: {line!r} withheld {sorted(set(offers) - got)}; "
                         f"it offered {sorted(got)}"
                     )
+        for shell, hostile_form, twin in INJECTION_PROBES:
+            if shell not in found:
+                continue
+            sole = root / "solefile"
             marker = root / f"OWNED-{shell}"
-            hostile = INJECTION_LINE.format(marker=marker)
-            candidates(shell, found[shell], scripts[shell], probe, hostile)
+            offered = candidates(shell, found[shell], scripts[shell], sole, twin)
+            if offered != ("md:tail.md",):
+                failures.append(
+                    f"{shell}: the injection twin {twin!r} offered "
+                    f"{sorted(offered)}, so the hostile row below proves nothing"
+                )
+            hostile = hostile_form.format(marker=marker)
+            # bash splits the line on whitespace and nothing else, so a
+            # payload carrying a space is a different word shape from the twin
+            # and lands in a different arm. fish tokenizes parentheses and
+            # quotes, so its payload may hold one.
+            if shell == "bash" and len(hostile.split()) != len(twin.split()):
+                failures.append(
+                    f"bash: {hostile!r} splits into {len(hostile.split())} words "
+                    f"and the twin into {len(twin.split())}, so they reach "
+                    "different arms and the row proves nothing"
+                )
+            candidates(shell, found[shell], scripts[shell], sole, hostile)
             if marker.exists():
                 failures.append(f"{shell}: completing {hostile!r} executed the value")
+
+        if "zsh" in found:
+            marker = root / "OWNED-zsh"
+            typed = ZSH_INJECTION.format(marker=marker)
+            actual = buffer_after(
+                "zsh", found["zsh"], scripts["zsh"], root, "probe", typed
+            )
+            expected = _ZSH_INJECTION_BUFFER.format(marker=marker)
+            if actual != expected:
+                failures.append(
+                    f"zsh: {typed!r} + TAB left {actual!r}, expected {expected!r}"
+                )
+            if marker.exists():
+                failures.append(f"zsh: completing beside {typed!r} executed the value")
         print(
             f"completions-check: ran {len(BUFFER_PROBES)} buffer row(s), "
-            f"{len(CANDIDATE_PROBES)} candidate row(s) per shell, and injection"
+            f"{len(CANDIDATE_PROBES)} candidate row(s) per shell, and "
+            f"{len(INJECTION_PROBES) + 1} injection row(s)"
         )
     if failures:
         raise AssertionError(

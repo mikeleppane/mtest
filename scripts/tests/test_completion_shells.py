@@ -29,12 +29,22 @@ def _which(*absent: str) -> Callable[[str], str | None]:
     return lambda name: None if name in absent else f"/bin/{name}"
 
 
+def _bash_major(major: str) -> Callable[..., subprocess.CompletedProcess[bytes]]:
+    """Answer the version probe with `major` without starting a shell."""
+    return lambda *_a, **_k: subprocess.CompletedProcess(
+        args=["bash"], returncode=0, stdout=major.encode(), stderr=b""
+    )
+
+
 class ShellResolutionTests(unittest.TestCase):
     def test_every_declared_shell_is_resolved(self) -> None:
-        with mock.patch.object(shutil, "which", side_effect=_which()):
-            found, missing = completion_shells.resolve_shells(False)
+        with (
+            mock.patch.object(shutil, "which", side_effect=_which()),
+            mock.patch.object(subprocess, "run", side_effect=_bash_major("5")),
+        ):
+            found, skipped = completion_shells.resolve_shells(False)
 
-        self.assertEqual(missing, ())
+        self.assertEqual(skipped, {})
         self.assertEqual(
             found, {shell: f"/bin/{shell}" for shell in completion_shells.SHELLS}
         )
@@ -42,16 +52,43 @@ class ShellResolutionTests(unittest.TestCase):
     def test_a_missing_shell_fails_the_gate_by_default(self) -> None:
         with (
             mock.patch.object(shutil, "which", side_effect=_which("fish")),
-            self.assertRaisesRegex(AssertionError, r"missing shell\(s\) \['fish'\]"),
+            mock.patch.object(subprocess, "run", side_effect=_bash_major("5")),
+            self.assertRaisesRegex(AssertionError, r"fish \(not installed\)"),
         ):
             completion_shells.resolve_shells(False)
 
     def test_allow_missing_narrows_coverage_without_disabling_the_gate(self) -> None:
-        with mock.patch.object(shutil, "which", side_effect=_which("fish")):
-            found, missing = completion_shells.resolve_shells(True)
+        with (
+            mock.patch.object(shutil, "which", side_effect=_which("fish")),
+            mock.patch.object(subprocess, "run", side_effect=_bash_major("5")),
+        ):
+            found, skipped = completion_shells.resolve_shells(True)
 
-        self.assertEqual(missing, ("fish",))
+        self.assertEqual(skipped, {"fish": "not installed"})
         self.assertEqual(sorted(found), ["bash", "zsh"])
+
+    def test_a_bash_too_old_for_the_rows_is_skipped_like_an_absent_one(self) -> None:
+        """MacOS ships bash 3.2, which has neither `compopt` nor READLINE_LINE.
+
+        Present-but-unusable used to be indistinguishable from present, so the
+        osx-arm64 `--allow-missing` arm would have failed five bash rows
+        instead of narrowing to the shells it can actually drive.
+        """
+        with (
+            mock.patch.object(shutil, "which", side_effect=_which()),
+            mock.patch.object(subprocess, "run", side_effect=_bash_major("3")),
+        ):
+            found, skipped = completion_shells.resolve_shells(True)
+
+        self.assertEqual(sorted(found), ["fish", "zsh"])
+        self.assertIn("bash 3.x", skipped["bash"])
+
+        with (
+            mock.patch.object(shutil, "which", side_effect=_which()),
+            mock.patch.object(subprocess, "run", side_effect=_bash_major("3")),
+            self.assertRaisesRegex(AssertionError, r"bash \(bash 3\.x"),
+        ):
+            completion_shells.resolve_shells(False)
 
 
 class SubprocessTests(unittest.TestCase):
