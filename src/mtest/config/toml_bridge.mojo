@@ -15,6 +15,7 @@ from mtest.config.value_validation import (
     parse_color_value,
     parse_nonnegative_decimal,
     parse_precompile_value,
+    parse_report_style_value,
     parse_show_output_value,
     parse_verbosity_value,
     parse_worker_count,
@@ -712,6 +713,9 @@ def _convert_document(
                 and key != "junit-xml"
                 and key != "json"
                 and key != "gh-annotations"
+                and key != "md"
+                and key != "html"
+                and key != "style"
             ):
                 var value = _get(table, key)
                 return _unknown(
@@ -720,7 +724,7 @@ def _convert_document(
                     key,
                     (
                         "color, show-output, verbosity, durations, junit-xml,"
-                        " json, or gh-annotations"
+                        " json, gh-annotations, md, html, or style"
                     ),
                     _got(value),
                 )
@@ -820,6 +824,45 @@ def _convert_document(
                 )
             config.gh_annotations = parsed.value()
             config.saw_gh_annotations = True
+
+        if _contains(table, "md"):
+            var value = _get(table, "md")
+            if not value.is_string() or value.string_value.byte_length() == 0:
+                return _invalid(
+                    source,
+                    "[report] key 'md'",
+                    "non-empty string",
+                    _got(value),
+                )
+            config.report_md_dest = value.string_value.copy()
+            config.saw_report_md = True
+
+        if _contains(table, "html"):
+            var value = _get(table, "html")
+            if not value.is_string() or value.string_value.byte_length() == 0:
+                return _invalid(
+                    source,
+                    "[report] key 'html'",
+                    "non-empty string",
+                    _got(value),
+                )
+            config.report_html_dest = value.string_value.copy()
+            config.saw_report_html = True
+
+        if _contains(table, "style"):
+            var value = _get(table, "style")
+            var parsed = parse_report_style_value("")
+            if value.is_string():
+                parsed = parse_report_style_value(value.string_value)
+            if not parsed:
+                return _invalid(
+                    source,
+                    "[report] key 'style'",
+                    "concise|full",
+                    _got(value),
+                )
+            config.report_style = parsed.value()
+            config.saw_report_style = True
 
     if _contains(document, "override"):
         var overrides = _get(document, "override")

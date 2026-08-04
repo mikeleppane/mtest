@@ -180,6 +180,7 @@ class ValgrindCheckTests(unittest.TestCase):
                 "tests/unit/test_report_escape.mojo",
                 "tests/unit/test_report_junit.mojo",
                 "tests/unit/test_report_junit_finalize.mojo",
+                "tests/unit/test_report_writer.mojo",
             ),
         )
         for source in valgrind_check.REPORT_TESTS:
@@ -248,6 +249,8 @@ class ValgrindCliProbeTests(unittest.TestCase):
             "CLI_PROBE_MODULE",
             "CLI_PROBE_STREAM",
             "CLI_PROBE_REPORT",
+            "CLI_PROBE_MD",
+            "CLI_PROBE_HTML",
             "CLI_PROBE_KEYWORD",
             "CLI_PROBE_EXIT",
             "CLI_PROBE_ESCAPED_LINE",

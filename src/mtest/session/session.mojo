@@ -45,10 +45,13 @@ from mtest.discover import discover
 from mtest.exec import ExecRuntime, interrupt_requested
 from mtest.model import (
     Event,
+    NotRunFacts,
+    NotRunRecord,
     Outcome,
     Summary,
     TerminalFacts,
     TestCounts,
+    classify_not_run,
     exit_code_for,
     resolve_exit_code,
 )
@@ -57,7 +60,7 @@ from mtest.platform import (
     process_id,
     write_all_bytes_fd_status,
 )
-from mtest.report import ReportCoordinator
+from mtest.report import ReportCoordinator, ReportFinalizeContext
 from mtest.select import NamedTarget, parse_operands, selection_active
 from mtest.select.shuffle import shuffle_strings
 from mtest.session.attempt import _run_one
@@ -166,6 +169,22 @@ def _warn_cache_off[
         return
     reporter.handle(Event.warning("cache-off", ctx.disable_reason))
     ctx.warned = True
+
+
+def _is_gate_file(gate_files: List[String], path: String) -> Bool:
+    """Whether `path` is one of the run's gate files, by exact match.
+
+    Args:
+        gate_files: The run's gate paths. Not mutated.
+        path: The path to test.
+
+    Returns:
+        True iff `path` equals one entry of `gate_files`.
+    """
+    for gate in gate_files:
+        if gate == path:
+            return True
+    return False
 
 
 @fieldwise_init
@@ -1015,6 +1034,35 @@ def run_session[
     if reporter.stream_failed():
         stream_dead = True
 
+    # Classify why each selected file (gate and run alike, casualty_files by
+    # construction) never produced a tallied verdict — one record per entry,
+    # including a file that DID run, because a consumer with verdict knowledge
+    # (the report writer's row index) filters rather than this call. Latched
+    # causal facts are checked first, in their causal order: a latched earlier
+    # cause explains the stop even when the exit-code resolver later escalates
+    # for delivery, because these rows answer "why did this file not run"
+    # while `resolve_exit_code` separately answers "can the verdict be
+    # trusted". A dead stream ranks below every latched cause and above the
+    # bare gate-membership heuristic, so a gate file that never ran because the
+    # stream died is a delivery casualty, not a gate casualty, when no gate
+    # actually aborted.
+    var not_run_records = List[NotRunRecord]()
+    for i in range(len(casualty_files)):
+        var path = casualty_files[i]
+        var reason = classify_not_run(
+            NotRunFacts(
+                interrupt_latched=interrupt_latched,
+                internal_error=internal_error,
+                drift=drift,
+                precompile_failed=precompile_failed,
+                gate_abort=gate_abort,
+                stream_dead=stream_dead,
+                is_gate_file=_is_gate_file(disc.gate_files, path),
+            )
+        )
+        not_run_records.append(NotRunRecord(path, reason))
+    reporter.note_not_run_records(not_run_records)
+
     # Synthesize a `[not-run]` row into the JUnit report for every selected file
     # that never produced a verdict (interrupt/gate-abort/--maxfail casualties),
     # then finalize the report: assemble in node-id order, verify-write the
@@ -1060,11 +1108,58 @@ def run_session[
     var flaky_files = summary.count_of(Outcome.FLAKY)
     var flaky_failed = config.fail_on_flaky and flaky_files > 0
 
-    # One delivery fact, three ways to earn it: a dead machine stream, a JUnit
-    # report that could not be published, and a console that would not take the
-    # run's report. The model does not distinguish them, and neither should
-    # this — each means a terminal artifact the caller asked for never arrived.
-    var delivery_failed = stream_dead or finalize_failed or console_dead
+    # The single wall-clock snapshot, taken HERE rather than after the resolve
+    # so the run report's own writing time is excluded from the duration the
+    # report and the terminal record both carry. What now sits between this
+    # reading and the `session_finished` emit is the report finalize and the
+    # resolver call; the resolver is pure and allocation-free, so the only
+    # measurable exclusion is the report I/O, which is the point.
+    # `summary.counts` is copied before `summary^` moves at that emit.
+    var wall = Float64(perf_counter_ns() - started_ns) / 1.0e9
+
+    # Publish the run report's sinks. Like the JUnit finalize above, this
+    # happens BEFORE the delivery fact is computed, because a sink that could
+    # not be published is one of the facts that fact is made of. Each sink
+    # reports independently and each failure is announced on its own, ahead of
+    # the terminal record, exactly as the JUnit finalization failure is.
+    var report_ctx = ReportFinalizeContext(
+        counts=summary.counts.copy(),
+        tests_passed=test_totals.passed,
+        tests_failed=test_totals.failed,
+        tests_skipped=test_totals.skipped,
+        flaky_files=flaky_files,
+        built_files=built_files,
+        cached_files=cached_files,
+        wall_seconds=wall,
+        interrupted=interrupt_latched,
+        drift=drift,
+        workers=resolved_workers,
+        shuffle=config.shuffle,
+        shuffle_seed=shuffle_seed,
+        shard_label=shard_label,
+    )
+    var report_fin = reporter.finalize_reports(report_ctx)
+    if report_fin.md_failed:
+        reporter.handle(Event.warning("report-finalize", report_fin.md_detail))
+    if report_fin.html_failed:
+        reporter.handle(
+            Event.warning("report-finalize", report_fin.html_detail)
+        )
+
+    # One delivery fact, five ways to earn it: a dead machine stream, a JUnit
+    # report that could not be published, a console that would not take the
+    # run's report, and either run-report sink that could not be published. The
+    # model does not distinguish them, and neither should this — each means a
+    # terminal artifact the caller asked for never arrived. Every term is also
+    # read a second time through this same variable, which guards the delivery
+    # re-resolve below: dropping one here would silently disarm that guard too.
+    var delivery_failed = (
+        stream_dead
+        or finalize_failed
+        or console_dead
+        or report_fin.md_failed
+        or report_fin.html_failed
+    )
 
     var code = resolve_exit_code(
         TerminalFacts(
@@ -1078,7 +1173,6 @@ def run_session[
         )
     )
 
-    var wall = Float64(perf_counter_ns() - started_ns) / 1.0e9
     reporter.handle(
         Event.session_finished(
             summary^,

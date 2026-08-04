@@ -17,7 +17,7 @@ from mtest.cli import (
     help_text,
     parse_args,
 )
-from mtest.config import AnnotationsMode, ShardMode
+from mtest.config import AnnotationsMode, ReportStyle, ShardMode
 
 
 @fieldwise_init
@@ -34,7 +34,7 @@ struct InvRow(Copyable, Movable):
 
 
 def frozen_inventory() -> List[InvRow]:
-    """Every flag spelling in the v1 contract, transcribed by hand.
+    """Every flag spelling the command-line contract carries, by hand.
 
     Every field is a contract fact authored independently from `flag_specs()`.
     `help_label` is the complete label for the physical help row, so aliases
@@ -329,6 +329,25 @@ def frozen_inventory() -> List[InvRow]:
             "Delete .mtest-cache (cache/last-run state), run.",
             "--cache-clear",
         ),
+        # `--report FORMAT:PATH` and `--report-style concise|full`: now served.
+        InvRow(
+            "--report",
+            1,
+            True,
+            "FORMAT:PATH",
+            FlagGroup.REPORTING,
+            "Write an md or html run report (once each).",
+            "--report FORMAT:PATH",
+        ),
+        InvRow(
+            "--report-style",
+            1,
+            False,
+            "STYLE",
+            FlagGroup.REPORTING,
+            "Choose concise|full report detail.",
+            "--report-style STYLE",
+        ),
         # `--gh-annotations off|on|auto`: now served.
         InvRow(
             "--gh-annotations",
@@ -527,8 +546,8 @@ def test_help_renders_every_option_once_with_values_and_aligned_help() raises:
     for line_slice in rendered.split("\n"):
         if String(line_slice).startswith("  -"):
             option_rows += 1
-    # Five two-spelling aliases collapse 42 spellings into 37 physical rows.
-    assert_equal(option_rows, 37)
+    # Five two-spelling aliases collapse 44 spellings into 39 physical rows.
+    assert_equal(option_rows, 39)
     for row in frozen_inventory():
         var expected_line = "  " + row.help_label
         for _ in range(30 - expected_line.count_codepoints()):
@@ -835,6 +854,117 @@ def test_junit_xml_has_no_stdout_dash_form() raises:
     var argv: List[String] = ["--junit-xml", "report.xml", "-"]
     var r = parse_args(argv)
     assert_equal(r.config.junit_dest, "report.xml")
+
+
+def test_report_md_and_html_are_served_when_parents_exist() raises:
+    # `--report` is served once per format: each destination lands in its own
+    # config field, and the two are independent.
+    var argv: List[String] = [
+        "--report",
+        "md:tests/run.md",
+        "--report",
+        "html:tests/run.html",
+    ]
+    var r = parse_args(argv)
+    assert_equal(r.config.report_md_dest, "tests/run.md")
+    assert_equal(r.config.report_html_dest, "tests/run.html")
+
+
+def test_report_bare_filename_is_served() raises:
+    var argv: List[String] = ["--report", "md:run.md"]
+    var r = parse_args(argv)
+    assert_equal(r.config.report_md_dest, "run.md")
+
+
+def test_report_default_is_absent_for_both_formats() raises:
+    var argv: List[String] = ["tests/"]
+    var r = parse_args(argv)
+    assert_equal(r.config.report_md_dest, "")
+    assert_equal(r.config.report_html_dest, "")
+
+
+def test_report_unknown_format_is_usage_error() raises:
+    var argv: List[String] = ["--report", "xml:r.xml"]
+    with assert_raises(contains="'--report' wants md:PATH or html:PATH"):
+        _ = parse_args(argv)
+
+
+def test_report_without_a_separator_is_usage_error() raises:
+    var argv: List[String] = ["--report", "run.md"]
+    with assert_raises(contains="'--report' wants md:PATH or html:PATH"):
+        _ = parse_args(argv)
+
+
+def test_report_empty_path_is_usage_error() raises:
+    var argv: List[String] = ["--report", "md:"]
+    with assert_raises(contains="'--report' wants md:PATH or html:PATH"):
+        _ = parse_args(argv)
+
+
+def test_report_repeated_format_is_usage_error() raises:
+    var argv: List[String] = ["--report", "md:a.md", "--report", "md:b.md"]
+    with assert_raises(contains="'--report md:' was given twice"):
+        _ = parse_args(argv)
+
+
+def test_report_repeated_html_format_is_usage_error() raises:
+    var argv: List[String] = [
+        "--report",
+        "html:a.html",
+        "--report",
+        "html:b.html",
+    ]
+    with assert_raises(contains="'--report html:' was given twice"):
+        _ = parse_args(argv)
+
+
+def test_report_nonexistent_parent_is_usage_error() raises:
+    var argv: List[String] = ["--report", "md:/no/such/dir/run.md"]
+    with assert_raises(contains="destination parent directory does not exist"):
+        _ = parse_args(argv)
+
+
+def test_report_has_no_stdout_dash_form() raises:
+    # There is no `-` destination: the document is renamed atomically, never
+    # streamed, so `md:-` is an ordinary relative path named `-`.
+    var argv: List[String] = ["--report", "md:-"]
+    var r = parse_args(argv)
+    assert_equal(r.config.report_md_dest, "-")
+
+
+def test_report_style_is_served_and_defaults_to_concise() raises:
+    var argv: List[String] = ["tests/"]
+    assert_true(parse_args(argv).config.report_style == ReportStyle.CONCISE)
+    var full: List[String] = ["--report-style", "full"]
+    assert_true(parse_args(full).config.report_style == ReportStyle.FULL)
+    var concise: List[String] = ["--report-style", "concise"]
+    assert_true(parse_args(concise).config.report_style == ReportStyle.CONCISE)
+
+
+def test_report_style_bad_value_is_usage_error() raises:
+    var argv: List[String] = ["--report-style", "verbose"]
+    with assert_raises(contains="'--report-style' wants 'concise' or 'full'"):
+        _ = parse_args(argv)
+
+
+def test_report_style_is_last_wins() raises:
+    var argv: List[String] = [
+        "--report-style",
+        "full",
+        "--report-style",
+        "concise",
+    ]
+    assert_true(parse_args(argv).config.report_style == ReportStyle.CONCISE)
+
+
+def test_report_style_alone_is_inert_but_accepted() raises:
+    # The `--fail-on-flaky` inertness precedent: a style with no destination
+    # parses cleanly and changes nothing.
+    var argv: List[String] = ["--report-style", "full", "tests/"]
+    var r = parse_args(argv)
+    assert_true(r.config.report_style == ReportStyle.FULL)
+    assert_equal(r.config.report_md_dest, "")
+    assert_equal(r.config.report_html_dest, "")
 
 
 def test_gh_annotations_auto_is_served_and_default() raises:

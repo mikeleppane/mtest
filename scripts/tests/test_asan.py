@@ -46,6 +46,7 @@ class AsanCheckTests(unittest.TestCase):
                 "tests/unit/test_report_json_reporter.mojo",
                 "tests/unit/test_report_junit.mojo",
                 "tests/unit/test_report_junit_finalize.mojo",
+                "tests/unit/test_report_writer.mojo",
             ),
         )
         self.assertGreater(len(asan_check.TESTS), 0)
@@ -225,6 +226,17 @@ class AsanCliProbeTests(unittest.TestCase):
         self.assertEqual(
             command[junit_index + 1], str(scratch / asan_check.CLI_PROBE_REPORT)
         )
+        # Both run-report formats, so the lane drives the writer's whole
+        # transfer twice over: a spool of fragments, a temp per destination, a
+        # document streamed through a BORROWED descriptor, one close, one
+        # rename.
+        self.assertEqual(
+            [command[i + 1] for i, flag in enumerate(command) if flag == "--report"],
+            [
+                f"md:{scratch / asan_check.CLI_PROBE_MD}",
+                f"html:{scratch / asan_check.CLI_PROBE_HTML}",
+            ],
+        )
         self.assertNotIn("--collect-only", command)
 
     def test_cli_probe_tree_carries_config_and_one_module(self) -> None:
@@ -393,6 +405,13 @@ class AsanCliProbeOracleTests(unittest.TestCase):
         (scratch / asan_check.CLI_PROBE_REPORT).write_text(
             self.REPORT.format(total=1), encoding="utf-8"
         )
+        row = f"{asan_check.CLI_PROBE_TREE}/{asan_check.CLI_PROBE_MODULE}"
+        (scratch / asan_check.CLI_PROBE_MD).write_text(
+            f"# mtest report\n\n| {row} | FAIL |\n", encoding="utf-8"
+        )
+        (scratch / asan_check.CLI_PROBE_HTML).write_text(
+            f"<!doctype html>\n<code>{row}</code>\n</html>\n", encoding="utf-8"
+        )
 
     REPORT = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -478,6 +497,87 @@ class AsanCliProbeOracleTests(unittest.TestCase):
                     "ASan",
                 )
 
+    def test_an_unpublished_run_report_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            scratch = Path(raw_tmp)
+            self._tree(scratch)
+            (scratch / asan_check.CLI_PROBE_MD).unlink()
+            with self.assertRaisesRegex(SystemExit, "published no markdown"):
+                asan_check.check_cli_probe_output(
+                    asan_check.CLI_PROBE_EXIT,
+                    asan_check.CLI_PROBE_ESCAPED_LINE,
+                    scratch,
+                    "ASan",
+                )
+
+    def test_a_run_report_in_the_wrong_format_is_rejected(self) -> None:
+        """One destination holding the other's bytes.
+
+        The failure a shared spool of fragments makes possible.
+        """
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            scratch = Path(raw_tmp)
+            self._tree(scratch)
+            (scratch / asan_check.CLI_PROBE_HTML).write_text(
+                (scratch / asan_check.CLI_PROBE_MD).read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(SystemExit, "not assembled into its own"):
+                asan_check.check_cli_probe_output(
+                    asan_check.CLI_PROBE_EXIT,
+                    asan_check.CLI_PROBE_ESCAPED_LINE,
+                    scratch,
+                    "ASan",
+                )
+
+    def test_a_run_report_describing_another_run_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            scratch = Path(raw_tmp)
+            self._tree(scratch)
+            (scratch / asan_check.CLI_PROBE_MD).write_text(
+                "# mtest report\n\n| some/other.mojo | FAIL |\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(SystemExit, "describes some run other"):
+                asan_check.check_cli_probe_output(
+                    asan_check.CLI_PROBE_EXIT,
+                    asan_check.CLI_PROBE_ESCAPED_LINE,
+                    scratch,
+                    "ASan",
+                )
+
+    def test_a_raw_control_byte_inside_a_run_report_is_rejected(self) -> None:
+        """The escaping question asked of the document rather than the band."""
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            scratch = Path(raw_tmp)
+            self._tree(scratch)
+            body = (scratch / asan_check.CLI_PROBE_MD).read_text(encoding="utf-8")
+            (scratch / asan_check.CLI_PROBE_MD).write_text(
+                body + "\x1b[0m", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(SystemExit, "raw ESC byte"):
+                asan_check.check_cli_probe_output(
+                    asan_check.CLI_PROBE_EXIT,
+                    asan_check.CLI_PROBE_ESCAPED_LINE,
+                    scratch,
+                    "ASan",
+                )
+
+    def test_an_unclosed_html_run_report_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            scratch = Path(raw_tmp)
+            self._tree(scratch)
+            body = (scratch / asan_check.CLI_PROBE_HTML).read_text(encoding="utf-8")
+            (scratch / asan_check.CLI_PROBE_HTML).write_text(
+                body.replace("</html>\n", ""), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(SystemExit, "not a closed document"):
+                asan_check.check_cli_probe_output(
+                    asan_check.CLI_PROBE_EXIT,
+                    asan_check.CLI_PROBE_ESCAPED_LINE,
+                    scratch,
+                    "ASan",
+                )
+
     def test_clean_probe_output_is_accepted(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             scratch = Path(raw_tmp)
@@ -491,6 +591,7 @@ class AsanCliProbeOracleTests(unittest.TestCase):
 
         self.assertIn("NDJSON", detail)
         self.assertIn("JUnit", detail)
+        self.assertIn("run reports md+html published", detail)
 
 
 class AsanMainProbeRosterTests(unittest.TestCase):

@@ -142,6 +142,23 @@ def test_gh_annotations_with_collect_is_usage_error_even_off() raises:
         _ = parse_args(argv2)
 
 
+def test_report_with_collect_is_usage_error() raises:
+    var argv: List[String] = ["collect", "--report", "md:r.md"]
+    with assert_raises(contains="--report"):
+        _ = parse_args(argv)
+    var again: List[String] = ["collect", "--report", "html:r.html"]
+    with assert_raises(contains="run-only"):
+        _ = parse_args(again)
+
+
+def test_report_style_with_collect_is_usage_error() raises:
+    # Refused on PROVISION, like every other run-only reporting knob: a
+    # listing has no report for a style to shape.
+    var argv: List[String] = ["collect", "--report-style", "full"]
+    with assert_raises(contains="--report-style"):
+        _ = parse_args(argv)
+
+
 def test_timeout_with_collect_is_allowed() raises:
     var argv: List[String] = ["collect", "--timeout", "5"]
     var r = parse_args(argv)

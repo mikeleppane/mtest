@@ -199,6 +199,7 @@ only `--ci VALUE` beside them (§29).
 | `-s`, `--show-output MODE` | ✓ | — | — | — |
 | `--durations N` | ✓ | — | — | — |
 | `--junit-xml PATH`, `--gh-annotations` | ✓ | — | — | — |
+| `--report FORMAT:PATH`, `--report-style STYLE` | ✓ | — | — | — |
 | `--json PATH\|-` | ✓ | — | — | — |
 | `--format lines\|json` | — | ✓ | — | — |
 | `-q`, `-v` | ✓ | ✓ | ✓ | accepted, inert |
@@ -819,8 +820,8 @@ grow:
 | 0 | the session ran; every selected test's outcome is PASS or SKIP (exclusions allowed) |
 | 1 | at least one selected outcome is FAIL, CRASH, TIMEOUT, COMPILE-ERROR, COMPILE-TIMEOUT, MALFORMED-SUITE, or PRECOMPILE-ERROR; or the session would otherwise exit 0 and, under `--fail-on-flaky` (§13), counted at least one FLAKY file |
 | 2 | interrupted (SIGINT/SIGTERM); a partial summary is printed |
-| 3 | internal `mtest` error — including protocol drift (a report present but off-grammar) and an environment/I-O failure such as a runtime report-destination open/write failure (a `--json` destination that cannot be opened at session start, or whose stream write later fails — a fatal abort; or a `--junit-xml` target that cannot be created at session start, or whose report cannot be finalized and renamed onto PATH), or a direct write to stdout or stderr that the destination could not take at all (a closed descriptor, a full filesystem — anything but a departed consumer, below) |
-| 4 | pre-run usage error (unknown flag, bad value, nonexistent path, an explicit operand of a file type mtest cannot run (a FIFO, socket, or device, §5), a path discovery cannot inspect (§5), unknown node id, forbidden build argument, mutually exclusive `--config`/`--no-config`, `--seed` without `--shuffle`, `--shuffle` beside `--lf`/`--ff` (§18), a flag applied to a subcommand it does not belong to (§4) — a run-only flag `collect` marks `—`, `--format` outside `collect`, or any run, build, selection, state, or reporter flag under `doctor` — a `--format` value that is neither `lines` nor `json`, a selected project config that is missing, unreadable, malformed, or has an invalid key/value, a syntactically invalid `--json` or `--junit-xml` report destination — an empty value or a nonexistent parent directory, the machine-stdout conflict — `--json -` without an explicit `--gh-annotations off`, since the byte-pure stream and the annotation tail cannot share stdout, or a `--cache-clear` target mtest can see and cannot prove it owns, or can prove and cannot delete, §8.5 — a target it cannot characterize at all is treated as absent and exits `0`) — detected **before any test runs** |
+| 3 | internal `mtest` error — including protocol drift (a report present but off-grammar) and an environment/I-O failure such as a runtime report-destination open/write failure (a `--json` destination that cannot be opened at session start, or whose stream write later fails — a fatal abort; or a `--junit-xml` target that cannot be created at session start, or whose report cannot be finalized and renamed onto PATH; or a `--report` target that cannot be created at session start, or whose document cannot be finalized and renamed onto PATH), or a direct write to stdout or stderr that the destination could not take at all (a closed descriptor, a full filesystem — anything but a departed consumer, below) |
+| 4 | pre-run usage error (unknown flag, bad value, nonexistent path, an explicit operand of a file type mtest cannot run (a FIFO, socket, or device, §5), a path discovery cannot inspect (§5), unknown node id, forbidden build argument, mutually exclusive `--config`/`--no-config`, `--seed` without `--shuffle`, `--shuffle` beside `--lf`/`--ff` (§18), a flag applied to a subcommand it does not belong to (§4) — a run-only flag `collect` marks `—`, `--format` outside `collect`, or any run, build, selection, state, or reporter flag under `doctor` — a `--format` value that is neither `lines` nor `json`, a selected project config that is missing, unreadable, malformed, or has an invalid key/value, a syntactically invalid `--json` or `--junit-xml` report destination — an empty value or a nonexistent parent directory, a `--report` value that is not `md:PATH` or `html:PATH` or names a format twice or a nonexistent parent directory, a `--report-style` value that is neither `concise` nor `full`, two active file destinations that name the same file (§15.5), the machine-stdout conflict — `--json -` without an explicit `--gh-annotations off`, since the byte-pure stream and the annotation tail cannot share stdout, or a `--cache-clear` target mtest can see and cannot prove it owns, or can prove and cannot delete, §8.5 — a target it cannot characterize at all is treated as absent and exits `0`) — detected **before any test runs** |
 | 5 | no tests collected (empty walk, `-k` matched nothing, everything excluded) |
 
 **Precedence** when outcomes mix. A usage error aborts before the run with 4.
@@ -1228,6 +1229,12 @@ events, never from a parse of the console text.
   nonexistent parent directory) is a pre-run usage error (exit 4, §9); a runtime
   creation or finalization failure (an unwritable or vanished target) is an
   internal error (exit 3, §9). Report destinations are not root-constrained.
+  A PATH that names the same file as another active destination — a `--json`
+  file destination or either `--report` path — is a pre-run usage error
+  (exit 4), because the other writer would replace this document or be replaced
+  by it depending only on finalization order. The comparison is by resolved
+  identity, so `out.xml` and `./out.xml` are one destination; the full rule is
+  stated once in §15.5.
 
 ### 15.3 GitHub annotations — `--gh-annotations MODE`
 
@@ -1354,12 +1361,91 @@ this section summarizes it.
   this differs from JUnit's atomic write, §15.2); report destinations are not
   root-constrained. A syntactically bad destination is a pre-run usage error
   (exit 4, §9); a runtime open failure is a pre-run internal error (exit 3, §9).
+  A `PATH` that names the same file as another active destination — `--junit-xml`
+  or either `--report` path — is a pre-run usage error (exit 4), because this
+  stream truncates at session start and would destroy whatever the other writer
+  was going to publish there. `--json -` is exempt: stdout has no filesystem
+  identity to collide with. The comparison is by resolved identity, so `out.json`
+  and `./out.json` are one destination; the full rule is stated once in §15.5.
 - **Versioning.** Version 1 freezes the framing, header, event names, field
   meanings, and vocabularies. Growth is additive (new fields and kinds);
   consumers **must ignore** unknown fields and kinds. A removal or
   meaning-change bumps the header version; the version lives only on the header.
 
 `--json` is a **run-only** flag in v1 (§4).
+
+---
+
+### 15.5 Run report — `--report FORMAT:PATH`, `--report-style STYLE`
+
+`--report` is **served**: it writes one self-contained document describing the
+whole run — a summary table, a per-file section for the files that need a
+second look, the reasons any selected file never ran, and a machine index of
+reproduce commands. It is assembled from the runner's own typed events, exactly
+as the JUnit report is, never from a parse of the console text.
+
+- **Grammar.** `--report FORMAT:PATH`, where `FORMAT` is `md` or `html` and
+  `PATH` is a non-empty filesystem path. The value splits at the **first** `:`,
+  so a path may contain further colons. The flag is repeatable **once per
+  format**: `md` and `html` together compose two documents from one run, while a
+  second destination for a format already given is a usage error (exit 4) rather
+  than a silent last-wins. An unknown format, a missing separator, and an empty
+  path are usage errors too.
+- **Destinations.** There is no `-` stdout form: the document is assembled and
+  renamed atomically, never streamed live, so `md:-` names an ordinary relative
+  file called `-`. The parent directory must already exist. Nothing at `PATH` is
+  touched until the final rename, so a prior report survives every failure. A
+  unique temp is created **in the target directory** at session start, which is
+  what proves that directory writable before any file is built. Report
+  destinations are not root-constrained.
+- **Destination collisions.** Every active file destination — `--json PATH`,
+  `--junit-xml PATH`, and both `--report` paths — must name a different file.
+  Two of them naming one file is a usage error (exit 4) detected before the run,
+  because each writer would otherwise truncate or rename over the other's work
+  and which survived would depend on finalization order. The comparison is by
+  resolved identity rather than by spelling, so `out.md` and `./out.md` are the
+  one destination they are. Where the destination's own directory ignores case
+  — which the runner asks that directory rather than assuming from the platform
+  — `Run.out` and `run.out` are also the one destination they are there, and
+  the same refusal applies; where it does not, the two are the different files
+  they are and the pair is accepted. `--json -` is excluded: it names the
+  inherited stdout stream, which has no filesystem identity. The check belongs to the
+  commands that open destinations, so `config show` — which resolves without
+  touching the filesystem — renders a collision with both values' provenance and
+  never refuses (§27.1).
+- **`--report-style STYLE`.** `concise` (the default) or `full`, last-wins.
+  Under `concise` every file earns a summary row and only a file that needs a
+  second look earns a per-file section; under `full` every file earns both. The
+  flag is **inert without a resolved destination**: supplying it alone is
+  accepted and changes nothing, the `--fail-on-flaky` precedent.
+- **Both formats render one model.** Markdown and HTML are two renderings of the
+  same typed data, so the two documents describe the same run and differ only in
+  presentation. Untrusted text — a failure detail, a captured stream, a path —
+  is escaped for the structural position it lands in, and control bytes are
+  scalarized before that escaping — except that a captured stream and a failure
+  detail, which are rendered as multi-line blocks, deliberately keep their
+  literal LF and Tab so the block retains the shape the child produced. Every
+  other control byte, including a bare CR, is scalarized there too.
+- **Failure handling.** The two sinks are independent: a Markdown failure never
+  stops the HTML document from publishing, and neither ever replaces the report
+  already at the other's target. A destination that cannot be prepared at
+  session start is a pre-run internal error (exit 3, §9), and a report that
+  cannot be written, closed, or renamed at finalization is a delivery failure
+  that resolves the same way — a requested report that could not be produced is
+  an error, so even a green run exits 3.
+- **Permissions.** A published report carries the mode an ordinary new file
+  would get here — the `0666` an `open(2)` asks for, minus the process umask —
+  and not the `0600` of the temporary it was assembled in. A report is written
+  to be read by a CI job, a reviewer, or a web server, none of which run as the
+  runner's user. The mode is set on the temp before the rename, so there is no
+  window in which the published path is owner-readable only, and it is verified
+  by observing the file rather than by trusting the call. A filesystem that will
+  not apply it — one whose modes come from its mount options, or one that
+  refuses `chmod` outright — still receives the complete report, at whatever
+  mode it allowed. That is announced on stderr and changes no exit code: the
+  requested artifact was delivered, and an exit 3 would say it was not.
+
+`--report` and `--report-style` are **run-only** flags in v1 (§4).
 
 ---
 
@@ -1602,7 +1688,9 @@ file's result line carries an informal `SERIAL` marker (§15.1).
   on every platform, so a printed seed reproduces the order that produced a
   failure (§18); *(from 1.1)* `--fail-on-flaky` semantics and its position in
   the exit precedence (§13, §9); *(from 1.1)* the `--format` value set and
-  which subcommand it belongs to (§4, §16);
+  which subcommand it belongs to (§4, §16); *(from 1.1)* the `--report` value
+  grammar, its once-per-format repetition, the `--report-style` value set, and
+  the destination-collision refusal (§15.5);
   the JUnit mapping; the annotation shapes; the `--json` event stream schema
   (§15.4; normatively `docs/json-stream.md`) — its framing, header, event and
   field names, and token vocabularies, frozen at stream `version` 1 and
@@ -1871,6 +1959,9 @@ durations = 2  # (mtest.toml)
 # junit-xml = (unset)
 # json = (unset)
 gh-annotations = "auto"  # (default)
+# md = (unset)
+# html = (unset)
+style = "concise"  # (default)
 
 [[override]]
 files = "e2e/matrix/test_beta.mojo"  # (mtest.toml)
@@ -2019,8 +2110,9 @@ above — it only reports which of those surfaces are wired up yet.
 `debug`, `new`, `init`, `version`, and `help` subcommands (`--collect-only`
 too, as an alias that behaves as `collect`), plus `init`'s own `--ci VALUE`.
 `--shard` applies under both `run` and `collect`. `--json` (the machine event
-stream, §15.4), `--junit-xml` (the JUnit report, §15.2), and `--gh-annotations`
-(the CI annotation tail, §15.3) are served too — see §24.2 for how they are now
+stream, §15.4), `--junit-xml` (the JUnit report, §15.2), `--gh-annotations`
+(the CI annotation tail, §15.3), and `--report`/`--report-style` (the run
+report, §15.5) are served too — see §24.2 for how they are now
 reached. `--format lines|json` is served under `collect` and refused everywhere
 else (§4), with `lines` the default.
 `--no-cache`/`--cache-clear` act on the persistent build-artifact
@@ -2056,7 +2148,8 @@ code exist today. Section 27 separately covers the reachable `config show` and
   carries the same 2 the process exits with.
 - **3** — reachable via a spawn failure (the runner could not spawn `mojo` or
   a built binary), via protocol drift (a report present but off-grammar, §6)
-  in both `run` and `collect`, via runtime `--json` or `--junit-xml`
+  in both `run` and `collect`, via runtime `--json`, `--junit-xml`, or
+  `--report`
   report-destination failures (§9), and via undelivered primary output — a
   `collect` listing, or a run's console report, whose destination is closed or
   full. The console reaches it through the same delivery precedence a dead
@@ -2068,7 +2161,10 @@ code exist today. Section 27 separately covers the reachable `config show` and
   `lines` nor `json`, and `--format` outside `collect` at all; a selected
   config that is
   missing, unreadable, malformed, or invalid; a syntactically invalid `--json`
-  or `--junit-xml` destination; the `--json -`/annotations stdout conflict; and
+  or `--junit-xml` destination; a `--report` value outside `md:PATH`/`html:PATH`,
+  a repeated format, or a `--report-style` value outside `concise|full`; two
+  active file destinations naming one file; the `--json -`/annotations stdout
+  conflict; and
   a `--cache-clear` target that is a symlink, carries no deletion-authorization
   marker, or cannot be deleted (§8.5), all detected pre-run.
 
@@ -2088,6 +2184,21 @@ on a runtime creation failure). Unlike the stream, a spool failure never aborts
 mid-run; it surfaces at finalization, where the report is assembled and renamed
 atomically onto PATH (exit 3 on a finalization failure, with the prior report
 never truncated). The §9 causes are cited here, never restated.
+
+**`--report` reachability.** `--report FORMAT:PATH` is served (§15.5): it is
+parsed into a run-report writer composed beside the console, the stream, and the
+JUnit report, with one independent sink per requested format. Each destination
+is validated syntactically by pre-run resolved validation (exit 4 on a malformed
+value, a repeated format, or a nonexistent parent directory), every active file
+destination is checked against its siblings for a collision (exit 4), and a
+unique temp is created in each target directory at session start to prove it
+writable (exit 3 on a runtime creation failure). Like the JUnit report and
+unlike the stream, a spool failure never aborts mid-run; it surfaces at
+finalization, where each document is streamed, closed, and renamed atomically
+onto its PATH (exit 3 on a finalization failure, with the prior report never
+truncated), and a failure in one sink never stops the other from publishing.
+`--report-style` shapes those documents and is inert without a destination. The
+§9 causes are cited here, never restated.
 
 **`--gh-annotations` reachability.** `--gh-annotations off|on|auto` is served
 (§15.3): it is parsed into a self-gating annotations reporter composed beside the
@@ -2223,6 +2334,9 @@ durations = 0                    # integer >= 0
 junit-xml = "reports/junit.xml"
 json = "reports/events.ndjson"   # PATH or "-"
 gh-annotations = "auto"          # off | on | auto
+md = "reports/run.md"            # the Markdown run report's destination
+html = "reports/run.html"        # the HTML run report's destination
+style = "concise"                # concise | full
 
 [[override]]
 files = ["tests/gpu_*"]          # or one non-empty string
@@ -2242,6 +2356,11 @@ its limit. The budgets are sized above anything this schema can express — an
 exclude list of a thousand globs and dozens of `[[override]]` tables are both
 well inside them — so a configuration that is valid by the rules above is
 never refused for size. They are a ceiling on abuse, not a documented capacity.
+
+`[report] style` sits beside the console appearance keys and is not one of
+them: `verbosity`, `color`, and `show-output` shape what a human watching the
+live run sees, while `style` decides how much detail the WRITTEN `md`/`html`
+documents carry (§15.5) and is inert unless one of those destinations is set.
 
 Within a table, a key/value pair ends at the end of its line, as TOML 1.0
 requires: `timeout = 1 state = false` on one line is a parse error, not two

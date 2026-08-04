@@ -107,6 +107,15 @@ struct ActiveConfigKeys(Copyable, Movable):
     var gh_annotations: Bool
     """Whether GitHub annotations participate."""
 
+    var report_md_dest: Bool
+    """Whether the Markdown run-report destination participates."""
+
+    var report_html_dest: Bool
+    """Whether the HTML run-report destination participates."""
+
+    var report_style: Bool
+    """Whether the run-report detail style participates."""
+
     @staticmethod
     def run() -> ActiveConfigKeys:
         """Build the full run/build/report projection.
@@ -137,6 +146,9 @@ struct ActiveConfigKeys(Copyable, Movable):
             junit_dest=True,
             json_dest=True,
             gh_annotations=True,
+            report_md_dest=True,
+            report_html_dest=True,
+            report_style=True,
         )
 
     @staticmethod
@@ -174,6 +186,9 @@ struct ActiveConfigKeys(Copyable, Movable):
             junit_dest=False,
             json_dest=False,
             gh_annotations=False,
+            report_md_dest=False,
+            report_html_dest=False,
+            report_style=False,
         )
 
     @staticmethod
@@ -213,6 +228,9 @@ struct ActiveConfigKeys(Copyable, Movable):
             junit_dest=False,
             json_dest=False,
             gh_annotations=False,
+            report_md_dest=False,
+            report_html_dest=False,
+            report_style=False,
         )
 
 
@@ -433,6 +451,15 @@ def resolve_config(
     if file.saw_gh_annotations:
         config.gh_annotations = file.gh_annotations
         sources.gh_annotations = Provenance.MTEST_TOML
+    if file.saw_report_md:
+        config.report_md_dest = file.report_md_dest.copy()
+        sources.report_md_dest = Provenance.MTEST_TOML
+    if file.saw_report_html:
+        config.report_html_dest = file.report_html_dest.copy()
+        sources.report_html_dest = Provenance.MTEST_TOML
+    if file.saw_report_style:
+        config.report_style = file.report_style
+        sources.report_style = Provenance.MTEST_TOML
 
     if environment.mtest_mojo.byte_length() > 0:
         config.mojo_path = environment.mtest_mojo.copy()
@@ -505,6 +532,15 @@ def resolve_config(
     if overlay.saw_gh_annotations:
         config.gh_annotations = overlay.gh_annotations
         sources.gh_annotations = Provenance.CLI
+    if overlay.saw_report_md:
+        config.report_md_dest = overlay.report_md_dest.copy()
+        sources.report_md_dest = Provenance.CLI
+    if overlay.saw_report_html:
+        config.report_html_dest = overlay.report_html_dest.copy()
+        sources.report_html_dest = Provenance.CLI
+    if overlay.saw_report_style:
+        config.report_style = overlay.report_style
+        sources.report_style = Provenance.CLI
 
     var active_keys = ActiveConfigKeys.run()
     if config.collect:

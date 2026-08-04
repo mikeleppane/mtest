@@ -9,6 +9,7 @@ rule is discover's job.
 from mtest.config.annotations_mode import AnnotationsMode
 from mtest.config.color_when import ColorWhen
 from mtest.config.precompile import Precompile
+from mtest.config.report_style import ReportStyle
 from mtest.config.shard_mode import ShardMode
 from mtest.config.show_output import ShowOutput
 from mtest.config.verbosity import Verbosity
@@ -168,6 +169,24 @@ struct RunnerConfig(Copyable, Movable):
     (non-empty, with an existing parent directory); a runtime creation failure
     is the session's to resolve."""
 
+    var report_md_dest: String
+    """`--report md:PATH`: the Markdown run-report destination. Empty means no
+    Markdown report. Like `--junit-xml`, the destination is never truncated
+    live: the document is streamed into a unique temp created beside the target
+    at session start and renamed atomically onto the path only after a complete
+    write, so a prior report survives every failure."""
+
+    var report_html_dest: String
+    """`--report html:PATH`: the HTML run-report destination, empty when no
+    HTML report was requested. Written under the same never-truncate,
+    rename-at-the-end protocol as `report_md_dest`."""
+
+    var report_style: ReportStyle
+    """`--report-style concise|full`: how much detail each run report carries.
+    `CONCISE` (the default) gives every file a summary row and reserves a
+    per-file section for the files that need a second look; `FULL` gives every
+    file both. Inert when neither report destination is set."""
+
     var shuffle: Bool
     """`--shuffle`: randomize the order the run files execute in.
 
@@ -213,11 +232,13 @@ struct RunnerConfig(Copyable, Movable):
         `collect_json`, `last_failed`,
         `failed_first`, `fail_on_flaky`, `shuffle`, `no_cache`, and
         `cache_clear` are False; and
-        `keyword`, `json_dest`, and `junit_dest` are `""`, so no keyword
-        filter, event stream, or JUnit report is configured. The rest are
-        `mojo_path="mojo"`,
+        `keyword`, `json_dest`, `junit_dest`, `report_md_dest`, and
+        `report_html_dest` are `""`, so no keyword
+        filter, event stream, JUnit report, or run report is configured. The
+        rest are `mojo_path="mojo"`,
         `show_output=FAILURES`, `verbosity=NORMAL`, `color=AUTO`,
-        `shard_mode=HASH`, and `gh_annotations=AUTO`.
+        `shard_mode=HASH`, `gh_annotations=AUTO`, and
+        `report_style=CONCISE`.
 
         Returns:
             A freshly allocated config used as the lower-precedence input to
@@ -266,6 +287,9 @@ struct RunnerConfig(Copyable, Movable):
             json_dest="",
             gh_annotations=AnnotationsMode.AUTO,
             junit_dest="",
+            report_md_dest="",
+            report_html_dest="",
+            report_style=ReportStyle.CONCISE,
             shuffle=False,
             shuffle_seed=-1,
             no_cache=False,

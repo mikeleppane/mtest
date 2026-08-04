@@ -37,6 +37,9 @@ supports.
   honestly.
 - [Continuous integration](ci.md) — the workflow to paste, and the sharded
   variant of it.
+- [Run reports](reports.md) — the self-contained Markdown or HTML document
+  `--report` writes for a reader, and what happens when it cannot be
+  delivered.
 - [Command-line contract](cli-contract.md) — the frozen specification of every
   subcommand, flag, exit code, and stream.
 - [JSON event stream](json-stream.md) — the machine-readable stream, event by

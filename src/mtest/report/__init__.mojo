@@ -44,6 +44,7 @@ from mtest.report.collect_stream import (
 from mtest.report.console import ConsoleReporter
 from mtest.report.recording import RecordingReporter
 from mtest.report.fencing import resume_delimiter
+from mtest.report.escape import html_escape_attribute, html_escape_text
 from mtest.report.json_stream_reporter import (
     JsonStreamReporter,
     close_json_fd,
@@ -55,3 +56,45 @@ from mtest.report.junit_reporter import (
     open_junit_spool,
 )
 from mtest.report.annotations_reporter import AnnotationsReporter
+from mtest.report.report_text import (
+    md_code_fence,
+    md_code_span,
+    md_escape_cell,
+    normalize_detail,
+)
+from mtest.report.report_model import (
+    ReportFinalizeContext,
+    ReportHeaderFacts,
+    ReportRow,
+    ReportSectionInput,
+    needs_action,
+    outcome_label,
+)
+from mtest.report.report_md import (
+    md_file_section,
+    md_header,
+    md_machine_index,
+    md_not_run_heading,
+    md_not_run_line,
+    md_summary_row,
+    md_summary_table_header,
+)
+from mtest.report.file_accum import FileAccum, FileAccums
+from mtest.report.spool_dir import open_spool_dir
+from mtest.report.report_writer import (
+    REPORT_STYLE_CONCISE,
+    REPORT_STYLE_FULL,
+    ReportArtifact,
+    ReportFinalizeResult,
+    ReportWriter,
+    open_report_spool,
+)
+from mtest.report.report_html import (
+    html_document_close,
+    html_document_open,
+    html_file_section,
+    html_machine_index,
+    html_not_run_heading,
+    html_not_run_line,
+    html_summary_row,
+)

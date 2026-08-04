@@ -125,6 +125,22 @@ def test_debug_refuses_reporter_flags_with_the_reason() raises:
     ]
     with assert_raises(contains="no terminal record could be written"):
         _ = parse_args(annotations)
+    var report: List[String] = [
+        "debug",
+        "--report",
+        "md:run.md",
+        "tests/test_a.mojo::test_x",
+    ]
+    with assert_raises(contains="no terminal record could be written"):
+        _ = parse_args(report)
+    var style: List[String] = [
+        "debug",
+        "--report-style",
+        "full",
+        "tests/test_a.mojo::test_x",
+    ]
+    with assert_raises(contains="cannot be combined with 'debug'"):
+        _ = parse_args(style)
 
 
 def test_debug_refuses_color_because_nothing_renders() raises:

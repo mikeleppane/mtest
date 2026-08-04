@@ -3,11 +3,12 @@
 
 The site exists to navigate a reader to documents that are already gated: the
 command-line contract, the event-stream specification, the release runbook.
-Three pages cannot do their job by navigation alone — a landing page has to
+Four pages cannot do their job by navigation alone — a landing page has to
 show how the package is installed, a five-minute path has to show a test file
-and the run it produces, and the continuous-integration page has to show the
-workflow to paste — and each of those is a command or a captured output living
-somewhere other than the surface that owns it.
+and the run it produces, the continuous-integration page has to show the
+workflow to paste, and the run-report page has to show what the document it
+describes actually looks like — and each of those is a command or a captured
+output living somewhere other than the surface that owns it.
 
 A second copy of a command is the defect this repository keeps finding. A copy
 on a site page is executed by nothing and reviewed against nothing: it agrees
@@ -87,6 +88,7 @@ SITE_PAGES = (
     Path("docs/index.md"),
     Path("docs/getting-started.md"),
     Path("docs/ci.md"),
+    Path("docs/reports.md"),
 )
 """Every documentation-site page allowed to render a command or an output.
 
@@ -263,6 +265,13 @@ PARITY_BLOCKS = (
     ParityBlock(Path("docs/ci.md"), 0, "Run it in CI", 0),
     ParityBlock(Path("docs/ci.md"), 1, "Run it in CI", 1),
     ParityBlock(Path("docs/ci.md"), 2, "Run it in CI", 2),
+    # The run report: the invocation that writes both formats, and the three
+    # parts of the document a reader is shown — the summary table, one file
+    # section with its root-relative backtrace, and the machine index.
+    ParityBlock(Path("docs/reports.md"), 0, "Run reports", 0),
+    ParityBlock(Path("docs/reports.md"), 1, "Run reports", 1),
+    ParityBlock(Path("docs/reports.md"), 2, "Run reports", 2),
+    ParityBlock(Path("docs/reports.md"), 3, "Run reports", 3),
 )
 """Every mirrored block, paired with the README block that owns it.
 

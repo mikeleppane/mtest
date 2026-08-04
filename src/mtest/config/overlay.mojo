@@ -8,6 +8,7 @@ between an absent value and an explicitly supplied default.
 from mtest.config.annotations_mode import AnnotationsMode
 from mtest.config.color_when import ColorWhen
 from mtest.config.precompile import Precompile
+from mtest.config.report_style import ReportStyle
 from mtest.config.runner_config import RunnerConfig
 from mtest.config.show_output import ShowOutput
 from mtest.config.verbosity import Verbosity
@@ -153,6 +154,24 @@ struct CliOverlay(Copyable, Movable):
     var saw_gh_annotations: Bool
     """Whether argv supplied `--gh-annotations`."""
 
+    var report_md_dest: String
+    """The parsed Markdown run-report destination."""
+
+    var saw_report_md: Bool
+    """Whether argv supplied `--report md:PATH`."""
+
+    var report_html_dest: String
+    """The parsed HTML run-report destination."""
+
+    var saw_report_html: Bool
+    """Whether argv supplied `--report html:PATH`."""
+
+    var report_style: ReportStyle
+    """The parsed run-report detail style."""
+
+    var saw_report_style: Bool
+    """Whether argv supplied `--report-style`."""
+
     @staticmethod
     def default() -> CliOverlay:
         """An absent overlay with typed contract-default value slots.
@@ -205,6 +224,12 @@ struct CliOverlay(Copyable, Movable):
             saw_json=False,
             gh_annotations=AnnotationsMode.AUTO,
             saw_gh_annotations=False,
+            report_md_dest="",
+            saw_report_md=False,
+            report_html_dest="",
+            saw_report_html=False,
+            report_style=ReportStyle.CONCISE,
+            saw_report_style=False,
         )
 
     def fold(self, defaults: RunnerConfig) -> RunnerConfig:
@@ -275,4 +300,10 @@ struct CliOverlay(Copyable, Movable):
             config.json_dest = self.json_dest.copy()
         if self.saw_gh_annotations:
             config.gh_annotations = self.gh_annotations
+        if self.saw_report_md:
+            config.report_md_dest = self.report_md_dest.copy()
+        if self.saw_report_html:
+            config.report_html_dest = self.report_html_dest.copy()
+        if self.saw_report_style:
+            config.report_style = self.report_style
         return config^

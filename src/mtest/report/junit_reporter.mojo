@@ -34,9 +34,8 @@ step is the fragment file write, which is wrapped and latched as in the JSON
 stream reporter, after which the reporter goes silent. An inert reporter, the
 no-`--junit-xml` shape, owns no spool directory and does nothing.
 """
-from std.os import getenv, mkdir, remove
+from std.os import remove
 from std.os.path import basename, dirname
-from std.time import perf_counter_ns
 
 from mtest.model.events import (
     AttemptFinishedPayload,
@@ -50,6 +49,8 @@ from mtest.model.events import (
 from mtest.model.outcome import Outcome
 from mtest.model.test_result import TestResult
 from mtest.platform import process_id, rename_path
+from mtest.report.file_accum import FileAccums
+from mtest.report.spool_dir import open_spool_dir
 from mtest.report.junit import (
     CACHE_SUITE_NAME,
     JunitCase,
@@ -71,21 +72,14 @@ comptime _TERM_SIGNALED = 1
 comptime _TERM_TIMED_OUT = 2
 comptime _TERM_SPAWN_FAILED = 3
 
-# How many distinct spool-directory names one call may try before giving up.
-# Every candidate re-reads the nanosecond clock, so a repeat needs two readings
-# to land on the same nanosecond; the budget therefore guards against an
-# unusable temp base rather than a collision rate.
-comptime _SPOOL_ATTEMPTS = 64
-
 
 def _junit_nonce() -> String:
-    """A per-process token isolating this run's JUnit spool and temp paths.
+    """A per-process token isolating this run's JUnit temp paths.
 
     Two mtest processes writing the same `--junit-xml PATH`, which `--shard`
     makes plausible, must never collide on a temp path one's finalize is
-    renaming or a spool dir one's cleanup would delete. The process id is stable
-    within a run and distinct across concurrent runs, so it keys each
-    invocation's disposable paths apart.
+    renaming. The process id is stable within a run and distinct across
+    concurrent runs, so it keys each invocation's disposable paths apart.
 
     Returns:
         The process id, rendered in decimal.
@@ -96,36 +90,17 @@ def _junit_nonce() -> String:
 def open_junit_spool() raises -> String:
     """Create and return this run's private temp directory for suite fragments.
 
-    Deliberately avoids `std.tempfile.mkdtemp`: at the pinned toolchain its
-    candidate-name generator is unseeded, so every process walks the same name
-    sequence. In a shared `/tmp` those exact names already exist from earlier
-    runs, mkdtemp exhausts its internal attempts, and `--junit-xml` dies before
-    a single test is built.
-
-    The key here is instead a monotonic nanosecond reading taken fresh on every
-    attempt, with `mkdir`'s own atomic exclusive create as the arbiter, under a
-    `mtest-junit-<pid>-` prefix that ties a stray directory back to the run that
-    left it. The pid alone cannot be the key: pids recur across pid namespaces
-    and after wraparound, so a fixed per-pid stem walked in index order would
-    have to step over every leftover a previous same-pid run abandoned, which
-    against a persisted `/tmp` reproduces the budget exhaustion this function
-    exists to remove. A re-read clock cannot be walked into again.
-
-    Honors `TMPDIR`, then `TEMP`, then `TMP`, falling back to `/tmp`. That is the
-    same precedence `gettempdir()` applies behind the `mkdtemp()` this replaces,
-    so confining a run's scratch keeps working exactly as it did before.
+    A thin naming of `open_spool_dir`, which owns the creation protocol and the
+    reasoning behind it (no `mkdtemp`, a re-read clock per attempt, the
+    TMPDIR/TEMP/TMP precedence).
 
     Returns:
         The path of the freshly created, empty directory, mode 0o700. The
         caller owns it and is responsible for removing it.
 
     Raises:
-        Error: When no candidate could be created within the attempt budget,
-            because the temp base is missing, is not a directory, or is
-            unwritable. The message carries the last underlying failure
-            verbatim, since every one of those causes burns the whole budget
-            identically and only the errno text tells them apart. The caller
-            resolves this to the pre-run internal-error exit code.
+        Error: When no candidate could be created within the attempt budget.
+            The caller resolves this to the pre-run internal-error exit code.
 
     Examples:
 
@@ -135,36 +110,7 @@ def open_junit_spool() raises -> String:
     var rep = JunitReporter(open_junit_spool(), True)
     ```
     """
-    var base = getenv("TMPDIR", "")
-    if base == "":
-        base = getenv("TEMP", "")
-    if base == "":
-        base = getenv("TMP", "")
-    if base == "":
-        base = String("/tmp")
-    if base.byte_length() > 1 and base.endswith("/"):
-        base = String(base.removesuffix("/"))
-    var stem = base + "/mtest-junit-" + _junit_nonce() + "-"
-    # Seeded so the raise below is always well-formed; the budget is positive,
-    # so a real failure always overwrites this.
-    var last = String("no attempt was made")
-    for attempt in range(_SPOOL_ATTEMPTS):
-        var candidate = stem + String(perf_counter_ns()) + "-" + String(attempt)
-        try:
-            mkdir(candidate, 0o700)
-        except e:
-            last = String(e)
-            continue
-        return candidate^
-    raise Error(
-        "report: could not create a junit spool directory under '"
-        + base
-        + "' ("
-        + String(_SPOOL_ATTEMPTS)
-        + " attempts; last: "
-        + last
-        + ")"
-    )
+    return open_spool_dir("junit")
 
 
 @fieldwise_init
@@ -272,15 +218,6 @@ struct _AttemptRec(Copyable, Movable):
     var escalated: Bool
     var stdout_text: String
     var stderr_text: String
-
-
-@fieldwise_init
-struct _FileAccum(Copyable, Movable):
-    """The per-file state accumulated between FileStarted and FileFinished."""
-
-    var path: String
-    var tests: List[TestResult]
-    var attempts: List[_AttemptRec]
 
 
 @fieldwise_init
@@ -463,7 +400,7 @@ struct JunitReporter(Reporter):
     """A monotonic counter minting a unique fragment filename per suite."""
     var _index: List[_SpoolEntry]
     """One entry per spooled suite: order key, fragment path, and counts."""
-    var _accums: List[_FileAccum]
+    var _accums: FileAccums[_AttemptRec]
     """The in-flight per-file accumulators, keyed by path."""
     var _failed: Bool
     """The latch: set on the first fragment-write failure, then `handle` no-ops.
@@ -512,7 +449,7 @@ struct JunitReporter(Reporter):
         self._spool_dir = spool_dir
         self._counter = 0
         self._index = List[_SpoolEntry]()
-        self._accums = List[_FileAccum]()
+        self._accums = FileAccums[_AttemptRec].empty()
         self._failed = False
         self._context = String("")
         self._target_path = target_path
@@ -719,17 +656,17 @@ struct JunitReporter(Reporter):
         if not self._active or self._failed:
             return
         if e.kind == EventKind.FILE_STARTED:
-            self._reset_accum(e.data[FileStartedPayload].path)
+            self._accums.reset(e.data[FileStartedPayload].path)
             return
         if e.kind == EventKind.TEST_REPORTED:
             ref tr = e.data[TestReportedPayload]
-            var idx = self._ensure_accum(tr.path)
-            self._accums[idx].tests.append(tr.test.copy())
+            var idx = self._accums.ensure(tr.path)
+            self._accums.items[idx].tests.append(tr.test.copy())
             return
         if e.kind == EventKind.ATTEMPT_FINISHED:
             ref a = e.data[AttemptFinishedPayload]
-            var idx = self._ensure_accum(a.path)
-            self._accums[idx].attempts.append(
+            var idx = self._accums.ensure(a.path)
+            self._accums.items[idx].attempts.append(
                 _AttemptRec(
                     a.term_kind,
                     a.term_value,
@@ -801,49 +738,15 @@ struct JunitReporter(Reporter):
             )
         return assemble(root_name, frags)
 
-    def _accum_index(self, path: String) -> Int:
-        """The index of `path`'s accumulator, or -1 if none exists yet."""
-        for i in range(len(self._accums)):
-            if self._accums[i].path == path:
-                return i
-        return -1
-
-    def _ensure_accum(mut self, path: String) -> Int:
-        """The index of `path`'s accumulator, creating one if absent."""
-        var idx = self._accum_index(path)
-        if idx >= 0:
-            return idx
-        self._accums.append(
-            _FileAccum(path.copy(), List[TestResult](), List[_AttemptRec]())
-        )
-        return len(self._accums) - 1
-
-    def _reset_accum(mut self, path: String):
-        """Begin a fresh accumulator for `path`, discarding any stale one."""
-        var idx = self._accum_index(path)
-        if idx >= 0:
-            self._accums[idx].tests = List[TestResult]()
-            self._accums[idx].attempts = List[_AttemptRec]()
-            return
-        self._accums.append(
-            _FileAccum(path.copy(), List[TestResult](), List[_AttemptRec]())
-        )
-
-    def _drop_accum(mut self, path: String):
-        """Remove `path`'s accumulator once its suite has been rendered."""
-        var idx = self._accum_index(path)
-        if idx >= 0:
-            _ = self._accums.pop(idx)
-
     def _finish_file(mut self, e: FileFinishedPayload):
         """Render and spool the suite for one finished file (or drop it)."""
         # Selection-induced absences carry no suite at all.
         if e.outcome == Outcome.EXCLUDED or e.outcome == Outcome.DESELECTED:
-            self._drop_accum(e.path)
+            self._accums.drop(e.path)
             return
-        var idx = self._ensure_accum(e.path)
+        var idx = self._accums.ensure(e.path)
         var suite = self._suite_for_file(e, idx)
-        self._drop_accum(e.path)
+        self._accums.drop(e.path)
         self._spool(render_suite(suite), "suite " + e.path)
 
     def _suite_for_file(
@@ -866,8 +769,8 @@ struct JunitReporter(Reporter):
             return JunitSuite(e.path, e.duration_seconds, cases^, "", "")
 
         var failing_test_rows = 0
-        for i in range(len(self._accums[accum_idx].tests)):
-            var t = self._accums[accum_idx].tests[i].copy()
+        for i in range(len(self._accums.items[accum_idx].tests)):
+            var t = self._accums.items[accum_idx].tests[i].copy()
             if _is_failing_test(t):
                 failing_test_rows += 1
             cases.append(_case_for_test(t, cn))
@@ -915,8 +818,8 @@ struct JunitReporter(Reporter):
         termination.
         """
         var reruns = List[JunitRerun]()
-        for i in range(len(self._accums[accum_idx].attempts)):
-            var a = self._accums[accum_idx].attempts[i].copy()
+        for i in range(len(self._accums.items[accum_idx].attempts)):
+            var a = self._accums.items[accum_idx].attempts[i].copy()
             var d = _attempt_diag(a)
             reruns.append(
                 JunitRerun(
@@ -937,8 +840,8 @@ struct JunitReporter(Reporter):
         since the per-test rows already carry the verdict.
         """
         var reruns = List[JunitRerun]()
-        for i in range(len(self._accums[accum_idx].attempts)):
-            var a = self._accums[accum_idx].attempts[i].copy()
+        for i in range(len(self._accums.items[accum_idx].attempts)):
+            var a = self._accums.items[accum_idx].attempts[i].copy()
             var d = _attempt_diag(a)
             reruns.append(_rerun_from(d, False, a.stdout_text, a.stderr_text))
         return JunitCase("[attempts]", cn, False, _blank_primary(), reruns^)
@@ -953,7 +856,7 @@ struct JunitReporter(Reporter):
         order. When no non-final attempts were captured, the final outcome is
         the primary and there are no reruns.
         """
-        var n = len(self._accums[accum_idx].attempts)
+        var n = len(self._accums.items[accum_idx].attempts)
         var final_d = _outcome_diag(
             e, bounded_text_from_bytes(e.captured_stderr)
         )
@@ -967,11 +870,11 @@ struct JunitReporter(Reporter):
             )
         var reruns = List[JunitRerun]()
         for i in range(1, n):
-            var a = self._accums[accum_idx].attempts[i].copy()
+            var a = self._accums.items[accum_idx].attempts[i].copy()
             var d = _attempt_diag(a)
             reruns.append(_rerun_from(d, False, a.stdout_text, a.stderr_text))
         reruns.append(_rerun_from(final_d, False, "", ""))
-        var first_d = _attempt_diag(self._accums[accum_idx].attempts[0])
+        var first_d = _attempt_diag(self._accums.items[accum_idx].attempts[0])
         return JunitCase(
             "[attempts]", cn, True, _primary_from(first_d), reruns^
         )

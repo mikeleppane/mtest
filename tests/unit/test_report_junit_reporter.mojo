@@ -25,8 +25,8 @@ from mtest.model.events import Event
 from mtest.model.node_id import NodeId
 from mtest.model.outcome import Outcome
 from mtest.model.test_result import TestResult
+from mtest.report.spool_dir import _SPOOL_ATTEMPTS
 from mtest.report.junit_reporter import (
-    _SPOOL_ATTEMPTS,
     JunitReporter,
     open_junit_spool,
 )

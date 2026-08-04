@@ -36,7 +36,7 @@ cwd, getenv, file operations, and exit are ordinary program-level operations
 via `std`.
 """
 from std.os import getenv, listdir, remove, rmdir
-from std.os.path import dirname, exists, isdir
+from std.os.path import basename, dirname, exists, isdir
 from std.pathlib import cwd
 from std.sys import argv, exit
 
@@ -45,6 +45,7 @@ from mtest.cli import (
     ParseResult,
     build_flags_string,
     help_text,
+    host_platform_label,
     parse_args,
     run_doctor,
     run_init,
@@ -63,6 +64,7 @@ from mtest.config import (
     FileConfig,
     LastRunState,
     Provenance,
+    ReportStyle,
     ResolvedConfig,
     RunnerConfig,
     StateDelta,
@@ -88,6 +90,11 @@ from mtest.platform import (
     BoundedRegularFileRead,
     close_checked_fd,
     create_unique_temp,
+    apply_permissions,
+    case_folded_identity,
+    default_file_mode,
+    destination_identity,
+    directory_ignores_case,
     direct_write_failed,
     exec_replace,
     ignore_broken_pipe,
@@ -99,10 +106,15 @@ from mtest.platform import (
     write_errno_name,
 )
 from mtest.report import (
+    REPORT_STYLE_CONCISE,
+    REPORT_STYLE_FULL,
     AnnotationsReporter,
     ConsoleReporter,
     JsonStreamReporter,
     JunitReporter,
+    ReportArtifact,
+    ReportHeaderFacts,
+    ReportWriter,
     StandardReportCoordinator,
     close_json_fd,
     collect_finished_line,
@@ -111,6 +123,7 @@ from mtest.report import (
     open_json_fd,
     open_junit_artifact,
     open_junit_spool,
+    open_report_spool,
     resume_delimiter,
 )
 from mtest.session import (
@@ -352,6 +365,26 @@ def _origin_label(
 def _resolved_destination_error(
     resolved: ResolvedConfig,
 ) -> Optional[String]:
+    """Refuse an active destination whose parent directory does not exist.
+
+    Every active file destination is checked, not only the ones a flag can
+    spell. `--report FORMAT:PATH` is validated as the parser reads it, so a
+    command-line value with a missing parent never reaches here — but a
+    `[report]` destination that came from the project file has no parser of its
+    own, and without a branch here it would sail past resolved validation into
+    the session's temp creation and surface as an internal error, exit 3, where
+    §15.5 and §24.4 both promise a pre-run usage error, exit 4. Its two sibling
+    keys in the same table already give 4, so the gap was also an inconsistency
+    between two halves of one feature.
+
+    Args:
+        resolved: The layered configuration, after the command projection was
+            applied. Not mutated.
+
+    Returns:
+        A complete usage diagnostic naming the offending value the way its own
+        layer spells it, or none when every active destination can be created.
+    """
     if (
         resolved.active_keys.json_dest
         and resolved.config.json_dest != ""
@@ -381,7 +414,337 @@ def _resolved_destination_error(
                 + _safe_path_label(parent)
                 + "' (see mtest --help)"
             )
+    if (
+        resolved.active_keys.report_md_dest
+        and resolved.config.report_md_dest != ""
+    ):
+        var parent = String(dirname(resolved.config.report_md_dest))
+        if parent != "" and not isdir(parent):
+            return Optional[String](
+                _report_origin_label(
+                    resolved, resolved.provenance.report_md_dest, "md"
+                )
+                + " destination parent directory does not exist: '"
+                + _safe_path_label(parent)
+                + "' (see mtest --help)"
+            )
+    if (
+        resolved.active_keys.report_html_dest
+        and resolved.config.report_html_dest != ""
+    ):
+        var parent = String(dirname(resolved.config.report_html_dest))
+        if parent != "" and not isdir(parent):
+            return Optional[String](
+                _report_origin_label(
+                    resolved, resolved.provenance.report_html_dest, "html"
+                )
+                + " destination parent directory does not exist: '"
+                + _safe_path_label(parent)
+                + "' (see mtest --help)"
+            )
     return Optional[String](None)
+
+
+@fieldwise_init
+struct _Destination(Copyable, Movable):
+    """One active file destination, ready to be compared against its siblings.
+    """
+
+    var label: String
+    """The destination named the way its own layer spells it."""
+    var key: String
+    """The `destination_identity` key two spellings of one file share."""
+    var alias_key: String
+    """The folded key a case-ignoring volume ALSO makes two spellings share.
+
+    Empty when this destination's own directory distinguishes case, which is
+    what keeps `Run.out` and `run.out` the two different files they are on
+    Linux while catching them as one on APFS. Compared only against another
+    non-empty `alias_key`, never against `key`.
+    """
+
+
+@fieldwise_init
+struct _CaseVerdicts(Movable):
+    """One case-sensitivity answer per resolved directory, asked once each.
+
+    The probe creates and unlinks a file, so asking it once per DESTINATION
+    would touch a caller's output directory up to four times to learn one thing
+    about it. Two destinations resolving into one directory also have to be
+    given the same answer, which a cache makes structural rather than
+    incidental.
+    """
+
+    var parents: List[String]
+    """The resolved parent directories already probed, in arrival order."""
+    var ignores_case: List[Bool]
+    """Parallel to `parents`: what the probe answered for each."""
+
+    @staticmethod
+    def empty() -> Self:
+        """A cache that has probed nothing yet."""
+        return Self(List[String](), List[Bool]())
+
+    def ask(mut self, parent: String) -> Bool:
+        """The verdict for `parent`, probing the filesystem at most once."""
+        for i in range(len(self.parents)):
+            if self.parents[i] == parent:
+                return self.ignores_case[i]
+        var verdict = directory_ignores_case(parent)
+        self.parents.append(parent)
+        self.ignores_case.append(verdict)
+        return verdict
+
+
+def _active_destinations(resolved: ResolvedConfig) -> List[_Destination]:
+    """Every active destination this run will open, keyed for comparison.
+
+    `--json -` is deliberately absent: it names the inherited stdout stream,
+    which has no filesystem identity to collide with. Every other configured
+    destination is a real path that will be created or renamed onto, so two of
+    them naming one file is a request the runner cannot honor.
+
+    Every folded key starts empty. Filling one asks the filesystem a question,
+    which `_destination_collision_error` only does when there are at least two
+    destinations for the answer to decide anything between.
+
+    Args:
+        resolved: The layered configuration, after the command projection was
+            applied. Not mutated.
+
+    Returns:
+        A freshly allocated list in a fixed order, so the diagnostic for one
+        collision is the same whichever run produced it.
+    """
+    var destinations = List[_Destination]()
+    if (
+        resolved.active_keys.json_dest
+        and resolved.config.json_dest != ""
+        and resolved.config.json_dest != "-"
+    ):
+        destinations.append(
+            _Destination(
+                _origin_label(
+                    resolved, resolved.provenance.json_dest, "report", "json"
+                ),
+                destination_identity(resolved.config.json_dest),
+                "",
+            )
+        )
+    if resolved.active_keys.junit_dest and resolved.config.junit_dest != "":
+        destinations.append(
+            _Destination(
+                _origin_label(
+                    resolved,
+                    resolved.provenance.junit_dest,
+                    "report",
+                    "junit-xml",
+                ),
+                destination_identity(resolved.config.junit_dest),
+                "",
+            )
+        )
+    if (
+        resolved.active_keys.report_md_dest
+        and resolved.config.report_md_dest != ""
+    ):
+        destinations.append(
+            _Destination(
+                _report_origin_label(
+                    resolved, resolved.provenance.report_md_dest, "md"
+                ),
+                destination_identity(resolved.config.report_md_dest),
+                "",
+            )
+        )
+    if (
+        resolved.active_keys.report_html_dest
+        and resolved.config.report_html_dest != ""
+    ):
+        destinations.append(
+            _Destination(
+                _report_origin_label(
+                    resolved, resolved.provenance.report_html_dest, "html"
+                ),
+                destination_identity(resolved.config.report_html_dest),
+                "",
+            )
+        )
+    return destinations^
+
+
+def _report_origin_label(
+    resolved: ResolvedConfig, source: Provenance, format: String
+) -> String:
+    """Name a resolved run-report destination the way its own layer spells it.
+
+    `_origin_label` cannot serve here: the CLI spelling of `[report] md` is
+    `--report md:`, not `--md`.
+
+    Args:
+        resolved: The layered configuration carrying provenance and the file.
+        source: The winning layer for this destination.
+        format: The `md` or `html` half, which is both the file key and part of
+            the flag spelling.
+
+    Returns:
+        A complete diagnostic prefix ending in the offending value's name.
+    """
+    if source == Provenance.MTEST_TOML:
+        var origin = resolved.config_file
+        if origin == "":
+            origin = String("mtest.toml")
+        return "config: " + origin + ": [report] " + format
+    return "cli: '--report " + format + ":'"
+
+
+def _destination_collision_error(
+    resolved: ResolvedConfig,
+) -> Optional[String]:
+    """Refuse two active destinations that name one file.
+
+    Two reporters writing one path is not a composition: each one truncates or
+    renames over the other's work, and which of them survives depends on
+    finalization order rather than on anything the caller asked for. The
+    comparison is by resolved identity rather than by spelling, so `out.md` and
+    `./out.md` are caught as the one file they are.
+
+    Identity alone is not enough where the volume ignores case. `Run.out` and
+    `run.out` are two files on Linux and one file on APFS — the default on a
+    supported platform — so a spelling-only comparison would let that pair
+    through, publish both documents onto one inode, and exit 0 with one
+    requested artifact missing. Where a destination's own directory was
+    observed to fold case, its folded key is compared too; where it was not,
+    the folded key is empty and nothing extra can match.
+
+    Run-path only. `config show` resolves without touching the filesystem and
+    renders a collision with both provenances instead (§27.1), so the two
+    commands are deliberately different here.
+
+    Args:
+        resolved: The layered configuration, after the command projection was
+            applied. Not mutated.
+
+    Returns:
+        A complete usage diagnostic naming both offending values, or none.
+    """
+    var destinations = _active_destinations(resolved)
+    if len(destinations) < 2:
+        return Optional[String](None)
+    # Asked here rather than while the list is built: one destination can
+    # collide with nothing, so a run with a single `--junit-xml` never touches
+    # its output directory to learn something it cannot use.
+    var verdicts = _CaseVerdicts.empty()
+    for i in range(len(destinations)):
+        if verdicts.ask(String(dirname(destinations[i].key))):
+            destinations[i].alias_key = case_folded_identity(
+                destinations[i].key
+            )
+    for i in range(len(destinations)):
+        for j in range(i + 1, len(destinations)):
+            var same_key = destinations[i].key == destinations[j].key
+            var same_folded = (
+                destinations[i].alias_key != ""
+                and destinations[i].alias_key == destinations[j].alias_key
+            )
+            if same_key or same_folded:
+                return Optional[String](
+                    destinations[i].label
+                    + " and "
+                    + destinations[j].label
+                    + " name the same destination '"
+                    + _safe_path_label(destinations[j].key)
+                    + "'; each report needs its own path"
+                    + " (see mtest --help)"
+                )
+    return Optional[String](None)
+
+
+def _report_temp_template(destination: String) -> String:
+    """The `mkstemp` template for one report destination's unique temp.
+
+    Placed in the destination's OWN directory, not in the spool: creating it
+    there is what proves the target directory writable before any build or run,
+    and it is also what lets the finished document be published by an atomic
+    rename, which only works within one filesystem.
+
+    Args:
+        destination: The resolved report path the temp will be renamed onto.
+
+    Returns:
+        A template ending in the six `X` bytes `create_unique_temp` requires.
+    """
+    var target_dir = String(dirname(destination))
+    var leaf = (
+        "."
+        + String(basename(destination))
+        + ".mtest-"
+        + String(process_id())
+        + ".XXXXXX"
+    )
+    if target_dir == "":
+        return leaf^
+    return target_dir + "/" + leaf
+
+
+def _relax_report_temp_mode(temp_path: String, destination: String):
+    """Give one report temp the mode the published report must appear with.
+
+    `create_unique_temp` is `mkstemp(3)`, so the file arrives `0600`: right for
+    a temporary, wrong for a report a CI job, a reviewer, or a web server is
+    meant to read. The mode asked for is `default_file_mode()`, what an ordinary
+    new file would get here — the `0666` an `open(2)` requests, minus this
+    process's umask. It is NOT copied from `--junit-xml`'s artifact: the pinned
+    toolchain's `open` ignores the umask, so that artifact lands at a literal
+    `0666`, and matching it would publish a world-writable report.
+
+    Set BEFORE publication, not after: the rename makes the temp's inode the
+    published file, so the mode chosen here is the mode the report appears with
+    and there is no window in which it is owner-readable only.
+
+    Best-effort, and SAID OUT LOUD when it is not honored. A mode that could not
+    be applied still leaves a complete, correct report at the destination, and a
+    delivered artifact must not be reported as an undelivered one, so this
+    neither raises nor moves the exit code. What it must not do is stay silent:
+    a run that quietly published a less readable report than it promised would
+    leave the caller to discover that from the consumer that could not read it.
+    The verdict comes from observing the file rather than from the call's
+    status, because a filesystem whose modes come from its mount options accepts
+    the change and applies nothing.
+
+    Args:
+        temp_path: The just-created unique temp that will be renamed onto the
+            report destination.
+        destination: The path that temp will become, for the diagnostic — the
+            temp's own name is scratch the caller never asked for.
+    """
+    var wanted = default_file_mode()
+    if apply_permissions(temp_path, wanted):
+        return
+    _eprintln(
+        "mtest: report: could not give '"
+        + _safe_path_label(destination)
+        + "' the mode an ordinary new file would have here; it is published"
+        + " with the mode this filesystem allowed"
+    )
+
+
+def _report_style_code(style: ReportStyle) -> Int:
+    """Translate the config vocabulary into the report layer's own constant.
+
+    Two vocabularies rather than one because the layers may not share a type:
+    `config` sits below `report`, so neither can name the other's spelling of
+    this choice, and `main` is the composition root that owns the translation.
+
+    Args:
+        style: The resolved `--report-style` value.
+
+    Returns:
+        `REPORT_STYLE_FULL` or `REPORT_STYLE_CONCISE`.
+    """
+    if style == ReportStyle.FULL:
+        return REPORT_STYLE_FULL
+    return REPORT_STYLE_CONCISE
 
 
 @fieldwise_init
@@ -561,8 +924,9 @@ def _persist_state(root: String, text: String) -> Optional[String]:
 struct RunResources:
     """Everything a configured run owns, and the one ladder that releases it.
 
-    `main` takes these resources at three different points: the exec runtime
-    first, then the machine-stream descriptor, then the JUnit scratch. Every
+    `main` takes these resources at four different points: the exec runtime
+    first, then the machine-stream descriptor, then the JUnit scratch, then the
+    run-report scratch. Every
     exit path from there on has to release all of them, in one order, under one
     precedence. Holding them together is what lets `close_into` state that
     ladder once instead of once per exit path.
@@ -589,6 +953,68 @@ struct RunResources:
 
     var junit_temp: String
     """The JUnit target temp file `main` created, or "" when it owns none."""
+
+    var report_spool: String
+    """The run-report spool directory `main` created, or "" when it owns none.
+    """
+
+    var report_md_temp: String
+    """The Markdown report's target temp file, or "" when it owns none."""
+
+    var report_md_fd: Int
+    """The Markdown report temp's open descriptor, `-1` when the sink is off.
+
+    Recorded for the record's sake, never closed here. The descriptor is LENT
+    to `ReportWriter`, whose `finalize_reports` performs the one close; an abort
+    path that skips finalize therefore leaks it into `exit()`, exactly as the
+    JUnit scratch path does today. Closing it here would be the second close of
+    a descriptor number the kernel may already have handed to something else.
+    """
+
+    var report_html_temp: String
+    """The HTML report's target temp file, or "" when it owns none."""
+
+    var report_html_fd: Int
+    """The HTML report temp's open descriptor, `-1` when the sink is off.
+
+    Borrowed on exactly the terms `report_md_fd` documents.
+    """
+
+    def _discard_report_scratch(self):
+        """Remove the run-report spool, its fragments, and any leftover temps.
+
+        `main` owns this scratch: it created the spool with `open_report_spool`
+        and one temp per active format with `create_unique_temp`, so it frees
+        them once the session has finished with them. On success a temp has
+        already been renamed onto its report target, so its removal is a no-op
+        that never touches the published report; on failure the writer left it
+        behind deliberately, and the prior report at the target is what survives.
+
+        The descriptors are NOT closed here — see `report_md_fd`.
+
+        Best-effort and non-raising, so it is safe on every error path and with
+        empty or missing paths.
+        """
+        if self.report_md_temp != "":
+            try:
+                remove(self.report_md_temp)
+            except:
+                pass
+        if self.report_html_temp != "":
+            try:
+                remove(self.report_html_temp)
+            except:
+                pass
+        if self.report_spool != "":
+            try:
+                for name in listdir(self.report_spool):
+                    try:
+                        remove(self.report_spool + "/" + name)
+                    except:
+                        pass
+                rmdir(self.report_spool)
+            except:
+                pass
 
     def _discard_junit_scratch(self):
         """Remove the JUnit spool directory, its fragments, and any leftover temp.
@@ -622,9 +1048,9 @@ struct RunResources:
     def close_into(mut self, code: Int, rank_delivery: Bool) -> Int:
         """Release every owned resource and return the code to exit with.
 
-        The ladder, stated once: discard the JUnit scratch, close the
-        machine-stream descriptor when `main` owns it, then restore the exec
-        runtime. The precedence over `code` follows from what each release can
+        The ladder, stated once: discard the JUnit scratch, discard the
+        run-report scratch, close the machine-stream descriptor when `main`
+        owns it, then restore the exec runtime. The precedence over `code` follows from what each release can
         observe. A descriptor close can surface a deferred write error (a quota
         or network filesystem that reports ENOSPC/EIO only at close), which is
         a delivery fact this presents to `resolve_exit_code` rather than a code
@@ -644,6 +1070,7 @@ struct RunResources:
             so the result is meaningful once. Never raises.
         """
         self._discard_junit_scratch()
+        self._discard_report_scratch()
         var resolved = code
         # `flaky_failed` is False here on purpose: the session already applied
         # it, so a flaky-forced failure arrives as `outcome_code=1` and survives
@@ -798,6 +1225,14 @@ def main():
     if destination_error:
         _eprintln(destination_error.value())
         exit(EXIT_USAGE_ERROR)
+    # After the parent-directory check, and only on the run path: this is the
+    # command that will actually open every one of these destinations, and
+    # `destination_identity` resolves a parent the check above just proved
+    # exists.
+    var collision_error = _destination_collision_error(resolved)
+    if collision_error:
+        _eprintln(collision_error.value())
+        exit(EXIT_USAGE_ERROR)
 
     var config = resolved.config.copy()
 
@@ -852,7 +1287,18 @@ def main():
     # From here on the runtime is owned, and every exit path has to release it.
     # The machine-stream descriptor and the JUnit scratch join it below, each
     # recorded the moment it is actually opened.
-    var resources = RunResources(runtime^, -1, False, String(""), String(""))
+    var resources = RunResources(
+        runtime^,
+        -1,
+        False,
+        String(""),
+        String(""),
+        String(""),
+        String(""),
+        -1,
+        String(""),
+        -1,
+    )
 
     # Debug: prepare one test under ordinary supervision, print the two
     # commands, and then BECOME the test binary. Every refusal is made here,
@@ -1067,17 +1513,82 @@ def main():
             _eprintln("mtest: internal error: " + String(junit_error))
             exit(resources.close_into(EXIT_INTERNAL_ERROR, rank_delivery=True))
 
+    # Resolve the run-report destinations, on exactly the terms `--junit-xml`
+    # uses: nothing at PATH is touched until the final atomic rename, and the
+    # unique temp created in the TARGET directory now is what proves that
+    # directory writable BEFORE any build or run. A creation failure here is a
+    # pre-run internal error: exit 3.
+    #
+    # The descriptor `create_unique_temp` returns is LENT to the writer, which
+    # performs the one close inside `finalize_reports`. `RunResources` records
+    # the pair so an abort path can unlink the temp by name, and never closes
+    # it — a second close would target a descriptor number the kernel may
+    # already have reissued.
+    var report_md_active = config.report_md_dest != ""
+    var report_html_active = config.report_html_dest != ""
+    var report_md = Optional[ReportArtifact](None)
+    var report_html = Optional[ReportArtifact](None)
+    if report_md_active or report_html_active:
+        try:
+            # Record the spool as owned FIRST, so a later failure to create a
+            # target temp still leaves the spool directory tracked for cleanup
+            # rather than leaking it.
+            resources.report_spool = open_report_spool()
+            if report_md_active:
+                var md = create_unique_temp(
+                    _report_temp_template(config.report_md_dest)
+                )
+                resources.report_md_temp = md.path.copy()
+                resources.report_md_fd = md.fd
+                _relax_report_temp_mode(md.path, config.report_md_dest)
+                report_md = ReportArtifact(
+                    config.report_md_dest.copy(),
+                    md.path.copy(),
+                    md.fd,
+                    False,
+                    "",
+                )
+            if report_html_active:
+                var html = create_unique_temp(
+                    _report_temp_template(config.report_html_dest)
+                )
+                resources.report_html_temp = html.path.copy()
+                resources.report_html_fd = html.fd
+                _relax_report_temp_mode(html.path, config.report_html_dest)
+                report_html = ReportArtifact(
+                    config.report_html_dest.copy(),
+                    html.path.copy(),
+                    html.fd,
+                    False,
+                    "",
+                )
+        except report_error:
+            _eprintln("mtest: internal error: " + String(report_error))
+            exit(resources.close_into(EXIT_INTERNAL_ERROR, rank_delivery=True))
+
     # Each reporter is independently inert when its feature is off: no `--json`,
-    # no `--junit-xml`, annotations resolved off. The coordinator exposes the
-    # stream latch, the JUnit finalize, and the annotation tail by name, so no
-    # caller depends on the order they are constructed in.
+    # no `--junit-xml`, annotations resolved off, no `--report`. The coordinator
+    # exposes the stream latch, the JUnit finalize, the run-report finalize, and
+    # the annotation tail by name, so no caller depends on the order they are
+    # constructed in.
     var stream = JsonStreamReporter(json_fd, MTEST_VERSION, json_active)
     var junit = JunitReporter(
         junit_spool, junit_active, junit_target, junit_temp
     )
     var annotations = AnnotationsReporter(annotations_on, config.fail_on_flaky)
+    # The version and the platform are `main`'s to supply: `session` sits below
+    # `cli` and can never name `MTEST_VERSION`, and the platform label comes
+    # from the same source `doctor`'s platform line reads.
+    var report = ReportWriter(
+        ReportHeaderFacts(MTEST_VERSION, host_platform_label()),
+        _report_style_code(config.report_style),
+        report_md^,
+        report_html^,
+        resources.report_spool,
+        root,
+    )
     var comp = StandardReportCoordinator(
-        console^, stream^, junit^, annotations^
+        console^, stream^, junit^, annotations^, report^
     )
 
     var session_result = SessionResult(0, StateDelta.empty())

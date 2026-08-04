@@ -16,6 +16,7 @@ from std.testing import assert_equal, assert_true, TestSuite
 from mtest.config import ShardMode
 from mtest.model import (
     EventKind,
+    NotRunReason,
     Outcome,
     ParseDisposition,
     SessionStartedPayload,
@@ -155,6 +156,33 @@ def test_flow_pass_fail_excluded_warning_exit1() raises:
     assert_equal(comp.composite.reporters[1].count(), 10)
     assert_true(
         comp.composite.reporters[1].kind_at(9) == EventKind.SESSION_FINISHED
+    )
+
+
+def test_exitfirst_delivers_a_not_run_record_for_the_unrun_file() raises:
+    # `-x` stops scheduling after the first failing file, so the second
+    # selected file never produces a verdict. Both files are still selected
+    # by construction, so both get a record; the never-ran one is classified
+    # LIMIT_REACHED, the reason `-x`/`--maxfail` carries.
+    var root = temp_root()
+    write_file(root, "tests/test_a_fail.mojo", SRC_FAIL)
+    write_file(root, "tests/test_b_fail.mojo", SRC_FAIL)
+
+    var config = base_config()
+    config.exitfirst = True
+
+    var comp = RecordingCoordinator(
+        CompositeReporter(Tuple(RecordingReporter()))
+    )
+    var code = run_session(config, root, comp)
+
+    assert_equal(code, 1, "a FAIL must resolve to exit 1")
+    assert_equal(len(comp.not_run_records), 2)
+    assert_equal(comp.not_run_records[0].path, "tests/test_a_fail.mojo")
+    assert_equal(comp.not_run_records[1].path, "tests/test_b_fail.mojo")
+    assert_true(
+        comp.not_run_records[1].reason == NotRunReason.LIMIT_REACHED,
+        "the file -x stopped scheduling before must carry LIMIT_REACHED",
     )
 
 

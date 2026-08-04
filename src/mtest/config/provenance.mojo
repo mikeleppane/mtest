@@ -100,6 +100,15 @@ struct ConfigProvenance(Copyable, Movable):
     var gh_annotations: Provenance
     """Source of `[report] gh-annotations`."""
 
+    var report_md_dest: Provenance
+    """Source of `[report] md`."""
+
+    var report_html_dest: Provenance
+    """Source of `[report] html`."""
+
+    var report_style: Provenance
+    """Source of `[report] style`."""
+
     @staticmethod
     def defaults() -> ConfigProvenance:
         """Build provenance for an untouched built-in-default layer.
@@ -130,4 +139,7 @@ struct ConfigProvenance(Copyable, Movable):
             junit_dest=Provenance.DEFAULT,
             json_dest=Provenance.DEFAULT,
             gh_annotations=Provenance.DEFAULT,
+            report_md_dest=Provenance.DEFAULT,
+            report_html_dest=Provenance.DEFAULT,
+            report_style=Provenance.DEFAULT,
         )

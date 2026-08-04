@@ -29,6 +29,7 @@ from mtest.config import (
     CliOverlay,
     ColorWhen,
     Precompile,
+    ReportStyle,
     RunnerConfig,
     ShardMode,
     ShowOutput,
@@ -38,6 +39,8 @@ from mtest.config import (
     parse_color_value,
     parse_nonnegative_decimal,
     parse_precompile_value,
+    parse_report_style_value,
+    parse_report_value,
     parse_show_output_value,
     parse_worker_count,
     resolve_mojo_path,
@@ -307,6 +310,67 @@ def _validate_junit_dest(value: String, validate_parent: Bool) raises -> String:
     return value
 
 
+def _validate_report_dest(
+    format: String, value: String, validate_parent: Bool
+) raises -> String:
+    """Validate one `--report FORMAT:PATH` destination; return the path.
+
+    The path half of the value is always a filesystem path. There is no `-`
+    stdout form, for the same reason `--junit-xml` has none: the document is
+    assembled and renamed atomically rather than streamed live. When
+    `validate_parent` is True, its parent directory (when it names one) must
+    already exist.
+
+    This is the parse-time check only. `parse_report_value` has already refused
+    an empty path, an unknown format, and a missing separator; a missing parent
+    is also a usage error for a run, while resolution-only config display skips
+    that filesystem check. A runtime creation failure is `main`'s to detect
+    under a different exit code.
+
+    Args:
+        format: The already-validated `md` or `html` half, named in the
+            diagnostic so a reader knows which destination is wrong.
+        value: The destination path half of the `--report` value.
+        validate_parent: Whether to require an existing parent directory.
+
+    Returns:
+        `value` unchanged.
+
+    Raises:
+        Error: A usage error (exit 4) when the parent directory is absent.
+    """
+    if validate_parent:
+        var parent = String(dirname(value))
+        if parent != "" and not isdir(parent):
+            raise _err(
+                "'--report "
+                + format
+                + ":' destination parent directory does not exist: '"
+                + safe_path_label(parent)
+                + "'"
+            )
+    return value
+
+
+def _err_report_value(value: String) -> Error:
+    """The standard `--report` usage error naming the offending value."""
+    return _err(
+        "'--report' wants md:PATH or html:PATH, got '"
+        + safe_path_label(value)
+        + "'"
+    )
+
+
+def _parse_report_style(value: String) raises -> ReportStyle:
+    """Parse a `--report-style` value: `concise` or `full`."""
+    var parsed = parse_report_style_value(value)
+    if not parsed:
+        raise _err(
+            "'--report-style' wants 'concise' or 'full', got '" + value + "'"
+        )
+    return parsed.value()
+
+
 def _parse_annotations(value: String) raises -> AnnotationsMode:
     """Parse a `--gh-annotations` mode: `off`, `on`, or `auto`."""
     var parsed = parse_annotations_value(value)
@@ -427,6 +491,7 @@ def _debug_refusal(name: String, id: Int) -> Error:
         id == FlagId.JSON
         or id == FlagId.JUNIT_XML
         or id == FlagId.GH_ANNOTATIONS
+        or id == FlagId.REPORT
     ):
         return _err(
             body
@@ -904,6 +969,12 @@ def parse_args(argv: List[String]) raises -> ParseResult:
     var saw_json = False
     var junit_dest = String("")
     var saw_junit = False
+    var report_md_dest = String("")
+    var saw_report_md = False
+    var report_html_dest = String("")
+    var saw_report_html = False
+    var report_style = ReportStyle.CONCISE
+    var saw_report_style = False
     var gh_annotations = AnnotationsMode.AUTO
     var saw_annotations = False
     var saw_show_output = False
@@ -1103,6 +1174,37 @@ def parse_args(argv: List[String]) raises -> ParseResult:
                 value, not config_show and not doctor
             )
             saw_junit = True
+        elif s.id == FlagId.REPORT:
+            var report = parse_report_value(value)
+            if not report:
+                raise _err_report_value(value)
+            var destination = _validate_report_dest(
+                report.value().format,
+                report.value().path,
+                not config_show and not doctor,
+            )
+            # Repeatable ONCE PER FORMAT: a second `md:` is a typo whose two
+            # destinations cannot both be honored, so it is refused rather
+            # than silently last-wins.
+            if report.value().format == "md":
+                if saw_report_md:
+                    raise _err(
+                        "'--report md:' was given twice; pass at most one"
+                        " destination per format"
+                    )
+                report_md_dest = destination
+                saw_report_md = True
+            else:
+                if saw_report_html:
+                    raise _err(
+                        "'--report html:' was given twice; pass at most one"
+                        " destination per format"
+                    )
+                report_html_dest = destination
+                saw_report_html = True
+        elif s.id == FlagId.REPORT_STYLE:
+            report_style = _parse_report_style(value)
+            saw_report_style = True
         elif s.id == FlagId.GH_ANNOTATIONS:
             gh_annotations = _parse_annotations(value)
             saw_annotations = True
@@ -1255,6 +1357,16 @@ def parse_args(argv: List[String]) raises -> ParseResult:
                 "'--gh-annotations' is a reporter flag and cannot be combined"
                 " with doctor"
             )
+        if saw_report_md or saw_report_html:
+            raise _err(
+                "'--report' is a reporter flag and cannot be combined with"
+                " doctor"
+            )
+        if saw_report_style:
+            raise _err(
+                "'--report-style' is a reporter flag and cannot be combined"
+                " with doctor"
+            )
 
     # Collect mode is a listing, not a run: the run-only knobs that shape which
     # tests execute or when to stop scheduling are meaningless against it and are
@@ -1323,6 +1435,16 @@ def parse_args(argv: List[String]) raises -> ParseResult:
                 "'--gh-annotations' is a run-only flag and cannot be combined"
                 " with collect mode"
             )
+        if saw_report_md or saw_report_html:
+            raise _err(
+                "'--report' is a run-only flag and cannot be combined with"
+                " collect mode"
+            )
+        if saw_report_style:
+            raise _err(
+                "'--report-style' is a run-only flag and cannot be combined"
+                " with collect mode"
+            )
 
     if saw_quiet and saw_verbose:
         raise _err("'-q' and '-v' are mutually exclusive")
@@ -1380,6 +1502,12 @@ def parse_args(argv: List[String]) raises -> ParseResult:
         saw_json=saw_json,
         gh_annotations=gh_annotations,
         saw_gh_annotations=saw_annotations,
+        report_md_dest=report_md_dest^,
+        saw_report_md=saw_report_md,
+        report_html_dest=report_html_dest^,
+        saw_report_html=saw_report_html,
+        report_style=report_style,
+        saw_report_style=saw_report_style,
     )
     var defaults = RunnerConfig.default()
     defaults.mojo_path = resolve_mojo_path(Optional[String](None), _env_mojo())

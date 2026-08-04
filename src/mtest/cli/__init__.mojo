@@ -33,6 +33,8 @@ from mtest.cli.flag_spec import (
 from mtest.cli.parse_result import ParseResult
 from mtest.cli.doctor import (
     DoctorReport,
+    host_platform_label,
+    platform_label,
     run_doctor,
 )
 from mtest.cli.parser import (

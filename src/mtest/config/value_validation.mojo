@@ -7,6 +7,7 @@ reports that one value is invalid.
 from mtest.config.annotations_mode import AnnotationsMode
 from mtest.config.color_when import ColorWhen
 from mtest.config.precompile import Precompile
+from mtest.config.report_style import ReportStyle
 from mtest.config.show_output import ShowOutput
 from mtest.config.verbosity import Verbosity
 
@@ -147,6 +148,53 @@ def parse_verbosity_value(value: String) -> Optional[Verbosity]:
     if value == "verbose":
         return Optional[Verbosity](Verbosity.VERBOSE)
     return Optional[Verbosity](None)
+
+
+def parse_report_style_value(value: String) -> Optional[ReportStyle]:
+    """Parse one run-report detail style.
+
+    Args:
+        value: The candidate `concise` or `full` spelling.
+
+    Returns:
+        The typed style, or `None` when invalid.
+    """
+    if value == "concise":
+        return Optional[ReportStyle](ReportStyle.CONCISE)
+    if value == "full":
+        return Optional[ReportStyle](ReportStyle.FULL)
+    return Optional[ReportStyle](None)
+
+
+@fieldwise_init
+struct ReportValue(Copyable, Movable):
+    """A parsed --report value: which format, where to write it."""
+
+    var format: String
+    """"md" or "html"."""
+    var path: String
+    """The destination path, non-empty."""
+
+
+def parse_report_value(value: String) -> Optional[ReportValue]:
+    """Parse one `FORMAT:PATH` report destination.
+
+    Args:
+        value: The candidate `--report` value.
+
+    Returns:
+        The typed destination, or `None` for an empty path, a missing
+        separator, or a format outside {md, html}.
+    """
+    var sep = value.find(":")
+    if sep <= 0 or sep == value.byte_length() - 1:
+        return Optional[ReportValue](None)
+    var format = String(value[byte=:sep])
+    if format != "md" and format != "html":
+        return Optional[ReportValue](None)
+    return Optional[ReportValue](
+        ReportValue(format=format^, path=String(value[byte = sep + 1 :]))
+    )
 
 
 def parse_precompile_value(value: String) -> Optional[Precompile]:
