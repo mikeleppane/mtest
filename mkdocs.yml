@@ -20,6 +20,7 @@ nav:
   - Getting started: getting-started.md
   - Continuous integration: ci.md
   - Run reports: reports.md
+  - Shell completion: completions.md
   - Reference:
       - Command-line contract: cli-contract.md
       - JSON event stream: json-stream.md

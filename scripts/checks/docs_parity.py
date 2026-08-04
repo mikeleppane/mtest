@@ -3,12 +3,13 @@
 
 The site exists to navigate a reader to documents that are already gated: the
 command-line contract, the event-stream specification, the release runbook.
-Four pages cannot do their job by navigation alone — a landing page has to
+Five pages cannot do their job by navigation alone — a landing page has to
 show how the package is installed, a five-minute path has to show a test file
 and the run it produces, the continuous-integration page has to show the
-workflow to paste, and the run-report page has to show what the document it
-describes actually looks like — and each of those is a command or a captured
-output living somewhere other than the surface that owns it.
+workflow to paste, the run-report page has to show what the document it
+describes actually looks like, and the shell-completion page has to show where
+each shell wants the script written — and each of those is a command or a
+captured output living somewhere other than the surface that owns it.
 
 A second copy of a command is the defect this repository keeps finding. A copy
 on a site page is executed by nothing and reviewed against nothing: it agrees
@@ -89,6 +90,7 @@ SITE_PAGES = (
     Path("docs/getting-started.md"),
     Path("docs/ci.md"),
     Path("docs/reports.md"),
+    Path("docs/completions.md"),
 )
 """Every documentation-site page allowed to render a command or an output.
 
@@ -272,6 +274,13 @@ PARITY_BLOCKS = (
     ParityBlock(Path("docs/reports.md"), 1, "Run reports", 1),
     ParityBlock(Path("docs/reports.md"), 2, "Run reports", 2),
     ParityBlock(Path("docs/reports.md"), 3, "Run reports", 3),
+    # Installing a completion script: the two bash routes, the zsh file and
+    # the `.zshrc` lines that put its directory on `$fpath` before `compinit`,
+    # and the fish redirect.
+    ParityBlock(Path("docs/completions.md"), 0, "Shell completion", 0),
+    ParityBlock(Path("docs/completions.md"), 1, "Shell completion", 1),
+    ParityBlock(Path("docs/completions.md"), 2, "Shell completion", 2),
+    ParityBlock(Path("docs/completions.md"), 3, "Shell completion", 3),
 )
 """Every mirrored block, paired with the README block that owns it.
 
