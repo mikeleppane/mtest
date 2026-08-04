@@ -33,6 +33,7 @@ from mtest.platform.broken_pipe import (
 from mtest.platform.exec_replace import exec_replace
 from mtest.platform.executable import is_executable_file, resolve_executable
 from mtest.platform.fs import (
+    apply_permissions,
     case_folded_identity,
     default_file_mode,
     destination_identity,

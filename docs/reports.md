@@ -92,6 +92,13 @@ touched until the rename and a prior report survives a failed run. That temp
 is created at session start, before anything is built, which is what proves
 the directory writable early; the parent directory itself must already exist.
 
+A published report carries the mode an ordinary new file would get here — the
+`0666` an `open(2)` asks for, minus the process umask — because it is written
+to be read by a CI job, a reviewer, or a web server, none of which run as the
+user the runner did. A filesystem that will not apply that mode still receives
+the complete report, at whatever mode it allowed, and the run says so on
+stderr; the exit code does not move, because the artifact was delivered.
+
 Every active file destination — `--json PATH`, `--junit-xml PATH`, and both
 `--report` paths — must name a different file, compared by resolved identity
 rather than by spelling, so `out.md` and `./out.md` are the one destination

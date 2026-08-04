@@ -1435,7 +1435,12 @@ as the JUnit report is, never from a parse of the console text.
   and not the `0600` of the temporary it was assembled in. A report is written
   to be read by a CI job, a reviewer, or a web server, none of which run as the
   runner's user. The mode is set on the temp before the rename, so there is no
-  window in which the published path is owner-readable only.
+  window in which the published path is owner-readable only, and it is verified
+  by observing the file rather than by trusting the call. A filesystem that will
+  not apply it — one whose modes come from its mount options, or one that
+  refuses `chmod` outright — still receives the complete report, at whatever
+  mode it allowed. That is announced on stderr and changes no exit code: the
+  requested artifact was delivered, and an exit 3 would say it was not.
 
 `--report` and `--report-style` are **run-only** flags in v1 (§4).
 

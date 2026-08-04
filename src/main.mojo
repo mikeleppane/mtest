@@ -90,6 +90,7 @@ from mtest.platform import (
     BoundedRegularFileRead,
     close_checked_fd,
     create_unique_temp,
+    apply_permissions,
     case_folded_identity,
     default_file_mode,
     destination_identity,
@@ -100,7 +101,6 @@ from mtest.platform import (
     process_id,
     read_bounded_regular_file,
     rename_path,
-    set_permissions,
     write_all_bytes_fd_status,
     write_all_fd,
     write_errno_name,
@@ -687,32 +687,46 @@ def _report_temp_template(destination: String) -> String:
     return target_dir + "/" + leaf
 
 
-def _relax_report_temp_mode(temp_path: String):
+def _relax_report_temp_mode(temp_path: String, destination: String):
     """Give one report temp the mode the published report must appear with.
 
     `create_unique_temp` is `mkstemp(3)`, so the file arrives `0600`: right for
     a temporary, wrong for a report a CI job, a reviewer, or a web server is
-    meant to read. `--junit-xml`'s artifact is created through an ordinary
-    `open` and lands at the usual `0666 & ~umask`, so a report written beside it
-    would otherwise be the one artifact nobody but the runner's own user could
-    read.
+    meant to read. The mode asked for is `default_file_mode()`, what an ordinary
+    new file would get here — the `0666` an `open(2)` requests, minus this
+    process's umask. It is NOT copied from `--junit-xml`'s artifact: the pinned
+    toolchain's `open` ignores the umask, so that artifact lands at a literal
+    `0666`, and matching it would publish a world-writable report.
 
     Set BEFORE publication, not after: the rename makes the temp's inode the
     published file, so the mode chosen here is the mode the report appears with
     and there is no window in which it is owner-readable only.
 
-    Best-effort and non-raising by design. A mode this could not relax still
-    leaves a complete, correct report at the destination, so refusing the whole
-    run over it would trade a readable report for no report at all.
+    Best-effort, and SAID OUT LOUD when it is not honored. A mode that could not
+    be applied still leaves a complete, correct report at the destination, and a
+    delivered artifact must not be reported as an undelivered one, so this
+    neither raises nor moves the exit code. What it must not do is stay silent:
+    a run that quietly published a less readable report than it promised would
+    leave the caller to discover that from the consumer that could not read it.
+    The verdict comes from observing the file rather than from the call's
+    status, because a filesystem whose modes come from its mount options accepts
+    the change and applies nothing.
 
     Args:
         temp_path: The just-created unique temp that will be renamed onto the
             report destination.
+        destination: The path that temp will become, for the diagnostic — the
+            temp's own name is scratch the caller never asked for.
     """
-    try:
-        set_permissions(temp_path, default_file_mode())
-    except:
-        pass
+    var wanted = default_file_mode()
+    if apply_permissions(temp_path, wanted):
+        return
+    _eprintln(
+        "mtest: report: could not give '"
+        + _safe_path_label(destination)
+        + "' the mode an ordinary new file would have here; it is published"
+        + " with the mode this filesystem allowed"
+    )
 
 
 def _report_style_code(style: ReportStyle) -> Int:
@@ -1526,7 +1540,7 @@ def main():
                 )
                 resources.report_md_temp = md.path.copy()
                 resources.report_md_fd = md.fd
-                _relax_report_temp_mode(md.path)
+                _relax_report_temp_mode(md.path, config.report_md_dest)
                 report_md = ReportArtifact(
                     config.report_md_dest.copy(),
                     md.path.copy(),
@@ -1540,7 +1554,7 @@ def main():
                 )
                 resources.report_html_temp = html.path.copy()
                 resources.report_html_fd = html.fd
-                _relax_report_temp_mode(html.path)
+                _relax_report_temp_mode(html.path, config.report_html_dest)
                 report_html = ReportArtifact(
                     config.report_html_dest.copy(),
                     html.path.copy(),

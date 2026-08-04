@@ -2885,6 +2885,14 @@ class Runner:
             expected = 0o666 & ~previous
             if report_mode != expected:
                 probs.append(f"report mode {report_mode:#o}, want {expected:#o}")
+            # The other half of the same promise: on a filesystem that DOES
+            # apply the mode, the run says nothing about it. The best-effort
+            # clause is announced on stderr, so a silent warning here would
+            # mean the mode above was reached by accident rather than applied.
+            if "could not give" in run.stderr:
+                probs.append(
+                    f"the mode was applied but still warned about: {run.stderr!r}"
+                )
             if junit_mode & 0o444 & ~previous & ~report_mode:
                 probs.append(
                     f"report mode {report_mode:#o} is less readable than the "

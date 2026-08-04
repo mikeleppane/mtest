@@ -139,7 +139,7 @@ def case_folded_identity(key: String) -> String:
     ```mojo
     from mtest.platform import case_folded_identity, destination_identity
 
-    var alias = case_folded_identity(destination_identity("Run.out"))
+    var folded = case_folded_identity(destination_identity("Run.out"))
     ```
     """
     return key.lower()
@@ -267,6 +267,50 @@ def set_permissions(path: String, mode: Int) raises:
         raise Error(
             "platform: chmod failed for '" + path + "' to mode " + String(mode)
         )
+
+
+def apply_permissions(path: String, mode: Int) -> Bool:
+    """Give `path` the bits `mode`, and report whether it now carries them.
+
+    The observing form of `set_permissions`, for a publisher that promised a
+    mode rather than a call. `chmod(2)` refusing is only one of the two ways the
+    promise breaks: a filesystem whose modes come from its mount options — FAT,
+    exFAT, several FUSE mounts — accepts the call, changes nothing, and returns
+    success. A caller that read the return status would report a mode the file
+    does not have, and would report it on exactly the filesystems where it is
+    wrong. So the answer comes from `lstat(2)` afterwards, not from the call.
+
+    Deliberately total. A caller reaching for this has already decided the mode
+    is worth asking for and not worth failing over, so the failure it needs is a
+    value it can warn about, not an exception it must wrap.
+
+    A final-component symlink answers `False` whatever happens: `chmod` follows
+    it and the observation does not, so the two are looking at different files
+    and this cannot honestly claim the mode took.
+
+    Args:
+        path: An existing path whose permission bits are replaced.
+        mode: The POSIX permission bits to install.
+
+    Returns:
+        Whether `path` is present and carries exactly `mode` afterwards.
+        Allocates only the transient path bytes and cannot fail.
+
+    Examples:
+
+    ```mojo
+    from mtest.platform import apply_permissions, default_file_mode
+
+    if not apply_permissions("report.md", default_file_mode()):
+        print("published with the mode the filesystem allowed")
+    ```
+    """
+    try:
+        set_permissions(path, mode)
+    except:
+        pass
+    var facts = observe_path(path)
+    return facts.present and facts.error == 0 and facts.mode == mode
 
 
 def _replace_umask(mask: Int) -> Int:
