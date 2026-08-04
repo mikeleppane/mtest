@@ -6,7 +6,10 @@ publication that can only ever create, never replace. `set_permissions`
 supports explicit mode changes, while `prepare_directory_for_rename` makes an
 identity-checked damaged cache directory movable on Darwin without following
 substituted symlinks. `destination_identity` answers the adjacent question of
-whether two spellings name one file that does not exist yet.
+whether two spellings name one file that does not exist yet, and
+`directory_ignores_case` plus `case_folded_identity` answer the half of it that
+no spelling can settle: whether the volume underneath folds case, so that two
+keys this module tells apart would land on one file anyway.
 
 The pinned standard library does not expose these operations with the required
 semantics. Its `link` wrapper is the closest, and it is not close enough: it
@@ -23,7 +26,10 @@ from std.os.path import basename, dirname, realpath
 from std.sys.info import CompilationTarget
 
 from mtest.platform.cstring import c_string_bytes
+from mtest.platform.process import process_id
+from mtest.platform.regular_file import observe_path
 from mtest.platform.stream import close_fd, errno_now
+from mtest.platform.temp_file import close_checked_fd, create_unique_temp
 
 
 comptime _EINTR = 4
@@ -65,6 +71,15 @@ def destination_identity(path: String) -> String:
     the lexical spelling, which keeps the key comparable for a destination whose
     real failure is reported by whichever check owns it.
 
+    Two residual limitations, both of them cases where one file wears two keys.
+    A volume that ignores case — APFS, and any `osx-arm64` run by default —
+    resolves `Run.out` and `run.out` to one file that these keys tell apart;
+    `directory_ignores_case` plus `case_folded_identity` are how a caller asks
+    that question, because it cannot be answered from the spelling alone.
+    A symlink on the FINAL component is not resolved either, because
+    `realpath(3)` cannot resolve a component that does not exist yet, which is
+    the normal state of a destination about to be written.
+
     Args:
         path: The destination as its own layer spelled it.
 
@@ -91,6 +106,127 @@ def destination_identity(path: String) -> String:
     except:
         pass
     return resolved + "/" + String(basename(path))
+
+
+def case_folded_identity(key: String) -> String:
+    """The key two spellings share on a volume that ignores case.
+
+    A lowercase projection of a whole `destination_identity` key, for the ONE
+    comparison a caller may make after `directory_ignores_case` said the
+    destination's directory folds case. It is not a second identity: on a
+    case-sensitive volume `Run.out` and `run.out` are two genuinely different
+    files, and comparing folded keys there would refuse a legal pair.
+
+    Deliberately not an ASCII-only fold. The volumes this exists for — APFS and
+    HFS+, the default on the supported `osx-arm64` platform — are case-
+    insensitive over Unicode rather than over the 26 ASCII letters, so an
+    ASCII-only projection would miss exactly the aliases those filesystems
+    create. It does NOT normalize, so two spellings that differ only in Unicode
+    normal form still produce two keys; APFS would treat those as one file, and
+    that residue is the reason this is a supplementary comparison rather than
+    the identity itself.
+
+    Args:
+        key: A key from `destination_identity`. Any other string is meaningless
+            here, because the fold is only sound against a sibling key.
+
+    Returns:
+        A freshly allocated folded key, comparable only against another folded
+        key. Allocates once and cannot fail.
+
+    Examples:
+
+    ```mojo
+    from mtest.platform import case_folded_identity, destination_identity
+
+    var alias = case_folded_identity(destination_identity("Run.out"))
+    ```
+    """
+    return key.lower()
+
+
+def directory_ignores_case(directory: String) -> Bool:
+    """Ask `directory`'s filesystem whether it distinguishes case, by probing.
+
+    There is no portable attribute to read and no answer derivable from a path:
+    `pathconf(_PC_CASE_SENSITIVE)` is Darwin-only, and one machine routinely
+    carries both kinds of volume at once, so the question has to be asked of the
+    exact directory a destination will be written into. The standard technique
+    is used: create one uniquely named file, then ask whether its case-flipped
+    spelling resolves to something. On a volume that ignores case it does; on a
+    case-sensitive one it does not, because that name was never created.
+
+    Only the created file's BASENAME is flipped. Flipping the directory prefix
+    too would ask about the mount points above it, which may legitimately answer
+    differently from the directory in hand.
+
+    Deliberately total and conservative. A directory that cannot be created in —
+    missing, unwritable, read-only — answers `False`, the case-sensitive
+    verdict, which folds nothing and therefore refuses nothing; whichever check
+    owns that directory reports its real failure. The probe file is unlinked on
+    every path, so asking the question leaves the caller's output directory
+    exactly as it was found.
+
+    Args:
+        directory: An existing directory a destination will be written into.
+
+    Returns:
+        Whether a name created here is also reachable by its case-flipped
+        spelling. Cannot fail.
+
+    Examples:
+
+    ```mojo
+    from mtest.platform import directory_ignores_case
+
+    var folds = directory_ignores_case("/Volumes/ci-out")
+    ```
+    """
+    var parent = directory
+    if parent == "":
+        parent = String(".")
+    try:
+        var probe = create_unique_temp(
+            parent + "/.mtest-case-" + String(process_id()) + ".XXXXXX"
+        )
+        var flipped = parent + "/" + _flip_case(String(basename(probe.path)))
+        var ignores = False
+        if flipped != probe.path:
+            ignores = observe_path(flipped).present
+        try:
+            close_checked_fd(probe.fd)
+        except:
+            pass
+        try:
+            remove(probe.path)
+        except:
+            pass
+        return ignores
+    except:
+        return False
+
+
+def _flip_case(name: String) -> String:
+    """Swap the case of every cased code point in `name`, leaving the rest.
+
+    Flipping rather than lowering, so a `mkstemp` suffix that happens to be all
+    lowercase still produces a different name to look for. The probe's own
+    `.mtest-case-` prefix guarantees at least one letter, so the flipped
+    spelling is never the original — a same-name comparison would report every
+    filesystem as case-insensitive.
+    """
+    var out = String("")
+    for cp in name.codepoint_slices():
+        var c = String(cp)
+        var lowered = c.lower()
+        var uppered = c.upper()
+        if c == uppered and c != lowered:
+            out += lowered
+        elif c == lowered and c != uppered:
+            out += uppered
+        else:
+            out += c
+    return out^
 
 
 def set_permissions(path: String, mode: Int) raises:

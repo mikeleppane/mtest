@@ -90,8 +90,10 @@ from mtest.platform import (
     BoundedRegularFileRead,
     close_checked_fd,
     create_unique_temp,
+    case_folded_identity,
     default_file_mode,
     destination_identity,
+    directory_ignores_case,
     direct_write_failed,
     exec_replace,
     ignore_broken_pipe,
@@ -452,6 +454,46 @@ struct _Destination(Copyable, Movable):
     """The destination named the way its own layer spells it."""
     var key: String
     """The `destination_identity` key two spellings of one file share."""
+    var alias_key: String
+    """The folded key a case-ignoring volume ALSO makes two spellings share.
+
+    Empty when this destination's own directory distinguishes case, which is
+    what keeps `Run.out` and `run.out` the two different files they are on
+    Linux while catching them as one on APFS. Compared only against another
+    non-empty `alias_key`, never against `key`.
+    """
+
+
+@fieldwise_init
+struct _CaseVerdicts(Movable):
+    """One case-sensitivity answer per resolved directory, asked once each.
+
+    The probe creates and unlinks a file, so asking it once per DESTINATION
+    would touch a caller's output directory up to four times to learn one thing
+    about it. Two destinations resolving into one directory also have to be
+    given the same answer, which a cache makes structural rather than
+    incidental.
+    """
+
+    var parents: List[String]
+    """The resolved parent directories already probed, in arrival order."""
+    var ignores_case: List[Bool]
+    """Parallel to `parents`: what the probe answered for each."""
+
+    @staticmethod
+    def empty() -> Self:
+        """A cache that has probed nothing yet."""
+        return Self(List[String](), List[Bool]())
+
+    def ask(mut self, parent: String) -> Bool:
+        """The verdict for `parent`, probing the filesystem at most once."""
+        for i in range(len(self.parents)):
+            if self.parents[i] == parent:
+                return self.ignores_case[i]
+        var verdict = directory_ignores_case(parent)
+        self.parents.append(parent)
+        self.ignores_case.append(verdict)
+        return verdict
 
 
 def _active_destinations(resolved: ResolvedConfig) -> List[_Destination]:
@@ -461,6 +503,10 @@ def _active_destinations(resolved: ResolvedConfig) -> List[_Destination]:
     which has no filesystem identity to collide with. Every other configured
     destination is a real path that will be created or renamed onto, so two of
     them naming one file is a request the runner cannot honor.
+
+    Every folded key starts empty. Filling one asks the filesystem a question,
+    which `_destination_collision_error` only does when there are at least two
+    destinations for the answer to decide anything between.
 
     Args:
         resolved: The layered configuration, after the command projection was
@@ -482,6 +528,7 @@ def _active_destinations(resolved: ResolvedConfig) -> List[_Destination]:
                     resolved, resolved.provenance.json_dest, "report", "json"
                 ),
                 destination_identity(resolved.config.json_dest),
+                "",
             )
         )
     if resolved.active_keys.junit_dest and resolved.config.junit_dest != "":
@@ -494,6 +541,7 @@ def _active_destinations(resolved: ResolvedConfig) -> List[_Destination]:
                     "junit-xml",
                 ),
                 destination_identity(resolved.config.junit_dest),
+                "",
             )
         )
     if (
@@ -506,6 +554,7 @@ def _active_destinations(resolved: ResolvedConfig) -> List[_Destination]:
                     resolved, resolved.provenance.report_md_dest, "md"
                 ),
                 destination_identity(resolved.config.report_md_dest),
+                "",
             )
         )
     if (
@@ -518,6 +567,7 @@ def _active_destinations(resolved: ResolvedConfig) -> List[_Destination]:
                     resolved, resolved.provenance.report_html_dest, "html"
                 ),
                 destination_identity(resolved.config.report_html_dest),
+                "",
             )
         )
     return destinations^
@@ -559,6 +609,14 @@ def _destination_collision_error(
     comparison is by resolved identity rather than by spelling, so `out.md` and
     `./out.md` are caught as the one file they are.
 
+    Identity alone is not enough where the volume ignores case. `Run.out` and
+    `run.out` are two files on Linux and one file on APFS — the default on a
+    supported platform — so a spelling-only comparison would let that pair
+    through, publish both documents onto one inode, and exit 0 with one
+    requested artifact missing. Where a destination's own directory was
+    observed to fold case, its folded key is compared too; where it was not,
+    the folded key is empty and nothing extra can match.
+
     Run-path only. `config show` resolves without touching the filesystem and
     renders a collision with both provenances instead (§27.1), so the two
     commands are deliberately different here.
@@ -571,9 +629,25 @@ def _destination_collision_error(
         A complete usage diagnostic naming both offending values, or none.
     """
     var destinations = _active_destinations(resolved)
+    if len(destinations) < 2:
+        return Optional[String](None)
+    # Asked here rather than while the list is built: one destination can
+    # collide with nothing, so a run with a single `--junit-xml` never touches
+    # its output directory to learn something it cannot use.
+    var verdicts = _CaseVerdicts.empty()
+    for i in range(len(destinations)):
+        if verdicts.ask(String(dirname(destinations[i].key))):
+            destinations[i].alias_key = case_folded_identity(
+                destinations[i].key
+            )
     for i in range(len(destinations)):
         for j in range(i + 1, len(destinations)):
-            if destinations[i].key == destinations[j].key:
+            var same_key = destinations[i].key == destinations[j].key
+            var same_folded = (
+                destinations[i].alias_key != ""
+                and destinations[i].alias_key == destinations[j].alias_key
+            )
+            if same_key or same_folded:
                 return Optional[String](
                     destinations[i].label
                     + " and "

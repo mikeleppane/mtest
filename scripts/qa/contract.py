@@ -829,6 +829,7 @@ EXPECTED_CHECK_NAMES: tuple[str, ...] = (
     "report: an unwritable --report target exits 3, prior report intact",
     "report: a configured md destination with a missing parent -> 4",
     "report: a configured html destination with a missing parent -> 4",
+    "report: a case-only destination alias follows the volume's rule",
     "config show: colliding destinations render with provenance, exit 0",
     "interrupt: SIGINT frees the owned process group",
 )
@@ -3080,6 +3081,71 @@ class Runner:
                 probs.append("refused as an internal error rather than a usage error")
             self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
 
+    def check_run_report_case_alias(self) -> None:
+        """Assert a case-only alias is judged by the VOLUME, not by the OS.
+
+        `Run.out` and `run.out` are two files on ext4 and one file on APFS,
+        which is the default on a supported platform. Comparing spellings alone
+        would let the pair through there, publish both documents onto one
+        inode, and exit 0 with one requested artifact missing — success reported
+        for a run that lost a requested product.
+
+        So the expectation is derived from the filesystem this check is standing
+        on, the same way mtest derives it: create one name, ask whether its
+        case-flipped spelling resolves. Where it does, the pair must be refused
+        before the run; where it does not, the pair is legal and BOTH documents
+        must land, which is the false-positive half of the same rule.
+        """
+        ref = "§15.5 destination collisions are compared as the volume sees them"
+        name = "report: a case-only destination alias follows the volume's rule"
+        out = self.root / "casealias"
+        out.mkdir(exist_ok=True)
+        probe = out / "casecheck"
+        probe.write_text("x")
+        folds = (out / "CASECHECK").exists()
+        probe.unlink()
+        upper, lower = out / "Run.out", out / "run.out"
+        for stale in (upper, lower):
+            if stale.exists():
+                stale.unlink()
+        run = self.mtest(
+            [
+                *I_FLAGS,
+                "--report",
+                f"md:{upper}",
+                "--report",
+                f"html:{lower}",
+                "tests",
+            ]
+        )
+        probs: list[str] = []
+        if folds:
+            if run.returncode != 4:
+                probs.append(
+                    f"a case-folding volume accepted the alias: exit "
+                    f"{run.returncode}, want 4"
+                )
+            if "same destination" not in run.stderr:
+                probs.append(f"not refused as a collision: {run.stderr!r}")
+            if upper.exists() or lower.exists():
+                probs.append("a refused run still published a document")
+        else:
+            if run.returncode != 0:
+                probs.append(
+                    f"a case-sensitive volume refused a legal pair: exit "
+                    f"{run.returncode}, want 0"
+                )
+            # Both documents, and each in its own format: one file holding the
+            # other's bytes is the loss this rule exists to prevent.
+            if not upper.is_file() or not lower.is_file():
+                probs.append("one of the two requested documents is missing")
+            else:
+                if not upper.read_text().startswith("# mtest report"):
+                    probs.append("the markdown destination does not hold markdown")
+                if not lower.read_text().startswith("<!doctype html>"):
+                    probs.append("the html destination does not hold html")
+        self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
+
     def check_config_show_report(self) -> None:
         """Assert `config show` renders a collision instead of refusing it.
 
@@ -3871,6 +3937,8 @@ def main() -> int:
             "report: a configured md destination with a missing parent -> 4"
         ) or wanted("report: a configured html destination with a missing parent -> 4"):
             runner.check_run_report_configured_missing_parent()
+        if wanted("report: a case-only destination alias follows the volume's rule"):
+            runner.check_run_report_case_alias()
         if wanted("config show: colliding destinations render with provenance, exit 0"):
             runner.check_config_show_report()
         if wanted("interrupt: SIGINT frees the owned process group"):

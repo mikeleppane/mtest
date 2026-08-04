@@ -1404,8 +1404,12 @@ as the JUnit report is, never from a parse of the console text.
   because each writer would otherwise truncate or rename over the other's work
   and which survived would depend on finalization order. The comparison is by
   resolved identity rather than by spelling, so `out.md` and `./out.md` are the
-  one destination they are. `--json -` is excluded: it names the inherited
-  stdout stream, which has no filesystem identity. The check belongs to the
+  one destination they are. Where the destination's own directory ignores case
+  — which the runner asks that directory rather than assuming from the platform
+  — `Run.out` and `run.out` are also the one destination they are there, and
+  the same refusal applies; where it does not, the two are the different files
+  they are and the pair is accepted. `--json -` is excluded: it names the
+  inherited stdout stream, which has no filesystem identity. The check belongs to the
   commands that open destinations, so `config show` — which resolves without
   touching the filesystem — renders a collision with both values' provenance and
   never refuses (§27.1).

@@ -1220,7 +1220,10 @@ Two failures are worth knowing in advance. Every active file destination —
 different file, compared by resolved identity rather than by spelling, so
 `out.md` and `./out.md` are the one destination they are; two of them naming
 one file is a usage error caught before the run (exit `4`), because otherwise
-which writer's work survived would depend on finalization order. And a report
+which writer's work survived would depend on finalization order. Whether
+`Run.out` and `run.out` are one destination is asked of the directory itself
+rather than assumed from the platform, so the pair is refused on a volume that
+ignores case and accepted on one that does not. And a report
 that was requested and could not be published — a destination that cannot be
 prepared at session start, or a document that cannot be written, closed, or
 renamed at the end — is an error in its own right, so it escalates even a green

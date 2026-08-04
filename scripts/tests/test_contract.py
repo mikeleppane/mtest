@@ -639,6 +639,7 @@ class CheckRosterTests(unittest.TestCase):
                 "report: an unwritable --report target exits 3, prior report intact",
                 "report: a configured md destination with a missing parent -> 4",
                 "report: a configured html destination with a missing parent -> 4",
+                "report: a case-only destination alias follows the volume's rule",
                 "config show: colliding destinations render with provenance, exit 0",
                 "interrupt: SIGINT frees the owned process group",
             ],
@@ -842,6 +843,11 @@ class CheckRosterTests(unittest.TestCase):
                 )
                 self._perform(
                     "report: a configured html destination with a missing parent -> 4"
+                )
+
+            def check_run_report_case_alias(self) -> None:
+                self._perform(
+                    "report: a case-only destination alias follows the volume's rule"
                 )
 
             def check_config_show_report(self) -> None:

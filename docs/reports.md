@@ -97,7 +97,10 @@ Every active file destination — `--json PATH`, `--junit-xml PATH`, and both
 rather than by spelling, so `out.md` and `./out.md` are the one destination
 they are. Two of them naming one file is a usage error caught before the run
 (exit `4`), because otherwise which writer's work survived would depend on
-finalization order.
+finalization order. Whether `Run.out` and `run.out` are one destination is
+asked of the directory itself rather than assumed from the platform, so the
+pair is refused on a volume that ignores case and accepted on one that does
+not.
 
 A report that was requested and could not be published — a destination that
 cannot be prepared at session start, or a document that cannot be written,
