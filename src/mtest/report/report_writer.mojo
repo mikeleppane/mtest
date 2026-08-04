@@ -22,8 +22,19 @@ Two facts shape the type:
   `Movable`-only by design, so a writer that transitively owned one could not
   compile. `ReportArtifact` therefore splits the created temp into its path and
   its BORROWED descriptor, exactly as `JsonStreamReporter` borrows the machine
-  stream's fd: copies of the writer never close anything, and the descriptor's
-  lifetime belongs to `main`/`RunResources`.
+  stream's fd: the descriptor's lifetime belongs to `main`/`RunResources`, and
+  exactly one instance ever closes it.
+
+  Read that as a constraint on callers, because the type system cannot enforce
+  it. `Copyable` is what the trait demands, so the compiler will happily make a
+  copy of a writer holding a live descriptor, and `finalize_reports` on that
+  copy would close a descriptor number the kernel may already have reissued to
+  an unrelated file. Nothing in the shipped composition can reach that state:
+  production MOVES the writer into `StandardReportCoordinator`, neither
+  coordinator declares `Copyable`, and the session takes the coordinator by
+  `mut`. Taking a copy of a writer before its finalize is therefore a
+  programming error, not a supported use, and it is the one way to break the
+  exactly-one-close property this module rests on.
 - The two sinks are independent. A fragment write that fails latches only its
   own sink; a finalize that cannot write, close, or rename fails only its own
   sink. The other format still publishes, and a failing sink never truncates
@@ -139,6 +150,13 @@ struct ReportArtifact(Copyable, Movable):
     platform seam's anti-replacement rule; it is never reopened) and splits
     the result here. The descriptor is BORROWED: exactly one instance — the
     coordinator-slot writer, at finalize — may close it.
+
+    `Copyable` here is inherited from the `Reporter` trait's requirement on the
+    writer that holds this, not a statement that a copy is safe to finalize. A
+    copy taken while `fd` is still open holds a descriptor a second close would
+    release twice, and the second release could land on an unrelated file the
+    kernel reissued the number to. Copy this freely for reading; do not carry a
+    copy across the one finalize.
     """
 
     var target: String
@@ -149,7 +167,7 @@ struct ReportArtifact(Copyable, Movable):
     """The open write descriptor from `create_unique_temp`; `-1` after the
     finalize close (and in copies made after it).
 
-    Borrowed, never closed by a copy. `main` records the same descriptor on
+    Borrowed. `main` records the same descriptor on
     `RunResources`, whose `close_into` unlinks `temp_path` best-effort and
     never closes this fd: an abort path that skips finalize leaks it into
     `exit()`, exactly as the JUnit scratch path does today. The single close
@@ -697,7 +715,7 @@ struct ReportWriter(Reporter):
                 return True
         return False
 
-    def _reproduce_target(self, accum_idx: Int, path: String) -> String:
+    def _reproduce_node_for(self, accum_idx: Int, path: String) -> String:
         """The section's single reproduce/debug target for one file.
 
         A file whose verdict is carried by exactly one failing test names that
@@ -720,7 +738,7 @@ struct ReportWriter(Reporter):
         """Record one finished file's row and, when it earns one, its section.
         """
         var idx = self._accums.ensure(e.path)
-        var repro = self._reproduce_target(idx, e.path)
+        var repro = self._reproduce_node_for(idx, e.path)
         self._rows.append(
             ReportRow(
                 e.path.copy(),

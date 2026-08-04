@@ -305,6 +305,47 @@ def test_full_document_assembly_has_balanced_table_and_shell() raises:
     assert_equal(_count_occurrences(doc, "</html"), 1)
 
 
+def test_the_heading_hierarchy_descends_without_skipping_a_level() raises:
+    """A document outline is a real consumer: assistive technology and every
+    table-of-contents generator read it, and a skipped level breaks both."""
+    var tests = List[TestResult]()
+    tests.append(
+        TestResult(NodeId("tests/a.mojo", "test_x"), Outcome.FAIL, "boom", "")
+    )
+    var section = ReportSectionInput(
+        path="tests/a.mojo",
+        root="",
+        outcome_code=Outcome.FAIL.code,
+        tests=tests^,
+        stdout_text="",
+        stderr_text="",
+        stdout_truncated=False,
+        stderr_truncated=False,
+        attempts=List[String](),
+        build_line="",
+        reproduce_node="tests/a.mojo::test_x",
+    )
+    var rows = List[ReportRow]()
+    rows.append(_row("a.mojo", Outcome.FAIL.code))
+    var nodes = List[String]()
+    nodes.append("a.mojo")
+    var doc = html_document_open(_facts(), _ctx())
+    doc += html_summary_row(_row("a.mojo", Outcome.FAIL.code))
+    doc += html_file_section(section)
+    doc += html_not_run_heading()
+    doc += html_not_run_line(NotRunRecord("b.mojo", NotRunReason.LIMIT_REACHED))
+    doc += html_machine_index(rows, nodes)
+    doc += html_document_close()
+    # Exactly one document title, sections one level under the h2 bands, and
+    # nothing below: a level that appears without its parent is the skip.
+    assert_equal(_count_occurrences(doc, "<h1>"), 1)
+    assert_equal(_count_occurrences(doc, "<h2>"), 3)
+    assert_equal(_count_occurrences(doc, "<h3>"), 1)
+    assert_equal(_count_occurrences(doc, "<h4>"), 0)
+    assert_equal(_count_occurrences(doc, "<h5>"), 0)
+    assert_equal(_count_occurrences(doc, "<h6>"), 0)
+
+
 # --- Summary row ---------------------------------------------------------
 
 

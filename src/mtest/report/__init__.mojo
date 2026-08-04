@@ -80,6 +80,7 @@ from mtest.report.report_md import (
     md_summary_table_header,
 )
 from mtest.report.file_accum import FileAccum, FileAccums
+from mtest.report.spool_dir import open_spool_dir
 from mtest.report.report_writer import (
     REPORT_STYLE_CONCISE,
     REPORT_STYLE_FULL,

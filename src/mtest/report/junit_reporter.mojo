@@ -50,7 +50,7 @@ from mtest.model.outcome import Outcome
 from mtest.model.test_result import TestResult
 from mtest.platform import process_id, rename_path
 from mtest.report.file_accum import FileAccums
-from mtest.report.spool_dir import _SPOOL_ATTEMPTS, open_spool_dir
+from mtest.report.spool_dir import open_spool_dir
 from mtest.report.junit import (
     CACHE_SUITE_NAME,
     JunitCase,

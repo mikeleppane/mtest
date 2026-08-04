@@ -372,9 +372,9 @@ def html_file_section(section: ReportSectionInput) -> String:
         if t.outcome != Outcome.FAIL:
             continue
         out += (
-            "<h4>FAIL <code>"
+            "<h3>FAIL <code>"
             + _escape_inline(t.node.render())
-            + "</code></h4>\n"
+            + "</code></h3>\n"
         )
         var detail = normalize_detail(t.detail, section.root)
         if detail.byte_length() > 0:

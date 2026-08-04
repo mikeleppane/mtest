@@ -34,7 +34,7 @@ struct InvRow(Copyable, Movable):
 
 
 def frozen_inventory() -> List[InvRow]:
-    """Every flag spelling in the v1 contract, transcribed by hand.
+    """Every flag spelling the command-line contract carries, by hand.
 
     Every field is a contract fact authored independently from `flag_specs()`.
     `help_label` is the complete label for the physical help row, so aliases
