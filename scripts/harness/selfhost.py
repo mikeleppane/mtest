@@ -220,10 +220,18 @@ segment is stripped before the abnormal check rather than asserted.
 """
 
 VERDICT_ROW_RE = re.compile(
-    r"^(?P<verdict>[A-Z][A-Z-]{2,})\s+(?P<path>\S+\.mojo)(?=\s|$)",
+    r"^(?P<verdict>PASS|FAIL|CRASH|TIMEOUT|COMPILE-ERROR|COMPILE-TIMEOUT"
+    r"|MALFORMED-SUITE|PRECOMPILE-ERROR|FLAKY|NO-TESTS)\s+(?P<path>\S+\.mojo)(?=\s|$)",
     re.MULTILINE,
 )
 """One per-file verdict row: the verdict token and the file it names.
+
+The alternation must be exactly the file-row token set `_verdict_token` in
+src/mtest/report/console.mojo can print (PASS through FLAKY, plus the
+NO-TESTS substitution): any looser pattern can match a line that only looks
+like a verdict row. Duplicated here rather than imported: this harness stays
+import-free by design (see the module docstring above), so this list and
+package_consumption.py's copy are kept in sync by hand.
 
 Not scoped to a fixed root prefix the way `dogfood.py`'s row regex is. This
 harness gets its roots at runtime and compares every row against the

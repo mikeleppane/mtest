@@ -762,6 +762,44 @@ class ArtifactIdentityTests(unittest.TestCase):
             verify_installed_artifact_identity(self.prefix, self.artifact)
 
 
+FILE_ROW_TOKENS = (
+    "PASS",
+    "FAIL",
+    "CRASH",
+    "TIMEOUT",
+    "COMPILE-ERROR",
+    "COMPILE-TIMEOUT",
+    "MALFORMED-SUITE",
+    "PRECOMPILE-ERROR",
+    "FLAKY",
+    "NO-TESTS",
+)
+"""Every file-row token `_verdict_token` in `console.mojo` can print.
+
+Derived by reading the row-emission sites, not the old alternation: PASS
+through FLAKY fall through `_on_file_finished`'s generic branch
+(`console.mojo:1339`) for any outcome not specially handled, COMPILE-TIMEOUT
+and MALFORMED-SUITE among them; PRECOMPILE-ERROR is the literal banner token
+`_on_precompile_failed` prints (`console.mojo:1279`); NO-TESTS is substituted
+for PASS ahead of `_verdict_token` (`console.mojo:1339`, `:1588`). SKIP and
+DESELECTED never label a file row (per-test only, or never assigned); EXCLUDED
+and NOT-RUN are their own accounting rows, not `_verdict_token` output.
+"""
+
+
+class VerdictRowTokenCoverageTests(unittest.TestCase):
+    """`VERDICT_ROW_RE` must see every token a real console row can carry."""
+
+    def test_verdict_row_re_sees_every_file_row_token(self) -> None:
+        for token in FILE_ROW_TOKENS:
+            line = f"{token} e2e/cases/example.mojo"
+            with self.subTest(token=token):
+                match = package_consumption.VERDICT_ROW_RE.search(line)
+                if match is None:
+                    raise AssertionError(f"VERDICT_ROW_RE is blind to {token}")
+                self.assertEqual(match.group("token"), token)
+
+
 class FailingFixtureConsumptionTests(unittest.TestCase):
     """The installed binary must be seen failing the known-failing fixture."""
 

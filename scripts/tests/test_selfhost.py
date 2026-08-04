@@ -364,6 +364,51 @@ def run_oracle(
     return code, out.getvalue(), err.getvalue()
 
 
+FILE_ROW_TOKENS = (
+    "PASS",
+    "FAIL",
+    "CRASH",
+    "TIMEOUT",
+    "COMPILE-ERROR",
+    "COMPILE-TIMEOUT",
+    "MALFORMED-SUITE",
+    "PRECOMPILE-ERROR",
+    "FLAKY",
+    "NO-TESTS",
+)
+"""Every file-row token `_verdict_token` in `console.mojo` can print.
+
+Kept in sync with `scripts/tests/test_package_consumption.py`'s copy by hand:
+`scripts/harness/selfhost.py` stays import-free on purpose, so this list is a
+deliberate duplicate rather than a shared import.
+"""
+
+
+class VerdictRowTokenCoverageTests(unittest.TestCase):
+    """`VERDICT_ROW_RE` must see every token a real console row can carry."""
+
+    def test_verdict_row_re_sees_every_file_row_token(self) -> None:
+        for token in FILE_ROW_TOKENS:
+            line = f"{token} tests/unit/test_example.mojo"
+            with self.subTest(token=token):
+                match = selfhost.VERDICT_ROW_RE.search(line)
+                if match is None:
+                    raise AssertionError(f"VERDICT_ROW_RE is blind to {token}")
+                self.assertEqual(match.group("verdict"), token)
+
+    def test_verdict_row_re_rejects_a_token_outside_the_real_vocabulary(self) -> None:
+        # The catch-all `[A-Z][A-Z-]{2,}` this test replaces would happily match
+        # nonsense here; the tightened alternation must not.
+        line = "NONSENSE-TOKEN tests/unit/test_example.mojo"
+
+        match = selfhost.VERDICT_ROW_RE.search(line)
+
+        if match is not None:
+            raise AssertionError(
+                f"VERDICT_ROW_RE matched a token outside the real vocabulary: {match}"
+            )
+
+
 class IndependentParserTests(unittest.TestCase):
     def test_reads_top_level_test_declarations_in_order(self) -> None:
         source = (

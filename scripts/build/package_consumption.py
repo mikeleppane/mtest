@@ -252,8 +252,14 @@ FIXTURE_TIMEOUT = 300.0
 # `PASS e2e/...`-shaped verdict rows: a token at column zero, then the file the
 # verdict belongs to. Captured child output is indented, so it can never be
 # mistaken for a verdict mtest itself reported.
+#
+# The alternation must be exactly the file-row token set `_verdict_token` in
+# src/mtest/report/console.mojo can print, PASS through FLAKY plus the
+# NO-TESTS substitution: the gate must see every one of these to judge a
+# packaged binary's output truthfully.
 VERDICT_ROW_RE = re.compile(
-    r"^(?P<token>PASS|FAIL|CRASH|TIMEOUT|COMPILE-ERROR|NO-TESTS)\s+(?P<path>\S+)",
+    r"^(?P<token>PASS|FAIL|CRASH|TIMEOUT|COMPILE-ERROR|COMPILE-TIMEOUT"
+    r"|MALFORMED-SUITE|PRECOMPILE-ERROR|FLAKY|NO-TESTS)\s+(?P<path>\S+)",
     re.MULTILINE,
 )
 # The console summary band, as pinned by scripts/e2e/assertions.py.
