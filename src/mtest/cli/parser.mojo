@@ -16,6 +16,7 @@ version to stdout with exit 0, and prints a usage error to stderr with exit 4.
 from std.os import getenv
 from std.os.path import dirname, isdir
 
+from mtest.cli.completions import completion_shells
 from mtest.cli.flag_spec import (
     FlagId,
     FlagSpec,
@@ -23,7 +24,6 @@ from mtest.cli.flag_spec import (
     flag_specs,
     subcommand_specs,
 )
-from mtest.cli.completions import completion_shells
 from mtest.cli.parse_result import ParseResult
 from mtest.model import split_node_token
 from mtest.config import (

@@ -7,10 +7,21 @@ mask; and a script is `eval`'d into someone's interactive shell, so every byte
 that reaches it has to be inert in the position it lands in. The first is
 checked by embedding the very strings the renderers build their word lists
 from, the second by handing the escapers text no table contains today.
+
+Inertness is *modelled*, not asserted. Three of the positions a table value
+lands in are expanded twice — the script's own quotes come off, and then
+`compgen -W` or fish's `complete -a` expands what is left — so this module
+carries small models of both passes (`_bash_double_quote_removal`,
+`_fish_single_quote_removal`, `_backslash_removal`, `_live_metacharacters`) and
+drives a hostile value through them, asserting both that nothing live survives
+into the second pass and that the word arrives byte-identical. Asserting that
+one level of escaping "looks right" is what let a defective barrier read as a
+working one.
 """
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from mtest.cli import (
+    FlagId,
     Subcommand,
     ValueKind,
     completion_shells,
@@ -22,9 +33,15 @@ from mtest.cli import (
 from mtest.cli.completions import (
     _bash_word,
     _cmd_scoped_patterns,
+    _compgen_wordlist,
+    _fish_argument_list,
     _fish_flag_token,
     _fish_quoted,
+    _flag_words_for,
     _flags_for,
+    _head_state,
+    _none_tokens,
+    _spelling_of,
     _subcommand_words,
     _zsh_action_word,
     _zsh_description,
@@ -68,12 +85,171 @@ def _head_bits() -> List[Int]:
     ]
 
 
+def _head_name(bit: Int) -> String:
+    """The script-side name of one applicability bit."""
+    if bit == Subcommand.COLLECT:
+        return "collect"
+    if bit == Subcommand.CONFIG_SHOW:
+        return "config-show"
+    if bit == Subcommand.DOCTOR:
+        return "doctor"
+    if bit == Subcommand.DEBUG:
+        return "debug"
+    return "run"
+
+
 def _all_scripts() raises -> List[String]:
     """The three rendered scripts, in `completion_shells()` order."""
     var scripts = List[String]()
     for shell in completion_shells():
         scripts.append(render_completions(shell))
     return scripts^
+
+
+def _hostile_values() -> List[String]:
+    """Values no spec table holds today, each live in some shell position."""
+    return [
+        "$(touch OWNED)",
+        "`touch OWNED`",
+        "${IFS}",
+        'a"b',
+        "a'b",
+        "a\\b",
+        "a;touch OWNED",
+        "a b",
+        "a|b",
+        "*",
+        "a&b",
+        "$HOME",
+    ]
+
+
+def _config_row_description() raises -> String:
+    """The `config` Subcommands row's own help text, read from the table."""
+    for spec in subcommand_specs():
+        if spec.token == "config":
+            return spec.description.copy()
+    raise Error("the subcommand table has no 'config' row")
+
+
+# --- models of the shell passes a value has to survive ---------------------
+
+
+def _bash_double_quote_removal(source: String) -> String:
+    """What bash hands a builtin after removing one level of double quoting.
+
+    Inside double quotes a backslash keeps its meaning only before another
+    backslash, a double quote, a dollar sign, or a backtick; anywhere else it
+    is an ordinary character that survives.
+
+    Args:
+        source: The text as it appears between the script's double quotes.
+
+    Returns:
+        The freshly allocated argument text the builtin receives.
+    """
+    var out = String("")
+    var pending = False
+    for cp in source.codepoints():
+        var code = Int(cp)
+        if pending:
+            if not (code == 92 or code == 34 or code == 36 or code == 96):
+                out += "\\"
+            out += String(cp)
+            pending = False
+            continue
+        if code == 92:
+            pending = True
+            continue
+        out += String(cp)
+    if pending:
+        out += "\\"
+    return out^
+
+
+def _fish_single_quote_removal(source: String) -> String:
+    """What fish stores after removing one level of single quoting.
+
+    Fish honors exactly two escapes inside single quotes; every other
+    backslash is literal and survives into the expansion that follows.
+
+    Args:
+        source: The complete single-quoted literal, quotes included.
+
+    Returns:
+        The freshly allocated stored text.
+    """
+    var body = String(source[byte = 1 : source.byte_length() - 1])
+    var out = String("")
+    var pending = False
+    for cp in body.codepoints():
+        var code = Int(cp)
+        if pending:
+            if not (code == 92 or code == 39):
+                out += "\\"
+            out += String(cp)
+            pending = False
+            continue
+        if code == 92:
+            pending = True
+            continue
+        out += String(cp)
+    if pending:
+        out += "\\"
+    return out^
+
+
+def _backslash_removal(word: String) -> String:
+    """What a word expansion leaves once its own backslashes are consumed."""
+    var out = String("")
+    var pending = False
+    for cp in word.codepoints():
+        if pending:
+            out += String(cp)
+            pending = False
+            continue
+        if Int(cp) == 92:
+            pending = True
+            continue
+        out += String(cp)
+    if pending:
+        out += "\\"
+    return out^
+
+
+def _live_metacharacters(text: String) -> String:
+    """Every expansion-triggering codepoint of `text` no backslash protects."""
+    var live = String("")
+    var pending = False
+    for cp in text.codepoints():
+        var code = Int(cp)
+        if pending:
+            pending = False
+            continue
+        if code == 92:
+            pending = True
+            continue
+        if (
+            code == 36
+            or code == 96
+            or code == 40
+            or code == 41
+            or code == 34
+            or code == 39
+            or code == 59
+            or code == 38
+            or code == 124
+            or code == 60
+            or code == 62
+            or code == 42
+            or code == 63
+            or code == 91
+            or code == 126
+            or code == 123
+            or code == 125
+        ):
+            live += String(cp)
+    return live^
 
 
 # --- the grammar -----------------------------------------------------------
@@ -202,7 +378,7 @@ def test_fish_script_carries_its_frame() raises:
 def test_bash_embeds_every_command_scoped_flag_list() raises:
     var script = render_bash_completions()
     for bit in _head_bits():
-        var words = _flags_for(bit)
+        var words = _compgen_wordlist(_flag_words_for(bit))
         assert_true(words.byte_length() > 0, "empty flag list for a head")
         assert_true('-W "' + words in script, "flag list drift: " + words)
 
@@ -300,46 +476,217 @@ def test_fish_conditions_every_flag_line_on_an_accepting_head() raises:
             )
 
 
-def _head_name(bit: Int) -> String:
-    """The script-side name of one applicability bit."""
-    if bit == Subcommand.COLLECT:
-        return "collect"
-    if bit == Subcommand.CONFIG_SHOW:
-        return "config-show"
-    if bit == Subcommand.DOCTOR:
-        return "doctor"
-    if bit == Subcommand.DEBUG:
-        return "debug"
-    return "run"
-
-
 # --- head resolution: the leading token, then the effective head -----------
+
+
+def test_the_head_state_table_names_every_leading_token() raises:
+    """No token may fall to `none` by accident of a missing branch."""
+    assert_equal(_head_state("run"), "run")
+    assert_equal(_head_state("collect"), "collect")
+    assert_equal(_head_state("config"), "config-show")
+    assert_equal(_head_state("doctor"), "doctor")
+    assert_equal(_head_state("debug"), "debug")
+    assert_equal(_head_state("completions"), "completions")
+    assert_equal(_head_state("new"), "none")
+    assert_equal(_head_state("init"), "none")
+    assert_equal(_head_state("help"), "none")
+    assert_equal(_head_state("version"), "none")
+
+
+def test_every_head_token_is_resolved_by_every_script() raises:
+    """The generalized guard: a new subcommand cannot inherit the run grammar.
+
+    Every token of `subcommand_specs()` must appear in each script's own
+    head-resolution block — as its own branch when it resolves to a head, and
+    in the `none` group when it does not. A subcommand added to the table
+    without a branch here lands in `none` and offers nothing, which is the safe
+    answer; a subcommand added without reaching the block at all would keep
+    `run`'s flags, which is the wrong one.
+    """
+    var bash = render_bash_completions()
+    var zsh = render_zsh_completions()
+    var fish = render_fish_completions()
+    var none_tokens = _none_tokens()
+    var bash_none = String("")
+    var zsh_none = String("")
+    var fish_none = String("")
+    for token in none_tokens:
+        if bash_none.byte_length() != 0:
+            bash_none += "|"
+            zsh_none += "|"
+            fish_none += " "
+        bash_none += String(token)
+        zsh_none += String(token)
+        fish_none += String(token)
+    assert_true(len(none_tokens) > 0, "no flag-less head token at all")
+    assert_true("    " + bash_none + ') cmd="none" ;;\n' in bash)
+    assert_true("    " + zsh_none + ") cmd=none ;;\n" in zsh)
+    assert_true(
+        "            case " + fish_none + "\n                set head none\n"
+        in fish
+    )
+    for spec in subcommand_specs():
+        var token = spec.token.copy()
+        var state = _head_state(token)
+        if state == "none":
+            assert_true(
+                _has_word(fish_none, token),
+                "flag-less head not in the none group: " + token,
+            )
+            continue
+        if token == "config":
+            # The sole two-token subcommand keeps its own pending branch.
+            assert_true("    config)\n" in bash, "bash lost the config branch")
+            assert_true("    config)\n" in zsh, "zsh lost the config branch")
+            assert_true(
+                "            case config\n" in fish,
+                "fish lost the config branch",
+            )
+            continue
+        assert_true(
+            "    " + token + ') cmd="' + state + '" ;;\n' in bash,
+            "bash does not resolve the head token: " + token,
+        )
+        assert_true(
+            "    " + token + ") cmd=" + state + " ;;\n" in zsh,
+            "zsh does not resolve the head token: " + token,
+        )
+        assert_true(
+            "            case " + token + "\n                set head " + state
+            in fish,
+            "fish does not resolve the head token: " + token,
+        )
 
 
 def test_bash_resolves_the_head_from_the_leading_token_only() raises:
     var script = render_bash_completions()
     assert_true('case "${COMP_WORDS[1]-}" in' in script)
     assert_true('doctor) cmd="doctor" ;;' in script)
-    assert_true("completions|help|init|new|version) " in script)
+
+
+def test_the_collect_only_spelling_comes_from_the_flag_table() raises:
+    assert_equal(_spelling_of(FlagId.COLLECT_ONLY), "--collect-only")
 
 
 def test_bash_refines_a_run_head_to_collect_under_collect_only() raises:
-    var script = render_bash_completions()
-    var position = script.find('if [ "$cmd" = "run" ]; then')
-    assert_true(position != -1, "no effective-head refinement")
-    assert_true('"$word" = "--collect-only"' in script)
+    """Deleting the refinement must fail this test, not merely change it."""
+    var block = String('  if [ "$cmd" = "run" ]; then\n')
+    block += '    for word in "${COMP_WORDS[@]}"; do\n'
+    block += (
+        '      if [ "$word" = "'
+        + _spelling_of(FlagId.COLLECT_ONLY)
+        + '" ]; then\n'
+    )
+    block += '        cmd="collect"\n'
+    block += "        break\n"
+    block += "      fi\n"
+    block += "    done\n"
+    block += "  fi\n"
+    assert_true(
+        block in render_bash_completions(),
+        "the bash effective-head refinement is gone",
+    )
 
 
-def test_every_script_refines_the_head_under_collect_only() raises:
-    for script in _all_scripts():
-        assert_true("--collect-only" in script, "no effective-head refinement")
+def test_zsh_refines_a_run_head_to_collect_under_collect_only() raises:
+    var block = String("  if [[ $cmd == run ]] && (( ${words[(I)")
+    block += _spelling_of(FlagId.COLLECT_ONLY)
+    block += "]} )); then\n    cmd=collect\n  fi\n"
+    assert_true(
+        block in render_zsh_completions(),
+        "the zsh effective-head refinement is gone",
+    )
+
+
+def test_fish_refines_a_run_head_to_collect_under_collect_only() raises:
+    var block = String('    if test "$head" = run; and contains -- ')
+    block += _spelling_of(FlagId.COLLECT_ONLY)
+    block += " $parts\n        set head collect\n    end\n"
+    assert_true(
+        block in render_fish_completions(),
+        "the fish effective-head refinement is gone",
+    )
+
+
+def test_the_refined_head_gains_format_and_withdraws_the_run_only_flags() raises:
+    """What the refinement is *for*: the collect grammar, in all three shells.
+    """
+    var collect = _flags_for(Subcommand.COLLECT)
+    assert_true(_has_word(collect, "--format"), "collect lost --format")
+    for withdrawn in ["-x", "--exitfirst", "--gate", "--json"]:
+        assert_false(
+            _has_word(collect, withdrawn),
+            "collect still offers a run-only flag: " + withdrawn,
+        )
+    assert_true(
+        '-W "' + _compgen_wordlist(_flag_words_for(Subcommand.COLLECT))
+        in render_bash_completions(),
+        "the bash collect arm does not embed the collect list",
+    )
+    var zsh_collect = _zsh_specs_for(Subcommand.COLLECT)
+    assert_true("'--format[" in zsh_collect, "zsh collect lost --format")
+    for withdrawn in ["'-x[", "'--gate[", "'--json["]:
+        assert_false(
+            withdrawn in zsh_collect,
+            "zsh collect still offers a run-only flag: " + withdrawn,
+        )
+    var fish = render_fish_completions()
+    assert_true(
+        "'__mtest_head_is collect' -l format" in fish,
+        "fish collect lost --format",
+    )
+    for withdrawn in ["-s x ", "-l gate ", "-l json "]:
+        assert_false(
+            "'__mtest_head_is collect' " + withdrawn in fish,
+            "fish collect still offers a run-only flag: " + withdrawn,
+        )
 
 
 def test_config_pending_completes_exactly_the_show_token() raises:
-    var script = render_bash_completions()
-    assert_true('config-pending) COMPREPLY=($(compgen -W "show"' in script)
-    var zsh = render_zsh_completions()
-    assert_true("config-pending" in zsh)
+    assert_true(
+        '    config-pending) COMPREPLY=($(compgen -W "show" -- "$cur")) ;;\n'
+        in render_bash_completions(),
+        "the bash config-pending arm drifted",
+    )
+    assert_true(
+        "    config-pending) _values 'subcommand' 'show' ;;\n"
+        in render_zsh_completions(),
+        "the zsh config-pending arm drifted",
+    )
+    assert_true(
+        "complete -c mtest -n '__mtest_head_is config-pending' -f -a 'show' -d "
+        + _fish_quoted(_config_row_description())
+        + "\n"
+        in render_fish_completions(),
+        "the fish config-pending rule drifted",
+    )
+
+
+def test_the_completions_head_completes_its_own_shell_operand() raises:
+    assert_true(
+        '    completions) COMPREPLY=($(compgen -W "'
+        + _compgen_wordlist(completion_shells())
+        + '" -- "$cur")) ;;\n'
+        in render_bash_completions(),
+        "the bash completions arm drifted",
+    )
+    var shells = String("")
+    for shell in completion_shells():
+        if shells.byte_length() != 0:
+            shells += " "
+        shells += "'" + _zsh_action_word(shell) + "'"
+    assert_true(
+        "    completions) _values 'shell' " + shells + " ;;\n"
+        in render_zsh_completions(),
+        "the zsh completions arm drifted",
+    )
+    assert_true(
+        "complete -c mtest -n '__mtest_head_is completions' -f -a "
+        + _fish_argument_list(completion_shells())
+        + "\n"
+        in render_fish_completions(),
+        "the fish completions rule drifted",
+    )
 
 
 def test_value_arms_are_keyed_on_command_and_flag() raises:
@@ -382,6 +729,21 @@ def test_the_prefix_choice_arm_completes_a_path_after_its_prefix() raises:
     assert_true('compgen -P "$pfx" -f -- "$rest"' in script)
 
 
+def test_the_prefix_choice_arm_leaves_no_trailing_space() raises:
+    """A prefix completed with a space cannot be continued into a path."""
+    var bash = render_bash_completions()
+    var position = bash.find("compopt -o nospace")
+    assert_true(position != -1, "the bash prefix arm lost its nospace option")
+    assert_true(
+        position < bash.find('if [[ "$cur" == *:* ]]; then'),
+        "nospace is applied after the branch it has to cover",
+    )
+    assert_true(
+        'compadd -S "" --' in render_zsh_completions(),
+        "the zsh prefix action lost its empty suffix",
+    )
+
+
 # --- shell safety ----------------------------------------------------------
 
 
@@ -395,13 +757,78 @@ def test_file_completions_never_word_split_on_a_filename() raises:
     assert_false("COMPREPLY=($(compgen -f" in script)
 
 
-def test_bash_words_are_inert_inside_double_quotes() raises:
+def test_bash_words_are_literal_inside_double_quotes() raises:
+    """The literal level only; `compgen -W` needs the second one below."""
     assert_equal(_bash_word("--color"), "--color")
     assert_equal(_bash_word('a"b'), 'a\\"b')
     assert_equal(_bash_word("a$b"), "a\\$b")
     assert_equal(_bash_word("a`b"), "a\\`b")
     assert_equal(_bash_word("a\\b"), "a\\\\b")
     assert_equal(_bash_word("$(id)"), "\\$(id)")
+
+
+def test_a_hostile_word_survives_compgen_re_expansion_unchanged() raises:
+    """The barrier `compgen -W` actually needs, modelled pass by pass.
+
+    Bash removes the script's double quotes and hands the result to `compgen`,
+    which splits the list and then **expands** each word. A single level of
+    quoting therefore delivers a live `$(…)` to the second pass. Both
+    properties are asserted: nothing expandable survives into that pass, and
+    the word that comes out the far side is the one the table put in.
+    """
+    for hostile in _hostile_values():
+        var emitted = _compgen_wordlist([hostile.copy()])
+        var handed = _bash_double_quote_removal(emitted)
+        assert_equal(
+            _live_metacharacters(handed),
+            "",
+            "live metacharacter reaches compgen for: " + hostile,
+        )
+        assert_equal(
+            _backslash_removal(handed),
+            hostile,
+            "compgen would not yield the word verbatim: " + hostile,
+        )
+
+
+def test_a_hostile_word_survives_fish_argument_expansion_unchanged() raises:
+    """`complete -a` is expanded when a completion runs, so it needs two too."""
+    for hostile in _hostile_values():
+        var emitted = _fish_argument_list([hostile.copy()])
+        var stored = _fish_single_quote_removal(emitted)
+        assert_equal(
+            _live_metacharacters(stored),
+            "",
+            "live metacharacter reaches fish expansion for: " + hostile,
+        )
+        assert_equal(
+            _backslash_removal(stored),
+            hostile,
+            "fish would not yield the word verbatim: " + hostile,
+        )
+
+
+def test_a_hostile_word_is_inert_in_a_zsh_action() raises:
+    """The `_arguments` action list is parsed after zsh removes the quotes."""
+    for hostile in _hostile_values():
+        var escaped = _zsh_action_word(hostile)
+        assert_equal(
+            _live_metacharacters(escaped),
+            "",
+            "live metacharacter reaches the zsh action for: " + hostile,
+        )
+        assert_equal(
+            _backslash_removal(escaped),
+            hostile,
+            "zsh would not yield the action word verbatim: " + hostile,
+        )
+
+
+def test_a_multi_word_list_keeps_its_separators_unescaped() raises:
+    """The escaping may not swallow the spaces that separate the candidates."""
+    var emitted = _compgen_wordlist(["auto", "always", "never"])
+    assert_equal(emitted, "auto always never")
+    assert_equal(_fish_argument_list(["md:", "html:"]), "'md: html:'")
 
 
 def test_bash_case_patterns_are_literal() raises:
@@ -448,13 +875,6 @@ def test_fish_flag_tokens_split_short_from_long() raises:
     assert_equal(_fish_flag_token("-x"), "-s x")
     assert_equal(_fish_flag_token("-I"), "-s I")
     assert_equal(_fish_flag_token("--color"), "-l color")
-
-
-def test_no_script_carries_an_unquoted_command_substitution() raises:
-    """Nothing a table contributes may reach the shell as a command."""
-    for script in _all_scripts():
-        assert_false("$(id)" in script)
-        assert_false("`id`" in script)
 
 
 def main() raises:

@@ -2965,9 +2965,9 @@ a subcommand is recognized in. `mtest -q doctor <TAB>` is therefore completed
 as a run, matching what it would do if executed. One refinement follows: a run
 whose words already contain `--collect-only` is a collection, so it offers
 `--format` and withdraws the flags that mode refuses. A bare `config` completes
-exactly the mandatory `show` token (§27.1), and `new`, `init`, `completions`,
-`help`, and `version` offer nothing, because each takes at most one operand
-this document does not enumerate.
+exactly the mandatory `show` token (§27.1); `completions` completes the three
+shell names above; and `new`, `init`, `help`, and `version` offer nothing,
+because each takes at most one operand this document does not enumerate.
 
 Within a command, only the flags that command accepts are offered, and a
 flag's value is completed only under a command that accepts the flag: after
