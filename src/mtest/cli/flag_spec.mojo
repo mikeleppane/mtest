@@ -168,7 +168,8 @@ struct ValueKind(Equatable, ImplicitlyCopyable, Movable):
 struct FlagSpec(Copyable, Movable):
     """One accepted flag spelling and everything the parser needs about it.
 
-    Owns its `String` fields, so every copy is an explicit `.copy()`.
+    Owns its `String` and `List` fields, so every copy is an explicit
+    `.copy()`.
 
     Examples:
 
@@ -549,6 +550,12 @@ def flag_specs() -> List[FlagSpec]:
             ValueKind.CHOICE,
             collect_format_choices(),
         ),
+        # `PATH` understates this one row by a single token: `--json` also
+        # accepts a bare `-` for stdout, which no other destination flag does
+        # (`--junit-xml` and `--report` are assembled and renamed, so they have
+        # no stream form). Path completion is the useful behavior and stays;
+        # a caller that wants to offer the dash too has to special-case it
+        # here rather than read it off the kind.
         FlagSpec(
             "--json",
             FlagId.JSON,

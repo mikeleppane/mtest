@@ -579,6 +579,49 @@ def _spellings_with_kind(kind: ValueKind) -> String:
     return rendered^
 
 
+def _undeclared_probe(kind: ValueKind) -> String:
+    """A value shaped for `kind` that no row declares.
+
+    The probe has to be well-formed for its kind's own grammar, or the parser
+    refuses it on a structural rule before the choice list is ever consulted
+    and the list stays unconstrained. A bare `not-a-declared-choice` is refused
+    by `--report` for carrying no `:` at all, which would leave the prefix list
+    free to gain a bogus entry without any test noticing.
+
+    Args:
+        kind: The value kind the probe must be well-formed for.
+
+    Returns:
+        A newly allocated value the parser must refuse for that kind's own
+        reason.
+    """
+    if kind == ValueKind.PREFIX_CHOICE:
+        # A complete FORMAT:PATH value; only the prefix is undeclared, so the
+        # prefix list is the only thing that can refuse it.
+        return "txt:probe.out"
+    # A bare word. The free arm of CHOICE_OR_OTHER is a positive decimal and
+    # can never accept one, so closed-list membership is the only route in.
+    return "not-a-declared-choice"
+
+
+def _near_miss(kind: ValueKind, choice: String) -> String:
+    """A one-character perturbation of `choice`, still shaped for `kind`.
+
+    Args:
+        kind: The value kind the perturbation must stay well-formed for.
+        choice: One declared choice to perturb.
+
+    Returns:
+        A newly allocated value that differs from every declared choice.
+    """
+    if kind == ValueKind.PREFIX_CHOICE:
+        # Perturb inside the prefix, not after it: `md:x` would be a legal
+        # value with `x` as the path.
+        var stem = String(choice[byte = : choice.byte_length() - 1])
+        return stem + "x:probe.out"
+    return choice + "x"
+
+
 def _argv_for(spelling: String, value: String) -> List[String]:
     """The shortest argument vector that offers `value` to `spelling`."""
     var argv = List[String]()
@@ -881,19 +924,45 @@ def test_every_declared_choice_is_accepted_by_the_parser() raises:
 
 
 def test_a_value_outside_every_closed_list_is_refused() raises:
-    """A list is only closed while the parser refuses what it omits."""
+    """A list is only closed while the parser refuses what it omits.
+
+    The probe is shaped for the row's own kind (`_undeclared_probe`), so the
+    refusal comes from the choice list rather than from a structural rule the
+    list plays no part in.
+    """
     for spec in flag_specs():
         if len(spec.choices) == 0:
             continue
+        var probe = _undeclared_probe(spec.value_kind)
         var refused = False
         try:
-            _ = parse_args(_argv_for(spec.spelling, "not-a-declared-choice"))
+            _ = parse_args(_argv_for(spec.spelling, probe))
         except:
             refused = True
         assert_true(
             refused,
-            "declared list is not closed: " + spec.spelling,
+            "declared list is not closed: " + spec.spelling + " " + probe,
         )
+
+
+def test_a_near_miss_on_a_declared_choice_is_refused() raises:
+    """Membership is exact: no prefix match, no fuzzy match, per member.
+
+    One fixed probe per row cannot prove that; perturbing each declared member
+    in turn constrains every entry of every list rather than only the row.
+    """
+    for spec in flag_specs():
+        for choice in spec.choices:
+            var probe = _near_miss(spec.value_kind, choice)
+            var refused = False
+            try:
+                _ = parse_args(_argv_for(spec.spelling, probe))
+            except:
+                refused = True
+            assert_true(
+                refused,
+                "near miss accepted: " + spec.spelling + " " + probe,
+            )
 
 
 def test_workers_free_arm_is_open_beside_its_closed_arm() raises:
