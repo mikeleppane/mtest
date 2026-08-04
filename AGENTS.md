@@ -92,12 +92,17 @@ Three named seams:
   which step does the run want next. It spawns nothing, emits no event, and
   owns no captured bytes.
 
-Drivers execute what the kernel decides. A sequential driver services one step
-at a time through `run_supervised`, and `session/selection.mojo` is the one that
-takes the node-id and `-k` path. `session/pool.mojo` is the parallel scheduler
-behind `-n`/`--workers`, driving up to `workers` children at once under a single
-`Supervisor` over native ABI v2; `--serial` pins its matching files to a final
-one-at-a-time pass that runs after the parallel batch drains. Concurrency is
+Only the sequential driver executes what the kernel's `next_step` decides:
+`session/selection.mojo` services one step at a time through `run_supervised`,
+and it is the one that takes the node-id and `-k` path. `session/pool.mojo`,
+the parallel scheduler behind `-n`/`--workers`, does not call `next_step` at
+all — it runs its own `_PENDING_BUILD` → `_BUILDING` → `_PENDING_RUN` →
+`_RUNNING` → `_DONE` phase machine, driving up to `workers` children at once
+under a single `Supervisor` over native ABI v2, and reaches into the kernel
+only for `admit_crash_retry`, `record_verdict`, and the halt predicates;
+`--serial` pins its matching files to a final one-at-a-time pass that runs
+after the parallel batch drains. A scheduling feature meant for both drivers
+belongs in those kernel policy methods, never in `next_step`. Concurrency is
 only ever across files: one file's steps stay strictly ordered, and `-n 1` is
 byte-identical to the sequential path (one child per step, and no
 `--num-threads` on the build argv). Admission, retry, maxfail, serial, and
