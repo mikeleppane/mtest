@@ -137,6 +137,13 @@ jobs:
       - name: README CLI reference
         run: pixi run readme-help-check
 
+      # Runs here rather than in the static preflight because it needs the
+      # built binary to render the scripts, and on linux-64 because that is
+      # where the pinned zsh and fish are declared: this is the require-all
+      # run of the completion oracle.
+      - name: Shell completion scripts
+        run: pixi run completions-check
+
       - name: Rendered JUnit document
         run: pixi run junit-render-check
 
