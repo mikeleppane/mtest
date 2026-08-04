@@ -1,6 +1,6 @@
 ---
 name: validating-mtest
-description: Use when QA-testing or acceptance-testing the mtest runner, validating it against docs/cli-contract.md, verifying exit codes / outcome labels / determinism / the availability matrix / the collect stream / the source-writing subcommands, checking a change or a Mojo re-pin did not break a user-facing promise, or hunting for silent or contract-violating behavior before a release.
+description: Use when QA-testing or acceptance-testing the mtest runner, validating it against docs/cli-contract.md, verifying exit codes / outcome labels / determinism / the availability matrix / the collect stream / the source-writing subcommands, checking a change or a Mojo re-pin did not break a user-facing promise, or hunting for silent or contract-violating behavior before a release. Also covers clean-room validation in Docker — when a probe needs a shell or tool the host lacks, a fresh-machine install path, or an environment (non-root, hostile umask, empty PATH) this workstation cannot produce.
 ---
 
 # Validating mtest
@@ -182,6 +182,78 @@ direct exit capture, correct build) before writing it up. The original pass
 produced a false positive (`--color always` vs `NO_COLOR`) from a bad
 invocation; a second clean run retracted it. **Rebuild first** — an all-green run
 against a stale binary proves nothing.
+
+## Clean-room validation with Docker
+
+Some promises cannot be observed from this workstation: a shell the host does
+not have, a *fresh user's* install path, or behavior that depends on an
+environment the developer's box has already been configured out of. Reach for a
+container there — and only there.
+
+**Reach for Docker when:**
+
+- **The probe needs a tool the host lacks.** The fish completion script shipped
+  unparsed by anything for a full task because `fish` is not installed here.
+  `docker run --rm -v "$PWD":/w:ro debian:stable-slim` with
+  `apt-get install -y zsh fish` parses all three in under a minute.
+- **The claim is about a fresh machine.** "The rendered completion script works
+  when a user sources it" is a statement about a box that has never seen this
+  repo. A pristine image is the only honest oracle for it; your shell has
+  history, rc files, and a warm `PATH`.
+- **The probe would otherwise install onto the developer's machine.** Mount the
+  repo **read-only** (`:ro`) and install inside the container. Nothing you do
+  there can touch the host tree.
+- **You need an environment the host cannot produce** — a different locale, a
+  non-root user with a hostile `umask`, a directory the process genuinely cannot
+  write, an empty `PATH`.
+
+**Do NOT reach for Docker when:**
+
+- **`pixi` already provides the tool.** A conda-forge dependency under
+  `[target.linux-64.dependencies]` installs into the project's `.pixi/`, not
+  system-wide — it does not "mess up the machine" either, and it is the route CI
+  can reproduce. Docker is the fallback when a package will not solve, not the
+  default.
+- **The property is host-dependent in a way Linux cannot fake.** A container
+  cannot stand in for the macOS lane: `/tmp` is not a symlink to `/private/tmp`
+  there, and an ext4/overlay filesystem is case-**sensitive**, so a
+  case-insensitive destination collision (the APFS defect class) is
+  unreproducible. Those belong on the real macOS CI lane; a green container run
+  proves nothing about them.
+
+**Container traps that manufacture false findings:**
+
+- **You are root by default.** Every permission-refusal probe — `chmod 0500` on
+  a parent, an unwritable destination, a read-only directory — is a **no-op for
+  root**, so the failure you meant to provoke never happens and the run comes
+  back green. Pass `--user "$(id -u):$(id -g)"`, or drop privileges inside.
+- **Mount read-only unless you mean to write.** `-v "$PWD":/w:ro` is the
+  default posture; a writable mount lets a container-side build scribble
+  root-owned artifacts into the host tree.
+- **The binary must match the container's architecture and libc.** Mounting a
+  locally built `build/mtest` into an image works only when both are the same
+  arch and the image's glibc is new enough. If it will not run, build inside.
+- **Bare `apt-get` output is noise.** Redirect it; an installer's progress lines
+  buried a real parse error more than once.
+
+**Recipes that work headlessly** (no TTY, no interactive shell):
+
+```bash
+# bash: drive the completion function directly
+bash -c 'source ./mtest.bash
+  COMP_WORDS=(mtest -q doctor --retr); COMP_CWORD=3
+  _mtest_complete; printf "%s\n" "${COMPREPLY[@]}"'
+
+# fish: complete -C computes candidates for a command line
+fish -c 'source ./mtest.fish; complete -C "mtest --collect-only --"'
+
+# zsh: needs a pseudo-terminal — zpty is the only reliable route
+```
+
+Assert the candidate **set**, not a substring of the script's text: a renderer
+test that greps for `--collect-only` passes even if the entire feature is
+deleted, because that string is also just a flag spelling. This is the same
+exact-sets discipline the rest of this skill applies to `collect` output.
 
 ## Validation matrix (what the oracle asserts)
 
