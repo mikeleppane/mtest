@@ -960,11 +960,20 @@ def test_the_prefix_choice_arm_completes_a_path_in_every_shell() raises:
     )
 
 
-def test_every_pure_file_completion_declares_filename_semantics() raises:
-    """`-o filenames` is what makes a completed directory end in a slash.
+def test_every_file_completion_declares_filename_semantics() raises:
+    """`-o filenames` is what makes readline escape and mark a completed path.
 
-    Only the arms whose whole candidate set is filenames take it: an arm that
-    also offers flag words would have bash treat `--color` as a path.
+    It carries two effects a path candidate cannot do without: a directory
+    ends in a slash instead of a terminating space, and a name holding a
+    shell-special character is re-quoted for the line. Without it readline
+    inserts the match verbatim, so completing `my\\ rep` yields the two words
+    `my report.md` and completing `re` yields `reports ` — a path the shell
+    then cannot open.
+
+    Every arm whose `compgen` carries `-f` takes it, including the ones that
+    also offer flag words. Mixing costs nothing: readline asks the filesystem
+    about each candidate, and `--color` is neither a directory nor in need of
+    quoting, so it is completed exactly as it was without the option.
     """
     var lines = render_bash_completions().split("\n")
     var found = 0
@@ -972,18 +981,34 @@ def test_every_pure_file_completion_declares_filename_semantics() raises:
         var line = String(lines[i])
         if "compgen " not in line or "-f " not in line:
             continue
-        if "-W " in line:
-            continue
         found += 1
         if "compgen -P " in line:
             # The prefix arm chooses between filename semantics and `nospace`
             # on whether readline split the word; its own test pins the shape.
             continue
         assert_true(
-            i > 0 and "compopt -o filenames" in String(lines[i - 1]),
-            "a pure file completion without filename semantics: " + line,
+            "compopt -o filenames" in line
+            or (i > 0 and "compopt -o filenames" in String(lines[i - 1])),
+            "a file completion without filename semantics: " + line,
         )
-    assert_true(found >= 2, "no pure file completion found at all")
+    assert_true(found >= 2, "no file completion found at all")
+
+
+def test_the_doctor_arm_offers_no_path_and_so_no_filename_semantics() raises:
+    """The one head that takes no operand is the one arm without either.
+
+    `doctor` accepts no path at all, so its arm carries neither `-f` nor the
+    filename marking — which is what keeps the assertion above honest: an
+    unconditional `compopt` would satisfy it without proving anything.
+    """
+    var bash = render_bash_completions()
+    var doctor = String("")
+    for line in bash.split("\n"):
+        if String(line).startswith("    doctor) "):
+            doctor = String(line)
+    assert_true(doctor != "", "the bash doctor arm is gone")
+    assert_false("-f " in doctor, "doctor completes a path: " + doctor)
+    assert_false("compopt" in doctor, "doctor marks filenames: " + doctor)
 
 
 # --- value kinds: a closed set, and three syntaxes for each ----------------

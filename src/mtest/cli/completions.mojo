@@ -833,6 +833,7 @@ def render_bash_completions() -> String:
     script += '  if [ "$index" -eq 1 ]; then\n'
     var head_words = _subcommand_word_list()
     head_words.extend(_flag_words_for(Subcommand.RUN))
+    script += "    compopt -o filenames\n"
     script += (
         '    _mtest_reply < <(compgen -W "'
         + _compgen_wordlist(head_words)
@@ -842,11 +843,15 @@ def render_bash_completions() -> String:
     script += "  fi\n"
     script += '  case "$cmd" in\n'
     for bit in _head_bits():
-        var files = " -f" if bit != Subcommand.DOCTOR else ""
+        var takes_paths = bit != Subcommand.DOCTOR
+        var files = " -f" if takes_paths else ""
+        var filenames = "compopt -o filenames; " if takes_paths else ""
         script += (
             "    "
             + _head_name(bit)
-            + ') _mtest_reply < <(compgen -W "'
+            + ") "
+            + filenames
+            + '_mtest_reply < <(compgen -W "'
             + _compgen_wordlist(_flag_words_for(bit))
             + '"'
             + files
