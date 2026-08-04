@@ -601,25 +601,63 @@ def test_bash_resolves_the_head_from_the_leading_token_only() raises:
     assert_true('"doctor") cmd="doctor" ;;' in script)
 
 
-def test_bash_reads_its_words_from_the_line_readline_never_splits() raises:
+def test_bash_rejoins_the_words_readline_split_at_a_colon() raises:
     """`COMP_WORDBREAKS` contains `:`, so `COMP_WORDS` cannot carry `md:path`.
 
     Driven for real, `--report md:` reaches a completion function as
     `cur=[:] prev=[md]` and `--report md:pl` as `cur=[pl] prev=[:]`: the value
     arm is keyed on `cmd:prev`, so it never fires a second time and the path
-    after the separator is unreachable. The logical words come from
-    `COMP_LINE`, which readline does not split.
+    after the separator is unreachable. Only the pieces that were adjacent in
+    `COMP_LINE` are re-joined — `-k a: b` is three words and `md:pl` is one,
+    and nothing but the whitespace between them distinguishes the two.
     """
     var script = render_bash_completions()
-    assert_true('typed="${COMP_LINE:0:COMP_POINT}"' in script)
-    assert_true('read -r -a lwords <<< "$typed"' in script)
+    assert_true("_mtest_words() {" in script)
+    assert_true('local rest="$COMP_LINE" piece last i' in script)
+    assert_true('[[ "$rest" != [[:space:]]* ]]; then' in script)
+    assert_true('lwords[last-1]+="$piece"' in script)
+    assert_true('rest="${rest#"$piece"}"' in script)
+
+
+def test_bash_keeps_readlines_own_quote_aware_word_array() raises:
+    """Re-splitting the line would complete the wrong file and eat typed text.
+
+    `COMP_WORDS` elements are raw slices of the command line, so a
+    backslash-escaped space or an opening quote is still part of the word;
+    readline does not even split at a `:` inside quotes. A whitespace re-split
+    of `COMP_LINE` loses that, and since readline still replaces the whole
+    word, `mtest my\\ rep<TAB>` completes `rep` and overwrites `my\\ rep`
+    with the result.
+    """
+    var script = render_bash_completions()
+    assert_true('piece="${COMP_WORDS[i]}"' in script)
+    assert_true('[ "$i" -eq "$COMP_CWORD" ]' in script)
     assert_false(
-        "COMP_WORDS" in script,
-        "a split word array is still consulted somewhere",
+        "COMP_LINE:0:COMP_POINT" in script,
+        (
+            "a byte-offset slice of the line is back; it also mixes byte and"
+            " character offsets in a multibyte locale"
+        ),
     )
     assert_false(
-        "COMP_CWORD" in script,
-        "a split word index is still consulted somewhere",
+        "read -r -a lwords" in script,
+        "the line is being re-split instead of the array re-joined",
+    )
+
+
+def test_bash_trims_only_what_readline_will_not_replace() raises:
+    """The trim is the difference between the logical word and readline's.
+
+    An unsplit word leaves nothing to trim, which is what lets a quoted
+    `"md:my rep` be completed whole; a split `md:pl` leaves `md:`, which would
+    otherwise be inserted after the `md:` already on the line.
+    """
+    var script = render_bash_completions()
+    assert_true("_mtest_trim_to_replaced() {" in script)
+    assert_true('local keep="${1%"$2"}" i' in script)
+    assert_true(
+        '_mtest_trim_to_replaced "$cur" "${COMP_WORDS[COMP_CWORD]}"' in script,
+        "the prefix arm does not trim against readline's own word",
     )
 
 
@@ -808,7 +846,11 @@ def test_the_prefix_choice_arm_leaves_no_trailing_space() raises:
     var bash = render_bash_completions()
     var arm = String('      if [[ "$cur" == *:* ]]; then\n')
     arm += '        local pfx="${cur%%:*}:" rest="${cur#*:}"\n'
-    arm += "        compopt -o filenames\n"
+    arm += '        if [ "$cur" = "${COMP_WORDS[COMP_CWORD]}" ]; then\n'
+    arm += "          compopt -o nospace\n"
+    arm += "        else\n"
+    arm += "          compopt -o filenames\n"
+    arm += "        fi\n"
     arm += '        _mtest_reply < <(compgen -P "$pfx" -f -- "$rest")\n'
     arm += "      else\n"
     arm += "        compopt -o nospace\n"
@@ -831,8 +873,7 @@ def test_the_prefix_choice_arm_completes_a_path_in_every_shell() raises:
     """
     var bash = render_bash_completions()
     assert_true('compgen -P "$pfx" -f -- "$rest"' in bash)
-    assert_true('_mtest_ltrim_colon "$cur"' in bash)
-    assert_true("_mtest_ltrim_colon() {" in bash)
+    assert_true("_mtest_trim_to_replaced() {" in bash)
     var zsh = render_zsh_completions()
     assert_true(
         "_mtest_prefix__report() {\n" in zsh,
@@ -863,6 +904,10 @@ def test_every_pure_file_completion_declares_filename_semantics() raises:
         if "-W " in line:
             continue
         found += 1
+        if "compgen -P " in line:
+            # The prefix arm chooses between filename semantics and `nospace`
+            # on whether readline split the word; its own test pins the shape.
+            continue
         assert_true(
             i > 0 and "compopt -o filenames" in String(lines[i - 1]),
             "a pure file completion without filename semantics: " + line,

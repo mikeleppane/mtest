@@ -34,12 +34,17 @@ completing a word without ending it. bash and zsh can, so both offer the
 prefix first and the path second — and both need help to do it. bash splits
 `COMP_WORDS` at every `COMP_WORDBREAKS` character, and that set contains `:`,
 so `--report md:pl` reaches a completion function as `prev=:` and no value arm
-would fire twice; the logical words are therefore recovered from `COMP_LINE`,
-which readline never splits, and the candidates are trimmed back to what
-readline will actually replace. zsh's `compset -P` does the same job in one
-builtin. fish can neither suppress the trailing space nor re-split the word,
-so it assembles the whole `PREFIX:PATH` candidate at once and needs no second
-stage.
+would fire twice; the pieces that were adjacent in `COMP_LINE` are therefore
+re-joined, and the candidates are trimmed back to what readline will actually
+replace. That array is readline's own rather than a fresh split of the line,
+because it is the quote-aware one: re-splitting on whitespace would complete a
+backslash-escaped `my rep` from its `rep` alone, overwriting the text already
+typed with a candidate computed from the wrong half of it.
+zsh's `compset -P` does the same job in one builtin. fish needs neither,
+because a `complete -a` rule supplies whole words: one function assembles the
+`PREFIX:PATH` candidate from `commandline -ct`, and fish leaves a completed
+prefix or directory without a trailing space on its own, so the same two steps
+work there without a second rule.
 
 **Escaping is two-level where the shell expands twice.** These scripts are
 `eval`'d into an interactive shell, and three of the positions a table value
@@ -672,35 +677,53 @@ def render_bash_completions() -> String:
     script += '    COMPREPLY+=("$_mtest_line")\n'
     script += "  done\n"
     script += "}\n"
-    # readline replaces only the text after the last COMP_WORDBREAKS character
-    # it found, and that set contains `:`, so a candidate carrying the prefix
-    # would be inserted *after* the prefix already on the line, yielding
-    # `md:md:report.md`. Trimming the candidates is the same fix bash's own
-    # completion library makes, for the same reason.
-    script += "_mtest_ltrim_colon() {\n"
-    script += '  local trimmed="${1%"${1##*:}"}" _mtest_index\n'
-    script += '  [ -z "$trimmed" ] && return\n'
-    script += "  for ((_mtest_index = 0;"
-    script += " _mtest_index < ${#COMPREPLY[@]}; _mtest_index++)); do\n"
-    script += '    COMPREPLY[_mtest_index]="${COMPREPLY[_mtest_index]'
-    script += '#"$trimmed"}"\n'
+    # COMP_WORDS is split at every COMP_WORDBREAKS character, and that set
+    # contains `:` — `--report md:pl` arrives as five words, so `prev` is `:`
+    # and no value arm could ever fire a second time. Only the pieces that
+    # were *adjacent* in COMP_LINE are re-joined, which is why the line is
+    # consumed alongside the array rather than re-split: `-k a: b` is three
+    # words and `md:pl` is one, and nothing but the whitespace between them
+    # tells the two apart. readline's own array is kept because it is the
+    # quote-aware one — each element is a raw slice of the line, so a
+    # backslash-escaped space or a quoted path survives, and readline does not
+    # split at a `:` inside quotes in the first place.
+    script += "_mtest_words() {\n"
+    script += '  local rest="$COMP_LINE" piece last i\n'
+    script += "  lwords=()\n"
+    script += "  index=0\n"
+    script += "  for ((i = 0; i < ${#COMP_WORDS[@]}; i++)); do\n"
+    script += '    piece="${COMP_WORDS[i]}"\n'
+    script += "    last=${#lwords[@]}\n"
+    script += '    if [ "$i" -gt 0 ] && [ "$last" -gt 0 ] &&'
+    script += ' [[ "$rest" != [[:space:]]* ]]; then\n'
+    script += '      lwords[last-1]+="$piece"\n'
+    script += '      [ "$i" -eq "$COMP_CWORD" ] && index=$(( last - 1 ))\n'
+    script += "    else\n"
+    script += '      rest="${rest#"${rest%%[![:space:]]*}"}"\n'
+    script += '      lwords+=("$piece")\n'
+    script += '      [ "$i" -eq "$COMP_CWORD" ] && index=$last\n'
+    script += "    fi\n"
+    script += '    rest="${rest#"$piece"}"\n'
+    script += "  done\n"
+    script += "}\n"
+    # readline replaces exactly `COMP_WORDS[COMP_CWORD]`, while a candidate is
+    # the whole logical word, so whatever readline is going to keep has to come
+    # off the front of every candidate. Taking the difference between the two
+    # words is exact in both directions: an unsplit word leaves nothing to trim
+    # and a quoted `"md:my rep` is therefore completed whole, while a split
+    # `md:pl` leaves `md:` and would otherwise be inserted after the `md:`
+    # already on the line.
+    script += "_mtest_trim_to_replaced() {\n"
+    script += '  local keep="${1%"$2"}" i\n'
+    script += '  [ -z "$keep" ] && return\n'
+    script += "  for ((i = 0; i < ${#COMPREPLY[@]}; i++)); do\n"
+    script += '    COMPREPLY[i]="${COMPREPLY[i]#"$keep"}"\n'
     script += "  done\n"
     script += "}\n"
     script += "_mtest_complete() {\n"
-    script += "  local cur prev cmd word typed count index\n"
+    script += "  local cur prev cmd word index\n"
     script += "  local -a lwords\n"
-    # COMP_WORDS is split at every COMP_WORDBREAKS character, and that set
-    # contains `:` — `--report md:pl` arrives as five words, so `prev` is `:`
-    # and no value arm could ever fire a second time. The command line itself
-    # is never split, so the logical words are recovered from it: the same
-    # whitespace split the runner's own argv came from.
-    script += '  typed="${COMP_LINE:0:COMP_POINT}"\n'
-    script += '  read -r -a lwords <<< "$typed"\n'
-    script += "  count=${#lwords[@]}\n"
-    script += '  case "$typed" in\n'
-    script += "    *[![:space:]]) index=$(( count > 0 ? count - 1 : 0 )) ;;\n"
-    script += "    *) index=$count ;;\n"
-    script += "  esac\n"
+    script += "  _mtest_words\n"
     script += '  cur="${lwords[index]-}"\n'
     script += '  prev=""\n'
     script += '  [ "$index" -gt 0 ] && prev="${lwords[index-1]-}"\n'
@@ -757,7 +780,17 @@ def render_bash_completions() -> String:
         elif spec.value_kind == ValueKind.PREFIX_CHOICE:
             script += '      if [[ "$cur" == *:* ]]; then\n'
             script += '        local pfx="${cur%%:*}:" rest="${cur#*:}"\n'
-            script += "        compopt -o filenames\n"
+            # Whether readline split this word decides what survives the trim
+            # below, and a candidate that keeps its prefix is not a filename:
+            # asking bash to requote one as a filename escapes the quote a
+            # user typed and corrupts the word.
+            script += (
+                '        if [ "$cur" = "${COMP_WORDS[COMP_CWORD]}" ]; then\n'
+            )
+            script += "          compopt -o nospace\n"
+            script += "        else\n"
+            script += "          compopt -o filenames\n"
+            script += "        fi\n"
             script += (
                 '        _mtest_reply < <(compgen -P "$pfx" -f -- "$rest")\n'
             )
@@ -772,7 +805,10 @@ def render_bash_completions() -> String:
                 + '" -- "$cur"))\n'
             )
             script += "      fi\n"
-            script += '      _mtest_ltrim_colon "$cur"\n'
+            script += (
+                '      _mtest_trim_to_replaced "$cur"'
+                ' "${COMP_WORDS[COMP_CWORD]}"\n'
+            )
         else:
             script += (
                 '      COMPREPLY=($(compgen -W "'
@@ -1039,11 +1075,10 @@ def _fish_value_options(spec: FlagSpec) -> String:
     if spec.value_kind == ValueKind.PATH:
         return " -r"
     if spec.value_kind == ValueKind.PREFIX_CHOICE:
-        # `complete` has no per-rule `nospace`, so a two-stage prefix-then-path
-        # chain is unreachable in fish. The function assembles the whole
-        # `PREFIX:PATH` candidate instead, which needs no second stage. The
-        # parentheses stay live on purpose — this is a command substitution —
-        # so the arguments inside them carry the expansion escaping.
+        # A `complete -a` rule supplies whole words, so the candidate is the
+        # whole `PREFIX:PATH` and one rule covers both steps. The parentheses
+        # stay live on purpose — this is a command substitution — so the
+        # arguments inside them carry the expansion escaping.
         var escaped = List[String]()
         for choice in spec.choices:
             escaped.append(_fish_expansion_word(choice))
@@ -1108,9 +1143,11 @@ def render_fish_completions() -> String:
     script += "function __mtest_head_is\n"
     script += '    test (__mtest_head) = "$argv[1]"\n'
     script += "end\n"
-    # One candidate list rather than two stages: fish cannot suppress the space
-    # after a completed prefix, so a `PREFIX:` that had to be continued would
-    # be a dead end. Assembling `PREFIX:PATH` in one step avoids needing one.
+    # One rule rather than two stages: a fish completion is a whole word, so
+    # the candidate carries its prefix. Measured against a real fish, a
+    # completed prefix (`md:`) and a completed directory (`md:reports/`) are
+    # both left without a trailing space, so the word stays continuable and
+    # the second step needs no rule of its own.
     script += "function __mtest_prefixed_path\n"
     script += "    set -l token (commandline -ct)\n"
     script += "    if not string match -q -- '*:*' $token\n"
