@@ -634,6 +634,28 @@ def _fish_flag_token(spelling: String) -> String:
 # --- bash ----------------------------------------------------------------- #
 
 
+def _bash_word_break_class() -> String:
+    """The word-break characters whose replacement region readline leaves empty.
+
+    bash's default `COMP_WORDBREAKS` is `"'><=;|&(:` plus whitespace. With the
+    cursor straight after one of these, `COMP_WORDS` still reports it as the
+    current word while readline inserts rather than replaces, so a trim that
+    subtracted it would leave it on the front of every candidate.
+
+    The two quote characters are deliberately absent, and the exclusion is
+    load-bearing rather than an oversight: readline keeps and dequotes a quote
+    instead of discarding it, so its replacement region there is *not* empty.
+    Measured against a real bash — with `"` in this set, `--report md:"` and a
+    single match completes to `--report md:"md:onlyone.md"`, a second copy of
+    the prefix; without it, to `--report md:"onlyone.md"`.
+
+    Returns:
+        The freshly allocated body of a bracket expression, safe to place
+        between `[` and `]` in a bash pattern.
+    """
+    return ":=><;|&("
+
+
 def _cmd_scoped_patterns(spec: FlagSpec) -> String:
     """The `cmd:prev` alternation that offers one flag's value.
 
@@ -714,13 +736,18 @@ def render_bash_completions() -> String:
     # `md:` that would otherwise be inserted after the `md:` already typed.
     #
     # The exception is a cursor sitting straight after a word-break character.
-    # `COMP_WORDS` still reports the `:` as the current word, but readline's
-    # replacement region there is EMPTY — it inserts rather than replaces — so
-    # subtracting that `:` would leave one on the front of every candidate.
-    # Nothing survives on the line, so the whole logical word comes off.
+    # `COMP_WORDS` still reports that character as the current word, but
+    # readline's replacement region there is EMPTY — it inserts rather than
+    # replaces — so subtracting it would leave one on the front of every
+    # candidate. Nothing survives on the line, so the whole logical word comes
+    # off.
     script += "_mtest_trim_to_replaced() {\n"
     script += '  local replaced="$2" keep i\n'
-    script += '  [ "$replaced" = ":" ] && replaced=""\n'
+    script += (
+        '  [ -z "${replaced//['
+        + _bash_word_break_class()
+        + ']/}" ] && replaced=""\n'
+    )
     script += '  keep="${1%"$replaced"}"\n'
     script += '  [ -z "$keep" ] && return\n'
     script += "  for ((i = 0; i < ${#COMPREPLY[@]}; i++)); do\n"
