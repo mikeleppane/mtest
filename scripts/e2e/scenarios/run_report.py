@@ -40,11 +40,12 @@ SUITE_ROWS = (
     "| e2e/suite/test_passing.mojo | PASS |",
     "| e2e/suite/test_zero.mojo | PASS |",
 )
-"""The summary row prefix every file of the default suite must produce.
+"""The leading cells of the summary row every file of the suite produces.
 
-Anchored on the whole row rather than on a path and an outcome word found
-separately: a document that named the path in one place and the outcome in
-another would satisfy two independent substring checks while pairing neither.
+Path and outcome are matched together, as one row prefix, rather than as two
+substrings found anywhere: a document that named the path in one place and the
+outcome in another would satisfy two independent checks while pairing neither.
+The measured cells after them are deliberately not pinned.
 """
 
 MACHINE_INDEX = (
@@ -69,10 +70,10 @@ FAIL_NODE_HEADING = "### FAIL `e2e/suite/test_failing.mojo::test_second_fails`"
 RELATIVIZED_BACKTRACE = "At e2e/suite/test_failing.mojo:14:17"
 """The compiler-baked `At` line as the report must rewrite it.
 
-The child prints an absolute path here. The document says once, at its head,
-that every path it shows is relative to the run root, and this is the line
-that claim is hardest to keep: it arrives inside untrusted failure detail
-rather than from a `NodeId`.
+The child prints an absolute path here. The document's head note claims the
+paths it composes are relative to the run root, and this is the line that
+claim is hardest to keep: it arrives inside untrusted failure detail rather
+than from a `NodeId`.
 """
 
 GREEN_SECTION = "## `e2e/suite/test_passing.mojo`"
@@ -88,11 +89,18 @@ def _machine_index(document: str) -> tuple[str, ...]:
     Returns:
         Every non-empty line after the machine-index heading, and `()` when
         the document carries no such heading at all.
+
+        Split at the LAST occurrence, not the first. The index is the final
+        thing the writer emits, while everything above it includes captured
+        child output: a test that printed this heading itself would otherwise
+        truncate the view to whatever followed its own line, which is a
+        shorter list than the document holds and would fail the comparison
+        for the wrong reason.
     """
     heading = "## Machine index"
     if heading not in document:
         return ()
-    tail = document.split(heading, 1)[1]
+    tail = document.rsplit(heading, 1)[1]
     return tuple(line for line in tail.splitlines() if line.strip())
 
 
@@ -210,6 +218,15 @@ def s_report_escalates(context: ScenarioContext) -> str:
         expect(
             "internal error" in run.stderr.lower(),
             f"an unwritable --report target was not an internal error:\n{run.stderr}",
+        )
+        # And the diagnostic has to name the destination it could not
+        # prepare. A run composing several destinations reaches this exit
+        # code from any of them, so a message that only says "internal
+        # error" leaves the reader to guess which writer failed.
+        expect(
+            os.path.basename(target) in run.stderr,
+            f"the internal error never names the report destination "
+            f"{os.path.basename(target)!r} it could not prepare:\n{run.stderr}",
         )
         expect(
             Path(target).read_text(encoding="utf-8") == prior,
