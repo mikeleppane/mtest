@@ -9,9 +9,9 @@ session depends on this interface rather than on a concrete reporter type or a
 fixed position in a composition tuple.
 
 Two coordinators conform. `StandardReportCoordinator` is the production set
-(console, machine stream, JUnit, annotations). `RecordingCoordinator` swaps the
-console for an arbitrary comptime pack of reporters, which is what the session's
-own drivers compose. `CompositeReporter` remains the general fan-out mechanism
+(console, machine stream, JUnit, annotations, run report). `RecordingCoordinator`
+swaps the console for an arbitrary comptime pack of reporters, which is what the
+session's own drivers compose. `CompositeReporter` remains the general fan-out mechanism
 and does the pack's dispatch inside the recording coordinator.
 
 Because every caller reaches the layer through these named methods, adding a
@@ -265,11 +265,18 @@ struct _StateTracker(Copyable, Movable):
 
 
 struct StandardReportCoordinator(ReportCoordinator):
-    """The production reporter set: console, machine stream, JUnit, annotations.
+    """The production set: console, stream, JUnit, annotations, run report.
 
-    Owns all four reporters by name. Each is independently inert when its
-    feature is off (no `--json`, no `--junit-xml`, annotations resolved off), so
-    the set is fixed and the composition carries no positional convention.
+    Owns all five reporters by name. Each is independently inert when its
+    feature is off (no `--json`, no `--junit-xml`, annotations resolved off, no
+    `--report`), so the set is fixed and the composition carries no positional
+    convention.
+
+    The example below composes all five, which is what production does. The
+    four-argument overload exists for a caller that composes no run report at
+    all: it fills the slot with `ReportWriter.inert()`, so reaching for it
+    while a `--report` destination is configured would leave the requested
+    documents unwritten with nothing to say so.
 
     Examples:
 
@@ -281,6 +288,7 @@ struct StandardReportCoordinator(ReportCoordinator):
     from mtest.report import StandardReportCoordinator
     from mtest.report import JsonStreamReporter
     from mtest.report import JunitReporter
+    from mtest.report import ReportWriter
 
     var console = ConsoleReporter(
         "0.6.0", ColorWhen.NEVER, False, False, Verbosity.NORMAL,
@@ -288,7 +296,7 @@ struct StandardReportCoordinator(ReportCoordinator):
     )
     var coord = StandardReportCoordinator(
         console^, JsonStreamReporter.inert(), JunitReporter.inert(),
-        AnnotationsReporter.inert(),
+        AnnotationsReporter.inert(), ReportWriter.inert(),
     )
     coord.handle(Event.file_started("tests/test_a.mojo"))
     var rendered = coord.console_output()
@@ -320,10 +328,13 @@ struct StandardReportCoordinator(ReportCoordinator):
         var junit: JunitReporter,
         var annotations: AnnotationsReporter,
     ):
-        """Take ownership of the four reporters, with no run-report writer.
+        """Take ownership of four reporters, for a caller composing no report.
 
         The report slot is filled with `ReportWriter.inert()`, so a caller that
-        composes no run report keeps writing exactly this call.
+        composes no run report keeps writing exactly this call. Production is
+        NOT such a caller: it passes a writer through the five-argument form
+        below, because reaching for this one with a `--report` destination
+        configured would silently leave the requested documents unwritten.
 
         Args:
             console: The console reporter. Consumed.
@@ -349,7 +360,7 @@ struct StandardReportCoordinator(ReportCoordinator):
         var annotations: AnnotationsReporter,
         var report: ReportWriter,
     ):
-        """Take ownership of the four reporters and the run-report writer.
+        """Take ownership of all five reporters, the production composition.
 
         Args:
             console: The console reporter. Consumed.

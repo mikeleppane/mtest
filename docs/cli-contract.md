@@ -1422,7 +1422,10 @@ as the JUnit report is, never from a parse of the console text.
   same typed data, so the two documents describe the same run and differ only in
   presentation. Untrusted text — a failure detail, a captured stream, a path —
   is escaped for the structural position it lands in, and control bytes are
-  scalarized before that escaping.
+  scalarized before that escaping — except that a captured stream and a failure
+  detail, which are rendered as multi-line blocks, deliberately keep their
+  literal LF and Tab so the block retains the shape the child produced. Every
+  other control byte, including a bare CR, is scalarized there too.
 - **Failure handling.** The two sinks are independent: a Markdown failure never
   stops the HTML document from publishing, and neither ever replaces the report
   already at the other's target. A destination that cannot be prepared at
