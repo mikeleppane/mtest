@@ -70,8 +70,9 @@ def frozen_inventory() -> List[InvRow]:
 
     `applicability` is the exception, and re-transcribing it from the contract
     alone will not reproduce it. It models what `parse_args` refuses, which the
-    drift tests below hold it to; where the contract's §4 table and the parser
-    disagree, the parser wins here and the row carries a comment saying so.
+    drift tests below hold it to, and the contract's §4 table records the same
+    cells, accepted-inert ones included. Should the two part again, the parser
+    wins here and the row carries a comment saying so.
     """
     return [
         InvRow(
@@ -467,9 +468,12 @@ def frozen_inventory() -> List[InvRow]:
         # slip. `doctor` renders its diagnosis and returns before the build
         # store is read or cleared, so it accepts both flags and honors
         # neither — the accepted-inert cell §4 also gives `-n` and `--serial`
-        # under `collect`. Clearing the bit to match an older reading of the
-        # table reds both drift tests, because `mtest doctor --no-cache` and
-        # `mtest doctor --cache-clear` really do parse.
+        # under `collect`. Clearing the bit here reds the applicability
+        # comparison against `flag_specs()`; clearing it in that table too reds
+        # the unmasked-is-refused direction, because `mtest doctor --no-cache`
+        # and `mtest doctor --cache-clear` really do parse. The masked-parses
+        # direction stays green under either edit, so this is one drift test,
+        # not both.
         InvRow(
             "--no-cache",
             0,
