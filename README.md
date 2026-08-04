@@ -373,6 +373,11 @@ with one binary. What it does differently:
 - Three machine reporters: an NDJSON event stream (`--json`),
   schema-validated JUnit XML (`--junit-xml`), and GitHub Actions annotations
   (`--gh-annotations`).
+- A run report for a person to read: `--report FORMAT:PATH` writes one
+  self-contained Markdown or HTML document — the run's facts, a summary table,
+  a section per file that needs a second look, and a machine index of commands
+  to paste back — with `--report-style concise|full` choosing how much of it
+  each file earns.
 - A clean interrupt: Ctrl-C tears down the in-flight process group, prints a
   partial summary with NOT-RUN accounting, and exits `2`.
 - Project configuration in `mtest.toml`: a closed schema resolved per key as
@@ -672,7 +677,9 @@ every shard. A complete matrix cell, with the report upload, is under
 ### Machine reporters
 
 The three reporters compose with the console and with each other.
-[docs/cli-contract.md](docs/cli-contract.md) specifies each in full.
+[docs/cli-contract.md](docs/cli-contract.md) specifies each in full. The
+document `--report` writes is for a reader rather than a machine and has its
+own section, [Run reports](#run-reports).
 
 `--json PATH|-` writes a versioned NDJSON event stream
 ([docs/json-stream.md](docs/json-stream.md) is the normative spec). With
@@ -1122,6 +1129,105 @@ own banner or the binary's stderr printed beneath the diagnostic, since there
 is no reporter left to echo them; `3` for a spawn failure or protocol drift;
 and `2` for an interrupt, which is checked right up to the handover. Once the
 handover happens, the code you get is the test's own.
+
+## Run reports
+
+The machine reporters above are written for a machine. `--report FORMAT:PATH`
+writes the same run for a person: one self-contained document, `md` for a
+pull-request comment or a job summary, `html` for an artifact a browser opens
+with no network access at all. Both are assembled from the runner's own typed
+events, exactly as the JUnit report is, never from a parse of the console text.
+The flag is repeatable once per format, so one run composes both, and a second
+destination for a format already given is a usage error rather than a silent
+last-wins:
+
+```console
+$ pixi run bash -c 'build/mtest e2e/suite --report md:build/report.md --report html:build/report.html'
+[...the run's usual console output, unchanged by the two reports, then:...]
+$ echo $?
+1
+```
+
+The console is unchanged: a report is written beside it, never instead of it.
+Each document opens with the run's facts — the version, the platform, the wall
+time, the test and file counts, and each of builds, flaky files, workers,
+shuffle seed, shard, interrupt and drift that applied — followed by one line
+saying that every path it shows is relative to the run root. Then a summary
+table, one row per file:
+
+```markdown
+| Path | Outcome | Duration (s) | Passed | Failed | Skipped | Attempts |
+| --- | --- | --- | --- | --- | --- | --- |
+| e2e/suite/nested/test_nested.mojo | PASS | 0.017 | 1 | 0 | 0 | 1 |
+| e2e/suite/test_compile_error.mojo | COMPILE_ERROR | 0.000 | 0 | 0 | 0 | 1 |
+| e2e/suite/test_crashing.mojo | CRASH | 1.117 | 0 | 0 | 0 | 1 |
+| e2e/suite/test_failing.mojo | FAIL | 0.027 | 2 | 1 | 0 | 1 |
+| e2e/suite/test_noisy.mojo | PASS | 0.038 | 3 | 0 | 0 | 1 |
+| e2e/suite/test_passing.mojo | PASS | 0.031 | 3 | 0 | 0 | 1 |
+| e2e/suite/test_zero.mojo | PASS | 0.027 | 0 | 0 | 0 | 1 |
+```
+
+Below the table, a section per file that needs a second look carries the failed
+tests with their detail, the captured streams, the build command, and the
+reproduce and debug commands for that file. The compiler bakes an absolute path
+into a backtrace; the report rewrites it against the run root, so the document
+reads the same from any checkout:
+
+````markdown
+## `e2e/suite/test_failing.mojo` — FAIL
+
+### FAIL `e2e/suite/test_failing.mojo::test_second_fails`
+
+```
+At e2e/suite/test_failing.mojo:14:17: AssertionError: `left == right` comparison failed:
+   left: 1
+  right: 2
+```
+````
+
+A `Not run` list names every selected file that never ran and why, and the
+document closes with a flat machine index: one line per row that needs
+action, each already a command to paste back:
+
+```markdown
+## Machine index
+
+- `e2e/suite/test_compile_error.mojo` — COMPILE_ERROR
+- `e2e/suite/test_crashing.mojo` — CRASH
+- `e2e/suite/test_failing.mojo::test_second_fails` — FAIL
+```
+
+`--report-style STYLE` chooses how much of that a document carries. Under
+`concise`, the default, every file earns a summary row and only a file that
+needs a second look earns a section; under `full`, every file earns both. The
+flag is inert without a `--report` destination: supplying it alone is accepted
+and changes nothing.
+
+There is no `-` stdout form. A document is assembled in a unique temp in the
+target directory and renamed onto `PATH` at the end, so nothing at `PATH` is
+touched until the rename and a prior report survives a failed run. That temp is
+created at session start, before anything is built, which is what proves the
+directory writable early; the parent directory itself must already exist.
+A published report carries the mode an ordinary new file would get here — the
+`0666` an `open(2)` asks for, minus the process umask — because it is written
+to be read by a CI job, a reviewer, or a web server, none of which run as the
+user the runner did.
+
+Two failures are worth knowing in advance. Every active file destination —
+`--json PATH`, `--junit-xml PATH`, and both `--report` paths — must name a
+different file, compared by resolved identity rather than by spelling, so
+`out.md` and `./out.md` are the one destination they are; two of them naming
+one file is a usage error caught before the run (exit `4`), because otherwise
+which writer's work survived would depend on finalization order. And a report
+that was requested and could not be published — a destination that cannot be
+prepared at session start, or a document that cannot be written, closed, or
+renamed at the end — is an error in its own right, so it escalates even a green
+run to exit `3`. The two sinks are independent: a Markdown failure never stops
+the HTML document from publishing, and neither ever replaces the report at the
+other's target.
+
+[§15.5 of the CLI contract](docs/cli-contract.md#155-run-report----report-formatpath---report-style-style)
+specifies the format, the grammar, and every one of those refusals.
 
 ## Assertion diagnostics
 
@@ -1669,6 +1775,8 @@ General:
 | `--cache-clear` | delete `.mtest-cache` (build cache and last-run state), then run; CLI-only, never read from `mtest.toml` |
 | `--json PATH\|-` | write the versioned NDJSON event stream to `PATH`, or to stdout with `-` |
 | `--junit-xml PATH` | write a schema-validated JUnit XML report, renamed atomically onto `PATH` |
+| `--report FORMAT:PATH` | (repeatable once per format) write a self-contained `md` or `html` run report, renamed atomically onto `PATH`; a second destination for the same format, or a `PATH` whose parent does not exist, is a usage error (exit `4`) |
+| `--report-style STYLE` | `concise` (default) sections only files that need a second look, `full` sections every file; inert without a `--report` destination |
 | `--gh-annotations MODE` | `off\|on\|auto` (default `auto`); `--json -` requires an explicit `--gh-annotations off` |
 | `collect [PATHS] [flags]`, `--collect-only` | list node ids, sorted lexicographically, instead of running anything |
 | `--format lines\|json` | `collect` only: the plain listing (default) or the versioned NDJSON collect stream |
