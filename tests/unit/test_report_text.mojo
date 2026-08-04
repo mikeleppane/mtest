@@ -34,9 +34,51 @@ def test_md_cell_flattens_newlines_via_escape_scalar() raises:
     assert_equal(md_escape_cell("a\tb"), "a\\\\x09b")
 
 
+def test_md_cell_neutralizes_an_inline_link() raises:
+    """A path that spells a link renders as inert text, not as a live link."""
+    assert_equal(
+        md_escape_cell("test_[click](https://example.com/x).mojo"),
+        "test_\\[click\\](https://example.com/x).mojo",
+    )
+
+
+def test_md_cell_neutralizes_an_image_reference() raises:
+    """The image form is the beacon case: it would load a remote resource."""
+    assert_equal(
+        md_escape_cell("![x](https://example.com/p.png)"),
+        "\\!\\[x\\](https://example.com/p.png)",
+    )
+
+
+def test_md_cell_neutralizes_a_reference_style_link() raises:
+    """Both the reference use and the definition it would resolve against."""
+    assert_equal(md_escape_cell("[x][ref]"), "\\[x\\]\\[ref\\]")
+    assert_equal(
+        md_escape_cell("[ref]: https://example.com/x"),
+        "\\[ref\\]: https://example.com/x",
+    )
+
+
+def test_md_cell_escapes_a_leading_bang_only_at_the_front() raises:
+    """The leading rule mirrors the list/heading/quote rule already there."""
+    assert_equal(md_escape_cell("a!b"), "a!b")
+
+
 def test_code_span_grows_past_interior_backticks() raises:
     assert_equal(md_code_span("a`b"), "``a`b``")
     assert_equal(md_code_span("x"), "`x`")
+
+
+def test_code_span_pads_a_boundary_backtick() raises:
+    """Without the padding CommonMark parses no code span here at all."""
+    assert_equal(md_code_span("`x"), "`` `x ``")
+    assert_equal(md_code_span("x`"), "`` x` ``")
+
+
+def test_code_span_keeps_link_syntax_verbatim_and_inert() raises:
+    """A code span's content is literal by CommonMark's own rule, so the
+    bracket pass `md_escape_cell` performs would be visible noise here."""
+    assert_equal(md_code_span("[x](https://e/p)"), "`[x](https://e/p)`")
 
 
 def test_code_fence_longer_than_interior_run() raises:

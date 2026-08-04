@@ -128,9 +128,17 @@ def md_escape_cell(text: String) -> String:
     `escape_scalar`'s own `\\x0A`/`\\x09` escapes, and the `\\|` this pass adds,
     are never re-escaped. After the backslash pass, in order: `|` becomes
     `\\|`, `&` becomes `&amp;`, `<` becomes `&lt;` (a bare `>` is inert on its
-    own — it opens no Markdown structure by itself). Finally, if the assembled
-    cell now starts with `-`, `+`, `#`, or `>`, one backslash is prepended so
-    the cell cannot be misread as a list marker, a heading, or a blockquote.
+    own — it opens no Markdown structure by itself), and `[` and `]` each gain
+    a backslash. The bracket pass is what keeps a legal file name such as
+    `test_[click](https://example.com/x).mojo` inert text instead of a live
+    link: every link construct CommonMark has — the inline `[t](url)` form, the
+    `![t](url)` image form that would fetch a remote resource into a document
+    whose HTML sibling promises no network access, the reference `[t][r]` form,
+    and the `[r]: url` definition — is opened by a bracket, so neutralizing the
+    bracket closes all four at once. Finally, if the assembled cell now starts
+    with `-`, `+`, `#`, `>`, or `!`, one backslash is prepended so the cell
+    cannot be misread as a list marker, a heading, a blockquote, or the image
+    marker of a link construct a later renderer might spell differently.
 
     Args:
         text: The untrusted value, already valid UTF-8.
@@ -150,13 +158,17 @@ def md_escape_cell(text: String) -> String:
             out += "&amp;"
         elif c == "<":
             out += "&lt;"
+        elif c == "[":
+            out += "\\["
+        elif c == "]":
+            out += "\\]"
         else:
             out += c
     var lead = String("")
     for cp in out.codepoint_slices():
         lead = String(cp)
         break
-    if lead == "-" or lead == "+" or lead == "#" or lead == ">":
+    if lead == "-" or lead == "+" or lead == "#" or lead == ">" or lead == "!":
         out = "\\" + out
     return out^
 
@@ -169,6 +181,12 @@ def md_code_span(text: String) -> String:
     interior backtick run from prematurely closing the span. When `text`
     starts or ends with a backtick, a single space is added on both sides so
     the fence and the content stay visually distinct.
+
+    Nothing else is neutralized, and nothing else needs to be: a code span's
+    content is literal by CommonMark's own rule, so the link, image, and
+    reference-definition constructs `md_escape_cell` disarms cannot start
+    inside one. The backtick run is therefore the only delimiter with anything
+    to say here, and sizing it past every interior run is what closes it.
 
     Args:
         text: The untrusted value to wrap; not otherwise escaped, since a code
