@@ -59,6 +59,7 @@ TESTS = (
     ROOT / "tests" / "unit" / "test_report_json_reporter.mojo",
     ROOT / "tests" / "unit" / "test_report_junit.mojo",
     ROOT / "tests" / "unit" / "test_report_junit_finalize.mojo",
+    ROOT / "tests" / "unit" / "test_report_writer.mojo",
 )
 ASAN_OPTIONS = "detect_leaks=1:halt_on_error=1:abort_on_error=1"
 
@@ -152,6 +153,13 @@ CLI_PROBE_STREAM = "hostile.ndjson"
 
 CLI_PROBE_REPORT = "hostile.xml"
 """The JUnit artifact, judged by the xmllint + arithmetic oracle."""
+
+CLI_PROBE_MD = "hostile.report.md"
+"""The Markdown run report, one of the two documents the writer publishes."""
+
+CLI_PROBE_HTML = "hostile.report.html"
+"""The HTML run report, published from the same spooled fragments as the
+Markdown one through its own borrowed descriptor, temp, and rename."""
 
 CLI_PROBE_KEYWORD = "hostile"
 """The `-k` keyword. Present so the run drives `select.contains_ci`, whose
@@ -380,18 +388,28 @@ def cli_probe_command(binary: Path, scratch: Path) -> list[str]:
         str(scratch / CLI_PROBE_STREAM),
         "--junit-xml",
         str(scratch / CLI_PROBE_REPORT),
+        "--report",
+        f"md:{scratch / CLI_PROBE_MD}",
+        "--report",
+        f"html:{scratch / CLI_PROBE_HTML}",
     ]
 
 
 def check_cli_probe_output(
     returncode: int, stdout: str, scratch: Path, label: str
 ) -> str:
-    """Judge one instrumented CLI reporter run and both artifacts it wrote.
+    """Judge one instrumented CLI reporter run and every artifact it wrote.
 
     Every rejection names one cause. The two machine formats go to the project's
     existing strict oracles (the NDJSON stream consumer and the xmllint plus
     arithmetic JUnit checker) rather than being parsed here, so this gate cannot
     accept an artifact the report gates would reject.
+
+    The two run-report documents are judged structurally instead, because they
+    have no external oracle: each must be its own format, must carry the failing
+    file, and must carry none of the raw control bytes the probe's child emitted
+    — the same three bytes the console band is checked for, asked of a document
+    that was assembled through a borrowed descriptor and renamed into place.
 
     Args:
         returncode: The client's exit code.
@@ -458,9 +476,47 @@ def check_cli_probe_output(
         f"{label} CLI report counted tests={totals.tests} failures="
         f"{totals.failures}, expected one failing row",
     )
+
+    failing_row = f"{CLI_PROBE_TREE}/{CLI_PROBE_MODULE}"
+    documents = (
+        (scratch / CLI_PROBE_MD, "markdown", "# mtest report", f"| {failing_row} |"),
+        (
+            scratch / CLI_PROBE_HTML,
+            "html",
+            "<!doctype html>",
+            f"<code>{failing_row}</code>",
+        ),
+    )
+    for path, kind, opening, carried in documents:
+        require(
+            path.is_file(),
+            f"{label} CLI reporter run published no {kind} run report at {path}",
+        )
+        body = path.read_text(encoding="utf-8")
+        require(
+            body.startswith(opening),
+            f"{label} CLI {kind} run report does not open with {opening!r} — "
+            "the document was not assembled into its own format",
+        )
+        require(
+            carried in body,
+            f"{label} CLI {kind} run report omits {carried!r}: it describes "
+            "some run other than the one that just failed",
+        )
+        for name, byte in CLI_PROBE_RAW_BYTES:
+            require(
+                byte not in body,
+                f"{label} CLI {kind} run report carries a raw {name} byte "
+                f"({byte!r}) from the child's output",
+            )
+    require(
+        (scratch / CLI_PROBE_HTML).read_text(encoding="utf-8").endswith("</html>\n"),
+        f"{label} CLI html run report is not a closed document",
+    )
     return (
         f"NDJSON {len(report.records)} records (v{report.version}), "
-        f"JUnit tests={totals.tests} failures={totals.failures}"
+        f"JUnit tests={totals.tests} failures={totals.failures}, "
+        "run reports md+html published"
     )
 
 
