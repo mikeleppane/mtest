@@ -22,12 +22,16 @@ pending until its mandatory `show` arrives, and completes exactly that token
 until then, because `mtest config` alone is a usage error.
 
 Value completion is keyed on `command:flag` rather than on the flag alone, so
-`mtest doctor --report-style <TAB>` offers nothing: the pair never existed. Per
-kind: a closed list becomes its words, a `PATH` becomes filesystem completion,
-and `OTHER` deliberately offers nothing, because a kind that cannot express
-what is legal must not guess. One value the tables cannot express is `--json`'s
-bare `-` for stdout; its row says why the kind stays `PATH`, and this module
-does not invent a kind for it.
+`mtest doctor --report-style <TAB>` completes no style: the pair never existed,
+and the line falls through to `doctor`'s own flags. Per kind: a closed list
+becomes its words, a `PATH` becomes filesystem completion, and `OTHER`
+deliberately offers nothing, because a kind that cannot express what is legal
+must not guess. That last one is a rendered arm rather than an absent one, and
+the difference is the whole promise: an absent arm falls through to the head's
+own flags and files, which is what bash did while zsh and fish offered nothing,
+so the sentence was true in two shells out of three. One value the tables
+cannot express is `--json`'s bare `-` for stdout; its row says why the kind
+stays `PATH`, and this module does not invent a kind for it.
 
 A `PREFIX_CHOICE` is the one kind whose completion cannot be the same shape in
 all three shells, because reaching the path after the separator means
@@ -61,9 +65,14 @@ backslashes everything outside a small alphanumeric-and-punctuation set) and
 only then for the literal quoting the script source needs. Positions that are
 expanded once — a bash `case` pattern, a zsh bracketed description, a fish
 `-d` description, a value interpolated into a generated function body — get
-the single level that position actually needs. **No table value reaches script
-text without passing an escaper**, including the head tokens that end up as
-`case` labels, and that rule is what the whole module is for.
+the single level that position actually needs. A fish `-n` condition is a
+fourth re-expanded position and the sharpest one, because fish evaluates that
+argument as a *command* when a completion is generated: a head name landing
+there is escaped as one word of that command first and quoted for the script
+source second, which is what `_fish_head_condition` is. **No table value
+reaches script text without passing an escaper**, including the head names that
+end up as `case` labels and as that condition's argument, and that rule is what
+the whole module is for.
 
 Every file completion additionally rides a quoted read loop, because an
 unquoted `COMPREPLY=($(compgen -f …))` word-splits a filename containing a
@@ -263,7 +272,13 @@ def _flag_words_for(subcommand: Int) -> List[String]:
 
 
 def _flags_for(subcommand: Int) -> String:
-    """The space-separated spellings one head accepts, in table order."""
+    """The space-separated spellings one head accepts, in table order.
+
+    No renderer calls this: every script needs the list escaped for its own
+    word position, so each one takes `_flag_words_for` and escapes it. This is
+    the readable projection `test_cli_completions` asserts the applicability
+    masks through, and it is kept for that audience alone.
+    """
     return _joined(_flag_words_for(subcommand))
 
 
@@ -276,8 +291,29 @@ def _subcommand_word_list() -> List[String]:
 
 
 def _subcommand_words() -> String:
-    """The head tokens, as the space-separated word list scripts offer."""
+    """The head tokens, as one space-separated word list.
+
+    Test-facing, like `_flags_for` and for the same reason: the scripts offer
+    these tokens through `_compgen_wordlist`, `_describe`, and `complete -a`,
+    each of which escapes the words itself.
+    """
     return _joined(_subcommand_word_list())
+
+
+def _completions_state() -> String:
+    """The state a script enters after the `completions` head token.
+
+    The `completions` row accepts no flag, so it carries no applicability bit
+    and `_head_name` cannot reach it; its token is the only handle this module
+    has. Reading the state off the row rather than repeating it is what keeps
+    the arm that offers the shell names attached to the arm that sets the
+    state — renaming `completion_state` moves both.
+
+    Returns:
+        The freshly allocated state name, or `none` if the row is gone, which
+        is the state that offers nothing.
+    """
+    return _head_state("completions")
 
 
 def _config_description() -> String:
@@ -292,7 +328,23 @@ def _config_description() -> String:
     return String("")
 
 
-def _completes_a_value(spec: FlagSpec) -> Bool:
+def _has_value_arm(spec: FlagSpec) -> Bool:
+    """Whether a script renders a value rule for this spelling at all.
+
+    Args:
+        spec: The flag row to judge. Not mutated.
+
+    Returns:
+        True for every row that takes a value, `OTHER` included. `OTHER` earns
+        an arm precisely because it has nothing to offer: a glob, an integer,
+        or a build argument has no candidate set, and the arm is what makes
+        that an answer rather than a fall-through to the head's own flags and
+        files. An arity-0 flag has no value position and gets nothing.
+    """
+    return spec.arity != 0
+
+
+def _completes_a_candidate(spec: FlagSpec) -> Bool:
     """Whether this spelling's value has something worth offering.
 
     Args:
@@ -300,13 +352,32 @@ def _completes_a_value(spec: FlagSpec) -> Bool:
 
     Returns:
         True when the row takes a value whose kind can name what is legal.
-        `OTHER` is excluded on purpose: a glob, an integer, or a build argument
-        has no candidate set, and offering filenames for one would be a guess
-        the table never made.
+        `OTHER` is excluded on purpose: offering filenames for one would be a
+        guess the table never made.
     """
     if spec.arity == 0:
         return False
     return spec.value_kind != ValueKind.OTHER
+
+
+def _takes_path_operand(subcommand: Int) -> Bool:
+    """Whether one head accepts a filesystem operand after its flags.
+
+    The one command-line fact the three renderers still read off a bit rather
+    than off a field, and it is stated here once so the coupling is visible:
+    `doctor` diagnoses the environment and takes no operand, while `run`,
+    `collect`, `config show`, and `debug` all name something on disk. The row
+    says the same thing in prose (`label_args`), and a head added with no
+    operand needs this predicate widened or all three scripts will offer files
+    after it.
+
+    Args:
+        subcommand: One of the `Subcommand` bit constants.
+
+    Returns:
+        True when the head's grammar has a trailing operand.
+    """
+    return subcommand != Subcommand.DOCTOR
 
 
 # --- escaping: one helper per position a table value can land in ---------- #
@@ -597,15 +668,42 @@ def _fish_argument_list(values: List[String]) -> String:
 def _fish_flag_token(spelling: String) -> String:
     """Render one spelling as the fish `complete` flag option that names it.
 
+    The name is quoted rather than pasted, because `complete` lines are
+    ordinary fish source: an unquoted spelling carrying a `;`, a space, or a
+    `(` would end the `complete` command and start something else.
+
     Args:
         spelling: The exact flag spelling, `-x` or `--exclude` shaped.
 
     Returns:
-        The freshly allocated `-s X` or `-l name` option text.
+        The freshly allocated `-s 'X'` or `-l 'name'` option text.
     """
     if spelling.startswith("--"):
-        return "-l " + String(spelling[byte = 2 : spelling.byte_length()])
-    return "-s " + String(spelling[byte = 1 : spelling.byte_length()])
+        return "-l " + _fish_quoted(
+            String(spelling[byte = 2 : spelling.byte_length()])
+        )
+    return "-s " + _fish_quoted(
+        String(spelling[byte = 1 : spelling.byte_length()])
+    )
+
+
+def _fish_head_condition(head: String) -> String:
+    """The quoted `-n` condition that scopes one `complete` rule to one head.
+
+    Fish evaluates a `-n` argument as a command when a completion is
+    generated, so this is a two-level position exactly like `complete -a`: the
+    head name is escaped as one literal word of that command first, and the
+    whole condition is then single-quoted for the script source. A name pasted
+    in raw could close the quote and append a command that runs on the next
+    TAB.
+
+    Args:
+        head: The script-side head name the rule applies under.
+
+    Returns:
+        The freshly allocated, single-quoted condition text.
+    """
+    return _fish_quoted("__mtest_head_is " + _fish_expansion_word(head))
 
 
 # --- bash ----------------------------------------------------------------- #
@@ -643,10 +741,10 @@ def _cmd_scoped_patterns(spec: FlagSpec) -> String:
         spec: The flag row to scope. Not mutated.
 
     Returns:
-        The freshly allocated alternation, or empty text for a row with no
-        value worth completing.
+        The freshly allocated alternation, or empty text for an arity-0 row,
+        which has no value position to scope.
     """
-    if not _completes_a_value(spec):
+    if not _has_value_arm(spec):
         return String("")
     var alternatives = List[String]()
     for bit in _head_bits():
@@ -738,7 +836,7 @@ def render_bash_completions() -> String:
     script += '  cur="${lwords[index]-}"\n'
     script += '  prev=""\n'
     script += '  [ "$index" -gt 0 ] && prev="${lwords[index-1]-}"\n'
-    script += '  cmd="run"\n'
+    script += '  cmd="' + _bash_word(_head_name(Subcommand.RUN)) + '"\n'
     script += '  case "${lwords[1]-}" in\n'
     for head in _subcommand_word_list():
         var state = _head_state(head)
@@ -769,14 +867,20 @@ def render_bash_completions() -> String:
     script += "  esac\n"
     # The effective head: a run carrying --collect-only is a collection, so it
     # gains --format and loses every flag that mode refuses.
-    script += '  if [ "$cmd" = "run" ]; then\n'
+    script += (
+        '  if [ "$cmd" = "'
+        + _bash_word(_head_name(Subcommand.RUN))
+        + '" ]; then\n'
+    )
     script += '    for word in "${lwords[@]}"; do\n'
     script += (
         '      if [ "$word" = "'
         + _bash_word(_spelling_of(FlagId.COLLECT_ONLY))
         + '" ]; then\n'
     )
-    script += '        cmd="collect"\n'
+    script += (
+        '        cmd="' + _bash_word(_head_name(Subcommand.COLLECT)) + '"\n'
+    )
     script += "        break\n"
     script += "      fi\n"
     script += "    done\n"
@@ -822,6 +926,11 @@ def render_bash_completions() -> String:
                 '      _mtest_trim_to_replaced "$cur"'
                 ' "${COMP_WORDS[COMP_CWORD]}"\n'
             )
+        elif spec.value_kind == ValueKind.OTHER:
+            # The arm exists to be empty. Without it the line falls through to
+            # the head arm below and offers every flag and every file, which
+            # is a guess about a value the table said it could not describe.
+            script += "      COMPREPLY=()\n"
         else:
             script += (
                 '      COMPREPLY=($(compgen -W "'
@@ -843,12 +952,12 @@ def render_bash_completions() -> String:
     script += "  fi\n"
     script += '  case "$cmd" in\n'
     for bit in _head_bits():
-        var takes_paths = bit != Subcommand.DOCTOR
+        var takes_paths = _takes_path_operand(bit)
         var files = " -f" if takes_paths else ""
         var filenames = "compopt -o filenames; " if takes_paths else ""
         script += (
             "    "
-            + _head_name(bit)
+            + _bash_pattern(_head_name(bit))
             + ") "
             + filenames
             + '_mtest_reply < <(compgen -W "'
@@ -860,7 +969,9 @@ def render_bash_completions() -> String:
     script += '    config-pending) COMPREPLY=($(compgen -W "show"'
     script += ' -- "$cur")) ;;\n'
     script += (
-        '    completions) COMPREPLY=($(compgen -W "'
+        "    "
+        + _bash_pattern(_completions_state())
+        + ') COMPREPLY=($(compgen -W "'
         + _compgen_wordlist(completion_shells())
         + '" -- "$cur")) ;;\n'
     )
@@ -1001,7 +1112,7 @@ def render_zsh_completions() -> String:
             )
         )
     script += "  heads=(" + _joined(heads) + ")\n"
-    script += "  cmd=run\n"
+    script += "  cmd=" + _zsh_quoted(_head_name(Subcommand.RUN)) + "\n"
     script += '  case "${words[2]-}" in\n'
     for head in _subcommand_word_list():
         var state = _head_state(head)
@@ -1025,14 +1136,20 @@ def render_zsh_completions() -> String:
     script += "  esac\n"
     # A literal comparison rather than a `${words[(I)…]}` subscript, which
     # would read the spelling as a pattern.
-    script += "  if [[ $cmd == run ]]; then\n"
+    script += (
+        "  if [[ $cmd == "
+        + _zsh_quoted(_head_name(Subcommand.RUN))
+        + " ]]; then\n"
+    )
     script += "    for word in $words; do\n"
     script += (
         "      if [[ $word == "
         + _zsh_quoted(_spelling_of(FlagId.COLLECT_ONLY))
         + " ]]; then\n"
     )
-    script += "        cmd=collect\n"
+    script += (
+        "        cmd=" + _zsh_quoted(_head_name(Subcommand.COLLECT)) + "\n"
+    )
     script += "        break\n"
     script += "      fi\n"
     script += "    done\n"
@@ -1045,11 +1162,11 @@ def render_zsh_completions() -> String:
         var operand = String("")
         if bit == Subcommand.DEBUG:
             operand = " '*:node id:_files'"
-        elif bit != Subcommand.DOCTOR:
+        elif _takes_path_operand(bit):
             operand = " '*:path:_files'"
         script += (
             "    "
-            + _head_name(bit)
+            + _zsh_quoted(_head_name(bit))
             + ") _arguments -S : "
             + _zsh_specs_for(bit)
             + operand
@@ -1059,7 +1176,13 @@ def render_zsh_completions() -> String:
     var shells = List[String]()
     for shell in completion_shells():
         shells.append(_zsh_quoted(_zsh_action_word(shell)))
-    script += "    completions) _values 'shell' " + _joined(shells) + " ;;\n"
+    script += (
+        "    "
+        + _zsh_quoted(_completions_state())
+        + ") _values 'shell' "
+        + _joined(shells)
+        + " ;;\n"
+    )
     script += "    none) return 1 ;;\n"
     script += "  esac\n"
     script += "}\n"
@@ -1122,7 +1245,9 @@ def render_fish_completions() -> String:
     """
     var script = String("function __mtest_head\n")
     script += "    set -l parts (commandline -opc)\n"
-    script += "    set -l head run\n"
+    script += (
+        "    set -l head " + _fish_quoted(_head_name(Subcommand.RUN)) + "\n"
+    )
     script += "    if set -q parts[2]\n"
     script += '        switch "$parts[2]"\n'
     for head in _subcommand_word_list():
@@ -1152,11 +1277,17 @@ def render_fish_completions() -> String:
     script += "        end\n"
     script += "    end\n"
     script += (
-        '    if test "$head" = run; and contains -- '
+        '    if test "$head" = '
+        + _fish_quoted(_head_name(Subcommand.RUN))
+        + "; and contains -- "
         + _fish_quoted(_spelling_of(FlagId.COLLECT_ONLY))
         + " $parts\n"
     )
-    script += "        set head collect\n"
+    script += (
+        "        set head "
+        + _fish_quoted(_head_name(Subcommand.COLLECT))
+        + "\n"
+    )
     script += "    end\n"
     script += "    echo $head\n"
     script += "end\n"
@@ -1190,25 +1321,39 @@ def render_fish_completions() -> String:
             + "\n"
         )
     script += (
-        "complete -c mtest -n '__mtest_head_is config-pending' -f -a 'show' -d "
+        "complete -c mtest -n "
+        + _fish_head_condition("config-pending")
+        + " -f -a 'show' -d "
         + _fish_quoted(_config_description())
         + "\n"
     )
     script += (
-        "complete -c mtest -n '__mtest_head_is completions' -f -a "
+        "complete -c mtest -n "
+        + _fish_head_condition(_completions_state())
+        + " -f -a "
         + _fish_argument_list(completion_shells())
         + "\n"
     )
-    script += "complete -c mtest -n '__mtest_head_is doctor' -f\n"
-    script += "complete -c mtest -n '__mtest_head_is none' -f\n"
+    # A head with no operand suppresses fish's default file completion; every
+    # other one keeps it, which is the same split `_takes_path_operand` makes
+    # for the other two shells.
+    for bit in _head_bits():
+        if _takes_path_operand(bit):
+            continue
+        script += (
+            "complete -c mtest -n "
+            + _fish_head_condition(_head_name(bit))
+            + " -f\n"
+        )
+    script += "complete -c mtest -n " + _fish_head_condition("none") + " -f\n"
     for spec in flag_specs():
         for bit in _head_bits():
             if (spec.applicability & bit) == 0:
                 continue
             script += (
-                "complete -c mtest -n '__mtest_head_is "
-                + _head_name(bit)
-                + "' "
+                "complete -c mtest -n "
+                + _fish_head_condition(_head_name(bit))
+                + " "
                 + _fish_flag_token(spec.spelling)
                 + _fish_value_options(spec)
                 + " -d "

@@ -38,8 +38,11 @@ from mtest.cli import (
     subcommand_specs,
 )
 from mtest.cli.completions import (
+    _bash_pattern,
     _bash_word,
     _bash_word_break_class,
+    _completions_state,
+    _fish_head_condition,
     _cmd_scoped_patterns,
     _compgen_wordlist,
     _fish_argument_list,
@@ -227,6 +230,68 @@ def _backslash_removal(word: String) -> String:
     if pending:
         out += "\\"
     return out^
+
+
+def _zsh_single_quote_removal(source: String) raises -> String:
+    """What zsh stores after removing one level of single quoting.
+
+    Nothing is escapable inside zsh single quotes: the only way to carry a
+    quote is to close, escape one outside, and reopen, which is the `'\\''`
+    sequence `_zsh_quoted` emits.
+
+    Args:
+        source: The complete single-quoted literal, quotes included.
+
+    Returns:
+        The freshly allocated stored text.
+
+    Raises:
+        Error: If `source` is not one well-formed single-quoted literal, which
+            is itself the failure a hostile value would cause.
+    """
+    var body = String(source[byte = 1 : source.byte_length() - 1])
+    var out = String("")
+    var i = 0
+    while i < body.byte_length():
+        var rest = String(body[byte = i : body.byte_length()])
+        if rest.startswith("'\\''"):
+            out += "'"
+            i += 4
+            continue
+        if rest.startswith("'"):
+            raise Error("the quote closes early at byte " + String(i))
+        out += String(body[byte = i : i + 1])
+        i += 1
+    return out^
+
+
+def _live_inside_double_quotes(text: String) -> String:
+    """Every codepoint of `text` that keeps its meaning between double quotes.
+
+    Four bytes do, and no others: a `$` and a backtick still expand, a `"`
+    still closes the string, and a backslash still escapes. A glob character
+    or a semicolon is inert here, which is why the broader
+    `_live_metacharacters` would be the wrong instrument for this position.
+
+    Args:
+        text: The text as it appears between the script's double quotes.
+
+    Returns:
+        The freshly allocated live codepoints, in order.
+    """
+    var live = String("")
+    var pending = False
+    for cp in text.codepoints():
+        var code = Int(cp)
+        if pending:
+            pending = False
+            continue
+        if code == 92:
+            pending = True
+            continue
+        if code == 36 or code == 96 or code == 34:
+            live += String(cp)
+    return live^
 
 
 def _live_metacharacters(text: String) -> String:
@@ -757,12 +822,18 @@ def test_bash_refines_a_run_head_to_collect_under_collect_only() raises:
 
 
 def test_zsh_refines_a_run_head_to_collect_under_collect_only() raises:
-    var block = String("  if [[ $cmd == run ]]; then\n")
+    """The two state names are quoted, which is how they are table values.
+
+    Written as literals with their quotes rather than assembled from
+    `_head_name`, so a renderer that went back to pasting the name in raw
+    fails here instead of agreeing with itself.
+    """
+    var block = String("  if [[ $cmd == 'run' ]]; then\n")
     block += "    for word in $words; do\n"
     block += "      if [[ $word == '"
     block += _spelling_of(FlagId.COLLECT_ONLY)
     block += "' ]]; then\n"
-    block += "        cmd=collect\n"
+    block += "        cmd='collect'\n"
     block += "        break\n"
     block += "      fi\n"
     block += "    done\n"
@@ -774,9 +845,9 @@ def test_zsh_refines_a_run_head_to_collect_under_collect_only() raises:
 
 
 def test_fish_refines_a_run_head_to_collect_under_collect_only() raises:
-    var block = String('    if test "$head" = run; and contains -- ')
+    var block = String("    if test \"$head\" = 'run'; and contains -- ")
     block += "'" + _spelling_of(FlagId.COLLECT_ONLY) + "'"
-    block += " $parts\n        set head collect\n    end\n"
+    block += " $parts\n        set head 'collect'\n    end\n"
     assert_true(
         block in render_fish_completions(),
         "the fish effective-head refinement is gone",
@@ -807,10 +878,10 @@ def test_the_refined_head_gains_format_and_withdraws_the_run_only_flags() raises
         )
     var fish = render_fish_completions()
     assert_true(
-        "'__mtest_head_is collect' -l format" in fish,
+        "'__mtest_head_is collect' -l 'format'" in fish,
         "fish collect lost --format",
     )
-    for withdrawn in ["-s x ", "-l gate ", "-l json "]:
+    for withdrawn in ["-s 'x' ", "-l 'gate' ", "-l 'json' "]:
         assert_false(
             "'__mtest_head_is collect' " + withdrawn in fish,
             "fish collect still offers a run-only flag: " + withdrawn,
@@ -839,7 +910,7 @@ def test_config_pending_completes_exactly_the_show_token() raises:
 
 def test_the_completions_head_completes_its_own_shell_operand() raises:
     assert_true(
-        '    completions) COMPREPLY=($(compgen -W "'
+        '    "completions") COMPREPLY=($(compgen -W "'
         + _compgen_wordlist(completion_shells())
         + '" -- "$cur")) ;;\n'
         in render_bash_completions(),
@@ -851,7 +922,7 @@ def test_the_completions_head_completes_its_own_shell_operand() raises:
             shells += " "
         shells += "'" + _zsh_action_word(shell) + "'"
     assert_true(
-        "    completions) _values 'shell' " + shells + " ;;\n"
+        "    'completions') _values 'shell' " + shells + " ;;\n"
         in render_zsh_completions(),
         "the zsh completions arm drifted",
     )
@@ -873,13 +944,52 @@ def test_value_arms_are_keyed_on_command_and_flag() raises:
     assert_false("run:--format" in script)
 
 
-def test_arity_zero_and_open_value_flags_get_no_value_arm() raises:
+def test_only_arity_zero_flags_get_no_value_arm() raises:
+    """A value position always gets an arm, even when it offers nothing.
+
+    An `OTHER` row without one falls through to the head arm and completes
+    every flag and every file, which is the guess the kind exists to refuse —
+    so "offers nothing" has to be something the script says, not something it
+    omits.
+    """
     for spec in flag_specs():
         var arms = _cmd_scoped_patterns(spec)
-        if spec.arity == 0 or spec.value_kind == ValueKind.OTHER:
+        if spec.arity == 0:
             assert_equal(arms, "", "value arm for " + spec.spelling)
         else:
             assert_true(arms != "", "no value arm for " + spec.spelling)
+
+
+def test_an_open_value_completes_nothing_rather_than_falling_through() raises:
+    """The `OTHER` arm, asserted in all three shells at once.
+
+    bash offers an empty reply, zsh an empty action, and fish `-x` with no
+    `-a`. bash is the one that had to be added: the other two get the promise
+    from a syntax that requires the action to be written out.
+    """
+    var bash = render_bash_completions()
+    var fish = render_fish_completions()
+    var seen = 0
+    for spec in flag_specs():
+        if spec.arity == 0 or spec.value_kind != ValueKind.OTHER:
+            continue
+        seen += 1
+        assert_true(
+            "    "
+            + _cmd_scoped_patterns(spec)
+            + ")\n      COMPREPLY=()\n      return ;;\n"
+            in bash,
+            "bash falls through for " + spec.spelling,
+        )
+        assert_true(
+            _zsh_spec(spec).endswith(":'"),
+            "zsh offers a candidate for " + spec.spelling,
+        )
+        assert_true(
+            " " + _fish_flag_token(spec.spelling) + " -x -d " in fish,
+            "fish offers a candidate for " + spec.spelling,
+        )
+    assert_true(seen >= 10, "the open-value rows vanished from the table")
 
 
 def test_every_closed_choice_reaches_every_script() raises:
@@ -1004,11 +1114,26 @@ def test_the_doctor_arm_offers_no_path_and_so_no_filename_semantics() raises:
     var bash = render_bash_completions()
     var doctor = String("")
     for line in bash.split("\n"):
-        if String(line).startswith("    doctor) "):
+        if String(line).startswith('    "doctor") '):
             doctor = String(line)
     assert_true(doctor != "", "the bash doctor arm is gone")
     assert_false("-f " in doctor, "doctor completes a path: " + doctor)
     assert_false("compopt" in doctor, "doctor marks filenames: " + doctor)
+    # fish states the same fact as a rule of its own, and zsh by the absence
+    # of an operand action, so all three are pinned here rather than one.
+    assert_true(
+        "complete -c mtest -n '__mtest_head_is doctor' -f\n"
+        in render_fish_completions(),
+        "the fish doctor rule no longer suppresses files",
+    )
+    var zsh_doctor = String("")
+    for line in render_zsh_completions().split("\n"):
+        if String(line).startswith("    'doctor') "):
+            zsh_doctor = String(line)
+    assert_true(zsh_doctor != "", "the zsh doctor arm is gone")
+    assert_false(
+        "'*:" in zsh_doctor, "zsh doctor takes an operand: " + zsh_doctor
+    )
 
 
 # --- value kinds: a closed set, and three syntaxes for each ----------------
@@ -1055,8 +1180,10 @@ def _bash_value_arm(spec: FlagSpec) raises -> String:
     Raises:
         Error: For a `ValueKind` this module has no bash arm for.
     """
-    if spec.value_kind == ValueKind.NONE or spec.value_kind == ValueKind.OTHER:
+    if spec.value_kind == ValueKind.NONE:
         return String("")
+    if spec.value_kind == ValueKind.OTHER:
+        return String("      COMPREPLY=()\n")
     if spec.value_kind == ValueKind.PATH:
         return (
             "      compopt -o filenames\n"
@@ -1232,6 +1359,125 @@ def test_file_completions_never_word_split_on_a_filename() raises:
     assert_false("COMPREPLY=($(compgen -f" in script)
 
 
+def test_a_hostile_head_name_cannot_break_out_of_a_bash_case_label() raises:
+    """The `case "$cmd" in` labels, which used to take the name raw.
+
+    A raw label is a glob in an unquoted position: a `*` matches every head, a
+    space splits the pattern, and a `$` is expanded when `case` matches.
+    """
+    for hostile in _hostile_values():
+        var pattern = _bash_pattern(hostile)
+        assert_true(pattern.startswith('"'), "unquoted label: " + pattern)
+        assert_true(pattern.endswith('"'), "unquoted label: " + pattern)
+        var body = String(pattern[byte = 1 : pattern.byte_length() - 1])
+        assert_equal(
+            _live_inside_double_quotes(body),
+            "",
+            "the label stays live for: " + hostile,
+        )
+        assert_equal(
+            _bash_double_quote_removal(body),
+            hostile,
+            "the label no longer matches its own head: " + hostile,
+        )
+
+
+def test_a_hostile_head_name_cannot_break_out_of_a_zsh_case_label() raises:
+    for hostile in _hostile_values():
+        assert_equal(
+            _zsh_single_quote_removal(_zsh_quoted(hostile)),
+            hostile,
+            "the zsh label no longer matches its own head: " + hostile,
+        )
+
+
+def test_a_hostile_head_name_cannot_run_from_a_fish_condition() raises:
+    """The sharpest position in the module, because fish evaluates it.
+
+    `complete -n '…'` takes a *command*, run when a completion is generated,
+    so this position needs both levels: the name is escaped as one literal
+    word of that command and the command is then single-quoted. Both are
+    asserted — that nothing expandable reaches the evaluation, and that the
+    word the condition tests is still the head's own name.
+    """
+    for hostile in _hostile_values():
+        var condition = _fish_head_condition(hostile)
+        var stored = _fish_single_quote_removal(condition)
+        assert_equal(
+            _live_metacharacters(stored),
+            "",
+            "a live metacharacter reaches fish's evaluation for: " + hostile,
+        )
+        assert_equal(
+            _backslash_removal(stored),
+            "__mtest_head_is " + hostile,
+            "the fish condition tests the wrong head for: " + hostile,
+        )
+
+
+def test_every_head_name_reaches_each_script_through_its_escaper() raises:
+    """Routing, asserted against the rendered text rather than the helpers.
+
+    Every head name is a table value, and until this test the module escaped
+    it where it was *assigned* and pasted it raw where it was *matched*. The
+    two forms are identical for today's `[a-z-]+` states, so nothing but an
+    exact-shape assertion can tell them apart.
+    """
+    var bash = render_bash_completions()
+    var zsh = render_zsh_completions()
+    var fish = render_fish_completions()
+    for bit in _head_bits():
+        var name = _head_name(bit)
+        assert_true(
+            "    " + _bash_pattern(name) + ") " in bash,
+            "the bash head arm of " + name + " is not a quoted label",
+        )
+        assert_true(
+            "    " + _zsh_quoted(name) + ") _arguments" in zsh,
+            "the zsh head arm of " + name + " is not a quoted label",
+        )
+        assert_true(
+            " -n " + _fish_head_condition(name) + " " in fish,
+            "the fish rules of " + name + " do not quote the condition",
+        )
+    for state in [_completions_state(), String("config-pending"), "none"]:
+        assert_true(
+            " -n " + _fish_head_condition(state) + " " in fish,
+            "the fish " + state + " rule does not quote its condition",
+        )
+
+
+def test_no_table_value_can_carry_a_shell_metacharacter() raises:
+    """The other half of the guarantee: the escapers, and then the tables.
+
+    Escaping is what makes a hostile value inert; this is what keeps one off
+    the tables in the first place, so the two failures a reader has to
+    imagine — a spelling and a head state — cannot both be reached by one
+    careless row. Widen the set here deliberately, with the positions above
+    re-read, or not at all.
+    """
+    var names = List[String]()
+    for spec in subcommand_specs():
+        names.append(spec.token.copy())
+        names.append(spec.completion_state.copy())
+    for spec in flag_specs():
+        names.append(spec.spelling.copy())
+    for name in names:
+        for cp in String(name).codepoints():
+            var code = Int(cp)
+            var inert = (
+                (code >= 97 and code <= 122)
+                or (code >= 65 and code <= 90)
+                or (code >= 48 and code <= 57)
+                or code == 45
+                or code == 95
+            )
+            assert_true(
+                inert,
+                "a table value carries a shell-significant codepoint: " + name,
+            )
+
+
 def test_bash_words_are_literal_inside_double_quotes() raises:
     """The literal level only; `compgen -W` needs the second one below."""
     assert_equal(_bash_word("--color"), "--color")
@@ -1347,9 +1593,11 @@ def test_fish_quoting_escapes_the_two_bytes_that_matter() raises:
 
 
 def test_fish_flag_tokens_split_short_from_long() raises:
-    assert_equal(_fish_flag_token("-x"), "-s x")
-    assert_equal(_fish_flag_token("-I"), "-s I")
-    assert_equal(_fish_flag_token("--color"), "-l color")
+    """And quote the name: a `complete` line is ordinary fish source."""
+    assert_equal(_fish_flag_token("-x"), "-s 'x'")
+    assert_equal(_fish_flag_token("-I"), "-s 'I'")
+    assert_equal(_fish_flag_token("--color"), "-l 'color'")
+    assert_equal(_fish_flag_token("--x;touch owned;#"), "-l 'x;touch owned;#'")
 
 
 def main() raises:
