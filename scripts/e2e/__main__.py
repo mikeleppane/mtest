@@ -44,6 +44,7 @@ from scripts.e2e.scenarios import (
     junit_reporter,
     parallel,
     resilience,
+    run_report,
     selection,
 )
 
@@ -187,6 +188,8 @@ SCENARIOS: ScenarioRegistry = (
         "junit-finalization-and-interrupt",
         junit_reporter.s_junit_finalization_and_interrupt,
     ),
+    ("report-md", run_report.s_report_md),
+    ("report-escalates", run_report.s_report_escalates),
     ("annotations-modes", annotations_scenarios.s_annotations_modes),
     ("annotations-caps", annotations_scenarios.s_annotations_caps),
     ("annotations-conflict", annotations_scenarios.s_annotations_conflict),
