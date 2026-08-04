@@ -3,6 +3,19 @@
 These helpers recognize value domains without owning CLI diagnostics or
 cross-key policy. Callers attach source-specific error framing after a helper
 reports that one value is invalid.
+
+Every closed vocabulary is published as a `*_choices()` list, and the matching
+`parse_*_value` decides acceptance by membership in that same list. One list per
+vocabulary is the point: a caller that offers the list — a help renderer, a
+shell-completion renderer — offers exactly what the parser accepts, and the two
+cannot drift apart because there is nothing to drift from. Each list is ordered
+by discriminant, so position `i` is the vocabulary's `i`-th typed value; that
+ordering is what lets membership and mapping be one lookup rather than two
+tables to keep in sync.
+
+`parse_verbosity_value` is the one named exemption: verbosity is an
+`mtest.toml`-only key with no flag spelling, so nothing completes it and it
+keeps its own branches.
 """
 from mtest.config.annotations_mode import AnnotationsMode
 from mtest.config.color_when import ColorWhen
@@ -50,6 +63,39 @@ def parse_nonnegative_decimal(value: String) -> Optional[Int]:
         return Optional[Int](None)
 
 
+def _choice_index(value: String, choices: List[String]) -> Int:
+    """The position of `value` in `choices`, or `-1` when it is absent.
+
+    The one membership test every closed vocabulary here is decided by, so a
+    published list and its parser can never disagree about what is legal.
+
+    Args:
+        value: The candidate spelling, compared byte-for-byte and
+            case-sensitively.
+        choices: The closed list, ordered by discriminant.
+
+    Returns:
+        The matching position, or `-1` when the value is outside the list.
+    """
+    for i in range(len(choices)):
+        if choices[i] == value:
+            return i
+    return -1
+
+
+def workers_choices() -> List[String]:
+    """The closed arm of the `-n`/`--workers` value domain.
+
+    `auto` is the whole closed arm; every other accepted value is a positive
+    decimal integer, which is free text and cannot be enumerated. A completion
+    renderer offers this list and nothing else.
+
+    Returns:
+        A freshly allocated list holding the closed spellings.
+    """
+    return ["auto"]
+
+
 def parse_worker_count(value: String) -> Optional[Int]:
     """Parse `auto` or a positive decimal worker count.
 
@@ -70,12 +116,24 @@ def parse_worker_count(value: String) -> Optional[Int]:
     var automatic = parse_worker_count("auto")
     ```
     """
-    if value == "auto":
+    if _choice_index(value, workers_choices()) >= 0:
         return Optional[Int](0)
     var parsed = parse_nonnegative_decimal(value)
     if not parsed or parsed.value() < 1:
         return Optional[Int](None)
     return parsed
+
+
+def show_output_choices() -> List[String]:
+    """The closed `--show-output` vocabulary, ordered by discriminant.
+
+    Position `i` is `ShowOutput(i)`, which is what makes this list both the
+    accepted set and the mapping into the typed vocabulary.
+
+    Returns:
+        A freshly allocated list holding every accepted spelling.
+    """
+    return ["failures", "all", "none"]
 
 
 def parse_show_output_value(value: String) -> Optional[ShowOutput]:
@@ -87,13 +145,21 @@ def parse_show_output_value(value: String) -> Optional[ShowOutput]:
     Returns:
         The typed mode, or `None` when invalid.
     """
-    if value == "failures":
-        return Optional[ShowOutput](ShowOutput.FAILURES)
-    if value == "all":
-        return Optional[ShowOutput](ShowOutput.ALL)
-    if value == "none":
-        return Optional[ShowOutput](ShowOutput.NONE)
-    return Optional[ShowOutput](None)
+    var index = _choice_index(value, show_output_choices())
+    if index < 0:
+        return Optional[ShowOutput](None)
+    return Optional[ShowOutput](ShowOutput(index))
+
+
+def annotations_choices() -> List[String]:
+    """The closed `--gh-annotations` vocabulary, ordered by discriminant.
+
+    Position `i` is `AnnotationsMode(i)`.
+
+    Returns:
+        A freshly allocated list holding every accepted spelling.
+    """
+    return ["off", "on", "auto"]
 
 
 def parse_annotations_value(value: String) -> Optional[AnnotationsMode]:
@@ -105,13 +171,21 @@ def parse_annotations_value(value: String) -> Optional[AnnotationsMode]:
     Returns:
         The typed mode, or `None` when invalid.
     """
-    if value == "off":
-        return Optional[AnnotationsMode](AnnotationsMode.OFF)
-    if value == "on":
-        return Optional[AnnotationsMode](AnnotationsMode.ON)
-    if value == "auto":
-        return Optional[AnnotationsMode](AnnotationsMode.AUTO)
-    return Optional[AnnotationsMode](None)
+    var index = _choice_index(value, annotations_choices())
+    if index < 0:
+        return Optional[AnnotationsMode](None)
+    return Optional[AnnotationsMode](AnnotationsMode(index))
+
+
+def color_choices() -> List[String]:
+    """The closed `--color` vocabulary, ordered by discriminant.
+
+    Position `i` is `ColorWhen(i)`.
+
+    Returns:
+        A freshly allocated list holding every accepted spelling.
+    """
+    return ["auto", "always", "never"]
 
 
 def parse_color_value(value: String) -> Optional[ColorWhen]:
@@ -123,13 +197,42 @@ def parse_color_value(value: String) -> Optional[ColorWhen]:
     Returns:
         The typed mode, or `None` when invalid.
     """
-    if value == "auto":
-        return Optional[ColorWhen](ColorWhen.AUTO)
-    if value == "always":
-        return Optional[ColorWhen](ColorWhen.ALWAYS)
-    if value == "never":
-        return Optional[ColorWhen](ColorWhen.NEVER)
-    return Optional[ColorWhen](None)
+    var index = _choice_index(value, color_choices())
+    if index < 0:
+        return Optional[ColorWhen](None)
+    return Optional[ColorWhen](ColorWhen(index))
+
+
+def collect_format_choices() -> List[String]:
+    """The closed `--format` vocabulary for the collect listing.
+
+    Ordered so that position `1` is the NDJSON stream, which is what
+    `parse_collect_format_value` returns `True` for.
+
+    Returns:
+        A freshly allocated list holding every accepted spelling.
+    """
+    return ["lines", "json"]
+
+
+def parse_collect_format_value(value: String) -> Optional[Bool]:
+    """Parse one collect output format into "render the collect stream".
+
+    The domain lives here rather than in the parser so the accepted set and
+    the completion list are the same list. The caller owns the refusal text,
+    because nothing in this module raises.
+
+    Args:
+        value: The candidate `lines` or `json` spelling.
+
+    Returns:
+        `True` for `json`, `False` for `lines`, or `None` when invalid, an
+        empty value included.
+    """
+    var index = _choice_index(value, collect_format_choices())
+    if index < 0:
+        return Optional[Bool](None)
+    return Optional[Bool](index == 1)
 
 
 def parse_verbosity_value(value: String) -> Optional[Verbosity]:
@@ -150,6 +253,17 @@ def parse_verbosity_value(value: String) -> Optional[Verbosity]:
     return Optional[Verbosity](None)
 
 
+def report_style_choices() -> List[String]:
+    """The closed `--report-style` vocabulary, ordered by discriminant.
+
+    Position `i` is `ReportStyle(i)`.
+
+    Returns:
+        A freshly allocated list holding every accepted spelling.
+    """
+    return ["concise", "full"]
+
+
 def parse_report_style_value(value: String) -> Optional[ReportStyle]:
     """Parse one run-report detail style.
 
@@ -159,11 +273,10 @@ def parse_report_style_value(value: String) -> Optional[ReportStyle]:
     Returns:
         The typed style, or `None` when invalid.
     """
-    if value == "concise":
-        return Optional[ReportStyle](ReportStyle.CONCISE)
-    if value == "full":
-        return Optional[ReportStyle](ReportStyle.FULL)
-    return Optional[ReportStyle](None)
+    var index = _choice_index(value, report_style_choices())
+    if index < 0:
+        return Optional[ReportStyle](None)
+    return Optional[ReportStyle](ReportStyle(index))
 
 
 @fieldwise_init
@@ -176,6 +289,20 @@ struct ReportValue(Copyable, Movable):
     """The destination path, non-empty."""
 
 
+def report_format_prefixes() -> List[String]:
+    """The closed `--report` value prefixes, separator included.
+
+    A `--report` value is one of these prefixes followed by a free filesystem
+    path, so the prefixes carry their `:` — that is exactly the token a
+    completion renderer offers before it hands over to path completion, and
+    exactly what `parse_report_value` matches on.
+
+    Returns:
+        A freshly allocated list holding every accepted prefix.
+    """
+    return ["md:", "html:"]
+
+
 def parse_report_value(value: String) -> Optional[ReportValue]:
     """Parse one `FORMAT:PATH` report destination.
 
@@ -184,16 +311,21 @@ def parse_report_value(value: String) -> Optional[ReportValue]:
 
     Returns:
         The typed destination, or `None` for an empty path, a missing
-        separator, or a format outside {md, html}.
+        separator, or a prefix outside `report_format_prefixes()`.
     """
     var sep = value.find(":")
     if sep <= 0 or sep == value.byte_length() - 1:
         return Optional[ReportValue](None)
-    var format = String(value[byte=:sep])
-    if format != "md" and format != "html":
+    if (
+        _choice_index(String(value[byte = : sep + 1]), report_format_prefixes())
+        < 0
+    ):
         return Optional[ReportValue](None)
     return Optional[ReportValue](
-        ReportValue(format=format^, path=String(value[byte = sep + 1 :]))
+        ReportValue(
+            format=String(value[byte=:sep]),
+            path=String(value[byte = sep + 1 :]),
+        )
     )
 
 

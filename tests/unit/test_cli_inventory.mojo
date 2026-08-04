@@ -7,11 +7,24 @@ row-for-row bijection with this frozen list, so a drifted arity or dropped
 spelling fails loudly and the spec table can never be its own oracle. The help
 tests independently require complete metadata and one aligned, bounded line per
 spelling.
+
+Each row also transcribes how the flag's value completes and, for a closed
+vocabulary, exactly which values it accepts. That half of the table is only
+worth carrying while it is true, so it is checked twice: against the frozen
+transcription for drift, and against `parse_args` itself, which must accept
+every declared choice and refuse a value just outside the declared set.
 """
-from std.testing import assert_equal, assert_raises, assert_true, TestSuite
+from std.testing import (
+    assert_equal,
+    assert_false,
+    assert_raises,
+    assert_true,
+    TestSuite,
+)
 
 from mtest.cli import (
     FlagGroup,
+    ValueKind,
     flag_group_name,
     flag_specs,
     help_text,
@@ -31,6 +44,8 @@ struct InvRow(Copyable, Movable):
     var group: Int
     var help: String
     var help_label: String
+    var value_kind: ValueKind
+    var choices: List[String]
 
 
 def frozen_inventory() -> List[InvRow]:
@@ -49,6 +64,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.SELECTION,
             "Exclude matching files (repeatable).",
             "--exclude GLOB",
+            ValueKind.OTHER,
+            List[String](),
         ),
         InvRow(
             "-I",
@@ -58,6 +75,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.BUILDING,
             "Add a Mojo include path (repeatable).",
             "-I PATH",
+            ValueKind.PATH,
+            List[String](),
         ),
         InvRow(
             "--build-arg",
@@ -67,6 +86,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.BUILDING,
             "Forward one argument to mojo build (repeatable).",
             "--build-arg ARG",
+            ValueKind.OTHER,
+            List[String](),
         ),
         InvRow(
             "--gate",
@@ -76,6 +97,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.SELECTION,
             "Run PATH before ordinary files (repeatable).",
             "--gate PATH",
+            ValueKind.PATH,
+            List[String](),
         ),
         InvRow(
             "--precompile",
@@ -85,6 +108,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.BUILDING,
             "Precompile package before builds (repeatable).",
             "--precompile SRC[:OUT]",
+            ValueKind.PATH,
+            List[String](),
         ),
         InvRow(
             "--mojo",
@@ -94,6 +119,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.BUILDING,
             "Use this Mojo executable.",
             "--mojo PATH",
+            ValueKind.PATH,
+            List[String](),
         ),
         InvRow(
             "-x",
@@ -103,6 +130,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.EXECUTION,
             "Stop after the first failing file.",
             "-x, --exitfirst",
+            ValueKind.NONE,
+            List[String](),
         ),
         InvRow(
             "--exitfirst",
@@ -112,6 +141,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.EXECUTION,
             "Stop after the first failing file.",
             "-x, --exitfirst",
+            ValueKind.NONE,
+            List[String](),
         ),
         InvRow(
             "--timeout",
@@ -121,6 +152,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.EXECUTION,
             "Set per-file run timeout (0 disables).",
             "--timeout SECS",
+            ValueKind.OTHER,
+            List[String](),
         ),
         InvRow(
             "-s",
@@ -130,6 +163,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.REPORTING,
             "Show captured output for all files.",
             "-s",
+            ValueKind.NONE,
+            List[String](),
         ),
         InvRow(
             "--show-output",
@@ -139,6 +174,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.REPORTING,
             "Choose failures|all|none captured output.",
             "--show-output MODE",
+            ValueKind.CHOICE,
+            ["failures", "all", "none"],
         ),
         InvRow(
             "-q",
@@ -148,6 +185,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.REPORTING,
             "Suppress passing file rows.",
             "-q",
+            ValueKind.NONE,
+            List[String](),
         ),
         InvRow(
             "-v",
@@ -157,6 +196,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.REPORTING,
             "Show build commands and step timings.",
             "-v",
+            ValueKind.NONE,
+            List[String](),
         ),
         InvRow(
             "--color",
@@ -166,6 +207,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.REPORTING,
             "Choose auto|always|never color output.",
             "--color WHEN",
+            ValueKind.CHOICE,
+            ["auto", "always", "never"],
         ),
         InvRow(
             "-h",
@@ -175,6 +218,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.GENERAL,
             "Show this help and exit.",
             "-h, --help",
+            ValueKind.NONE,
+            List[String](),
         ),
         InvRow(
             "--help",
@@ -184,6 +229,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.GENERAL,
             "Show this help and exit.",
             "-h, --help",
+            ValueKind.NONE,
+            List[String](),
         ),
         InvRow(
             "--version",
@@ -193,6 +240,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.GENERAL,
             "Show the version and exit.",
             "--version",
+            ValueKind.NONE,
+            List[String](),
         ),
         InvRow(
             "-k",
@@ -202,6 +251,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.SELECTION,
             "Select node ids containing STR.",
             "-k STR",
+            ValueKind.OTHER,
+            List[String](),
         ),
         InvRow(
             "--maxfail",
@@ -211,6 +262,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.EXECUTION,
             "Stop after N failed tests (0 disables).",
             "--maxfail N",
+            ValueKind.OTHER,
+            List[String](),
         ),
         # `--durations N`: non-negative int; 0 disables.
         InvRow(
@@ -221,6 +274,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.REPORTING,
             "Show N slowest file durations (0 disables).",
             "--durations N",
+            ValueKind.OTHER,
+            List[String](),
         ),
         # `--shard [hash:|slice:]M/N`: 1<=M<=N, last-wins.
         InvRow(
@@ -231,6 +286,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.SELECTION,
             "Run only the selected shard.",
             "--shard [hash:|slice:]M/N",
+            ValueKind.OTHER,
+            List[String](),
         ),
         # `--retries N`: non-negative int; 0 disables.
         InvRow(
@@ -241,6 +298,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.EXECUTION,
             "Retry crash-class outcomes N times.",
             "--retries N",
+            ValueKind.OTHER,
+            List[String](),
         ),
         # `--fail-on-flaky`: valueless; a FLAKY file turns a would-be 0 into 1.
         InvRow(
@@ -251,6 +310,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.EXECUTION,
             "Exit 1 when any file passed only after retries.",
             "--fail-on-flaky",
+            ValueKind.NONE,
+            List[String](),
         ),
         # `--compile-timeout SECS`: non-negative int; 0 disables.
         InvRow(
@@ -261,6 +322,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.BUILDING,
             "Set per-file build timeout (0 disables).",
             "--compile-timeout SECS",
+            ValueKind.OTHER,
+            List[String](),
         ),
         # `-n`/`--workers N|auto`: served, last-wins.
         InvRow(
@@ -271,6 +334,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.EXECUTION,
             "Set worker count (default: 1).",
             "-n, --workers N|auto",
+            ValueKind.CHOICE_OR_OTHER,
+            ["auto"],
         ),
         InvRow(
             "--workers",
@@ -280,6 +345,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.EXECUTION,
             "Set worker count (default: 1).",
             "-n, --workers N|auto",
+            ValueKind.CHOICE_OR_OTHER,
+            ["auto"],
         ),
         # `--serial GLOB`: repeatable, now served.
         InvRow(
@@ -290,6 +357,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.EXECUTION,
             "Run matching files serially (repeatable).",
             "--serial GLOB",
+            ValueKind.OTHER,
+            List[String](),
         ),
         # CLI-only: never read from mtest.toml (order randomization).
         InvRow(
@@ -300,6 +369,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.EXECUTION,
             "Randomize run-file order (gates keep theirs).",
             "--shuffle",
+            ValueKind.NONE,
+            List[String](),
         ),
         InvRow(
             "--seed",
@@ -309,6 +380,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.EXECUTION,
             "Fix the --shuffle order to a reproducible seed.",
             "--seed N",
+            ValueKind.OTHER,
+            List[String](),
         ),
         # CLI-only: never read from mtest.toml (build cache).
         InvRow(
@@ -319,6 +392,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.EXECUTION,
             "Build without reading/writing the build cache.",
             "--no-cache",
+            ValueKind.NONE,
+            List[String](),
         ),
         InvRow(
             "--cache-clear",
@@ -328,6 +403,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.EXECUTION,
             "Delete .mtest-cache (cache/last-run state), run.",
             "--cache-clear",
+            ValueKind.NONE,
+            List[String](),
         ),
         # `--report FORMAT:PATH` and `--report-style concise|full`: now served.
         InvRow(
@@ -338,6 +415,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.REPORTING,
             "Write an md or html run report (once each).",
             "--report FORMAT:PATH",
+            ValueKind.PREFIX_CHOICE,
+            ["md:", "html:"],
         ),
         InvRow(
             "--report-style",
@@ -347,6 +426,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.REPORTING,
             "Choose concise|full report detail.",
             "--report-style STYLE",
+            ValueKind.CHOICE,
+            ["concise", "full"],
         ),
         # `--gh-annotations off|on|auto`: now served.
         InvRow(
@@ -357,6 +438,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.REPORTING,
             "Choose off|on|auto GitHub annotations.",
             "--gh-annotations MODE",
+            ValueKind.CHOICE,
+            ["off", "on", "auto"],
         ),
         # `--format lines|json`: collect-only; `lines` is the default.
         InvRow(
@@ -367,6 +450,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.REPORTING,
             "Collect output format: lines (default) or json.",
             "--format FORMAT",
+            ValueKind.CHOICE,
+            ["lines", "json"],
         ),
         # `--json PATH|-`: now served.
         InvRow(
@@ -377,6 +462,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.REPORTING,
             "Write NDJSON events to PATH or stdout.",
             "--json PATH|-",
+            ValueKind.PATH,
+            List[String](),
         ),
         # `--junit-xml PATH`: now served.
         InvRow(
@@ -387,6 +474,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.REPORTING,
             "Write a JUnit XML report.",
             "--junit-xml PATH",
+            ValueKind.PATH,
+            List[String](),
         ),
         # Served by this build (collect mode).
         InvRow(
@@ -397,6 +486,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.GENERAL,
             "List node ids without running tests.",
             "--collect-only",
+            ValueKind.NONE,
+            List[String](),
         ),
         InvRow(
             "--config",
@@ -406,6 +497,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.SESSION_STATE,
             "Use this project configuration file.",
             "--config PATH",
+            ValueKind.PATH,
+            List[String](),
         ),
         InvRow(
             "--no-config",
@@ -415,6 +508,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.SESSION_STATE,
             "Disable project configuration discovery.",
             "--no-config",
+            ValueKind.NONE,
+            List[String](),
         ),
         InvRow(
             "--lf",
@@ -424,6 +519,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.SESSION_STATE,
             "Run only entries from the last-failed state.",
             "--lf, --last-failed",
+            ValueKind.NONE,
+            List[String](),
         ),
         InvRow(
             "--last-failed",
@@ -433,6 +530,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.SESSION_STATE,
             "Run only entries from the last-failed state.",
             "--lf, --last-failed",
+            ValueKind.NONE,
+            List[String](),
         ),
         InvRow(
             "--ff",
@@ -442,6 +541,8 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.SESSION_STATE,
             "Run last-failed entries before the rest.",
             "--ff, --failed-first",
+            ValueKind.NONE,
+            List[String](),
         ),
         InvRow(
             "--failed-first",
@@ -451,8 +552,42 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.SESSION_STATE,
             "Run last-failed entries before the rest.",
             "--ff, --failed-first",
+            ValueKind.NONE,
+            List[String](),
         ),
     ]
+
+
+def _joined(values: List[String]) -> String:
+    """Render a choice list as one `|`-separated line for exact comparison."""
+    var rendered = String("")
+    for i in range(len(values)):
+        if i > 0:
+            rendered += "|"
+        rendered += values[i]
+    return rendered^
+
+
+def _spellings_with_kind(kind: ValueKind) -> String:
+    """Every spelling declaring `kind`, `|`-separated in table order."""
+    var rendered = String("")
+    for spec in flag_specs():
+        if spec.value_kind == kind:
+            if rendered != "":
+                rendered += "|"
+            rendered += spec.spelling
+    return rendered^
+
+
+def _argv_for(spelling: String, value: String) -> List[String]:
+    """The shortest argument vector that offers `value` to `spelling`."""
+    var argv = List[String]()
+    # `--format` shapes a listing, so the parser refuses it outside collect.
+    if spelling == "--format":
+        argv.append("collect")
+    argv.append(spelling)
+    argv.append(value)
+    return argv^
 
 
 def test_spec_table_matches_frozen_inventory_count() raises:
@@ -488,6 +623,15 @@ def test_every_spec_row_is_in_the_frozen_inventory() raises:
                     spec.help,
                     row.help,
                     "help description drift: " + spec.spelling,
+                )
+                assert_true(
+                    spec.value_kind == row.value_kind,
+                    "value kind drift: " + spec.spelling,
+                )
+                assert_equal(
+                    _joined(spec.choices),
+                    _joined(row.choices),
+                    "choice list drift: " + spec.spelling,
                 )
         assert_true(found, "spec not in inventory: " + spec.spelling)
 
@@ -615,6 +759,149 @@ def test_help_lines_never_exceed_78_columns() raises:
             line.count_codepoints() <= 78,
             "overlong help line: " + line,
         )
+
+
+def test_every_physical_help_label_fits_before_the_help_column() raises:
+    """A label of 28+ codepoints would run into the 30-column help text.
+
+    `_help_row` pads `"  " + label` out to column 30, so a 28-codepoint label
+    leaves no separating space and a longer one pushes the description right
+    and breaks the alignment every other row keeps.
+    """
+    for row in frozen_inventory():
+        assert_true(
+            row.help_label.count_codepoints() <= 27,
+            "overlong help label: " + row.help_label,
+        )
+
+
+# --- typed value metadata: the kind and the closed list per spelling ---
+
+
+def test_value_kind_discriminants_are_stable() raises:
+    assert_equal(ValueKind.NONE.code, 0)
+    assert_equal(ValueKind.PATH.code, 1)
+    assert_equal(ValueKind.CHOICE.code, 2)
+    assert_equal(ValueKind.CHOICE_OR_OTHER.code, 3)
+    assert_equal(ValueKind.PREFIX_CHOICE.code, 4)
+    assert_equal(ValueKind.OTHER.code, 5)
+
+
+def test_value_kind_compares_by_discriminant() raises:
+    assert_true(ValueKind.PATH == ValueKind(1))
+    assert_true(ValueKind.PATH != ValueKind.OTHER)
+    assert_false(ValueKind.PATH == ValueKind.OTHER)
+    assert_false(ValueKind.PATH != ValueKind(1))
+
+
+def test_valueless_flags_declare_no_value_kind_and_no_choices() raises:
+    for spec in flag_specs():
+        if spec.arity == 0:
+            assert_true(
+                spec.value_kind == ValueKind.NONE,
+                "arity-0 flag completes a value: " + spec.spelling,
+            )
+            assert_equal(
+                len(spec.choices),
+                0,
+                "arity-0 flag carries choices: " + spec.spelling,
+            )
+
+
+def test_value_taking_flags_never_declare_the_valueless_kind() raises:
+    for spec in flag_specs():
+        if spec.arity == 1:
+            assert_true(
+                spec.value_kind != ValueKind.NONE,
+                "arity-1 flag declares no value kind: " + spec.spelling,
+            )
+
+
+def test_only_the_closed_kinds_carry_a_choice_list() raises:
+    """A list on an open kind would be offered as if it were exhaustive."""
+    for spec in flag_specs():
+        var closed = (
+            spec.value_kind == ValueKind.CHOICE
+            or spec.value_kind == ValueKind.CHOICE_OR_OTHER
+            or spec.value_kind == ValueKind.PREFIX_CHOICE
+        )
+        if closed:
+            assert_true(
+                len(spec.choices) > 0,
+                "closed kind with an empty list: " + spec.spelling,
+            )
+        else:
+            assert_equal(
+                len(spec.choices),
+                0,
+                "open kind with a choice list: " + spec.spelling,
+            )
+
+
+def test_choice_flags_are_exactly_the_five_closed_vocabularies() raises:
+    assert_equal(
+        _spellings_with_kind(ValueKind.CHOICE),
+        "--show-output|--color|--format|--report-style|--gh-annotations",
+    )
+
+
+def test_path_flags_are_exactly_the_seven_destination_takers() raises:
+    assert_equal(
+        _spellings_with_kind(ValueKind.PATH),
+        "--gate|-I|--precompile|--mojo|--json|--junit-xml|--config",
+    )
+
+
+def test_workers_is_the_only_closed_list_beside_free_text() raises:
+    assert_equal(
+        _spellings_with_kind(ValueKind.CHOICE_OR_OTHER), "-n|--workers"
+    )
+
+
+def test_report_is_the_only_prefix_choice() raises:
+    assert_equal(_spellings_with_kind(ValueKind.PREFIX_CHOICE), "--report")
+
+
+def test_every_declared_choice_is_accepted_by_the_parser() raises:
+    """The published list may never contain a value the parser refuses."""
+    for spec in flag_specs():
+        for choice in spec.choices:
+            var value = choice.copy()
+            if spec.value_kind == ValueKind.PREFIX_CHOICE:
+                value += "out.txt"
+            var accepted = True
+            try:
+                _ = parse_args(_argv_for(spec.spelling, value))
+            except:
+                accepted = False
+            assert_true(
+                accepted,
+                "declared choice refused: " + spec.spelling + " " + value,
+            )
+
+
+def test_a_value_outside_every_closed_list_is_refused() raises:
+    """A list is only closed while the parser refuses what it omits."""
+    for spec in flag_specs():
+        if len(spec.choices) == 0:
+            continue
+        var refused = False
+        try:
+            _ = parse_args(_argv_for(spec.spelling, "not-a-declared-choice"))
+        except:
+            refused = True
+        assert_true(
+            refused,
+            "declared list is not closed: " + spec.spelling,
+        )
+
+
+def test_workers_free_arm_is_open_beside_its_closed_arm() raises:
+    """CHOICE_OR_OTHER means both arms parse: `auto` and a bare integer."""
+    var closed: List[String] = ["--workers", "auto"]
+    var free: List[String] = ["--workers", "7"]
+    assert_equal(parse_args(closed).config.workers, 0)
+    assert_equal(parse_args(free).config.workers, 7)
 
 
 def test_workers_short_parses_count() raises:

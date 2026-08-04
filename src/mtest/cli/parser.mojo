@@ -36,6 +36,7 @@ from mtest.config import (
     Verbosity,
     build_arg_rejection,
     parse_annotations_value,
+    parse_collect_format_value,
     parse_color_value,
     parse_nonnegative_decimal,
     parse_precompile_value,
@@ -223,6 +224,10 @@ def _parse_compile_timeout(value: String) raises -> Int:
 def _parse_format(value: String) raises -> Bool:
     """Parse a `--format` value into "render the collect stream".
 
+    The accepted set lives in `collect_format_choices()` so the flag-spec table
+    can publish exactly what this accepts; the refusal wording is this layer's,
+    because nothing in `mtest.config` raises.
+
     Args:
         value: The flag's value: `lines` (the plain listing) or `json` (the
             NDJSON collect stream).
@@ -234,11 +239,10 @@ def _parse_format(value: String) raises -> Bool:
         Error: A usage error (exit 4) naming the offending value for anything
             else, an empty value included.
     """
-    if value == "lines":
-        return False
-    if value == "json":
-        return True
-    raise _err("'--format' wants 'lines' or 'json', got '" + value + "'")
+    var parsed = parse_collect_format_value(value)
+    if not parsed:
+        raise _err("'--format' wants 'lines' or 'json', got '" + value + "'")
+    return parsed.value()
 
 
 def _parse_show_output(value: String) raises -> ShowOutput:

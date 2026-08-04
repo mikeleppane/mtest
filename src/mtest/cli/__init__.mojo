@@ -11,8 +11,9 @@ source — one test file, or the handful of files a project starts from — and
 return lines and a code rather than printing or exiting.
 
 The parser is table-driven. `flag_specs()` is the single source of truth for
-every accepted spelling: its arity, whether it repeats, and its owned help text,
-value placeholder, and group. It parses the full v1 grammar, and the grouped
+every accepted spelling: its arity, whether it repeats, its owned help text,
+value placeholder, and group, and — as a typed `ValueKind` plus a closed choice
+list — what its value may be. It parses the full v1 grammar, and the grouped
 help output is generated from that same table.
 
 The layer also owns `build_flags_string`, which renders a `RunnerConfig` back
@@ -27,6 +28,7 @@ from mtest.cli.flag_spec import (
     FlagGroup,
     FlagId,
     FlagSpec,
+    ValueKind,
     flag_group_name,
     flag_specs,
 )

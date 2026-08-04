@@ -1,13 +1,30 @@
 """The flag-spec table: the single source of truth for every flag spelling.
 
 The parser is table-driven rather than a pile of ad-hoc branches. Each accepted
-*spelling* is one `FlagSpec` row carrying its arity, repetition behavior, and
-owned help metadata. Two spellings of the same flag (`-x` and `--exitfirst`)
-are two rows sharing one `id`.
+*spelling* is one `FlagSpec` row carrying its arity, repetition behavior, owned
+help metadata, and how its value is shaped. Two spellings of the same flag
+(`-x` and `--exitfirst`) are two rows sharing one `id`.
+
+A row's `value_kind` and `choices` describe what the parser actually accepts,
+never an idealized domain: a `CHOICE` row's list is the exact closed set the
+matching `parse_*_value` validates against, taken from `mtest.config` rather
+than restated here, so the two cannot drift. Where the parser accepts more than
+a kind can express, the row says so by naming the wider kind — `OTHER` for a
+value with no useful completion, `CHOICE_OR_OTHER` where a closed arm sits
+beside free text.
 
 `flag_specs()` exposes the whole table so the command-line contract can be
 checked against an independently written inventory rather than against itself.
 """
+from mtest.config import (
+    annotations_choices,
+    collect_format_choices,
+    color_choices,
+    report_format_prefixes,
+    report_style_choices,
+    show_output_choices,
+    workers_choices,
+)
 
 
 struct FlagId:
@@ -101,6 +118,53 @@ def flag_group_name(group: Int) -> String:
 
 
 @fieldwise_init
+struct ValueKind(Equatable, ImplicitlyCopyable, Movable):
+    """How a flag's value completes.
+
+    A wrapper over a stable integer discriminant, so the vocabulary is a closed
+    set of named constants that compare by value. The kind describes the
+    parser's real accepting behavior, which is what makes it safe for a
+    completion renderer to act on: a kind that promised less than the parser
+    accepts would refuse to offer a legal value, and one that promised more
+    would offer a value the parser rejects.
+
+    Examples:
+
+    ```mojo
+    from mtest.cli import ValueKind, flag_specs
+
+    for spec in flag_specs():
+        if spec.value_kind == ValueKind.CHOICE:
+            print(spec.spelling, len(spec.choices))
+    ```
+    """
+
+    var code: Int
+    """The stable integer discriminant."""
+
+    comptime NONE = Self(0)
+    """Arity-0: the flag takes no value at all."""
+    comptime PATH = Self(1)
+    """A filesystem path: complete against the filesystem."""
+    comptime CHOICE = Self(2)
+    """Exactly the row's closed choice list, and nothing else."""
+    comptime CHOICE_OR_OTHER = Self(3)
+    """The closed list plus free text the list cannot enumerate."""
+    comptime PREFIX_CHOICE = Self(4)
+    """One of the row's closed prefixes, then a free path after it."""
+    comptime OTHER = Self(5)
+    """Free text with no useful completion: offer nothing."""
+
+    def __eq__(self, other: Self) -> Bool:
+        """Two kinds are equal when their discriminants are equal."""
+        return self.code == other.code
+
+    def __ne__(self, other: Self) -> Bool:
+        """Negation of `__eq__`."""
+        return self.code != other.code
+
+
+@fieldwise_init
 struct FlagSpec(Copyable, Movable):
     """One accepted flag spelling and everything the parser needs about it.
 
@@ -142,6 +206,16 @@ struct FlagSpec(Copyable, Movable):
     var group: Int
     """The closed `FlagGroup` identity that owns this spelling."""
 
+    var value_kind: ValueKind
+    """How this spelling's value completes; `NONE` for an arity-zero flag."""
+
+    var choices: List[String]
+    """The closed values this spelling accepts, empty unless the kind is closed.
+
+    Non-empty exactly for `CHOICE`, `CHOICE_OR_OTHER`, and `PREFIX_CHOICE`, and
+    always the same list the matching `mtest.config` validator decides
+    membership against, never a second transcription of it."""
+
 
 def flag_specs() -> List[FlagSpec]:
     """The whole flag-spec table, one row per accepted spelling.
@@ -160,6 +234,8 @@ def flag_specs() -> List[FlagSpec]:
             "Exclude matching files (repeatable).",
             "GLOB",
             FlagGroup.SELECTION,
+            ValueKind.OTHER,
+            List[String](),
         ),
         FlagSpec(
             "-k",
@@ -169,6 +245,8 @@ def flag_specs() -> List[FlagSpec]:
             "Select node ids containing STR.",
             "STR",
             FlagGroup.SELECTION,
+            ValueKind.OTHER,
+            List[String](),
         ),
         FlagSpec(
             "--gate",
@@ -178,6 +256,8 @@ def flag_specs() -> List[FlagSpec]:
             "Run PATH before ordinary files (repeatable).",
             "PATH",
             FlagGroup.SELECTION,
+            ValueKind.PATH,
+            List[String](),
         ),
         FlagSpec(
             "--shard",
@@ -187,6 +267,8 @@ def flag_specs() -> List[FlagSpec]:
             "Run only the selected shard.",
             "[hash:|slice:]M/N",
             FlagGroup.SELECTION,
+            ValueKind.OTHER,
+            List[String](),
         ),
         # Execution.
         FlagSpec(
@@ -197,6 +279,8 @@ def flag_specs() -> List[FlagSpec]:
             "Stop after the first failing file.",
             "",
             FlagGroup.EXECUTION,
+            ValueKind.NONE,
+            List[String](),
         ),
         FlagSpec(
             "--exitfirst",
@@ -206,6 +290,8 @@ def flag_specs() -> List[FlagSpec]:
             "Stop after the first failing file.",
             "",
             FlagGroup.EXECUTION,
+            ValueKind.NONE,
+            List[String](),
         ),
         FlagSpec(
             "--maxfail",
@@ -215,6 +301,8 @@ def flag_specs() -> List[FlagSpec]:
             "Stop after N failed tests (0 disables).",
             "N",
             FlagGroup.EXECUTION,
+            ValueKind.OTHER,
+            List[String](),
         ),
         FlagSpec(
             "--timeout",
@@ -224,6 +312,8 @@ def flag_specs() -> List[FlagSpec]:
             "Set per-file run timeout (0 disables).",
             "SECS",
             FlagGroup.EXECUTION,
+            ValueKind.OTHER,
+            List[String](),
         ),
         FlagSpec(
             "--retries",
@@ -233,6 +323,8 @@ def flag_specs() -> List[FlagSpec]:
             "Retry crash-class outcomes N times.",
             "N",
             FlagGroup.EXECUTION,
+            ValueKind.OTHER,
+            List[String](),
         ),
         FlagSpec(
             "--fail-on-flaky",
@@ -242,6 +334,8 @@ def flag_specs() -> List[FlagSpec]:
             "Exit 1 when any file passed only after retries.",
             "",
             FlagGroup.EXECUTION,
+            ValueKind.NONE,
+            List[String](),
         ),
         FlagSpec(
             "-n",
@@ -251,6 +345,8 @@ def flag_specs() -> List[FlagSpec]:
             "Set worker count (default: 1).",
             "N|auto",
             FlagGroup.EXECUTION,
+            ValueKind.CHOICE_OR_OTHER,
+            workers_choices(),
         ),
         FlagSpec(
             "--workers",
@@ -260,6 +356,8 @@ def flag_specs() -> List[FlagSpec]:
             "Set worker count (default: 1).",
             "N|auto",
             FlagGroup.EXECUTION,
+            ValueKind.CHOICE_OR_OTHER,
+            workers_choices(),
         ),
         FlagSpec(
             "--serial",
@@ -269,6 +367,8 @@ def flag_specs() -> List[FlagSpec]:
             "Run matching files serially (repeatable).",
             "GLOB",
             FlagGroup.EXECUTION,
+            ValueKind.OTHER,
+            List[String](),
         ),
         FlagSpec(
             "--shuffle",
@@ -278,6 +378,8 @@ def flag_specs() -> List[FlagSpec]:
             "Randomize run-file order (gates keep theirs).",
             "",
             FlagGroup.EXECUTION,
+            ValueKind.NONE,
+            List[String](),
         ),
         FlagSpec(
             "--seed",
@@ -287,6 +389,8 @@ def flag_specs() -> List[FlagSpec]:
             "Fix the --shuffle order to a reproducible seed.",
             "N",
             FlagGroup.EXECUTION,
+            ValueKind.OTHER,
+            List[String](),
         ),
         # CLI-only, exempt from mtest.toml by design (build cache).
         FlagSpec(
@@ -297,6 +401,8 @@ def flag_specs() -> List[FlagSpec]:
             "Build without reading/writing the build cache.",
             "",
             FlagGroup.EXECUTION,
+            ValueKind.NONE,
+            List[String](),
         ),
         FlagSpec(
             "--cache-clear",
@@ -306,6 +412,8 @@ def flag_specs() -> List[FlagSpec]:
             "Delete .mtest-cache (cache/last-run state), run.",
             "",
             FlagGroup.EXECUTION,
+            ValueKind.NONE,
+            List[String](),
         ),
         # Building.
         FlagSpec(
@@ -316,6 +424,8 @@ def flag_specs() -> List[FlagSpec]:
             "Add a Mojo include path (repeatable).",
             "PATH",
             FlagGroup.BUILDING,
+            ValueKind.PATH,
+            List[String](),
         ),
         FlagSpec(
             "--build-arg",
@@ -325,6 +435,8 @@ def flag_specs() -> List[FlagSpec]:
             "Forward one argument to mojo build (repeatable).",
             "ARG",
             FlagGroup.BUILDING,
+            ValueKind.OTHER,
+            List[String](),
         ),
         FlagSpec(
             "--precompile",
@@ -334,6 +446,8 @@ def flag_specs() -> List[FlagSpec]:
             "Precompile package before builds (repeatable).",
             "SRC[:OUT]",
             FlagGroup.BUILDING,
+            ValueKind.PATH,
+            List[String](),
         ),
         FlagSpec(
             "--mojo",
@@ -343,6 +457,8 @@ def flag_specs() -> List[FlagSpec]:
             "Use this Mojo executable.",
             "PATH",
             FlagGroup.BUILDING,
+            ValueKind.PATH,
+            List[String](),
         ),
         FlagSpec(
             "--compile-timeout",
@@ -352,6 +468,8 @@ def flag_specs() -> List[FlagSpec]:
             "Set per-file build timeout (0 disables).",
             "SECS",
             FlagGroup.BUILDING,
+            ValueKind.OTHER,
+            List[String](),
         ),
         # Reporting.
         FlagSpec(
@@ -362,6 +480,8 @@ def flag_specs() -> List[FlagSpec]:
             "Show captured output for all files.",
             "",
             FlagGroup.REPORTING,
+            ValueKind.NONE,
+            List[String](),
         ),
         FlagSpec(
             "--show-output",
@@ -371,6 +491,8 @@ def flag_specs() -> List[FlagSpec]:
             "Choose failures|all|none captured output.",
             "MODE",
             FlagGroup.REPORTING,
+            ValueKind.CHOICE,
+            show_output_choices(),
         ),
         FlagSpec(
             "--durations",
@@ -380,6 +502,8 @@ def flag_specs() -> List[FlagSpec]:
             "Show N slowest file durations (0 disables).",
             "N",
             FlagGroup.REPORTING,
+            ValueKind.OTHER,
+            List[String](),
         ),
         FlagSpec(
             "-q",
@@ -389,6 +513,8 @@ def flag_specs() -> List[FlagSpec]:
             "Suppress passing file rows.",
             "",
             FlagGroup.REPORTING,
+            ValueKind.NONE,
+            List[String](),
         ),
         FlagSpec(
             "-v",
@@ -398,6 +524,8 @@ def flag_specs() -> List[FlagSpec]:
             "Show build commands and step timings.",
             "",
             FlagGroup.REPORTING,
+            ValueKind.NONE,
+            List[String](),
         ),
         FlagSpec(
             "--color",
@@ -407,6 +535,8 @@ def flag_specs() -> List[FlagSpec]:
             "Choose auto|always|never color output.",
             "WHEN",
             FlagGroup.REPORTING,
+            ValueKind.CHOICE,
+            color_choices(),
         ),
         FlagSpec(
             "--format",
@@ -416,6 +546,8 @@ def flag_specs() -> List[FlagSpec]:
             "Collect output format: lines (default) or json.",
             "FORMAT",
             FlagGroup.REPORTING,
+            ValueKind.CHOICE,
+            collect_format_choices(),
         ),
         FlagSpec(
             "--json",
@@ -425,6 +557,8 @@ def flag_specs() -> List[FlagSpec]:
             "Write NDJSON events to PATH or stdout.",
             "PATH|-",
             FlagGroup.REPORTING,
+            ValueKind.PATH,
+            List[String](),
         ),
         FlagSpec(
             "--junit-xml",
@@ -434,6 +568,8 @@ def flag_specs() -> List[FlagSpec]:
             "Write a JUnit XML report.",
             "PATH",
             FlagGroup.REPORTING,
+            ValueKind.PATH,
+            List[String](),
         ),
         FlagSpec(
             "--report",
@@ -443,6 +579,8 @@ def flag_specs() -> List[FlagSpec]:
             "Write an md or html run report (once each).",
             "FORMAT:PATH",
             FlagGroup.REPORTING,
+            ValueKind.PREFIX_CHOICE,
+            report_format_prefixes(),
         ),
         FlagSpec(
             "--report-style",
@@ -452,6 +590,8 @@ def flag_specs() -> List[FlagSpec]:
             "Choose concise|full report detail.",
             "STYLE",
             FlagGroup.REPORTING,
+            ValueKind.CHOICE,
+            report_style_choices(),
         ),
         FlagSpec(
             "--gh-annotations",
@@ -461,6 +601,8 @@ def flag_specs() -> List[FlagSpec]:
             "Choose off|on|auto GitHub annotations.",
             "MODE",
             FlagGroup.REPORTING,
+            ValueKind.CHOICE,
+            annotations_choices(),
         ),
         # Session state.
         FlagSpec(
@@ -471,6 +613,8 @@ def flag_specs() -> List[FlagSpec]:
             "Use this project configuration file.",
             "PATH",
             FlagGroup.SESSION_STATE,
+            ValueKind.PATH,
+            List[String](),
         ),
         FlagSpec(
             "--no-config",
@@ -480,6 +624,8 @@ def flag_specs() -> List[FlagSpec]:
             "Disable project configuration discovery.",
             "",
             FlagGroup.SESSION_STATE,
+            ValueKind.NONE,
+            List[String](),
         ),
         FlagSpec(
             "--lf",
@@ -489,6 +635,8 @@ def flag_specs() -> List[FlagSpec]:
             "Run only entries from the last-failed state.",
             "",
             FlagGroup.SESSION_STATE,
+            ValueKind.NONE,
+            List[String](),
         ),
         FlagSpec(
             "--last-failed",
@@ -498,6 +646,8 @@ def flag_specs() -> List[FlagSpec]:
             "Run only entries from the last-failed state.",
             "",
             FlagGroup.SESSION_STATE,
+            ValueKind.NONE,
+            List[String](),
         ),
         FlagSpec(
             "--ff",
@@ -507,6 +657,8 @@ def flag_specs() -> List[FlagSpec]:
             "Run last-failed entries before the rest.",
             "",
             FlagGroup.SESSION_STATE,
+            ValueKind.NONE,
+            List[String](),
         ),
         FlagSpec(
             "--failed-first",
@@ -516,6 +668,8 @@ def flag_specs() -> List[FlagSpec]:
             "Run last-failed entries before the rest.",
             "",
             FlagGroup.SESSION_STATE,
+            ValueKind.NONE,
+            List[String](),
         ),
         # General.
         FlagSpec(
@@ -526,6 +680,8 @@ def flag_specs() -> List[FlagSpec]:
             "List node ids without running tests.",
             "",
             FlagGroup.GENERAL,
+            ValueKind.NONE,
+            List[String](),
         ),
         FlagSpec(
             "-h",
@@ -535,6 +691,8 @@ def flag_specs() -> List[FlagSpec]:
             "Show this help and exit.",
             "",
             FlagGroup.GENERAL,
+            ValueKind.NONE,
+            List[String](),
         ),
         FlagSpec(
             "--help",
@@ -544,6 +702,8 @@ def flag_specs() -> List[FlagSpec]:
             "Show this help and exit.",
             "",
             FlagGroup.GENERAL,
+            ValueKind.NONE,
+            List[String](),
         ),
         FlagSpec(
             "--version",
@@ -553,5 +713,7 @@ def flag_specs() -> List[FlagSpec]:
             "Show the version and exit.",
             "",
             FlagGroup.GENERAL,
+            ValueKind.NONE,
+            List[String](),
         ),
     ]

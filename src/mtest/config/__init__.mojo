@@ -6,8 +6,10 @@ typed presence-aware `mtest.toml` layer. `ResolvedConfig` carries layered
 values, per-key provenance, ordered overrides, and command-active key metadata.
 
 Alongside them live the closed vocabularies that name a config choice
-(`ShowOutput`, `Verbosity`, `ColorWhen`, `ShardMode`, `AnnotationsMode`) and
-the source-neutral single-value validators. The cross-cutting helpers sit here
+(`ShowOutput`, `Verbosity`, `ColorWhen`, `ShardMode`, `AnnotationsMode`), the
+source-neutral single-value validators, and the `*_choices()` lists those
+validators decide membership against, which is what lets a renderer offer
+exactly the values the parser accepts. The cross-cutting helpers sit here
 too: `resolve_mojo_path`, the shell-quoting pair `shell_quote` and `shell_join`
 that every reproduce line is rendered through, and the byte-to-text codec
 `lossy_utf8` that every captured stream is decoded with.
@@ -70,9 +72,13 @@ from mtest.config.toml_bridge import (
 from mtest.config.verbosity import Verbosity
 from mtest.config.value_validation import (
     ReportValue,
+    annotations_choices,
     build_arg_rejection,
+    collect_format_choices,
+    color_choices,
     escape_control_characters,
     parse_annotations_value,
+    parse_collect_format_value,
     parse_color_value,
     parse_nonnegative_decimal,
     parse_precompile_value,
@@ -81,5 +87,9 @@ from mtest.config.value_validation import (
     parse_show_output_value,
     parse_verbosity_value,
     parse_worker_count,
+    report_format_prefixes,
+    report_style_choices,
     safe_path_label,
+    show_output_choices,
+    workers_choices,
 )

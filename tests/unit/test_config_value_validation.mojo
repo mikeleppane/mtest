@@ -12,15 +12,36 @@ wrapped `Int.MIN` silently disables `--timeout` (an unbounded run), defeats
 `--maxfail` (early stop never fires), and corrupts `--retries`/`--durations`.
 The boundary is therefore pinned exactly — the largest accepted value, the two
 wrapping values, and the neighbours on both sides — rather than sampled.
+
+The module also owns the closed choice lists. Those lists are published so a
+completion renderer can offer exactly what the parser accepts, which is only
+true while every list and its `parse_*_value` agree in both directions: every
+published spelling parses, and nothing outside a list does. Both directions are
+asserted here, because a list that drifts one entry wide teaches a user a value
+the parser refuses.
 """
 from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.config import (
+    AnnotationsMode,
+    ColorWhen,
     ReportStyle,
+    ShowOutput,
+    annotations_choices,
+    collect_format_choices,
+    color_choices,
+    parse_annotations_value,
+    parse_collect_format_value,
+    parse_color_value,
     parse_nonnegative_decimal,
     parse_report_style_value,
     parse_report_value,
+    parse_show_output_value,
     parse_worker_count,
+    report_format_prefixes,
+    report_style_choices,
+    show_output_choices,
+    workers_choices,
 )
 
 
@@ -184,6 +205,190 @@ def test_report_style_refuses_anything_else() raises:
     assert_false(Bool(parse_report_style_value("")))
     assert_false(Bool(parse_report_style_value("Full")))
     assert_false(Bool(parse_report_style_value("verbose")))
+
+
+def _joined(values: List[String]) -> String:
+    """Render a choice list as one `|`-separated line for exact comparison."""
+    var rendered = String("")
+    for i in range(len(values)):
+        if i > 0:
+            rendered += "|"
+        rendered += values[i]
+    return rendered^
+
+
+# --- the published choice lists are exactly the accepted sets ---
+
+
+def test_show_output_choices_are_the_published_three() raises:
+    assert_equal(_joined(show_output_choices()), "failures|all|none")
+
+
+def test_every_show_output_choice_is_accepted() raises:
+    for choice in show_output_choices():
+        assert_true(
+            Bool(parse_show_output_value(choice)),
+            "unaccepted choice: " + choice,
+        )
+
+
+def test_show_output_list_order_is_the_discriminant_order() raises:
+    """Position `i` maps to `ShowOutput(i)`, named constant by named constant.
+
+    The parser derives the typed value from the position, so a reordered list
+    would silently remap every spelling. The spellings are therefore written
+    out literally here rather than read back out of the list under test.
+    """
+    assert_equal(_joined(show_output_choices()), "failures|all|none")
+    assert_true(
+        parse_show_output_value("failures").value() == ShowOutput.FAILURES
+    )
+    assert_true(parse_show_output_value("all").value() == ShowOutput.ALL)
+    assert_true(parse_show_output_value("none").value() == ShowOutput.NONE)
+
+
+def test_show_output_refuses_a_spelling_outside_the_list() raises:
+    assert_false(Bool(parse_show_output_value("failure")))
+    assert_false(Bool(parse_show_output_value("ALL")))
+    assert_false(Bool(parse_show_output_value("")))
+
+
+def test_color_choices_are_the_published_three() raises:
+    assert_equal(_joined(color_choices()), "auto|always|never")
+
+
+def test_every_color_choice_is_accepted() raises:
+    for choice in color_choices():
+        assert_true(
+            Bool(parse_color_value(choice)), "unaccepted choice: " + choice
+        )
+
+
+def test_color_list_order_is_the_discriminant_order() raises:
+    assert_equal(_joined(color_choices()), "auto|always|never")
+    assert_true(parse_color_value("auto").value() == ColorWhen.AUTO)
+    assert_true(parse_color_value("always").value() == ColorWhen.ALWAYS)
+    assert_true(parse_color_value("never").value() == ColorWhen.NEVER)
+
+
+def test_color_refuses_a_spelling_outside_the_list() raises:
+    assert_false(Bool(parse_color_value("yes")))
+    assert_false(Bool(parse_color_value("Auto")))
+    assert_false(Bool(parse_color_value("")))
+
+
+def test_annotations_choices_are_the_published_three() raises:
+    assert_equal(_joined(annotations_choices()), "off|on|auto")
+
+
+def test_every_annotations_choice_is_accepted() raises:
+    for choice in annotations_choices():
+        assert_true(
+            Bool(parse_annotations_value(choice)),
+            "unaccepted choice: " + choice,
+        )
+
+
+def test_annotations_list_order_is_the_discriminant_order() raises:
+    assert_equal(_joined(annotations_choices()), "off|on|auto")
+    assert_true(parse_annotations_value("off").value() == AnnotationsMode.OFF)
+    assert_true(parse_annotations_value("on").value() == AnnotationsMode.ON)
+    assert_true(parse_annotations_value("auto").value() == AnnotationsMode.AUTO)
+
+
+def test_annotations_refuses_a_spelling_outside_the_list() raises:
+    assert_false(Bool(parse_annotations_value("true")))
+    assert_false(Bool(parse_annotations_value("Off")))
+    assert_false(Bool(parse_annotations_value("")))
+
+
+def test_report_style_choices_are_the_published_two() raises:
+    assert_equal(_joined(report_style_choices()), "concise|full")
+
+
+def test_every_report_style_choice_is_accepted() raises:
+    for choice in report_style_choices():
+        assert_true(
+            Bool(parse_report_style_value(choice)),
+            "unaccepted choice: " + choice,
+        )
+
+
+def test_report_style_list_order_is_the_discriminant_order() raises:
+    assert_equal(_joined(report_style_choices()), "concise|full")
+    assert_true(
+        parse_report_style_value("concise").value() == ReportStyle.CONCISE
+    )
+    assert_true(parse_report_style_value("full").value() == ReportStyle.FULL)
+
+
+# --- the collect `--format` domain, owned here rather than in the parser ---
+
+
+def test_collect_format_choices_are_the_published_two() raises:
+    assert_equal(_joined(collect_format_choices()), "lines|json")
+
+
+def test_collect_format_lines_selects_the_plain_listing() raises:
+    var parsed = parse_collect_format_value("lines")
+    assert_true(Bool(parsed))
+    assert_false(parsed.value())
+
+
+def test_collect_format_json_selects_the_ndjson_stream() raises:
+    var parsed = parse_collect_format_value("json")
+    assert_true(Bool(parsed))
+    assert_true(parsed.value())
+
+
+def test_every_collect_format_choice_is_accepted() raises:
+    for choice in collect_format_choices():
+        assert_true(
+            Bool(parse_collect_format_value(choice)),
+            "unaccepted choice: " + choice,
+        )
+
+
+def test_collect_format_refuses_a_spelling_outside_the_list() raises:
+    assert_false(Bool(parse_collect_format_value("")))
+    assert_false(Bool(parse_collect_format_value("JSON")))
+    assert_false(Bool(parse_collect_format_value("ndjson")))
+
+
+# --- `--workers`: a one-member closed arm beside a free integer arm ---
+
+
+def test_workers_choices_are_the_closed_arm_alone() raises:
+    """`auto` is closed; every other accepted value is a free integer."""
+    assert_equal(_joined(workers_choices()), "auto")
+
+
+def test_every_workers_choice_is_accepted() raises:
+    for choice in workers_choices():
+        var parsed = parse_worker_count(choice)
+        assert_true(Bool(parsed), "unaccepted choice: " + choice)
+        assert_equal(parsed.value(), 0)
+
+
+def test_workers_refuses_a_near_miss_on_the_closed_arm() raises:
+    assert_false(Bool(parse_worker_count("Auto")))
+    assert_false(Bool(parse_worker_count("automatic")))
+
+
+# --- `--report`: closed prefixes, then a free path ---
+
+
+def test_report_format_prefixes_carry_their_separator() raises:
+    """The published entries are what a renderer offers, colon included."""
+    assert_equal(_joined(report_format_prefixes()), "md:|html:")
+
+
+def test_every_report_prefix_is_accepted_before_a_path() raises:
+    for prefix in report_format_prefixes():
+        var parsed = parse_report_value(prefix + "out.txt")
+        assert_true(Bool(parsed), "unaccepted prefix: " + prefix)
+        assert_equal(parsed.value().path, "out.txt")
+        assert_equal(parsed.value().format + ":", prefix)
 
 
 def main() raises:
