@@ -5,8 +5,9 @@ stdout. Nothing here restates a command-line fact: the spellings, their help
 text, their value placeholders, their closed choice lists, and which heads
 accept them all come from `flag_specs()`, and the head vocabulary — including
 which leading tokens accept no flag at all — comes from `subcommand_specs()`. A
-flag added to the table is offered by all three scripts without touching this
-module, which is the only arrangement in which a completion script cannot
+head's own row carries the state a script enters after its token, so a flag or
+a subcommand added to a table is served by all three scripts without touching
+this module, which is the only arrangement in which a completion script cannot
 quietly drift from the parser it describes.
 
 Head resolution mirrors `parse_args` exactly, and that is the subtle part. The
@@ -164,14 +165,18 @@ def _joined(values: List[String]) -> String:
 
 
 def _head_bits() -> List[Int]:
-    """Every flag-accepting head, as its applicability bit, in help order."""
-    return [
-        Subcommand.RUN,
-        Subcommand.COLLECT,
-        Subcommand.CONFIG_SHOW,
-        Subcommand.DOCTOR,
-        Subcommand.DEBUG,
-    ]
+    """Every flag-accepting head, as its applicability bit, in help order.
+
+    Returns:
+        A freshly allocated list of the nonzero `head_bit` values in
+        `subcommand_specs()` order, which is the order help renders the rows.
+        A row with no flag grammar carries a zero bit and is skipped.
+    """
+    var bits = List[Int]()
+    for spec in subcommand_specs():
+        if spec.head_bit != 0:
+            bits.append(spec.head_bit)
+    return bits^
 
 
 def _head_name(subcommand: Int) -> String:
@@ -181,46 +186,27 @@ def _head_name(subcommand: Int) -> String:
         subcommand: One of the `Subcommand` bit constants.
 
     Returns:
-        The freshly allocated script-side head name; `run` for anything the
-        scripts do not name separately, which is what the parser's default
-        subcommand means.
+        The freshly allocated script-side head name, taken from the row that
+        selects that bit; `run` for a bit no row claims, which is what the
+        parser's default subcommand means.
     """
-    if subcommand == Subcommand.COLLECT:
-        return "collect"
-    if subcommand == Subcommand.CONFIG_SHOW:
-        return "config-show"
-    if subcommand == Subcommand.DOCTOR:
-        return "doctor"
-    if subcommand == Subcommand.DEBUG:
-        return "debug"
-    return "run"
-
-
-def _resolved_head_tokens() -> List[String]:
-    """Every leading token `_head_state` maps to a head of its own.
-
-    Stated as a list as well as as branches so a rename can be caught: this
-    mapping is prose, so renaming a flag-bearing subcommand in
-    `subcommand_specs()` would otherwise drop that head to `none` — offering
-    nothing after it — with every derived assertion still green.
-    `test_cli_completions` checks each token here still names a real
-    subcommand row.
-
-    Returns:
-        A freshly allocated list of the tokens that resolve to a head.
-    """
-    return ["run", "collect", "config", "doctor", "debug", "completions"]
+    for spec in subcommand_specs():
+        if spec.head_bit != 0 and spec.head_bit == subcommand:
+            return spec.completion_state.copy()
+    return String("run")
 
 
 def _head_state(token: String) -> String:
     """The completion state one leading token selects.
 
-    This is the token-to-head mapping `parse_args` performs, and it is prose
-    rather than a table field: `config` names a two-token subcommand, and
-    `new`, `init`, `help`, and `version` have no flag table for a bit to
-    describe. Everything not named here therefore falls to `none`, which is
-    what makes a subcommand added to `subcommand_specs()` offer nothing after
-    its head token rather than silently inheriting the run grammar.
+    This is the token-to-head mapping `parse_args` performs, read off the row
+    rather than restated beside it. The two rows that make the mapping look
+    like prose are still rows: `config` names a two-token subcommand and
+    carries the state its second token resolves to, and `new`, `init`, `help`,
+    and `version` carry an empty state because no flag grammar follows them. An
+    empty state — and a token no row holds — is `none`, which is what makes a
+    subcommand added to `subcommand_specs()` offer nothing after its head token
+    rather than silently inheriting the run grammar.
 
     Args:
         token: A leading token from `subcommand_specs()`.
@@ -228,26 +214,17 @@ def _head_state(token: String) -> String:
     Returns:
         The freshly allocated script-side state name.
     """
-    if token == "run":
-        return "run"
-    if token == "collect":
-        return "collect"
-    if token == "config":
-        return "config-show"
-    if token == "doctor":
-        return "doctor"
-    if token == "debug":
-        return "debug"
-    if token == "completions":
-        return "completions"
-    return "none"
+    for spec in subcommand_specs():
+        if spec.token == token and spec.completion_state.byte_length() != 0:
+            return spec.completion_state.copy()
+    return String("none")
 
 
 def _none_tokens() -> List[String]:
     """Every head token after which nothing is offered, in table order."""
     var tokens = List[String]()
     for spec in subcommand_specs():
-        if _head_state(spec.token) == "none":
+        if spec.completion_state.byte_length() == 0:
             tokens.append(spec.token.copy())
     return tokens^
 

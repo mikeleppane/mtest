@@ -17,11 +17,18 @@ drives a hostile value through them, asserting both that nothing live survives
 into the second pass and that the word arrives byte-identical. Asserting that
 one level of escaping "looks right" is what let a defective barrier read as a
 working one.
+
+The `ValueKind` vocabulary is closed and gets its own guard, because the three
+shells share no syntax for a value: each kind's rendering is stated once per
+shell here, and a kind that reaches a `flag_specs()` row without those three
+statements raises out of the suite rather than reaching a shell as a flag that
+offers nothing.
 """
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
 from mtest.cli import (
     FlagId,
+    FlagSpec,
     Subcommand,
     ValueKind,
     completion_shells,
@@ -36,19 +43,21 @@ from mtest.cli.completions import (
     _cmd_scoped_patterns,
     _compgen_wordlist,
     _fish_argument_list,
+    _fish_expansion_word,
     _fish_flag_token,
     _fish_quoted,
     _flag_words_for,
     _flags_for,
     _head_state,
     _none_tokens,
-    _resolved_head_tokens,
     _spelling_of,
     _subcommand_words,
     _zsh_action_word,
     _zsh_description,
+    _zsh_helper_name,
     _zsh_message,
     _zsh_quoted,
+    _zsh_spec,
     _zsh_specs_for,
     render_bash_completions,
     render_fish_completions,
@@ -496,25 +505,31 @@ def test_the_head_state_table_names_every_leading_token() raises:
     assert_equal(_head_state("version"), "none")
 
 
-def test_every_resolved_head_token_is_still_a_real_subcommand() raises:
-    """Renaming a flag-bearing head must red a test, not go quietly to `none`.
+def test_every_flag_accepting_head_has_a_state_and_a_bit() raises:
+    """The two head fields, checked against each other row by row.
 
-    `_head_state` is prose, and every other assertion in this module derives
-    from it, so a `subcommand_specs()` token renamed without touching that
-    mapping would offer nothing after the new name while everything stayed
-    green. Checking the mapping's own tokens against the table is the one
-    direction that catches it.
+    They are separate fields because they genuinely differ, and `completions`
+    is where: no flag grammar, so no bit, but a closed shell vocabulary to
+    complete after the token. Every *other* resolved head owns a bit, and that
+    bit's script-side name is the row's own state, which is what lets the
+    per-head flag lists and the head-resolution branches key on one table.
     """
-    var table = _subcommand_words()
-    for token in _resolved_head_tokens():
+    for spec in subcommand_specs():
+        var state = _head_state(spec.token)
+        if spec.head_bit == 0:
+            assert_true(
+                state == "none" or spec.token == "completions",
+                "a head with no flag grammar resolves to a head: " + spec.token,
+            )
+            continue
         assert_true(
-            _has_word(table, token),
-            "the head-state mapping names a subcommand that no longer exists: "
-            + token,
+            state != "none",
+            "a flag-accepting head offers nothing: " + spec.token,
         )
-        assert_true(
-            _head_state(token) != "none",
-            "a resolved token maps to nothing: " + token,
+        assert_equal(
+            _head_name(spec.head_bit),
+            state,
+            "the bit and the state disagree: " + spec.token,
         )
 
 
@@ -955,6 +970,188 @@ def test_every_pure_file_completion_declares_filename_semantics() raises:
             "a pure file completion without filename semantics: " + line,
         )
     assert_true(found >= 2, "no pure file completion found at all")
+
+
+# --- value kinds: a closed set, and three syntaxes for each ----------------
+
+
+def _kind_roster() -> List[ValueKind]:
+    """Every `ValueKind` this module carries a rendering expectation for.
+
+    Transcribed rather than derived, because nothing can enumerate a struct's
+    `comptime` members: what catches a new kind is the three helpers below,
+    each of which refuses a kind it has no arm for, so a kind that reaches a
+    `flag_specs()` row reds this module instead of completing nothing.
+    """
+    return [
+        ValueKind.NONE,
+        ValueKind.PATH,
+        ValueKind.CHOICE,
+        ValueKind.CHOICE_OR_OTHER,
+        ValueKind.PREFIX_CHOICE,
+        ValueKind.OTHER,
+    ]
+
+
+def _spaced(values: List[String]) -> String:
+    """`values` joined with single spaces."""
+    var out = String("")
+    for value in values:
+        if out.byte_length() != 0:
+            out += " "
+        out += String(value)
+    return out^
+
+
+def _bash_value_arm(spec: FlagSpec) raises -> String:
+    """The bash body one row's value kind renders under its `cmd:prev` arm.
+
+    Args:
+        spec: The flag row to describe. Not mutated.
+
+    Returns:
+        The freshly allocated arm body, or empty text for a kind that gets no
+        arm at all.
+
+    Raises:
+        Error: For a `ValueKind` this module has no bash arm for.
+    """
+    if spec.value_kind == ValueKind.NONE or spec.value_kind == ValueKind.OTHER:
+        return String("")
+    if spec.value_kind == ValueKind.PATH:
+        return (
+            "      compopt -o filenames\n"
+            + '      _mtest_reply < <(compgen -f -- "$cur")\n'
+        )
+    if spec.value_kind == ValueKind.PREFIX_CHOICE:
+        return String('      if [[ "$cur" == *:* ]]; then\n')
+    if (
+        spec.value_kind == ValueKind.CHOICE
+        or spec.value_kind == ValueKind.CHOICE_OR_OTHER
+    ):
+        return (
+            '      COMPREPLY=($(compgen -W "'
+            + _compgen_wordlist(spec.choices)
+            + '" -- "$cur"))\n'
+        )
+    raise Error("no bash arm for value kind " + String(spec.value_kind.code))
+
+
+def _zsh_value_action(spec: FlagSpec) raises -> String:
+    """The tail one row's value kind gives its zsh `_arguments` specification.
+
+    Args:
+        spec: The flag row to describe. Not mutated.
+
+    Returns:
+        The freshly allocated text the specification must end in, before the
+        closing quote.
+
+    Raises:
+        Error: For a `ValueKind` this module has no zsh action for.
+    """
+    if spec.value_kind == ValueKind.NONE:
+        return String("]")
+    if spec.value_kind == ValueKind.OTHER:
+        return String(":")
+    if spec.value_kind == ValueKind.PATH:
+        return String(":_files")
+    if spec.value_kind == ValueKind.PREFIX_CHOICE:
+        return ":" + _zsh_helper_name(spec.spelling)
+    if (
+        spec.value_kind == ValueKind.CHOICE
+        or spec.value_kind == ValueKind.CHOICE_OR_OTHER
+    ):
+        var words = List[String]()
+        for choice in spec.choices:
+            words.append(_zsh_action_word(choice))
+        return ":(" + _spaced(words) + ")"
+    raise Error("no zsh action for value kind " + String(spec.value_kind.code))
+
+
+def _fish_value_syntax(spec: FlagSpec) raises -> String:
+    """The `complete` options one row's value kind renders for fish.
+
+    Args:
+        spec: The flag row to describe. Not mutated.
+
+    Returns:
+        The freshly allocated option text, empty for an arity-zero flag.
+
+    Raises:
+        Error: For a `ValueKind` this module has no fish options for.
+    """
+    if spec.value_kind == ValueKind.NONE:
+        return String("")
+    if spec.value_kind == ValueKind.PATH:
+        return String(" -r")
+    if spec.value_kind == ValueKind.OTHER:
+        return String(" -x")
+    if spec.value_kind == ValueKind.PREFIX_CHOICE:
+        var words = List[String]()
+        for choice in spec.choices:
+            words.append(_fish_expansion_word(choice))
+        return " -x -a " + _fish_quoted(
+            "(__mtest_prefixed_path " + _spaced(words) + ")"
+        )
+    if (
+        spec.value_kind == ValueKind.CHOICE
+        or spec.value_kind == ValueKind.CHOICE_OR_OTHER
+    ):
+        return " -x -a " + _fish_argument_list(spec.choices)
+    raise Error(
+        "no fish options for value kind " + String(spec.value_kind.code)
+    )
+
+
+def test_every_value_kind_reaches_all_three_scripts() raises:
+    """A kind with no rendering must red here, not complete nothing in a shell.
+
+    The three shells share no syntax for a value, so a new `ValueKind` is
+    inherently three edits — a bash arm body, a zsh action, and a fish option
+    string — and the three helpers above are where each one lands. A kind put
+    on a `flag_specs()` row without them raises out of this test rather than
+    reaching a user's shell as a flag that offers nothing.
+    """
+    var bash = render_bash_completions()
+    var zsh = render_zsh_completions()
+    var fish = render_fish_completions()
+    for spec in flag_specs():
+        var arm = _bash_value_arm(spec)
+        var patterns = _cmd_scoped_patterns(spec)
+        if arm.byte_length() == 0:
+            assert_equal(patterns, "", "bash value arm for " + spec.spelling)
+        else:
+            assert_true(
+                "    " + patterns + ")\n" + arm in bash,
+                "bash does not render the value of " + spec.spelling,
+            )
+        var specification = _zsh_spec(spec)
+        assert_true(
+            specification.endswith(_zsh_value_action(spec) + "'"),
+            "zsh does not render the value of " + spec.spelling,
+        )
+        assert_true(
+            specification in zsh,
+            "zsh dropped a specification: " + spec.spelling,
+        )
+        assert_true(
+            _fish_flag_token(spec.spelling) + _fish_value_syntax(spec) + " -d "
+            in fish,
+            "fish does not render the value of " + spec.spelling,
+        )
+
+
+def test_every_known_value_kind_is_declared_by_some_flag_row() raises:
+    """A kind no row declares is a kind the test above never exercises."""
+    for kind in _kind_roster():
+        var declared = False
+        for spec in flag_specs():
+            if spec.value_kind == kind:
+                declared = True
+        assert_true(
+            declared, "no flag row declares value kind " + String(kind.code)
+        )
 
 
 # --- shell safety ----------------------------------------------------------

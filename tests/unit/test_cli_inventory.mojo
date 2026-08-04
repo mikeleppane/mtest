@@ -1640,57 +1640,83 @@ def test_workers_equals_form_parses_count() raises:
 
 
 def frozen_subcommands() -> List[SubcommandSpec]:
-    """The ten Subcommands rows, transcribed from the contract by hand."""
+    """The ten Subcommands rows, transcribed from the contract by hand.
+
+    The head bit and the completion state are transcribed too: they are what
+    the completion scripts key their per-head flag lists and head-resolution
+    branches on, so a row that gained the wrong one would offer a head the
+    wrong grammar with every derived assertion still green.
+    """
     return [
         SubcommandSpec(
             token="run",
             label_args="[PATHS...] [flags]",
             description="Run tests (the default subcommand).",
+            head_bit=Subcommand.RUN,
+            completion_state="run",
         ),
         SubcommandSpec(
             token="collect",
             label_args="[PATHS...] [flags]",
             description="List node ids without running tests.",
+            head_bit=Subcommand.COLLECT,
+            completion_state="collect",
         ),
         SubcommandSpec(
             token="config",
             label_args="show [PATHS...]",
             description="Show resolved configuration.",
+            head_bit=Subcommand.CONFIG_SHOW,
+            completion_state="config-show",
         ),
         SubcommandSpec(
             token="doctor",
             label_args="[flags]",
             description="Diagnose the environment without running tests.",
+            head_bit=Subcommand.DOCTOR,
+            completion_state="doctor",
         ),
         SubcommandSpec(
             token="debug",
             label_args="PATH::TEST",
             description="Run one test with the terminal handed over.",
+            head_bit=Subcommand.DEBUG,
+            completion_state="debug",
         ),
         SubcommandSpec(
             token="new",
             label_args="PATH",
             description="Create one runnable test file.",
+            head_bit=0,
+            completion_state="",
         ),
         SubcommandSpec(
             token="init",
             label_args="[--ci github]",
             description="Bootstrap a project in this directory.",
+            head_bit=0,
+            completion_state="",
         ),
         SubcommandSpec(
             token="completions",
             label_args="SHELL",
             description="Print a bash, zsh, or fish completion script.",
+            head_bit=0,
+            completion_state="completions",
         ),
         SubcommandSpec(
             token="help",
             label_args="",
             description="Show this help and exit.",
+            head_bit=0,
+            completion_state="",
         ),
         SubcommandSpec(
             token="version",
             label_args="",
             description="Show the version and exit.",
+            head_bit=0,
+            completion_state="",
         ),
     ]
 
@@ -1719,6 +1745,16 @@ def test_subcommand_specs_match_the_frozen_rows_in_order() raises:
             specs[i].description,
             frozen[i].description,
             "description drift: " + frozen[i].token,
+        )
+        assert_equal(
+            specs[i].head_bit,
+            frozen[i].head_bit,
+            "head bit drift: " + frozen[i].token,
+        )
+        assert_equal(
+            specs[i].completion_state,
+            frozen[i].completion_state,
+            "completion state drift: " + frozen[i].token,
         )
 
 
@@ -1767,6 +1803,25 @@ def subcommand_bits() -> List[Int]:
         Subcommand.DOCTOR,
         Subcommand.DEBUG,
     ]
+
+
+def test_the_head_rows_claim_exactly_the_applicability_bits() raises:
+    """Every bit belongs to one row, in help order, and no row invents one.
+
+    The completion scripts read their per-head flag lists off these rows, so a
+    bit no row claims would serve no head at all for a grammar the parser still
+    accepts, and a bit two rows claimed would name the wrong head for it.
+    """
+    var bits = subcommand_bits()
+    var claimed = List[Int]()
+    for spec in subcommand_specs():
+        if spec.head_bit != 0:
+            claimed.append(spec.head_bit)
+    assert_equal(
+        len(claimed), len(bits), "the flag-accepting head set changed size"
+    )
+    for i in range(len(bits)):
+        assert_equal(claimed[i], bits[i], "head bit drift at row " + String(i))
 
 
 def _head_tokens(subcommand: Int) -> List[String]:

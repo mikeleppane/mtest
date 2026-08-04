@@ -11,8 +11,11 @@ refusals, not their source: each refusal is hand-written prose naming the flag
 and stating why that command cannot honor it, and a bit cannot reconstruct
 prose. `tests/unit/test_cli_inventory.mojo` holds the two-directional check that
 keeps the two from drifting — every masked pair parses, every unmasked pair is
-refused. `subcommand_specs()` is the matching table for the heads themselves,
-and the `Subcommands` help block is rendered from it.
+refused. `subcommand_specs()` is the matching table for the heads themselves:
+the `Subcommands` help block is rendered from it, and each row also carries the
+applicability bit its token selects and the state a completion script enters
+after it, so the token-to-head mapping is a field on the row rather than a
+branch in whatever consumes it.
 
 A row's `value_kind` and `choices` describe what the parser actually accepts,
 never an idealized domain: a `CHOICE` row's list is the exact closed set the
@@ -150,7 +153,7 @@ struct Subcommand:
 
 @fieldwise_init
 struct SubcommandSpec(Copyable, Movable):
-    """One `Subcommands` help row.
+    """One head token: its help row, its flag grammar, and its completion.
 
     The usage lines above that block stay hand-written: each one spells out a
     different subset of a command's grammar, which is prose rather than a
@@ -175,6 +178,24 @@ struct SubcommandSpec(Copyable, Movable):
     var description: String
     """The row's help text, at most 48 codepoints so the row fits 78."""
 
+    var head_bit: Int
+    """The `Subcommand` bit this token selects, or `0` for a token with none.
+
+    Zero says the token has no flag grammar to describe, which is why the
+    `Subcommand` namespace above holds five bits and this table ten rows. A
+    nonzero bit is the same one `flag_specs()` masks against, so the head a
+    completion script offers flags for and the head whose refusals the mask
+    describes are one fact rather than two lists that agree today."""
+
+    var completion_state: String
+    """The state a completion script enters after this token, empty for none.
+
+    Empty means the script offers nothing after the token, which is what makes
+    a subcommand added to this table offer nothing rather than silently
+    inheriting the run grammar. It is not derivable from `head_bit` and is
+    deliberately a second field: `completions` has no bit at all yet completes
+    its shell operand, so a token can carry a state without a grammar."""
+
 
 def subcommand_specs() -> List[SubcommandSpec]:
     """The `Subcommands` help block, one row per head, in help order.
@@ -188,51 +209,73 @@ def subcommand_specs() -> List[SubcommandSpec]:
             token="run",
             label_args="[PATHS...] [flags]",
             description="Run tests (the default subcommand).",
+            head_bit=Subcommand.RUN,
+            completion_state="run",
         ),
         SubcommandSpec(
             token="collect",
             label_args="[PATHS...] [flags]",
             description="List node ids without running tests.",
+            head_bit=Subcommand.COLLECT,
+            completion_state="collect",
         ),
         SubcommandSpec(
             token="config",
             label_args="show [PATHS...]",
             description="Show resolved configuration.",
+            head_bit=Subcommand.CONFIG_SHOW,
+            completion_state="config-show",
         ),
         SubcommandSpec(
             token="doctor",
             label_args="[flags]",
             description="Diagnose the environment without running tests.",
+            head_bit=Subcommand.DOCTOR,
+            completion_state="doctor",
         ),
         SubcommandSpec(
             token="debug",
             label_args="PATH::TEST",
             description="Run one test with the terminal handed over.",
+            head_bit=Subcommand.DEBUG,
+            completion_state="debug",
         ),
         SubcommandSpec(
             token="new",
             label_args="PATH",
             description="Create one runnable test file.",
+            head_bit=0,
+            completion_state="",
         ),
         SubcommandSpec(
             token="init",
             label_args="[--ci github]",
             description="Bootstrap a project in this directory.",
+            head_bit=0,
+            completion_state="",
         ),
+        # The row where the two fields genuinely diverge: no flag grammar to
+        # mask against, but a closed shell vocabulary to complete after it.
         SubcommandSpec(
             token="completions",
             label_args="SHELL",
             description="Print a bash, zsh, or fish completion script.",
+            head_bit=0,
+            completion_state="completions",
         ),
         SubcommandSpec(
             token="help",
             label_args="",
             description="Show this help and exit.",
+            head_bit=0,
+            completion_state="",
         ),
         SubcommandSpec(
             token="version",
             label_args="",
             description="Show the version and exit.",
+            head_bit=0,
+            completion_state="",
         ),
     ]
 
