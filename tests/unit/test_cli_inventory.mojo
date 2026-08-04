@@ -95,7 +95,7 @@ def frozen_inventory() -> List[InvRow]:
             FlagGroup.BUILDING,
             "Add a Mojo include path (repeatable).",
             "-I PATH",
-            ValueKind.PATH,
+            ValueKind.OTHER,
             List[String](),
             Subcommand.RUN
             | Subcommand.COLLECT
@@ -1013,11 +1013,41 @@ def test_choice_flags_are_exactly_the_five_closed_vocabularies() raises:
     )
 
 
-def test_path_flags_are_exactly_the_seven_destination_takers() raises:
+def test_path_flags_are_exactly_the_six_destination_takers() raises:
     assert_equal(
         _spellings_with_kind(ValueKind.PATH),
-        "--gate|-I|--precompile|--mojo|--json|--junit-xml|--config",
+        "--gate|--precompile|--mojo|--json|--junit-xml|--config",
     )
+
+
+def test_no_path_flag_routes_its_value_through_the_source_list_rule() raises:
+    """`PATH` promises the filesystem, and one rule takes part of it back.
+
+    `_check_build_arg` refuses any value ending `.mojo` or `.🔥` because mtest
+    owns the source list, and a `PATH` row wearing that rule offers `.mojo`
+    files in every shell and then exits 4 on the one the reader picks — which
+    is the §30 property "never offers a value this build refuses", broken by
+    metadata rather than by a renderer. `-I` wore it until this test existed.
+
+    A refusal for some other reason is fine and expected here — a missing
+    parent, an unreadable file — so the assertion is on the diagnostic, not on
+    acceptance.
+    """
+    for spec in flag_specs():
+        if spec.value_kind != ValueKind.PATH:
+            continue
+        var message = String("")
+        try:
+            _ = parse_args(_argv_for(spec.spelling, "vendor/pkg/thing.mojo"))
+        except e:
+            message = String(e)
+        assert_false(
+            "owns the source list" in message,
+            (
+                "a PATH flag refuses the .mojo files completion offers it: "
+                + spec.spelling
+            ),
+        )
 
 
 def test_workers_is_the_only_closed_list_beside_free_text() raises:

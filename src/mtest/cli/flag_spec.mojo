@@ -612,6 +612,14 @@ def flag_specs() -> List[FlagSpec]:
             | Subcommand.DOCTOR,
         ),
         # Building.
+        # `PATH` would be a lie here, and the reason is the rule below it:
+        # `-I` and `--build-arg` are validated by the same `_check_build_arg`,
+        # which refuses any value ending `.mojo` or `.🔥` because mtest owns
+        # the source list. A filesystem completion in a source directory would
+        # therefore offer values this build exits 4 on, which is exactly what
+        # the kind exists to prevent. What `-I` really takes is a directory,
+        # and no kind expresses that, so it takes the kind its sibling under
+        # the same rule already takes and offers nothing rather than a guess.
         FlagSpec(
             "-I",
             FlagId.INCLUDE,
@@ -620,7 +628,7 @@ def flag_specs() -> List[FlagSpec]:
             "Add a Mojo include path (repeatable).",
             "PATH",
             FlagGroup.BUILDING,
-            ValueKind.PATH,
+            ValueKind.OTHER,
             List[String](),
             Subcommand.RUN
             | Subcommand.COLLECT
@@ -642,6 +650,13 @@ def flag_specs() -> List[FlagSpec]:
             | Subcommand.CONFIG_SHOW
             | Subcommand.DEBUG,
         ),
+        # `PATH` understates this row the way it understates `--json`, and in
+        # the other direction: the grammar is `SRC[:OUT]`, so a completed path
+        # that happens to contain a colon is split at the FIRST one and
+        # accepted as two — a directory named `odd:dir/pkg` parses as
+        # `src="odd"`, `out="dir/pkg"` with no diagnostic. `PREFIX_CHOICE` is
+        # not the shape either: the prefix set here is open. Path completion is
+        # the useful behavior and stays.
         FlagSpec(
             "--precompile",
             FlagId.PRECOMPILE,

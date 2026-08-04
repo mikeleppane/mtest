@@ -2978,6 +2978,9 @@ flag's value is completed only under a command that accepts the flag: after
 closed set completes to that set, a value that names a path completes against
 the filesystem, and a value the contract does not enumerate — a glob, an
 integer, a build argument — completes to nothing rather than to a guess.
+`-I PATH` is in that last group rather than with the paths, and deliberately:
+§8.2 refuses a Mojo source file there because the runner owns its source list,
+so filesystem completion would offer values this build exits 4 on.
 `--report FORMAT:PATH` reaches a path under its format prefix (§15.5): the
 format first, and then the path after the separator, in all three shells.
 

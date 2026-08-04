@@ -71,7 +71,9 @@ because `doctor --report-style` is a usage error. Values follow their kind. A
 closed set completes to its members, a path completes against the filesystem,
 `--report FORMAT:PATH` completes the format prefix first and then a path after
 the separator, and a value nothing can enumerate — a glob, an integer, a build
-argument — completes to nothing rather than to a guess.
+argument — completes to nothing rather than to a guess. `-I` sits in that last
+group rather than with the paths: it refuses a Mojo source file, so completing
+one would offer a value this build exits 4 on.
 
 Which candidates a shell shows for a given prefix is a convenience rather than
 part of the frozen contract; what is fixed is the grammar, the exit codes, and
