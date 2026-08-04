@@ -654,10 +654,27 @@ def test_bash_trims_only_what_readline_will_not_replace() raises:
     """
     var script = render_bash_completions()
     assert_true("_mtest_trim_to_replaced() {" in script)
-    assert_true('local keep="${1%"$2"}" i' in script)
+    assert_true('local replaced="$2" keep i' in script)
+    assert_true('keep="${1%"$replaced"}"' in script)
     assert_true(
         '_mtest_trim_to_replaced "$cur" "${COMP_WORDS[COMP_CWORD]}"' in script,
         "the prefix arm does not trim against readline's own word",
+    )
+
+
+def test_bash_trims_the_whole_word_when_nothing_will_be_replaced() raises:
+    """A cursor straight after the separator has an EMPTY replacement region.
+
+    `COMP_WORDS` still reports the `:` as the current word, so subtracting it
+    leaves a `:` on the front of every candidate and `--report md:<TAB>` yields
+    `md:\\:tail.md`. readline inserts rather than replaces there, so the whole
+    logical word has to come off. No shape or candidate-list assertion can see
+    this: the candidates are right and the insertion is wrong, which is why it
+    is also driven at buffer level against a real readline.
+    """
+    assert_true(
+        '  [ "$replaced" = ":" ] && replaced=""\n' in render_bash_completions(),
+        "the empty replacement region is no longer special-cased",
     )
 
 

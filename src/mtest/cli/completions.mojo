@@ -706,15 +706,22 @@ def render_bash_completions() -> String:
     script += '    rest="${rest#"$piece"}"\n'
     script += "  done\n"
     script += "}\n"
-    # readline replaces exactly `COMP_WORDS[COMP_CWORD]`, while a candidate is
-    # the whole logical word, so whatever readline is going to keep has to come
-    # off the front of every candidate. Taking the difference between the two
-    # words is exact in both directions: an unsplit word leaves nothing to trim
-    # and a quoted `"md:my rep` is therefore completed whole, while a split
-    # `md:pl` leaves `md:` and would otherwise be inserted after the `md:`
-    # already on the line.
+    # A candidate is the whole logical word, so whatever readline is going to
+    # keep on the line has to come off the front of every candidate. That is
+    # the difference between the logical word and readline's own, which is
+    # exact in both directions: an unsplit word leaves nothing to trim, so a
+    # quoted `"md:my rep` is completed whole, while a split `md:pl` leaves
+    # `md:` that would otherwise be inserted after the `md:` already typed.
+    #
+    # The exception is a cursor sitting straight after a word-break character.
+    # `COMP_WORDS` still reports the `:` as the current word, but readline's
+    # replacement region there is EMPTY — it inserts rather than replaces — so
+    # subtracting that `:` would leave one on the front of every candidate.
+    # Nothing survives on the line, so the whole logical word comes off.
     script += "_mtest_trim_to_replaced() {\n"
-    script += '  local keep="${1%"$2"}" i\n'
+    script += '  local replaced="$2" keep i\n'
+    script += '  [ "$replaced" = ":" ] && replaced=""\n'
+    script += '  keep="${1%"$replaced"}"\n'
     script += '  [ -z "$keep" ] && return\n'
     script += "  for ((i = 0; i < ${#COMPREPLY[@]}; i++)); do\n"
     script += '    COMPREPLY[i]="${COMPREPLY[i]#"$keep"}"\n'
