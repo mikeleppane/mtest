@@ -21,6 +21,7 @@ from mtest.cli.flag_spec import (
     FlagSpec,
     flag_group_name,
     flag_specs,
+    subcommand_specs,
 )
 from mtest.cli.parse_result import ParseResult
 from mtest.model import split_node_token
@@ -91,28 +92,14 @@ def help_text() -> String:
         "       mtest init [--ci github]\n\n",
         "Subcommands:\n",
     )
-    rendered += _help_row(
-        "run [PATHS...] [flags]", "Run tests (the default subcommand)."
-    )
-    rendered += _help_row(
-        "collect [PATHS...] [flags]", "List node ids without running tests."
-    )
-    rendered += _help_row(
-        "config show [PATHS...]",
-        "Show resolved configuration.",
-    )
-    rendered += _help_row(
-        "doctor [flags]", "Diagnose the environment without running tests."
-    )
-    rendered += _help_row(
-        "debug PATH::TEST", "Run one test with the terminal handed over."
-    )
-    rendered += _help_row("new PATH", "Create one runnable test file.")
-    rendered += _help_row(
-        "init [--ci github]", "Bootstrap a project in this directory."
-    )
-    rendered += _help_row("help", "Show this help and exit.")
-    rendered += _help_row("version", "Show the version and exit.")
+    # The usage lines above stay hand-written — each states a different subset
+    # of one command's grammar — but the Subcommands rows are a table, so they
+    # come from the table.
+    for subcommand in subcommand_specs():
+        var head_label = subcommand.token.copy()
+        if subcommand.label_args != "":
+            head_label += " " + subcommand.label_args
+        rendered += _help_row(head_label^, subcommand.description)
 
     var current_group = -1
     var specs = flag_specs()

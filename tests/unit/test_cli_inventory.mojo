@@ -13,6 +13,15 @@ vocabulary, exactly which values it accepts. That half of the table is only
 worth carrying while it is true, so it is checked twice: against the frozen
 transcription for drift, and against `parse_args` itself, which must accept
 every declared choice and refuse a value just outside the declared set.
+
+The last field, `applicability`, is the same idea applied to the subcommands: a
+bitmask of the heads that accept the spelling. The parser's per-flag refusals
+are hand-written prose and cannot be generated from a mask, so the mask is
+checked against them in both directions — every masked pair parses, and every
+unmasked pair is refused by a message naming the spelling. Either direction
+failing alone is the defect the pair exists to catch: a completion renderer
+reading a drifted mask would offer a flag the parser rejects, or hide one that
+works.
 """
 from std.testing import (
     assert_equal,
@@ -24,11 +33,14 @@ from std.testing import (
 
 from mtest.cli import (
     FlagGroup,
+    Subcommand,
+    SubcommandSpec,
     ValueKind,
     flag_group_name,
     flag_specs,
     help_text,
     parse_args,
+    subcommand_specs,
 )
 from mtest.config import AnnotationsMode, ReportStyle, ShardMode
 
@@ -46,6 +58,7 @@ struct InvRow(Copyable, Movable):
     var help_label: String
     var value_kind: ValueKind
     var choices: List[String]
+    var applicability: Int
 
 
 def frozen_inventory() -> List[InvRow]:
@@ -66,6 +79,7 @@ def frozen_inventory() -> List[InvRow]:
             "--exclude GLOB",
             ValueKind.OTHER,
             List[String](),
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "-I",
@@ -77,6 +91,10 @@ def frozen_inventory() -> List[InvRow]:
             "-I PATH",
             ValueKind.PATH,
             List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DEBUG,
         ),
         InvRow(
             "--build-arg",
@@ -88,6 +106,10 @@ def frozen_inventory() -> List[InvRow]:
             "--build-arg ARG",
             ValueKind.OTHER,
             List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DEBUG,
         ),
         InvRow(
             "--gate",
@@ -99,6 +121,7 @@ def frozen_inventory() -> List[InvRow]:
             "--gate PATH",
             ValueKind.PATH,
             List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "--precompile",
@@ -110,6 +133,7 @@ def frozen_inventory() -> List[InvRow]:
             "--precompile SRC[:OUT]",
             ValueKind.PATH,
             List[String](),
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "--mojo",
@@ -121,6 +145,10 @@ def frozen_inventory() -> List[InvRow]:
             "--mojo PATH",
             ValueKind.PATH,
             List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DEBUG,
         ),
         InvRow(
             "-x",
@@ -132,6 +160,7 @@ def frozen_inventory() -> List[InvRow]:
             "-x, --exitfirst",
             ValueKind.NONE,
             List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "--exitfirst",
@@ -143,6 +172,7 @@ def frozen_inventory() -> List[InvRow]:
             "-x, --exitfirst",
             ValueKind.NONE,
             List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "--timeout",
@@ -154,6 +184,7 @@ def frozen_inventory() -> List[InvRow]:
             "--timeout SECS",
             ValueKind.OTHER,
             List[String](),
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "-s",
@@ -165,6 +196,7 @@ def frozen_inventory() -> List[InvRow]:
             "-s",
             ValueKind.NONE,
             List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "--show-output",
@@ -176,6 +208,7 @@ def frozen_inventory() -> List[InvRow]:
             "--show-output MODE",
             ValueKind.CHOICE,
             ["failures", "all", "none"],
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "-q",
@@ -187,6 +220,11 @@ def frozen_inventory() -> List[InvRow]:
             "-q",
             ValueKind.NONE,
             List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR
+            | Subcommand.DEBUG,
         ),
         InvRow(
             "-v",
@@ -198,6 +236,11 @@ def frozen_inventory() -> List[InvRow]:
             "-v",
             ValueKind.NONE,
             List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR
+            | Subcommand.DEBUG,
         ),
         InvRow(
             "--color",
@@ -209,6 +252,10 @@ def frozen_inventory() -> List[InvRow]:
             "--color WHEN",
             ValueKind.CHOICE,
             ["auto", "always", "never"],
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR,
         ),
         InvRow(
             "-h",
@@ -220,6 +267,11 @@ def frozen_inventory() -> List[InvRow]:
             "-h, --help",
             ValueKind.NONE,
             List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR
+            | Subcommand.DEBUG,
         ),
         InvRow(
             "--help",
@@ -231,6 +283,11 @@ def frozen_inventory() -> List[InvRow]:
             "-h, --help",
             ValueKind.NONE,
             List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR
+            | Subcommand.DEBUG,
         ),
         InvRow(
             "--version",
@@ -242,6 +299,10 @@ def frozen_inventory() -> List[InvRow]:
             "--version",
             ValueKind.NONE,
             List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR,
         ),
         InvRow(
             "-k",
@@ -253,6 +314,7 @@ def frozen_inventory() -> List[InvRow]:
             "-k STR",
             ValueKind.OTHER,
             List[String](),
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "--maxfail",
@@ -264,6 +326,7 @@ def frozen_inventory() -> List[InvRow]:
             "--maxfail N",
             ValueKind.OTHER,
             List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         # `--durations N`: non-negative int; 0 disables.
         InvRow(
@@ -276,6 +339,7 @@ def frozen_inventory() -> List[InvRow]:
             "--durations N",
             ValueKind.OTHER,
             List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         # `--shard [hash:|slice:]M/N`: 1<=M<=N, last-wins.
         InvRow(
@@ -288,6 +352,7 @@ def frozen_inventory() -> List[InvRow]:
             "--shard [hash:|slice:]M/N",
             ValueKind.OTHER,
             List[String](),
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         # `--retries N`: non-negative int; 0 disables.
         InvRow(
@@ -300,6 +365,7 @@ def frozen_inventory() -> List[InvRow]:
             "--retries N",
             ValueKind.OTHER,
             List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         # `--fail-on-flaky`: valueless; a FLAKY file turns a would-be 0 into 1.
         InvRow(
@@ -312,6 +378,7 @@ def frozen_inventory() -> List[InvRow]:
             "--fail-on-flaky",
             ValueKind.NONE,
             List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         # `--compile-timeout SECS`: non-negative int; 0 disables.
         InvRow(
@@ -324,6 +391,7 @@ def frozen_inventory() -> List[InvRow]:
             "--compile-timeout SECS",
             ValueKind.OTHER,
             List[String](),
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         # `-n`/`--workers N|auto`: served, last-wins.
         InvRow(
@@ -336,6 +404,7 @@ def frozen_inventory() -> List[InvRow]:
             "-n, --workers N|auto",
             ValueKind.CHOICE_OR_OTHER,
             ["auto"],
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "--workers",
@@ -347,6 +416,7 @@ def frozen_inventory() -> List[InvRow]:
             "-n, --workers N|auto",
             ValueKind.CHOICE_OR_OTHER,
             ["auto"],
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         # `--serial GLOB`: repeatable, now served.
         InvRow(
@@ -359,6 +429,7 @@ def frozen_inventory() -> List[InvRow]:
             "--serial GLOB",
             ValueKind.OTHER,
             List[String](),
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         # CLI-only: never read from mtest.toml (order randomization).
         InvRow(
@@ -371,6 +442,7 @@ def frozen_inventory() -> List[InvRow]:
             "--shuffle",
             ValueKind.NONE,
             List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "--seed",
@@ -382,6 +454,7 @@ def frozen_inventory() -> List[InvRow]:
             "--seed N",
             ValueKind.OTHER,
             List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         # CLI-only: never read from mtest.toml (build cache).
         InvRow(
@@ -394,6 +467,10 @@ def frozen_inventory() -> List[InvRow]:
             "--no-cache",
             ValueKind.NONE,
             List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR,
         ),
         InvRow(
             "--cache-clear",
@@ -405,6 +482,10 @@ def frozen_inventory() -> List[InvRow]:
             "--cache-clear",
             ValueKind.NONE,
             List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR,
         ),
         # `--report FORMAT:PATH` and `--report-style concise|full`: now served.
         InvRow(
@@ -417,6 +498,7 @@ def frozen_inventory() -> List[InvRow]:
             "--report FORMAT:PATH",
             ValueKind.PREFIX_CHOICE,
             ["md:", "html:"],
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "--report-style",
@@ -428,6 +510,7 @@ def frozen_inventory() -> List[InvRow]:
             "--report-style STYLE",
             ValueKind.CHOICE,
             ["concise", "full"],
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         # `--gh-annotations off|on|auto`: now served.
         InvRow(
@@ -440,6 +523,7 @@ def frozen_inventory() -> List[InvRow]:
             "--gh-annotations MODE",
             ValueKind.CHOICE,
             ["off", "on", "auto"],
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         # `--format lines|json`: collect-only; `lines` is the default.
         InvRow(
@@ -452,6 +536,7 @@ def frozen_inventory() -> List[InvRow]:
             "--format FORMAT",
             ValueKind.CHOICE,
             ["lines", "json"],
+            Subcommand.COLLECT,
         ),
         # `--json PATH|-`: now served.
         InvRow(
@@ -464,6 +549,7 @@ def frozen_inventory() -> List[InvRow]:
             "--json PATH|-",
             ValueKind.PATH,
             List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         # `--junit-xml PATH`: now served.
         InvRow(
@@ -476,6 +562,7 @@ def frozen_inventory() -> List[InvRow]:
             "--junit-xml PATH",
             ValueKind.PATH,
             List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         # Served by this build (collect mode).
         InvRow(
@@ -488,6 +575,7 @@ def frozen_inventory() -> List[InvRow]:
             "--collect-only",
             ValueKind.NONE,
             List[String](),
+            Subcommand.RUN | Subcommand.COLLECT | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "--config",
@@ -499,6 +587,11 @@ def frozen_inventory() -> List[InvRow]:
             "--config PATH",
             ValueKind.PATH,
             List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR
+            | Subcommand.DEBUG,
         ),
         InvRow(
             "--no-config",
@@ -510,6 +603,11 @@ def frozen_inventory() -> List[InvRow]:
             "--no-config",
             ValueKind.NONE,
             List[String](),
+            Subcommand.RUN
+            | Subcommand.COLLECT
+            | Subcommand.CONFIG_SHOW
+            | Subcommand.DOCTOR
+            | Subcommand.DEBUG,
         ),
         InvRow(
             "--lf",
@@ -521,6 +619,7 @@ def frozen_inventory() -> List[InvRow]:
             "--lf, --last-failed",
             ValueKind.NONE,
             List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "--last-failed",
@@ -532,6 +631,7 @@ def frozen_inventory() -> List[InvRow]:
             "--lf, --last-failed",
             ValueKind.NONE,
             List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "--ff",
@@ -543,6 +643,7 @@ def frozen_inventory() -> List[InvRow]:
             "--ff, --failed-first",
             ValueKind.NONE,
             List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
         InvRow(
             "--failed-first",
@@ -554,6 +655,7 @@ def frozen_inventory() -> List[InvRow]:
             "--ff, --failed-first",
             ValueKind.NONE,
             List[String](),
+            Subcommand.RUN | Subcommand.CONFIG_SHOW,
         ),
     ]
 
@@ -675,6 +777,11 @@ def test_every_spec_row_is_in_the_frozen_inventory() raises:
                     _joined(spec.choices),
                     _joined(row.choices),
                     "choice list drift: " + spec.spelling,
+                )
+                assert_equal(
+                    spec.applicability,
+                    row.applicability,
+                    "applicability drift: " + spec.spelling,
                 )
         assert_true(found, "spec not in inventory: " + spec.spelling)
 
@@ -1513,6 +1620,306 @@ def test_workers_equals_form_parses_count() raises:
     var argv: List[String] = ["--workers=3"]
     var r = parse_args(argv)
     assert_equal(r.config.workers, 3)
+
+
+# --- the Subcommands help rows ---
+
+
+def frozen_subcommands() -> List[SubcommandSpec]:
+    """The nine Subcommands rows, transcribed from the contract by hand."""
+    return [
+        SubcommandSpec(
+            "run", "[PATHS...] [flags]", "Run tests (the default subcommand)."
+        ),
+        SubcommandSpec(
+            "collect",
+            "[PATHS...] [flags]",
+            "List node ids without running tests.",
+        ),
+        SubcommandSpec(
+            "config", "show [PATHS...]", "Show resolved configuration."
+        ),
+        SubcommandSpec(
+            "doctor",
+            "[flags]",
+            "Diagnose the environment without running tests.",
+        ),
+        SubcommandSpec(
+            "debug",
+            "PATH::TEST",
+            "Run one test with the terminal handed over.",
+        ),
+        SubcommandSpec("new", "PATH", "Create one runnable test file."),
+        SubcommandSpec(
+            "init", "[--ci github]", "Bootstrap a project in this directory."
+        ),
+        SubcommandSpec("help", "", "Show this help and exit."),
+        SubcommandSpec("version", "", "Show the version and exit."),
+    ]
+
+
+def _subcommand_label(spec: SubcommandSpec) -> String:
+    """The physical help-row label for one Subcommands row."""
+    if spec.label_args == "":
+        return spec.token.copy()
+    return spec.token + " " + spec.label_args
+
+
+def test_subcommand_specs_match_the_frozen_rows_in_order() raises:
+    var specs = subcommand_specs()
+    var frozen = frozen_subcommands()
+    assert_equal(len(specs), len(frozen))
+    for i in range(len(frozen)):
+        assert_equal(
+            specs[i].token, frozen[i].token, "token drift at " + String(i)
+        )
+        assert_equal(
+            specs[i].label_args,
+            frozen[i].label_args,
+            "label args drift: " + frozen[i].token,
+        )
+        assert_equal(
+            specs[i].description,
+            frozen[i].description,
+            "description drift: " + frozen[i].token,
+        )
+
+
+def test_every_subcommand_row_is_rendered_once_into_the_help() raises:
+    var rendered = help_text()
+    for spec in frozen_subcommands():
+        var expected_line = "  " + _subcommand_label(spec)
+        for _ in range(30 - expected_line.count_codepoints()):
+            expected_line += " "
+        expected_line += spec.description
+        var matches = 0
+        for line_slice in rendered.split("\n"):
+            if String(line_slice) == expected_line:
+                matches += 1
+        assert_equal(matches, 1, "subcommand row coverage drift: " + spec.token)
+
+
+def test_subcommand_rows_fit_the_help_column_and_the_help_width() raises:
+    for spec in subcommand_specs():
+        assert_true(
+            spec.token.byte_length() > 0, "subcommand row with no token"
+        )
+        assert_true(
+            spec.description.byte_length() > 0,
+            "subcommand row with no description: " + spec.token,
+        )
+        assert_true(
+            _subcommand_label(spec).count_codepoints() <= 27,
+            "overlong subcommand label: " + spec.token,
+        )
+        assert_true(
+            spec.description.count_codepoints() <= 48,
+            "overlong subcommand description: " + spec.token,
+        )
+
+
+# --- applicability: the mask against the parser's own refusals ---
+
+
+def subcommand_bits() -> List[Int]:
+    """Every flag-accepting head, as its applicability bit."""
+    return [
+        Subcommand.RUN,
+        Subcommand.COLLECT,
+        Subcommand.CONFIG_SHOW,
+        Subcommand.DOCTOR,
+        Subcommand.DEBUG,
+    ]
+
+
+def _head_tokens(subcommand: Int) -> List[String]:
+    """The leading tokens that select `subcommand`, exactly as typed."""
+    if subcommand == Subcommand.COLLECT:
+        return ["collect"]
+    if subcommand == Subcommand.CONFIG_SHOW:
+        return ["config", "show"]
+    if subcommand == Subcommand.DOCTOR:
+        return ["doctor"]
+    if subcommand == Subcommand.DEBUG:
+        # `debug` wants exactly one node id, so the probe carries one. The
+        # parser never touches the filesystem for it.
+        return ["debug", "probe.mojo::test_probe"]
+    return ["run"]
+
+
+def _head_name(subcommand: Int) -> String:
+    """A readable name for `subcommand`, for assertion messages."""
+    if subcommand == Subcommand.COLLECT:
+        return "collect"
+    if subcommand == Subcommand.CONFIG_SHOW:
+        return "config show"
+    if subcommand == Subcommand.DOCTOR:
+        return "doctor"
+    if subcommand == Subcommand.DEBUG:
+        return "debug"
+    return "run"
+
+
+def _probe_value(spelling: String) -> String:
+    """A value every subcommand's grammar accepts for `spelling`.
+
+    The probe has to be valid on its own terms, or the argument vector could be
+    refused for the value rather than for applicability and the mask would go
+    unconstrained. Bare filenames are deliberate: a destination with no
+    directory part skips the parent-directory check.
+
+    Args:
+        spelling: The flag spelling the value is offered to.
+
+    Returns:
+        A newly allocated value the flag's own validator accepts.
+    """
+    if spelling == "--shard":
+        return "1/2"
+    if spelling == "--show-output":
+        return "all"
+    if spelling == "--color":
+        return "auto"
+    if spelling == "--format":
+        return "lines"
+    if spelling == "--gh-annotations":
+        return "off"
+    if spelling == "--report":
+        return "md:probe.md"
+    if spelling == "--report-style":
+        return "concise"
+    if spelling == "--json":
+        return "probe.ndjson"
+    if spelling == "--junit-xml":
+        return "probe.xml"
+    if spelling == "--build-arg":
+        return "-O0"
+    if spelling == "--precompile" or spelling == "-I":
+        return "src"
+    if spelling == "--mojo":
+        return "mojo"
+    if spelling == "--config":
+        return "mtest.toml"
+    if spelling == "--gate":
+        return "probe_gate.mojo"
+    if spelling == "-k":
+        return "probe"
+    if spelling == "--exclude" or spelling == "--serial":
+        return "*probe*"
+    if spelling == "-n" or spelling == "--workers":
+        return "2"
+    # Everything left takes a non-negative integer.
+    return "1"
+
+
+def _applicability_argv(
+    spelling: String, arity: Int, subcommand: Int
+) -> List[String]:
+    """The shortest vector that offers `spelling` to `subcommand`."""
+    var argv = _head_tokens(subcommand)
+    argv.append(spelling)
+    if arity == 1:
+        argv.append(_probe_value(spelling))
+    if spelling == "--seed":
+        # A lone `--seed` is refused everywhere for wanting `--shuffle`, which
+        # would answer a different question than this probe asks.
+        argv.append("--shuffle")
+    return argv^
+
+
+def test_subcommand_bits_are_stable_and_disjoint() raises:
+    assert_equal(Subcommand.RUN, 1)
+    assert_equal(Subcommand.COLLECT, 2)
+    assert_equal(Subcommand.CONFIG_SHOW, 4)
+    assert_equal(Subcommand.DOCTOR, 8)
+    assert_equal(Subcommand.DEBUG, 16)
+
+
+def test_every_flag_applies_somewhere_and_names_no_unknown_head() raises:
+    var every = 0
+    for bit in subcommand_bits():
+        every |= bit
+    for spec in flag_specs():
+        assert_true(
+            spec.applicability != 0,
+            "flag applies to no subcommand: " + spec.spelling,
+        )
+        assert_equal(
+            spec.applicability & every,
+            spec.applicability,
+            "applicability names an unknown subcommand: " + spec.spelling,
+        )
+
+
+def test_config_show_accepts_exactly_the_run_grammar() raises:
+    """`config show` resolves the run grammar, so the two bits move together."""
+    for spec in flag_specs():
+        assert_true(
+            ((spec.applicability & Subcommand.RUN) != 0)
+            == ((spec.applicability & Subcommand.CONFIG_SHOW) != 0),
+            "run and config show disagree: " + spec.spelling,
+        )
+
+
+def test_every_masked_flag_parses_under_that_subcommand() raises:
+    """Direction one: a mask bit may never promise a flag the parser refuses."""
+    for spec in flag_specs():
+        for subcommand in subcommand_bits():
+            if (spec.applicability & subcommand) == 0:
+                continue
+            var argv = _applicability_argv(
+                spec.spelling, spec.arity, subcommand
+            )
+            var message = String("")
+            var refused = False
+            try:
+                _ = parse_args(argv)
+            except e:
+                refused = True
+                message = String(e)
+            assert_false(
+                refused,
+                "masked applicable but refused: "
+                + _head_name(subcommand)
+                + " "
+                + spec.spelling
+                + ": "
+                + message,
+            )
+
+
+def test_every_unmasked_flag_is_refused_by_name_under_that_subcommand() raises:
+    """Direction two: every refusal the parser performs is a cleared bit."""
+    for spec in flag_specs():
+        for subcommand in subcommand_bits():
+            if (spec.applicability & subcommand) != 0:
+                continue
+            var argv = _applicability_argv(
+                spec.spelling, spec.arity, subcommand
+            )
+            var message = String("")
+            var refused = False
+            try:
+                _ = parse_args(argv)
+            except e:
+                refused = True
+                message = String(e)
+            assert_true(
+                refused,
+                "masked inapplicable but accepted: "
+                + _head_name(subcommand)
+                + " "
+                + spec.spelling,
+            )
+            assert_true(
+                spec.spelling in message,
+                "refusal does not name the flag: "
+                + _head_name(subcommand)
+                + " "
+                + spec.spelling
+                + ": "
+                + message,
+            )
 
 
 def main() raises:

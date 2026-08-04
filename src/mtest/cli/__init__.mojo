@@ -13,8 +13,10 @@ return lines and a code rather than printing or exiting.
 The parser is table-driven. `flag_specs()` is the single source of truth for
 every accepted spelling: its arity, whether it repeats, its owned help text,
 value placeholder, and group, and — as a typed `ValueKind` plus a closed choice
-list — what its value may be. It parses the full v1 grammar, and the grouped
-help output is generated from that same table.
+list — what its value may be, and — as a `Subcommand` bitmask — which heads
+accept it. It parses the full v1 grammar, and the grouped help output is
+generated from that same table; `subcommand_specs()` is the matching table for
+the `Subcommands` block.
 
 The layer also owns `build_flags_string`, which renders a `RunnerConfig` back
 into the shell-ready flag string the console echoes in a run-failure
@@ -28,9 +30,12 @@ from mtest.cli.flag_spec import (
     FlagGroup,
     FlagId,
     FlagSpec,
+    Subcommand,
+    SubcommandSpec,
     ValueKind,
     flag_group_name,
     flag_specs,
+    subcommand_specs,
 )
 from mtest.cli.parse_result import ParseResult
 from mtest.cli.doctor import (
