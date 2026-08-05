@@ -8,7 +8,7 @@ valid `<testsuite>` fragment and wraps a set of fragments in the `<testsuites>`
 root.
 
 The dialect is the vendored junit-10 one (`scripts/schemas/junit-10.xsd`),
-which `scripts/checks/reports/junit.py` validates against:
+which `scripts/formats/junit.py` validates against:
 
 - One `<testsuites>` root, carrying `name`, `tests`, `failures` and `errors`.
   junit-10 defines no root `skipped`, so the root skipped total is an

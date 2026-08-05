@@ -9,9 +9,6 @@ import signal
 import tempfile
 from xml.etree import ElementTree as ET
 
-from scripts.checks.reports import json_stream as json_stream_check
-from scripts.checks.reports import junit as junit_check
-from scripts.checks.reports import junit_canonicalize
 from scripts.e2e.assertions import (
     ELISION,
     INTERRUPT_TIMEOUT,
@@ -33,6 +30,9 @@ from scripts.e2e.runner import (
     ScenarioContext,
     ScenarioError,
 )
+from scripts.formats import json_stream as json_stream_check
+from scripts.formats import junit as junit_check
+from scripts.formats import junit_canonicalize
 
 
 XML_RAW_FORBIDDEN = (

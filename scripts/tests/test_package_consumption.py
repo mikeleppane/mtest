@@ -784,6 +784,10 @@ and MALFORMED-SUITE among them; PRECOMPILE-ERROR is the literal banner token
 for PASS ahead of `_verdict_token` (`console.mojo:1339`, `:1588`). SKIP and
 DESELECTED never label a file row (per-test only, or never assigned); EXCLUDED
 and NOT-RUN are their own accounting rows, not `_verdict_token` output.
+
+Written out rather than imported, so it can disagree with the regex it checks.
+`scripts/tests/test_vocabulary.py` reconciles it against
+`scripts/formats/vocabulary.txt`.
 """
 
 

@@ -87,6 +87,7 @@ from scripts.checks.build_profile import (
     BuildProfileError,
     parse_macho_minimum_versions,
 )
+from scripts.formats.vocabulary import CODE_BY_LABEL, CONSOLE_TOKENS
 from scripts.harness import dogfood, watchdog
 from scripts.release.public_verify import COMPANION_FILES
 
@@ -249,17 +250,45 @@ ASSERTION_EXAMPLE_TIMEOUT = 300.0
 # compiler cache, and the limit exists only to catch a genuine hang.
 FIXTURE_TIMEOUT = 300.0
 
+FILE_ROW_OUTCOMES = (
+    "PASS",
+    "FAIL",
+    "CRASH",
+    "TIMEOUT",
+    "COMPILE_ERROR",
+    "COMPILE_TIMEOUT",
+    "MALFORMED_SUITE",
+    "PRECOMPILE_ERROR",
+    "FLAKY",
+)
+"""The outcomes that can label a per-file console row, by report label.
+
+Which outcomes reach a file row is a fact about the console, not about the
+vocabulary: SKIP and DESELECTED are per-test only, and EXCLUDED and NOT-RUN get
+their own accounting rows rather than `_verdict_token` output. Their console
+SPELLINGS come from the vocabulary below, so a renamed token widens this gate
+instead of blinding it.
+"""
+
+VERDICT_ROW_TOKENS = (
+    *(CONSOLE_TOKENS[CODE_BY_LABEL[label]] for label in FILE_ROW_OUTCOMES),
+    "NO-TESTS",
+)
+"""Every token a per-file console row can start with, `NO-TESTS` included.
+
+`NO-TESTS` is substituted for PASS ahead of `_verdict_token` for a file that
+collected nothing, so it is a console substitution rather than an outcome.
+"""
+
 # `PASS e2e/...`-shaped verdict rows: a token at column zero, then the file the
 # verdict belongs to. Captured child output is indented, so it can never be
-# mistaken for a verdict mtest itself reported.
-#
-# The alternation must be exactly the file-row token set `_verdict_token` in
-# src/mtest/report/console.mojo can print, PASS through FLAKY plus the
-# NO-TESTS substitution: the gate must see every one of these to judge a
-# packaged binary's output truthfully.
+# mistaken for a verdict mtest itself reported. The gate must see every one of
+# these to judge a packaged binary's output truthfully, and no more: a looser
+# pattern can match a line that only looks like a verdict row.
 VERDICT_ROW_RE = re.compile(
-    r"^(?P<token>PASS|FAIL|CRASH|TIMEOUT|COMPILE-ERROR|COMPILE-TIMEOUT"
-    r"|MALFORMED-SUITE|PRECOMPILE-ERROR|FLAKY|NO-TESTS)\s+(?P<path>\S+)",
+    r"^(?P<token>"
+    + "|".join(re.escape(token) for token in VERDICT_ROW_TOKENS)
+    + r")\s+(?P<path>\S+)",
     re.MULTILINE,
 )
 # The console summary band, as pinned by scripts/e2e/assertions.py.

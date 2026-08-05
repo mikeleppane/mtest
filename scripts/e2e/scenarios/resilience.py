@@ -9,7 +9,6 @@ import shutil
 import signal
 import tempfile
 
-from scripts.checks.reports import junit as junit_check
 from scripts.e2e import main_open
 from scripts.e2e.assertions import (
     HARD_KILL_GUARD_SECONDS,
@@ -42,6 +41,7 @@ from scripts.e2e.runner import (
     ScenarioError,
     expect_group_gone,
 )
+from scripts.formats import junit as junit_check
 
 
 RESILIENCE_MATRIX = {

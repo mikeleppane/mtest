@@ -105,7 +105,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from typing import IO
 
-from scripts.checks.reports import json_stream
+from scripts.formats import json_stream
 from scripts.harness import watchdog
 
 
@@ -229,9 +229,11 @@ VERDICT_ROW_RE = re.compile(
 The alternation must be exactly the file-row token set `_verdict_token` in
 src/mtest/report/console.mojo can print (PASS through FLAKY, plus the
 NO-TESTS substitution): any looser pattern can match a line that only looks
-like a verdict row. Duplicated here rather than imported: this harness stays
-import-free by design (see the module docstring above), so this list and
-package_consumption.py's copy are kept in sync by hand.
+like a verdict row. Written out rather than derived from
+`scripts/formats/vocabulary.txt`, because this parser is one of two independent
+readers of the same run and a shared source would make them agree by
+construction. `scripts/tests/test_vocabulary.py` reconciles the two spellings
+instead, so drift is a loud failure rather than a hand-sync obligation.
 
 Not scoped to a fixed root prefix the way `dogfood.py`'s row regex is. This
 harness gets its roots at runtime and compares every row against the

@@ -58,8 +58,15 @@ import tempfile
 import time
 from typing import TYPE_CHECKING, NoReturn
 
-from scripts.checks.reports import collect_stream as collect_stream_oracle
-from scripts.checks.reports import json_stream as json_stream_oracle
+from scripts.formats import collect_stream as collect_stream_oracle
+from scripts.formats import json_stream as json_stream_oracle
+from scripts.formats.vocabulary import (
+    EXIT_FAILURE,
+    EXIT_INTERNAL,
+    EXIT_NOTHING_RAN,
+    EXIT_SUCCESS,
+    EXIT_USAGE,
+)
 
 
 if TYPE_CHECKING:
@@ -3145,8 +3152,17 @@ class Runner:
                     f"a case-folding volume accepted the alias: exit "
                     f"{run.returncode}, want 4"
                 )
-            if "same destination" not in run.stderr:
-                probs.append(f"not refused as a collision: {run.stderr!r}")
+            # §20 promises the refusal names its flags and destination, not
+            # the sentence phrasing them. The folded volume decides which of
+            # the two spellings the resolved identity carries, so the
+            # destination is matched case-insensitively.
+            probs += [
+                f"the collision refusal did not name {flag}: {run.stderr!r}"
+                for flag in ("'--report md:'", "'--report html:'")
+                if flag not in run.stderr
+            ]
+            if lower.name not in run.stderr.lower():
+                probs.append(f"the refusal named no destination: {run.stderr!r}")
             if upper.exists() or lower.exists():
                 probs.append("a refused run still published a document")
         else:
@@ -3195,8 +3211,13 @@ class Runner:
             )
             if needed not in run.stdout
         ]
-        if "same destination" in run.stdout + run.stderr:
-            probs.append("config show refused a collision it must only render")
+        # Absence of a REFUSAL, not absence of a phrase: every usage refusal is
+        # a `cli:` diagnostic, and pinning the sentence instead would make this
+        # pass unconditionally the moment the wording moved.
+        if "cli:" in run.stderr:
+            probs.append(
+                f"config show emitted a refusal it must only render: {run.stderr!r}"
+            )
         self.record(FAIL if probs else PASS, name, ref, "; ".join(probs))
 
     # -- interrupt: signal ONLY mtest, so the child's survival tests mtest's own
@@ -3287,7 +3308,7 @@ def build_matrix() -> list[Check]:
             "help: version prints the version",
             "§19",
             ["version"],
-            0,
+            EXIT_SUCCESS,
             out_has=["mtest 1.0.0"],
         ),
         # Outcomes + STABLE exit codes (§9,§10). CRASH must stay distinct from
@@ -3296,21 +3317,21 @@ def build_matrix() -> list[Check]:
             "outcome: passing tests/ -> 0, exact count",
             "§9,§10",
             [*I, "tests"],
-            0,
+            EXIT_SUCCESS,
             any_has=["4 passed", "NO-TESTS"],
         ),
         Check(
             "outcome: FAIL -> 1",
             "§9,§10",
             [*I, "probes/test_fail.mojo"],
-            1,
+            EXIT_FAILURE,
             any_has=["FAIL"],
         ),
         Check(
             "outcome: CRASH is not a FAIL -> 1",
             "§10",
             [*I, "probes/test_crash.mojo"],
-            1,
+            EXIT_FAILURE,
             any_has=["CRASH"],
             any_absent=["FAIL "],
         ),
@@ -3318,28 +3339,28 @@ def build_matrix() -> list[Check]:
             "outcome: COMPILE-ERROR -> 1",
             "§6,§9",
             [*I, "probes/test_compile_error.mojo"],
-            1,
+            EXIT_FAILURE,
             any_has=["COMPILE-ERROR"],
         ),
         Check(
             "outcome: MALFORMED-SUITE -> 1",
             "§6",
             [*I, "probes/test_malformed.mojo"],
-            1,
+            EXIT_FAILURE,
             any_has=["MALFORMED-SUITE"],
         ),
         Check(
             "outcome: NO-TESTS-only session -> 5",
             "§9(nothing collected)",
             [*I, "tests/test_todo.mojo"],
-            5,
+            EXIT_NOTHING_RAN,
             any_has=["NO-TESTS"],
         ),
         Check(
             "outcome: TIMEOUT -> 1",
             "§18",
             [*I, "--timeout", "3", "probes/test_hang.mojo"],
-            1,
+            EXIT_FAILURE,
             any_has=["TIMEOUT"],
         ),
         # Discovery (§5).
@@ -3347,22 +3368,22 @@ def build_matrix() -> list[Check]:
             "discover: nonexistent path -> 4 (stderr)",
             "§5",
             [*I, "tests/nope.mojo"],
-            4,
+            EXIT_USAGE,
             err_has=["discover"],
         ),
-        Check("discover: empty dir -> 5", "§5,§9", [*I, "empty"], 5),
+        Check("discover: empty dir -> 5", "§5,§9", [*I, "empty"], EXIT_NOTHING_RAN),
         Check(
             "discover: explicit non-test_ file bypasses pattern",
             "§5",
             [*I, "tests/helper.mojo"],
-            5,
+            EXIT_NOTHING_RAN,
             any_has=["NO-TESTS"],
         ),
         Check(
             "discover: operand escaping root -> 4 (stderr)",
             "§2",
             [*I, ".."],
-            4,
+            EXIT_USAGE,
             err_has=["discover"],
         ),  # structural prefix, not the informal sentence
         # Selection (§5): exact counts + POISON, so a broken filter flips the code.
@@ -3370,7 +3391,7 @@ def build_matrix() -> list[Check]:
             "select: node id runs exactly one; sibling poison must NOT run",
             "§5,§10.1",
             [*I, "poison/test_pick.mojo::test_keep"],
-            0,
+            EXIT_SUCCESS,
             any_has=["1 passed", "1 deselected"],
             any_absent=["CRASH", "test_drop"],
         ),
@@ -3378,40 +3399,40 @@ def build_matrix() -> list[Check]:
             "select: -k selects the matching set",
             "§5",
             [*I, "-k", "reverse", "tests"],
-            0,
+            EXIT_SUCCESS,
             any_has=["2 passed"],
         ),
         Check(
             "select: -k case-insensitive",
             "§5",
             [*I, "-k", "REVERSE", "tests"],
-            0,
+            EXIT_SUCCESS,
             any_has=["2 passed"],
         ),
         Check(
             "select: -k matches nothing -> 5",
             "§5,§9",
             [*I, "-k", "zzzznope", "tests"],
-            5,
+            EXIT_NOTHING_RAN,
         ),
         Check(
             "select: unknown test in a real file -> 4",
             "§5",
             [*I, "tests/test_reverse.mojo::ghost"],
-            4,
+            EXIT_USAGE,
         ),
         Check(
             "select: node id whose path is a DIRECTORY -> 4",
             "§5",
             [*I, "tests::test_reverse_ab"],
-            4,
+            EXIT_USAGE,
         ),
         # Exclusion (§12): the POISON crash file must be REALLY removed.
         Check(
             "exclude: pattern truly removes a would-crash file (exit stays 0)",
             "§12",
             [*I, "--exclude", "*_bad.mojo", "excl"],
-            0,
+            EXIT_SUCCESS,
             any_has=["EXCLUDED"],
             any_absent=["CRASH"],
         ),
@@ -3419,21 +3440,21 @@ def build_matrix() -> list[Check]:
             "exclude: stale pattern warns loudly",
             "§12",
             [*I, "--exclude", "*_missing.mojo", "tests"],
-            0,
+            EXIT_SUCCESS,
             any_has=["stale"],
         ),
         Check(
             "exclude: everything excluded -> 5",
             "§12,§9",
             [*I, "--exclude", "*", "excl"],
-            5,
+            EXIT_NOTHING_RAN,
         ),
         # Early stop (§11): the not-run COUNT discriminates (poison sibling).
         Check(
             "stop: -x stops scheduling; poison sibling stays NOT-RUN",
             "§11",
             [*I, "-x", "estop"],
-            1,
+            EXIT_FAILURE,
             any_has=["1 not run"],
             any_absent=["POISON must stop", "test_b"],
         ),
@@ -3441,7 +3462,7 @@ def build_matrix() -> list[Check]:
             "stop: --maxfail 1 stops; poison sibling stays NOT-RUN",
             "§11",
             [*I, "--maxfail", "1", "maxf"],
-            1,
+            EXIT_FAILURE,
             any_has=["1 not run"],
             any_absent=["test_b"],
         ),
@@ -3449,7 +3470,7 @@ def build_matrix() -> list[Check]:
             "stop: failing --gate aborts the whole run (exact not-run)",
             "§11",
             [*I, "--gate", "gatefail/test_smoke.mojo", "gate"],
-            1,
+            EXIT_FAILURE,
             any_has=["2 not run"],
         ),
         # collect (§16) + run-only rejection (§4) + §24.3 documented deviations.
@@ -3457,50 +3478,50 @@ def build_matrix() -> list[Check]:
             "collect: --durations rejected in collect -> 4",
             "§4",
             ["collect", *I, "--durations", "3", "tests"],
-            4,
+            EXIT_USAGE,
         ),
         Check(
             "collect: --maxfail rejected in collect -> 4",
             "§4",
             ["collect", *I, "--maxfail", "1", "tests"],
-            4,
+            EXIT_USAGE,
         ),
         Check(
             "collect: --retries rejected in collect -> 4",
             "§4",
             ["collect", *I, "--retries", "1", "tests"],
-            4,
+            EXIT_USAGE,
         ),
         Check(
             "collect: --json rejected in collect -> 4",
             "§4",
             ["collect", *I, "--json", "out.ndjson", "tests"],
-            4,
+            EXIT_USAGE,
         ),
         Check(
             "collect: --junit-xml rejected in collect -> 4",
             "§4",
             ["collect", *I, "--junit-xml", "r.xml", "tests"],
-            4,
+            EXIT_USAGE,
         ),
         Check(
             "collect: --gh-annotations rejected in collect -> 4 (even off)",
             "§4",
             ["collect", *I, "--gh-annotations", "off", "tests"],
-            4,
+            EXIT_USAGE,
         ),
         Check(
             "collect: --fail-on-flaky rejected in collect -> 4",
             "§4",
             ["collect", *I, "--fail-on-flaky", "tests"],
-            4,
+            EXIT_USAGE,
         ),
         # The flag alone never moves a clean run: only a FLAKY file does.
         Check(
             "run: --fail-on-flaky green run stays 0",
             "§13",
             [*I, "--fail-on-flaky", "tests"],
-            0,
+            EXIT_SUCCESS,
         ),
         # Ordering flags: a seed without the flag it seeds, and two flags that
         # each choose an order, are both refused pre-run (§18).
@@ -3508,19 +3529,19 @@ def build_matrix() -> list[Check]:
             "run: --seed without --shuffle -> 4",
             "§4",
             [*I, "--seed", "1", "tests"],
-            4,
+            EXIT_USAGE,
         ),
         Check(
             "run: --shuffle with --ff -> 4",
             "§4",
             [*I, "--shuffle", "--ff", "tests"],
-            4,
+            EXIT_USAGE,
         ),
         Check(
             "collect: --shuffle rejected -> 4",
             "§4",
             ["collect", *I, "--shuffle", "tests"],
-            4,
+            EXIT_USAGE,
         ),
         # `--format` is the mirror image of the rows above: the one flag that
         # belongs to collect alone, refused everywhere else.
@@ -3528,26 +3549,26 @@ def build_matrix() -> list[Check]:
             "collect: --format bogus -> 4",
             "§16",
             ["collect", *I, "--format", "xml", "tests"],
-            4,
+            EXIT_USAGE,
         ),
         Check(
             "run: --format is collect-only -> 4",
             "§4",
             [*I, "--format", "json", "tests"],
-            4,
+            EXIT_USAGE,
         ),
         Check(
             "collect: -k ignored with a loud notice (§24.3 deviation)",
             "§24.3",
             ["collect", *I, "-k", "reverse", "tests"],
-            0,
+            EXIT_SUCCESS,
             any_has=["ignored", "test_palindrome_true"],
         ),  # notice + un-filtered listing
         Check(
             "collect: node-id operand lists whole file (§24.3 deviation)",
             "§24.3",
             ["collect", *I, "tests/test_reverse.mojo::test_reverse_ab"],
-            0,
+            EXIT_SUCCESS,
             any_has=["test_reverse_ab", "test_reverse_empty"],
         ),
         # Forbidden build args (§8.4), detected pre-run (the poison never runs).
@@ -3555,61 +3576,64 @@ def build_matrix() -> list[Check]:
             "build-arg: -o forbidden -> 4, and the test never ran (pre-run, §9)",
             "§8.4,§9",
             [*I, "--build-arg", "-o", "--build-arg", "x", "poison/test_pick.mojo"],
-            4,
+            EXIT_USAGE,
             any_absent=["1 passed", "CRASH"],
         ),
         Check(
             "build-arg: --emit forbidden -> 4",
             "§8.4",
             [*I, "--build-arg", "--emit=llvm", "tests/test_reverse.mojo"],
-            4,
+            EXIT_USAGE,
         ),
         Check(
             "build-arg: extra source after -- forbidden -> 4",
             "§8.4",
             [*I, "tests/test_reverse.mojo", "--", "extra.mojo"],
-            4,
+            EXIT_USAGE,
         ),
         # Internal error (§24.2): spawn failure and protocol drift both -> 3.
         Check(
             "exit-3: bad --mojo (spawn failure) -> 3",
             "§24.2",
             [*I, "--mojo", "/nonexistent/mojo", "tests/test_reverse.mojo"],
-            3,
+            EXIT_INTERNAL,
         ),
         Check(
             "exit-3: off-grammar report (drift) -> 3, never a verdict",
             "§6,§16,§24.2",
             [*I, "drift/test_liar.mojo"],
-            3,
+            EXIT_INTERNAL,
         ),
         # Value validation (§3,§15.1).
         Check(
             "value: --durations negative -> 4",
             "§3",
             [*I, "--durations", "-1", "tests"],
-            4,
+            EXIT_USAGE,
         ),
         Check(
             "value: --timeout non-integer -> 4",
             "§3",
             [*I, "--timeout", "abc", "tests"],
-            4,
+            EXIT_USAGE,
         ),
         Check(
             "value: --show-output bad mode -> 4",
             "§3",
             [*I, "--show-output", "bogus", "tests"],
-            4,
+            EXIT_USAGE,
         ),
         Check(
-            "value: --color bad mode -> 4", "§3", [*I, "--color", "bogus", "tests"], 4
+            "value: --color bad mode -> 4",
+            "§3",
+            [*I, "--color", "bogus", "tests"],
+            EXIT_USAGE,
         ),
         Check(
             "value: -q and -v mutually exclusive -> 4",
             "§15.1",
             [*I, "-q", "-v", "tests"],
-            4,
+            EXIT_USAGE,
         ),
         # Precompile failure (§8.3): pass a DIRECTORY, so the casualty path
         # cannot be an operand echo and its presence proves it was listed.
@@ -3617,7 +3641,7 @@ def build_matrix() -> list[Check]:
             "precompile: failure -> PRECOMPILE-ERROR, casualties listed, exit 1",
             "§8.3,§10",
             ["--precompile", "brokenlib", *I, "tests"],
-            1,
+            EXIT_FAILURE,
             any_has=["PRECOMPILE-ERROR", "tests/test_reverse.mojo"],
             any_absent=["PRECOMPILE-FAILED"],
         ),
@@ -3627,103 +3651,110 @@ def build_matrix() -> list[Check]:
             "debug: plain path operand -> 4",
             "§28",
             ["debug", *I, "tests/test_reverse.mojo"],
-            4,
+            EXIT_USAGE,
             err_has=["PATH::TEST"],
         ),
         Check(
             "debug: unknown test -> 4",
             "§28",
             ["debug", *I, "tests/test_reverse.mojo::nope"],
-            4,
+            EXIT_USAGE,
             err_has=["unknown test"],
         ),
         Check(
             "debug: reporter flag refused -> 4",
             "§28",
             ["debug", *I, "--json", "-", "tests/test_reverse.mojo::test_reverse_ab"],
-            4,
+            EXIT_USAGE,
             err_has=["no terminal record could be written"],
         ),
         Check(
             "debug: --retries refused -> 4",
             "§28",
             ["debug", *I, "--retries", "1", "tests/test_reverse.mojo::test_reverse_ab"],
-            4,
+            EXIT_USAGE,
             err_has=["cannot be combined with 'debug'"],
         ),
         # The run report's pre-run refusals (§15.5). Every one is decided
         # before a file is built, so none of them can leave a partial document.
+        #
+        # What §20 places in STABLE here is the refusal itself: that it happens,
+        # its exit code, and the flag or destination the diagnostic names. The
+        # sentence phrasing it is INFORMAL, so these assert that structure and
+        # not the wording. The two exceptions carry a STABLE surface inside the
+        # text: `--report`'s value grammar and `--report-style`'s value set.
         Check(
             "run: --report bad format -> 4",
             "§15.5",
             [*I, "--report", "xml:r.xml", "tests"],
-            4,
+            EXIT_USAGE,
             err_has=["md:PATH or html:PATH"],
         ),
         Check(
             "run: --report duplicate format -> 4",
             "§15.5",
             [*I, "--report", "md:a.md", "--report", "md:b.md", "tests"],
-            4,
-            err_has=["given twice"],
+            EXIT_USAGE,
+            err_has=["'--report md:'"],
         ),
         Check(
             "run: --report md=html collision -> 4",
             "§15.5",
             [*I, "--report", "md:out.md", "--report", "html:out.md", "tests"],
-            4,
-            err_has=["same destination"],
+            EXIT_USAGE,
+            err_has=["'--report md:'", "'--report html:'", "out.md"],
         ),
         Check(
             "run: --report collides with --junit-xml -> 4",
             "§15.5",
             [*I, "--report", "md:out.md", "--junit-xml", "out.md", "tests"],
-            4,
-            err_has=["same destination"],
+            EXIT_USAGE,
+            err_has=["'--report md:'", "'--junit-xml'", "out.md"],
         ),
         # The alias case: two spellings of ONE file, which a string comparison
-        # of the raw values would let through.
+        # of the raw values would let through. The diagnostic naming the
+        # RESOLVED destination is what proves the comparison resolved first.
         Check(
             "run: --report relative-alias collision -> 4",
             "§15.5",
             [*I, "--report", "md:out.md", "--json", "./out.md", "tests"],
-            4,
-            err_has=["same destination"],
+            EXIT_USAGE,
+            err_has=["'--report md:'", "'--json'", "out.md"],
         ),
         Check(
             "collect: --report rejected -> 4",
             "§4",
             ["collect", *I, "--report", "md:r.md", "tests"],
-            4,
-            err_has=["run-only"],
+            EXIT_USAGE,
+            err_has=["'--report'", "collect"],
         ),
         Check(
             "doctor: --report rejected -> 4",
             "§4",
             ["doctor", "--report", "md:r.md"],
-            4,
-            err_has=["'--report' is a reporter flag and cannot be combined"],
+            EXIT_USAGE,
+            err_has=["'--report'", "doctor"],
         ),
         Check(
             "collect: --report-style rejected -> 4",
             "§4",
             ["collect", *I, "--report-style", "full", "tests"],
-            4,
-            err_has=["'--report-style' is a run-only flag"],
+            EXIT_USAGE,
+            err_has=["'--report-style'", "collect"],
         ),
         Check(
             "doctor: --report-style rejected -> 4",
             "§4",
             ["doctor", "--report-style", "full"],
-            4,
-            err_has=["'--report-style' is a reporter flag and cannot be combined"],
+            EXIT_USAGE,
+            err_has=["'--report-style'", "doctor"],
         ),
         Check(
             "value: --report-style bad value -> 4",
             "§9,§15.5",
             [*I, "--report-style", "loud", "tests"],
-            4,
-            err_has=["wants 'concise' or 'full'"],
+            EXIT_USAGE,
+            err_has=["'--report-style'", "'concise' or 'full'"],
         ),
         # The collision rule is not a --report rule: it governs every active
         # file destination, so it must hold with no report flag in the argv.
@@ -3731,8 +3762,8 @@ def build_matrix() -> list[Check]:
             "run: --json collides with --junit-xml -> 4",
             "§15.2,§15.4,§15.5",
             [*I, "--json", "shared.out", "--junit-xml", "./shared.out", "tests"],
-            4,
-            err_has=["same destination"],
+            EXIT_USAGE,
+            err_has=["'--json'", "'--junit-xml'", "shared.out"],
         ),
         Check(
             "debug: --report rejected -> 4",
@@ -3744,8 +3775,8 @@ def build_matrix() -> list[Check]:
                 "md:r.md",
                 "tests/test_reverse.mojo::test_reverse_ab",
             ],
-            4,
-            err_has=["no terminal record could be written"],
+            EXIT_USAGE,
+            err_has=["'--report'", "'debug'"],
         ),
         # §30. Each shell gets the frame its own completion system needs, and
         # the bash probe additionally pins the two head-resolution statements
@@ -3756,7 +3787,7 @@ def build_matrix() -> list[Check]:
             "completions: bash prints a sourceable function",
             "§30",
             ["completions", "bash"],
-            0,
+            EXIT_SUCCESS,
             out_has=[
                 "complete -F _mtest_complete mtest",
                 'config-pending) COMPREPLY=($(compgen -W "show"',
@@ -3768,28 +3799,28 @@ def build_matrix() -> list[Check]:
             "completions: zsh prints a compdef script",
             "§30",
             ["completions", "zsh"],
-            0,
+            EXIT_SUCCESS,
             out_has=["#compdef mtest", "compdef _mtest mtest", "--collect-only"],
         ),
         Check(
             "completions: fish prints complete rules",
             "§30",
             ["completions", "fish"],
-            0,
+            EXIT_SUCCESS,
             out_has=["complete -c mtest", "__mtest_head_is", "-l 'collect-only'"],
         ),
         Check(
             "completions: no shell operand -> 4",
             "§30",
             ["completions"],
-            4,
+            EXIT_USAGE,
             err_has=["'completions' wants one of bash, zsh, fish"],
         ),
         Check(
             "completions: an unrenderable shell -> 4",
             "§30",
             ["completions", "tcsh"],
-            4,
+            EXIT_USAGE,
             err_has=["'completions' wants one of bash, zsh, fish", "tcsh"],
         ),
         # Help is a directive, not a stop: §30 permits one operand and help
@@ -3799,7 +3830,7 @@ def build_matrix() -> list[Check]:
             "completions: a trailing operand after --help -> 4",
             "§30",
             ["completions", "bash", "--help", "garbage"],
-            4,
+            EXIT_USAGE,
             err_has=["'completions' wants one shell", "garbage"],
         ),
     ]
@@ -3810,7 +3841,7 @@ def build_matrix() -> list[Check]:
                 f"refused: {flag} -> 4 names flag + v1 contract",
                 "§24.1",
                 [*I, flag, val, "tests"],
-                4,
+                EXIT_USAGE,
                 any_has=["v1 contract", flag],
             )
         )
@@ -3822,7 +3853,7 @@ def build_matrix() -> list[Check]:
                 f"served: {flag} accepted (not exit 4)",
                 ref,
                 [*I, flag, val, "tests"],
-                0,
+                EXIT_SUCCESS,
                 any_absent=["v1 contract"],
             )
         )
@@ -3831,7 +3862,7 @@ def build_matrix() -> list[Check]:
             "served: collect --shard partitions (not exit 4)",
             "§18,§24.1",
             ["collect", *I, "--shard", "1/2", "tests"],
-            0,
+            EXIT_SUCCESS,
             any_absent=["v1 contract"],
         )
     )
@@ -3845,7 +3876,7 @@ def build_matrix() -> list[Check]:
             "served: collect --serial accepted, inert (not exit 4)",
             "§4,§18,§24.1",
             ["collect", *I, "--serial", "tests/*", "tests"],
-            0,
+            EXIT_SUCCESS,
             any_absent=["v1 contract", "run-only flag"],
         )
     )
@@ -3861,7 +3892,7 @@ def build_matrix() -> list[Check]:
             f"served: doctor {flag} accepted, inert (not exit 4)",
             "§4,§8.5,§27.2",
             ["doctor", flag],
-            0,
+            EXIT_SUCCESS,
             any_absent=["v1 contract", "cannot be combined"],
         )
         for flag in ("--no-cache", "--cache-clear")
@@ -3875,7 +3906,7 @@ def build_matrix() -> list[Check]:
             "served: --collect-only --format json is a collection (not exit 4)",
             "§4,§16",
             [*I, "--collect-only", "--format", "json", "tests"],
-            0,
+            EXIT_SUCCESS,
             out_has=["test_reverse_ab"],
             any_absent=["v1 contract", "collect-only flag"],
         )

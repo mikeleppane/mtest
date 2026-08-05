@@ -1,15 +1,15 @@
 """Emit mtest's real JUnit document for the schema/arithmetic oracle gate.
 
 Not a product module and not a test suite: a thin CLI tool the
-`scripts/checks/reports/junit_render.py` gate builds and runs. It drives the REAL
+`scripts/formats/junit_render.py` gate builds and runs. It drives the REAL
 `JunitReporter` over a typed event stream that exercises every sentinel-matrix
 cell (a non-retried file-level failure, a rerun-exhausted failure, a flaky pass,
 a retried per-test failure, non-retried per-test outcomes, a not-run file, a
 precompile failure with named casualties, and suite-level capture), plus the
 synthetic `mtest::cache` counter suite, spools the per-suite fragments,
-assembles the whole `<testsuites>` document, and prints it to stdout. The gate then runs `scripts/checks/reports/junit.py` over that output
-— so the oracle validates the shipped renderer's OWN bytes, not a hand-authored
-mock.
+assembles the whole `<testsuites>` document, and prints it to stdout. The gate
+then runs `scripts/formats/junit.py` over that output — so the oracle validates
+the shipped renderer's OWN bytes, not a hand-authored mock.
 """
 from mtest.model.events import Event
 from mtest.model.node_id import NodeId

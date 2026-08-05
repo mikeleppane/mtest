@@ -20,9 +20,6 @@ import signal
 import tempfile
 from typing import Any
 
-from scripts.checks.reports import json_stream as json_stream_check
-from scripts.checks.reports import junit as junit_check
-from scripts.checks.reports import junit_canonicalize
 from scripts.e2e.assertions import (
     INTERRUPT_TIMEOUT,
     SUMMARY_RE,
@@ -43,6 +40,9 @@ from scripts.e2e.runner import (
     ScenarioError,
     expect_group_gone,
 )
+from scripts.formats import json_stream as json_stream_check
+from scripts.formats import junit as junit_check
+from scripts.formats import junit_canonicalize
 
 
 # A small all-pass tree used where a fixed multi-file suite is all that matters;

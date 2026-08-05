@@ -8,7 +8,6 @@ import shutil
 import tempfile
 from typing import Any
 
-from scripts.checks.reports import collect_stream as collect_stream_oracle
 from scripts.e2e.assertions import (
     expect,
     expect_accounting,
@@ -24,6 +23,7 @@ from scripts.e2e.runner import (
     ScenarioContext,
     ScenarioError,
 )
+from scripts.formats import collect_stream as collect_stream_oracle
 
 
 COLLECT_MATRIX_EXPECTED = [

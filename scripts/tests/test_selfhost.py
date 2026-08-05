@@ -378,9 +378,10 @@ FILE_ROW_TOKENS = (
 )
 """Every file-row token `_verdict_token` in `console.mojo` can print.
 
-Kept in sync with `scripts/tests/test_package_consumption.py`'s copy by hand:
-`scripts/harness/selfhost.py` stays import-free on purpose, so this list is a
-deliberate duplicate rather than a shared import.
+Written out rather than imported, so it can disagree with the regex it checks.
+`scripts/tests/test_vocabulary.py` reconciles it against
+`scripts/formats/vocabulary.txt` and against the copy in
+`scripts/tests/test_package_consumption.py`.
 """
 
 

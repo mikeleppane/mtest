@@ -22,8 +22,8 @@ import re
 from typing import TYPE_CHECKING
 from xml.etree import ElementTree as ET
 
-from scripts.checks.reports import json_stream as json_stream_check
 from scripts.e2e.runner import REPO_ROOT, Run, ScenarioError
+from scripts.formats import json_stream as json_stream_check
 
 
 if TYPE_CHECKING:

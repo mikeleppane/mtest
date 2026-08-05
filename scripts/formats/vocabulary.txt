@@ -1,0 +1,71 @@
+# mtest's report vocabulary, one fact per line.
+#
+# The product and the harness each check themselves against this file:
+# tests/unit/test_vocabulary_snapshot.mojo rebuilds every section from the
+# runner's own tables, and scripts/tests/test_vocabulary.py reconciles the
+# harness copies. Neither side owns the file; both compare against it.
+#
+# The three surfaces spell one outcome three ways on purpose. The console
+# token is glyph-free ASCII with hyphens, the report label is the report
+# layer's own underscore spelling, and the JSON token is frozen lowercase on
+# the wire. Nothing may collapse them into one set.
+#
+# Grammar: blank lines and lines starting with '#' are ignored. Every other
+# line is space-separated fields, and the first field names the section.
+#
+#   outcome <code> <console-token> <report-label> <json-token>
+#   exit <name> <code>
+#   event model <NAME>
+#   event wire <token>
+#   stream_version <n>
+
+outcome 0 PASS PASS pass
+outcome 1 FAIL FAIL fail
+outcome 2 SKIP SKIP skip
+outcome 3 CRASH CRASH crash
+outcome 4 TIMEOUT TIMEOUT timeout
+outcome 5 COMPILE-ERROR COMPILE_ERROR compile_error
+outcome 6 COMPILE-TIMEOUT COMPILE_TIMEOUT compile_timeout
+outcome 7 MALFORMED-SUITE MALFORMED_SUITE malformed_suite
+outcome 8 PRECOMPILE-ERROR PRECOMPILE_ERROR precompile_error
+outcome 9 FLAKY FLAKY flaky
+outcome 10 DESELECTED DESELECTED deselected
+outcome 11 EXCLUDED EXCLUDED excluded
+outcome 12 NOT-RUN NOT_RUN not_run
+
+exit SUCCESS 0
+exit FAILURE 1
+exit INTERRUPTED 2
+exit INTERNAL_ERROR 3
+exit USAGE_ERROR 4
+exit NOTHING_RAN 5
+
+# The model set is every event kind the runner dispatches, in discriminant
+# order. PROGRESS is console-only and is filtered before serialization, so the
+# wire set is the other eleven.
+event model SESSION_STARTED
+event model WARNING
+event model PRECOMPILE_FAILED
+event model FILE_STARTED
+event model FILE_FINISHED
+event model SESSION_FINISHED
+event model INTERNAL_ERROR
+event model TEST_REPORTED
+event model COLLECTION_KNOWN
+event model ATTEMPT_FINISHED
+event model CRASH_ATTRIBUTION
+event model PROGRESS
+
+event wire session_started
+event wire warning
+event wire precompile_failed
+event wire file_started
+event wire file_finished
+event wire session_finished
+event wire internal_error
+event wire test_reported
+event wire collection_known
+event wire attempt_finished
+event wire crash_attribution
+
+stream_version 1
