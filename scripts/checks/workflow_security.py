@@ -211,20 +211,20 @@ def _yaml_mapping_keys(block: str, indent: int) -> list[str]:
     ]
 
 
-def _env_keys(block: str) -> list[str]:
-    """Return every key bound by every `env:` mapping in one block, in order.
+def _env_bindings(block: str) -> list[str]:
+    """Return every binding made by every `env:` mapping in one block, in order.
 
     Args:
         block: The YAML body to scan, at whatever indentation it sits.
 
     Returns:
-        One entry per key under every `env:` header found, in document order.
-        A line the scanner cannot read as `KEY: value` yields the whole line,
-        so an unreadable binding is rejected by the caller's comparison rather
-        than dropped from it.
+        One entry per line under every `env:` header found, stripped, in
+        document order. A line the scanner cannot read as `KEY: value` is
+        returned whole, so an unreadable binding is rejected by the caller's
+        comparison rather than dropped from it.
     """
     lines = block.splitlines()
-    keys: list[str] = []
+    bindings: list[str] = []
     for index, line in enumerate(lines):
         if line.strip() != "env:":
             continue
@@ -235,8 +235,20 @@ def _env_keys(block: str) -> list[str]:
                 continue
             if len(candidate) - len(body) <= header_indent:
                 break
-            keys.append(body.split(":", 1)[0].strip())
-    return keys
+            bindings.append(body.rstrip())
+    return bindings
+
+
+def _env_keys(block: str) -> list[str]:
+    """Return every key bound by every `env:` mapping in one block, in order.
+
+    Args:
+        block: The YAML body to scan, at whatever indentation it sits.
+
+    Returns:
+        One entry per key under every `env:` header found, in document order.
+    """
+    return [binding.split(":", 1)[0].strip() for binding in _env_bindings(block)]
 
 
 def _action_step_inputs(text: str, action: str) -> list[tuple[int, dict[str, str]]]:
@@ -595,6 +607,27 @@ def check_compat_canary_workflow(repo_root: Path = REPO_ROOT) -> None:
     lands in `.git/config` beside the downloaded compiler, and that the only
     environment binding in that job is the lane name.
 
+    Everything a step or a job can be handed is pinned by value, not by shape.
+    An `env:` mapping is compared binding by binding rather than key by key,
+    because a key set that still reads `CANARY_LANES` says nothing about a job
+    told to report on one lane and stay quiet about the other; a `with:` map is
+    compared line by line for the same reason, because the input this workflow
+    can least afford to have moved — the `repository:` and `ref:` the
+    privileged job checks out and then executes — is spelled exactly like the
+    input beside it.
+
+    Five keys are refused outright rather than reviewed: `defaults:`,
+    `container:` and `services:` on a job, and `shell:` and
+    `working-directory:` on a step. None appears in this workflow and each
+    changes what a `run:` line executes without touching the line — a shell
+    wrapper that sources a downloaded file before the reviewed command reaches
+    it, a floating image that supplies the interpreter, or a directory that
+    decides where `python3 -m` resolves `scripts.canary` from, which in the
+    privileged job is the difference between this repository's notifier and
+    one that arrived in an artifact. An allow-list of safe values for those
+    keys is a review this repository would have to keep redoing; the absence is
+    one it can keep.
+
     Beyond the security split, two functional properties are pinned because
     losing either leaves a workflow that runs, stays green, and reports nothing:
 
@@ -626,6 +659,21 @@ def check_compat_canary_workflow(repo_root: Path = REPO_ROOT) -> None:
         raise AssertionError(
             "compat canary credential mismatch: the notifier uses the run's own "
             "token, so no configured secret may be referenced here"
+        )
+    substitution = re.search(
+        r"(?m)^\s*(?:-\s*)?(defaults|container|services|shell|working-directory):",
+        workflow,
+    )
+    if substitution is not None:
+        raise AssertionError(
+            "compat canary execution mismatch: `defaults:`, `container:`, "
+            "`services:`, a step-level `shell:` and a step-level "
+            "`working-directory:` each change what a `run:` line executes "
+            "without changing the line — a wrapper that sources a downloaded "
+            "file ahead of the reviewed command, an image that supplies the "
+            "interpreter, or a directory the reviewed command resolves its own "
+            "imports from — so none of them may appear here at all, found "
+            f"{substitution.group(1)!r}"
         )
 
     expected_triggers = ["schedule", "workflow_dispatch"]
@@ -828,15 +876,44 @@ def check_compat_canary_workflow(repo_root: Path = REPO_ROOT) -> None:
             f"actual={[inputs for _line, inputs in pixi_setups]}"
         )
 
+    # Every input every action is handed, by value. The checkout entries are
+    # the load-bearing ones: `repository:` and `ref:` decide which tree the
+    # privileged job clones and the probe job then executes, they are spelled
+    # exactly like the `persist-credentials:` line beside them, and nothing
+    # else here would notice them arriving.
+    expected_step_inputs = {
+        "actions/checkout": [
+            ("persist-credentials: false",),
+            ("persist-credentials: false",),
+        ],
+        "prefix-dev/setup-pixi": [("run-install: false",)],
+        "actions/upload-artifact": [
+            ("name: canary-result-${{ matrix.lane }}", "path: build/canary/"),
+        ],
+    }
+    for action, expected_inputs in expected_step_inputs.items():
+        actual_inputs = _action_step_with_entries(workflow, action)
+        if actual_inputs != expected_inputs:
+            raise AssertionError(
+                f"compat canary step input mismatch for {action}: every input "
+                "each action is handed is reviewed by value, because the ones "
+                "that decide which tree is checked out and executed read like "
+                f"the ones beside them, expected={expected_inputs}, "
+                f"actual={actual_inputs}"
+            )
+
     expected_matrix = (
         "        lane: ${{ fromJSON(github.event_name == 'workflow_dispatch' && "
         'format(\'["{0}"]\', inputs.channel) || \'["stable","nightly"]\') }}'
     )
-    if expected_matrix not in probe or "      fail-fast: false" not in probe:
+    expected_strategy = ("fail-fast: false", "matrix:", expected_matrix.strip())
+    strategy = _block_entries(_yaml_block(probe, "    strategy:"))
+    if strategy != expected_strategy or "    strategy:" in notify:
         raise AssertionError(
             "compat canary lane matrix mismatch: a scheduled run probes both "
-            "lanes and a dispatch probes the requested one, and neither lane's "
-            "failure may cancel the other"
+            "lanes and a dispatch probes the requested one, neither lane's "
+            "failure may cancel the other, and the privileged job carries no "
+            f"matrix of its own, expected={expected_strategy}, actual={strategy}"
         )
 
     if "                run:" in workflow or re.search(
@@ -856,9 +933,15 @@ def check_compat_canary_workflow(repo_root: Path = REPO_ROOT) -> None:
             )
         ],
     }
-    expected_env_keys = {
-        "probe": ["CANARY_LANE"],
-        "notify": ["GH_TOKEN", "CANARY_LANES"],
+    expected_env = {
+        "probe": ["CANARY_LANE: ${{ matrix.lane }}"],
+        "notify": [
+            "GH_TOKEN: ${{ github.token }}",
+            (
+                "CANARY_LANES: ${{ github.event_name == 'workflow_dispatch' && "
+                "inputs.channel || 'stable nightly' }}"
+            ),
+        ],
     }
     for name, job in (("probe", probe), ("notify", notify)):
         # The notifier's negative space, checked before the positive form so a
@@ -878,14 +961,26 @@ def check_compat_canary_workflow(repo_root: Path = REPO_ROOT) -> None:
                 f"compat canary job {name!r} run command mismatch: "
                 f"expected={expected_runs[name]}, actual={runs}"
             )
-        env_keys = _env_keys(job)
-        if env_keys != expected_env_keys[name]:
+        bindings = _env_bindings(job)
+        if bindings != expected_env[name]:
             raise AssertionError(
-                f"compat canary job {name!r} environment key mismatch: a name "
-                "bash acts on before it reads the script, such as BASH_ENV, runs "
-                "code without substituting anything, so expected="
-                f"{expected_env_keys[name]}, actual={env_keys}"
+                f"compat canary job {name!r} environment mismatch: a name bash "
+                "acts on before it reads the script, such as BASH_ENV, runs code "
+                "without substituting anything, and a value alone decides which "
+                "lanes are reported and which go unmentioned, so both are pinned: "
+                f"expected={expected_env[name]}, actual={bindings}"
             )
+    # Over the whole file, so a binding made above the jobs — where neither
+    # job's own body would show it, and where it applies to both — is caught
+    # as an addition rather than missed as an absence.
+    workflow_bindings = _env_bindings(workflow)
+    if workflow_bindings != expected_env["probe"] + expected_env["notify"]:
+        raise AssertionError(
+            "compat canary environment mismatch: the only bindings in this "
+            "workflow are the two steps' own, because a workflow-level or "
+            "job-level `env:` reaches the privileged job without appearing in "
+            f"its step, actual={workflow_bindings}"
+        )
 
     probe_conditions = re.findall(r"^        if: (.+)$", probe, re.MULTILINE)
     upload_step = _yaml_block(probe, "      - name: Upload the classification")

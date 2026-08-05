@@ -1425,7 +1425,141 @@ class CompatCanaryWorkflowTests(unittest.TestCase):
             ),
         }.items():
             with self.subTest(job=label):
-                self._reject(mutated, "environment key mismatch")
+                self._reject(mutated, "environment mismatch")
+
+    def test_the_bound_environment_values_are_exact(self) -> None:
+        """A key set alone does not say what a binding will make happen.
+
+        `CANARY_LANES` names which lanes owe a report. Left in place with a
+        narrower value, the notifier stops asking about the other one, and a
+        red nightly artifact goes unmentioned in a run that is green and
+        complete in every other respect — including to an oracle that pinned
+        the key and not the value.
+        """
+        workflow = self._workflow()
+        lanes = (
+            "          CANARY_LANES: ${{ github.event_name == 'workflow_dispatch'"
+            " && inputs.channel || 'stable nightly' }}"
+        )
+        self.assertIn(lanes, workflow)
+        for label, mutated in {
+            "one-lane": workflow.replace(lanes, "          CANARY_LANES: stable", 1),
+            "empty": workflow.replace(lanes, '          CANARY_LANES: ""', 1),
+            "lane-substituted": workflow.replace(
+                "          CANARY_LANE: ${{ matrix.lane }}",
+                "          CANARY_LANE: stable",
+                1,
+            ),
+        }.items():
+            with self.subTest(binding=label):
+                self._reject(mutated, "environment mismatch")
+
+    def test_an_environment_above_the_jobs_is_rejected(self) -> None:
+        """A binding neither job's body shows still reaches both of them."""
+        workflow = self._workflow()
+        for label, mutated in {
+            "workflow-level": workflow.replace(
+                "jobs:\n", "env:\n  BASH_ENV: ./hook.sh\njobs:\n", 1
+            ),
+            "job-level": workflow.replace(
+                "    timeout-minutes: 10\n",
+                "    timeout-minutes: 10\n    env:\n      BASH_ENV: ./hook.sh\n",
+                1,
+            ),
+        }.items():
+            with self.subTest(scope=label):
+                self._reject(mutated, "environment mismatch")
+
+    def test_the_checkout_inputs_are_pinned_by_value(self) -> None:
+        """The one input that decides which sources are cloned and then run.
+
+        `repository:` and `ref:` are spelled exactly like the
+        `persist-credentials:` line beside them and are the whole of what
+        decides which tree the privileged job checks out — and which tree the
+        probe job hands to a compiler it downloaded. Counting the
+        `persist-credentials` lines leaves both of them free to arrive.
+        """
+        workflow = self._workflow()
+        head, separator, tail = workflow.rpartition(
+            "          persist-credentials: false\n"
+        )
+        self.assertTrue(separator)
+        for label, mutated in {
+            "foreign-repository": head
+            + "          repository: attacker/evil\n          ref: main\n"
+            + separator
+            + tail,
+            "checkout-path": head
+            + separator.replace(
+                "          persist-credentials: false\n",
+                "          persist-credentials: false\n          path: sources\n",
+            )
+            + tail,
+            "submodules": head
+            + separator
+            + tail.replace(
+                "\n      - name: Download the stable",
+                "\n          submodules: recursive\n"
+                "\n      - name: Download the stable",
+                1,
+            ),
+        }.items():
+            with self.subTest(input=label):
+                self._reject(mutated, "step input mismatch")
+
+    def test_a_recombining_job_or_step_key_is_rejected(self) -> None:
+        """Five ways to change what runs without changing a `run:` line.
+
+        `defaults:` and a step-level `shell:` decide which interpreter parses
+        the reviewed command, and both can source a downloaded file before it.
+        `container:` and `services:` supply that interpreter from an image this
+        repository has never read. `working-directory:` decides where
+        `python3 -m scripts.canary.notify` resolves that module from, and the
+        privileged job's working tree has an artifact directory in it. Each
+        leaves the permissions, the step names, the pins and the commands
+        exactly as reviewed.
+        """
+        workflow = self._workflow()
+        hook = "bash -c 'source build/canary-results/hook.sh; eval \"$0\"'"
+        for label, mutated in {
+            "job-defaults": workflow.replace(
+                "    timeout-minutes: 10\n",
+                "    timeout-minutes: 10\n"
+                "    defaults:\n      run:\n"
+                f"        shell: {hook}\n",
+                1,
+            ),
+            "workflow-defaults": workflow.replace(
+                "jobs:\n", f"defaults:\n  run:\n    shell: {hook}\njobs:\n", 1
+            ),
+            "step-shell": workflow.replace(
+                "      - name: Upsert the pinned issues\n",
+                f"      - name: Upsert the pinned issues\n        shell: {hook}\n",
+                1,
+            ),
+            "container": workflow.replace(
+                "    timeout-minutes: 10\n",
+                "    timeout-minutes: 10\n    container: ghcr.io/nobody/image:latest\n",
+                1,
+            ),
+            "services": workflow.replace(
+                "    timeout-minutes: 10\n",
+                "    timeout-minutes: 10\n"
+                "    services:\n"
+                "      sidecar:\n"
+                "        image: ghcr.io/nobody/image:latest\n",
+                1,
+            ),
+            "working-directory": workflow.replace(
+                "      - name: Upsert the pinned issues\n",
+                "      - name: Upsert the pinned issues\n"
+                "        working-directory: build/canary-results/"
+                "canary-result-stable\n",
+                1,
+            ),
+        }.items():
+            with self.subTest(key=label):
+                self._reject(mutated, "execution mismatch")
 
     def test_the_artifact_names_and_paths_are_pinned(self) -> None:
         workflow = self._workflow()
@@ -1544,7 +1678,7 @@ class CompatCanaryWorkflowTests(unittest.TestCase):
                 "          GH_TOKEN: ${{ github.token }}",
                 1,
             ),
-            "environment key mismatch|credential",
+            "environment mismatch|credential",
         )
 
 
