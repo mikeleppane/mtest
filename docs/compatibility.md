@@ -105,7 +105,7 @@ Every probe ends in exactly one of eight classifications.
 
 | Classification | What it says |
 |----------------|--------------|
-| `PASS` | Every gate above held on a toolchain newer than the pin. |
+| `PASS` | Every gate above held on a toolchain newer than the pin, apart from the toolchain-identity failures named as tolerated. |
 | `NO_NEWER_CANDIDATE` | Nothing newer is published on that lane's channels, so nothing was probed. |
 | `PROTOCOL_DRIFT` | The `TestSuite` report format the runner parses moved. |
 | `SOURCE_INCOMPATIBLE` | The repository as committed does not solve, compile, test, or behave on the candidate. |
