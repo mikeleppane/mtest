@@ -545,6 +545,7 @@ Scope vocabulary (authoritative; keep in sync as modules emerge):
 | `test` | test infrastructure (`scripts/harness/{selfhost,dogfood}.py`, `scripts/build/mojo_package.sh`, shared helpers) |
 | `e2e` | end-to-end harness (`scripts/e2e/`) and its `e2e/` manifest and scenarios |
 | `qa` | the contract gate (`scripts/qa/`) and its own tests |
+| `canary` | the toolchain compatibility canary (`scripts/canary/`), its fixtures and tests, and the canary workflow |
 | `bench` | `benchmarks/` |
 | `docs` | docstrings, `docs/` |
 | `build` | packaging |
