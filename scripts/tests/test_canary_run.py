@@ -74,6 +74,7 @@ from scripts.canary.toolchain import (
     workspace_channels,
     workspace_pin,
 )
+from scripts import gen_transcripts
 from scripts.e2e.__main__ import SCENARIOS
 from scripts.gen_transcripts import MOJO_VERSION_RE as GENERATOR_VERSION_RE
 
@@ -1137,12 +1138,69 @@ class StageClassificationTests(CanaryTestCase):
         self.assertIn("passing--default.txt", result.detail)
         self.assertNotIn("package-check", runner.stages)
 
-    def test_a_generator_that_cannot_run_is_protocol_drift(self) -> None:
+    def test_a_failed_structural_pin_is_protocol_drift(self) -> None:
+        # The generator's own pins — the emitted name set, and two generations
+        # that agree byte for byte — are protocol assertions in their own
+        # right, so failing one of them is drift even though no transcript was
+        # ever compared.
         repo, runner = self.build()
-        runner.fails("transcripts", stderr="non-deterministic transcript\n")
+        runner.outcomes(
+            "transcripts",
+            _Outcome(
+                2,
+                "",
+                "gen_transcripts: STRUCTURAL PIN FAILED: non-deterministic "
+                "transcript on regeneration: passing--default.txt\n",
+            ),
+        )
         result = self.classify(repo, runner)
         self.assertEqual(result.classification, PROTOCOL_DRIFT)
         self.assertIn("non-deterministic transcript", result.detail)
+
+    def test_the_generator_still_reports_its_pins_the_way_this_reads(self) -> None:
+        """A generator that changed how it reports would silently widen this.
+
+        Every non-pin failure below is read as a fact about the candidate, so
+        if the marker or the exit code moved, a real protocol pin would arrive
+        under the wrong name with nothing to notice it.
+        """
+        source = inspect.getsource(gen_transcripts)
+        self.assertIn('f"gen_transcripts: STRUCTURAL PIN FAILED: {e}"', source)
+        self.assertIn("sys.exit(2)", source)
+
+    def test_a_fixture_the_candidate_refuses_is_source_incompatible(self) -> None:
+        # A compiler that rejects the syntax in a protocol fixture is not a
+        # report format that moved; nothing was generated to compare.
+        repo, runner = self.build()
+        runner.fails(
+            "transcripts",
+            stderr="/repo/e2e/fixtures/passing.mojo:3:1: error: unknown attribute\n",
+        )
+        result = self.classify(repo, runner)
+        self.assertEqual(result.classification, SOURCE_INCOMPATIBLE)
+        self.assertEqual(
+            result.detail, "/repo/e2e/fixtures/passing.mojo:3:1: error: unknown attribute"
+        )
+
+    def test_an_unattributed_generator_death_is_not_called_drift(self) -> None:
+        repo, runner = self.build()
+        runner.fails(
+            "transcripts",
+            stderr="Traceback (most recent call last):\n"
+            "OSError: [Errno 28] No space left on device\n",
+        )
+        result = self.classify(repo, runner)
+        self.assertNotEqual(result.classification, PROTOCOL_DRIFT)
+        self.assertEqual(result.classification, SOURCE_INCOMPATIBLE)
+        self.assertIn("No space left on device", result.detail)
+
+    def test_a_wedged_generator_is_a_timeout(self) -> None:
+        repo, runner = self.build()
+        runner.outcomes(
+            "transcripts", _Outcome(TIMEOUT_RETURNCODE, "", "timed out after 2700s")
+        )
+        result = self.classify(repo, runner)
+        self.assertEqual(result.classification, STAGE_TIMEOUT)
 
     def test_the_generator_writes_outside_the_committed_snapshots(self) -> None:
         repo, runner = self.build()

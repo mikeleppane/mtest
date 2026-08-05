@@ -179,6 +179,14 @@ _DIAGNOSTIC = re.compile(r"^.*?: error: .*$", re.MULTILINE)
 # The e2e gate's failure roll-call, printed once per failing scenario.
 _E2E_FAILURE = re.compile(r"^FAILED: (\S+)$", re.MULTILINE)
 
+# How `scripts.gen_transcripts` says that one of its own structural pins broke,
+# as opposed to something underneath it. It catches `GenError`, prints this
+# marker, and leaves on this code; every other way of failing is something the
+# generator did not anticipate. A test pins both against that module, because a
+# generator that changed how it reports would quietly widen the reading below.
+GENERATOR_PIN_EXIT = 2
+GENERATOR_PIN_MARKER = "STRUCTURAL PIN FAILED"
+
 # Stands in for a toolchain identity the probe never got to observe.
 UNKNOWN = "unknown"
 _UNKNOWN = ResolvedToolchain(UNKNOWN, UNKNOWN)
@@ -461,6 +469,43 @@ def e2e_failure_verdict(failed: Sequence[str], *, toolchain_moved: bool) -> str 
     return None
 
 
+def generator_failure(result: CommandResult) -> CompareResult:
+    """Name what a transcript generation that never finished actually showed.
+
+    Reading every nonzero exit as drift claimed the report format had moved
+    without a byte having been compared, which is a red nobody can act on and
+    an over-claim besides. The generator says which of its two very different
+    failures happened: it catches its own `GenError` and leaves on
+    `GENERATOR_PIN_EXIT` with `GENERATOR_PIN_MARKER`, and that IS drift even
+    though nothing was compared, because the pins it failed — the emitted name
+    set, and two generations agreeing byte for byte — are protocol assertions
+    in their own right.
+
+    Anything else is not. A compiler that rejects the syntax in a protocol
+    fixture stops the generator before it produces anything to compare, and
+    that is the candidate refusing the sources. So is a generator that dies for
+    a reason this cannot attribute: it runs green on the pinned toolchain every
+    day, so its death on the candidate is evidence about the candidate until
+    someone shows otherwise. That admits an occasional wrong red — a full disk
+    would land here too — and it is the right way round, because the wrong red
+    carries the failure's own last line and is corrected the day it is read.
+
+    Args:
+        result: The failed generation.
+
+    Returns:
+        The classification and the evidence for it.
+    """
+    if result.returncode == TIMEOUT_RETURNCODE:
+        return CompareResult(STAGE_TIMEOUT, command_failure(result))
+    if (
+        result.returncode == GENERATOR_PIN_EXIT
+        and GENERATOR_PIN_MARKER in result.stderr
+    ):
+        return CompareResult(PROTOCOL_DRIFT, command_failure(result))
+    return CompareResult(SOURCE_INCOMPATIBLE, first_diagnostic(result))
+
+
 def _regenerate_and_compare(repo: Path, run: Runner) -> CompareResult:
     """Regenerate the protocol transcripts on the candidate and diff them.
 
@@ -474,10 +519,8 @@ def _regenerate_and_compare(repo: Path, run: Runner) -> CompareResult:
         run: The probe runner.
 
     Returns:
-        The comparator's own result. A generator that cannot complete at all is
-        reported as drift rather than as an infrastructure fault, because its
-        structural pins — the emitted name set, and byte-identical output
-        across two generations — are protocol assertions in their own right.
+        The comparator's own result, or — when there was nothing to compare —
+        whatever `generator_failure` could attribute the failure to.
     """
     with tempfile.TemporaryDirectory(prefix="mtest-canary-transcripts-") as raw:
         candidate = Path(raw)
@@ -493,7 +536,7 @@ def _regenerate_and_compare(repo: Path, run: Runner) -> CompareResult:
             ]
         )
         if generated.returncode != 0:
-            return CompareResult(PROTOCOL_DRIFT, command_failure(generated))
+            return generator_failure(generated)
         return compare_transcript_dirs(
             repo / "tests" / "snapshots" / "protocol", candidate
         )
