@@ -232,6 +232,59 @@ def _parse_seconds(text: String) -> Optional[Float64]:
     )
 
 
+def unsafe_tag_reason(tags: List[String]) -> String:
+    """Why `tags` cannot frame a cache key safely, or empty when they can.
+
+    Two rules, and their asymmetry is the whole point.
+
+    `feed` writes the tag bytes, one `0x00`, the payload length, then the
+    payload, so a tag carrying its own `0x00` produces the same byte stream as
+    a shorter tag with a longer payload. An empty tag names nothing. Either way
+    two different builds key alike, which serves a stale binary and reports a
+    green run that never happened.
+
+    `feed_file` then feeds `tag`, `tag + ".size"` and `tag + ".sha"`, so a BASE
+    tag already spelled `something.size` collides with another tag's derived
+    frame. Those two derived spellings are exactly what `feed` must keep
+    accepting — the rule applies to the base tags a namespace declares, never to
+    the frames `feed_file` builds out of them.
+
+    Neither method can refuse on its own: both are total by contract, as is
+    every caller of theirs in the store's key path. The refusal therefore
+    belongs to whoever owns the namespace, which reads this before feeding
+    anything and switches its cache off.
+
+    Args:
+        tags: The base contribution names a namespace declares, in declaration
+            order. Not mutated.
+
+    Returns:
+        A reason naming the offending tag, or an empty string when every tag is
+        safe. The NUL and empty cases name the POSITION rather than the tag,
+        because neither can be quoted into a diagnostic. Total; allocates only
+        the returned string. Says nothing about uniqueness, which is a property
+        of the set rather than of any tag and has no counterpart rule here.
+    """
+    for i in range(len(tags)):
+        var tag = tags[i]
+        if tag.byte_length() == 0:
+            return "cache key tag " + String(i) + " is empty"
+        for b in tag.as_bytes():
+            if b == 0:
+                return "cache key tag " + String(i) + " contains a NUL byte"
+    for tag in tags:
+        for suffix in [String(".size"), String(".sha")]:
+            if tag.endswith(suffix):
+                return (
+                    "cache key tag '"
+                    + tag
+                    + "' ends in the reserved '"
+                    + suffix
+                    + "' suffix"
+                )
+    return String("")
+
+
 struct KeyBuilder(Copyable, Movable):
     """Accumulates unambiguously framed contributions into one cache key.
 
@@ -274,7 +327,10 @@ struct KeyBuilder(Copyable, Movable):
         """Absorb one framed contribution.
 
         Args:
-            tag: The contribution's name; must not contain a `0x00` byte.
+            tag: The contribution's name, which must hold no `0x00` byte.
+                Tags come from call sites, never from data; the namespace that
+                declares them is what checks them, through
+                `unsafe_tag_reason`.
             payload: The contribution's bytes; may be empty and may contain
                 any byte value, including `0x00` and newlines.
         """
@@ -293,7 +349,7 @@ struct KeyBuilder(Copyable, Movable):
         """Absorb one framed contribution whose payload is text.
 
         Args:
-            tag: The contribution's name; must not contain a `0x00` byte.
+            tag: The contribution's name, which must hold no `0x00` byte.
             payload: The contribution's text, absorbed as its UTF-8 bytes.
         """
         var bytes = List[UInt8]()
@@ -310,8 +366,10 @@ struct KeyBuilder(Copyable, Movable):
         it costs nothing and makes a truncated read visible in the key.
 
         Args:
-            tag: The base contribution name; the size and digest frames use
-                `tag + ".size"` and `tag + ".sha"`.
+            tag: The base contribution name; the size and digest frames are
+                `tag + ".size"` and `tag + ".sha"`, so a base tag already
+                wearing either suffix collides with another tag's. See
+                `unsafe_tag_reason`.
             path: The file's path as the caller names it.
             size: The file's length in bytes.
             sha_hex: The file's content digest as hex.

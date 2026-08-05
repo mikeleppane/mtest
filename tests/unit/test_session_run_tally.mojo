@@ -1,11 +1,13 @@
-"""Tests for the one accumulator every run driver settles into.
+"""Tests for the two accumulators every run driver settles into.
 
 `RunTally` is where the gate loop, the plain run loop, the selection
-sub-session, and each pooled batch put what they learn, and `_absorb_batch` is
-the one place a finished batch is folded back. A field that grows without a fold
-would silently drop that batch's contribution from the run, so the fold case
-below constructs a whole `PoolBatchResult` positionally: a new field on either
-struct fails to compile here rather than going quietly unfolded.
+sub-session, and each pooled batch put what they learn; `CacheAdmissions` is
+where the same drivers charge the run's first-attempt compile admissions.
+`_absorb_batch` is the one place a finished batch is folded back into both. A
+field that grows without a fold would silently drop that batch's contribution
+from the run, so the fold case below constructs a whole `PoolBatchResult`
+positionally: a new field on either struct fails to compile here rather than
+going quietly unfolded.
 """
 from std.testing import TestSuite, assert_equal, assert_false, assert_true
 
@@ -15,10 +17,9 @@ from mtest.protocol import ParsedReport
 from mtest.session.attempt import _AttemptResult, _finalize_attempt
 from mtest.session.classify import Classification, TrustedReport
 from mtest.session.effective_settings import EffectiveFileSettings
-from mtest.session.file_result import RunTally, _CrashFile
+from mtest.session.file_result import CacheAdmissions, RunTally, _CrashFile
 from mtest.session.pool import PoolBatchResult
 from mtest.session.session import _absorb_batch
-from mtest.session.store import CacheContext
 
 
 def _settings() -> EffectiveFileSettings:
@@ -46,12 +47,12 @@ def _loaded_tally() -> RunTally:
 
 def test_absorb_batch_folds_every_field_a_batch_carries() raises:
     var tally = RunTally.zeros()
-    var ctx = CacheContext()
+    var admissions = CacheAdmissions.zeros()
     # Positional, so a field added to either struct breaks this case loudly
     # instead of being dropped on the floor by the fold.
-    var batch = PoolBatchResult(_loaded_tally(), True, 7, 9)
+    var batch = PoolBatchResult(_loaded_tally(), True, CacheAdmissions(7, 9))
 
-    _absorb_batch(tally, ctx, batch)
+    _absorb_batch(tally, admissions, batch)
 
     assert_equal(len(tally.run_outcomes), 2)
     assert_true(tally.run_outcomes[0] == Outcome.FAIL)
@@ -68,11 +69,11 @@ def test_absorb_batch_folds_every_field_a_batch_carries() raises:
     assert_true(tally.interrupted)
     assert_true(tally.internal_error)
     assert_true(tally.console_dead)
-    # The admissions land on the session's one cache context, never inside the
+    # The admissions land on the session's one accumulator, never inside the
     # batch, so the gate, parallel, and serial batches each account for
     # themselves.
-    assert_equal(ctx.built_files, 7)
-    assert_equal(ctx.cached_files, 9)
+    assert_equal(admissions.built, 7)
+    assert_equal(admissions.cached, 9)
 
 
 def test_absorb_batch_leaves_the_batch_local_halt_to_its_caller() raises:
@@ -80,13 +81,29 @@ def test_absorb_batch_leaves_the_batch_local_halt_to_its_caller() raises:
     # the serial pass that follows it. Folding it into the run would make the
     # session behave as if the whole run had halted.
     var tally = RunTally.zeros()
-    var ctx = CacheContext()
-    var batch = PoolBatchResult(RunTally.zeros(), True, 0, 0)
-    _absorb_batch(tally, ctx, batch)
+    var admissions = CacheAdmissions.zeros()
+    var batch = PoolBatchResult(RunTally.zeros(), True, CacheAdmissions.zeros())
+    _absorb_batch(tally, admissions, batch)
     assert_true(batch.halted)
     assert_false(tally.aborted)
     assert_false(tally.interrupted)
     assert_false(tally.internal_error)
+
+
+def test_a_zeroed_admissions_accumulator_has_charged_nothing() raises:
+    var admissions = CacheAdmissions.zeros()
+    assert_equal(admissions.built, 0)
+    assert_equal(admissions.cached, 0)
+
+
+def test_admissions_charge_across_batches_rather_than_replacing() raises:
+    # Every batch of a run charges the same accumulator, so the gate batch's
+    # compiles must still be there after the parallel and serial batches fold.
+    var admissions = CacheAdmissions.zeros()
+    admissions.merge(CacheAdmissions(2, 1))
+    admissions.merge(CacheAdmissions(3, 4))
+    assert_equal(admissions.built, 5)
+    assert_equal(admissions.cached, 5)
 
 
 def test_merge_accumulates_rather_than_replaces() raises:

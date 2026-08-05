@@ -61,6 +61,7 @@ from mtest.session.attempt import (
 from mtest.session.build import _COMPILE_GRACE_MS, build_argv
 from mtest.session.classify import classify, resolve_report
 from mtest.session.file_result import (
+    CacheAdmissions,
     FileResult,
     RunTally,
     settle_file,
@@ -162,12 +163,10 @@ struct PoolBatchResult(Movable):
     rest of the batch NOT-RUN. A later batch (the serial pass) reads this to
     honor the same stop, and never starts serial work after the parallel batch
     already halted."""
-    var built_files: Int
-    """First-attempt compile admissions in this batch, compile FAILURES
-    included. Retries never count. `run_session` folds it onto the session's one
-    `CacheContext`, which both terminal artifacts read."""
-    var cached_files: Int
-    """Cache-hit admissions in this batch, folded the same way."""
+    var admissions: CacheAdmissions
+    """This batch's first-attempt compile admissions. Retries never count.
+    `run_session` charges them onto the run's one accumulator, which both
+    terminal artifacts read."""
 
 
 struct _PoolFile(Movable):
@@ -223,19 +222,19 @@ struct _PoolFile(Movable):
     pathname between publication and exec. Only a completed child
     `SpawnFailed` proves that pathname-level failure; a native dispatch raise
     remains machinery, and is deliberately recoverable only for a warm hit.
-    The cold build was already admitted to `built_files`, so its one bounded
-    fallback must not charge it again.
+    The cold build was already charged as a `built` admission, so its one
+    bounded fallback must not charge it again.
     """
     var store_rebuilt: Bool
     """Whether this file already fell back from a store artifact to a compile.
 
     Once per file, so a binary that will not spawn for any other reason still
     reaches the internal-error path instead of looping. The fallback charges
-    neither counter: the file was already admitted as a cache hit or cold
-    build, and one file is one admission.
+    nothing: the file was already admitted as a cache hit or cold build, and one
+    file is one admission.
     """
     var hit_uncounted: Bool
-    """A cache hit this batch has not yet charged to `cached_files`.
+    """A cache hit this batch has not yet charged as a `cached` admission.
 
     Set when the store answers, cleared when the run is dispatched, which is
     where the charge lands. The two events are far apart on purpose: the store
@@ -528,10 +527,10 @@ def _run_pool_batch[
     future run as well, so removing it early is the same answer, taken sooner.
     What a probe never does is publish, count, or build.
 
-    Neither counter moves where the store is consulted. Both move at DISPATCH —
-    `built_files` at the build spawn, `cached_files` at the run spawn — because
-    a stop policy that latches between the two leaves files this batch knows a
-    cache answer for and will never run, and those files are admitted to
+    Neither admission is charged where the store is consulted. Both are charged
+    at DISPATCH — `built` at the build spawn, `cached` at the run spawn —
+    because a stop policy that latches between the two leaves files this batch
+    knows a cache answer for and will never run, and those files are admitted to
     nothing.
 
     Args:
@@ -572,7 +571,9 @@ def _run_pool_batch[
         raise Error("session: the parallel pool requires an active ExecRuntime")
     var config = resolved.config.copy()
     var n = len(files)
-    var result = PoolBatchResult(RunTally.zeros(), False, 0, 0)
+    var result = PoolBatchResult(
+        RunTally.zeros(), False, CacheAdmissions.zeros()
+    )
     if n == 0:
         return result^
 
@@ -605,8 +606,8 @@ def _run_pool_batch[
             # machine stream, or an interrupt can tear the batch down with most
             # of it still undispatched. A file that never ran was admitted to
             # nothing, so the charge rides on the flag below and lands at the
-            # run dispatch — the same point the build dispatch charges
-            # `built_files`.
+            # run dispatch — the same point the build dispatch charges a
+            # `built` admission.
             pf.phase = _PENDING_RUN
             pf.out_bin = pf.staging.bin_rel
             pf.build_argv = pf.staging.argv.copy()
@@ -710,7 +711,7 @@ def _run_pool_batch[
                         # on to say. The latch clears here, so a run-side crash
                         # retry — which comes back through this same dispatch —
                         # never charges the file twice.
-                        result.cached_files += 1
+                        result.admissions.cached += 1
                         state[picked].hit_uncounted = False
                     var run_argv = List[String]()
                     run_argv.append(state[picked].out_bin)
@@ -813,9 +814,9 @@ def _run_pool_batch[
                         # on to say about it. This batch folds its verdict a
                         # whole `wait_any` sweep later, so counting there would
                         # quietly drop every compile error out of the accounting
-                        # and break `built_files + cached_files ==
-                        # first-attempt compile admissions`.
-                        result.built_files += 1
+                        # and break `built + cached == first-attempt compile
+                        # admissions`.
+                        result.admissions.built += 1
                     try:
                         _ = supervisor.spawn(
                             ProcessSpec.command_in(

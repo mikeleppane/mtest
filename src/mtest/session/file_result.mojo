@@ -239,6 +239,41 @@ def _prepend_events(var extra: List[Event], var fr: FileResult) -> FileResult:
 
 
 @fieldwise_init
+struct CacheAdmissions(Copyable, Movable):
+    """How a run's first-attempt compile admissions divided.
+
+    `built + cached == first-attempt compile admissions` is the invariant these
+    two fields exist to hold together, and every driver charges its admission at
+    the point of no return rather than after the answer comes back: a compile
+    that fails is still a compile the run paid for, and counting it later would
+    drop it. A retry, the stale-name recovery rebuild, and a precompile step are
+    none of these and move neither field.
+
+    Owned by the run — the gate loop, the plain run loop, and each pooled batch
+    charge one accumulator, and the terminal artifacts read it once at the end.
+    """
+
+    var built: Int
+    """Admissions that reached the compiler, compile FAILURES included."""
+    var cached: Int
+    """Admissions served from the artifact store."""
+
+    @staticmethod
+    def zeros() -> Self:
+        """An accumulator that has charged nothing."""
+        return Self(0, 0)
+
+    def merge(mut self, other: Self):
+        """Charge another accumulator's admissions onto this one.
+
+        Args:
+            other: A finished batch's admissions. Copied, not consumed.
+        """
+        self.built += other.built
+        self.cached += other.cached
+
+
+@fieldwise_init
 struct RunTally(Copyable, Movable):
     """What a run accumulates as its files settle, wherever they ran.
 

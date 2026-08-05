@@ -38,7 +38,7 @@ from mtest.protocol import (
 )
 from mtest.session.classify import resolve_report
 from mtest.session.effective_settings import EffectiveFileSettings
-from mtest.session.file_result import FileResult
+from mtest.session.file_result import CacheAdmissions, FileResult
 from mtest.session.scratch import _ensure_dir, _mangle
 from mtest.session.store import CacheContext, _rewrite_output
 from mtest.session.store_seam import (
@@ -159,6 +159,7 @@ def _build_for_selection(
     include_paths: List[String],
     mut reg: BuildRegistry,
     mut ctx: CacheContext,
+    mut admissions: CacheAdmissions,
     attempts_used: Int = 1,
     recovering: Bool = False,
 ) raises -> _BuildOutcome:
@@ -186,10 +187,11 @@ def _build_for_selection(
         rel: The root-relative path of the file to build.
         include_paths: Directories passed to the compiler as `-I`.
         reg: The build registry that records the build or compile error.
-        ctx: The session's cache state. Its counters are advanced here — one
-            `built_files` per first-attempt compile admission (compile failures
-            included), one `cached_files` per hit — and it is switched off if
-            this file proves the store unusable.
+        ctx: The session's cache state, switched off if this file proves the
+            store unusable.
+        admissions: The run's admission accumulator. Exactly one admission is
+            charged here per first attempt — `built` when the file reaches the
+            compiler (compile failures included), `cached` on a store hit.
         attempts_used: The current file attempt, for a terminal recovery build.
             It is the CRASH-class attempt number and is 1 on a stale-name
             recovery too, so it never decides whether the store is consulted.
@@ -228,7 +230,7 @@ def _build_for_selection(
         if staging.hit:
             var stored = source_identity_key(root, rel)
             reg.record_build(BuildProduct.built(rel, staging.bin_rel, stored))
-            ctx.cached_files += 1
+            admissions.cached += 1
             # The stored build's own duration, not zero: the SLOW token must
             # read the same on a warm run as it did on the cold one.
             return _BuildOutcome(
@@ -260,8 +262,8 @@ def _build_for_selection(
         # file is about to be compiled for the first time, so it is a built
         # file whatever the compiler goes on to say about it. Counting after the
         # spawn would quietly drop every compile error out of the accounting and
-        # break `built_files + cached_files == first-attempt admissions`.
-        ctx.built_files += 1
+        # break `built + cached == first-attempt admissions`.
+        admissions.built += 1
 
     var bres: ProcessResult
     try:

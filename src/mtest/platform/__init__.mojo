@@ -42,6 +42,7 @@ from mtest.platform.fs import (
     default_file_mode,
     destination_identity,
     directory_ignores_case,
+    path_kind,
     prepare_directory_for_rename,
     publish_new_file,
     rename_path,

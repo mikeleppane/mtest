@@ -21,7 +21,7 @@ centralized here instead of being redeclared in session or tests.
 """
 from std.ffi import external_call
 from std.memory import alloc, memset_zero
-from std.os import remove
+from std.os import lstat, remove
 from std.os.path import basename, dirname, realpath
 from std.sys.info import CompilationTarget
 
@@ -56,6 +56,31 @@ comptime _DARWIN_ANCHOR_OPEN_FLAGS = (
     | 0x01000000  # O_CLOEXEC
     | 0x20000000  # O_NOFOLLOW_ANY
 )
+
+
+def path_kind(path: String) raises -> Int:
+    """The file-type bits of `path` itself, never of what a symlink points at.
+
+    `lstat`, never `isdir`/`isfile`/`islink`: those follow a link and fold an
+    unreadable path into False, so a symlink planted where a directory belongs
+    would be recursed into and an entry nobody may stat would read as "not a
+    directory". Both answers are the ones a caller deleting, executing, or
+    trusting the path must never be handed.
+
+    Args:
+        path: The path to characterize.
+
+    Returns:
+        One of `S_IFDIR`, `S_IFREG`, `S_IFLNK`, or another POSIX type value,
+        already masked with `S_IFMT`.
+
+    Raises:
+        Error: If `path` cannot be characterized — absent, or inside a
+            directory this process may not search. The two are indistinguishable
+            through a Mojo `Error`, and a caller that treats either as a kind
+            would be reading an answer the filesystem never gave.
+    """
+    return Int(lstat(path).st_mode) & S_IFMT
 
 
 def destination_identity(path: String) -> String:

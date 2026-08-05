@@ -254,8 +254,8 @@ CACHE_STORE_PREFIX = ".mtest-cache/build-v1/"
 CACHE_STAGING_PREFIX = ".tmp-"
 """Leading component of a staging directory's name, inside the store.
 
-Mirrors `mtest.session.store._TMP_PREFIX`, kept as a literal rather than
-derived: this module asserts the shipped shape from the outside, and a
+Mirrors `mtest.session.store.filesystem._TMP_PREFIX`, kept as a literal rather
+than derived: this module asserts the shipped shape from the outside, and a
 derivation would agree with a regression instead of catching it.
 """
 

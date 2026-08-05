@@ -69,6 +69,7 @@ from mtest.session.effective_settings import (
     effective_file_settings,
 )
 from mtest.session.file_result import (
+    CacheAdmissions,
     FileResult,
     RunTally,
     settle_file,
@@ -734,6 +735,7 @@ def _run_selection[
     mut summary: Summary,
     mut reg: BuildRegistry,
     mut ctx: CacheContext,
+    mut admissions: CacheAdmissions,
 ) raises -> SelectionSummary:
     """Run the selection sub-session: probe every run file, then run it.
 
@@ -759,10 +761,13 @@ def _run_selection[
         reporter: The composed reporter every event is handed to.
         summary: The run summary, accumulated as files finish.
         reg: The build registry recording builds, probes, and compile errors.
-        ctx: The session's cache state, threaded into every build step. Its
-            counters are advanced by the build seam, and a publication failure
-            it reports is emitted here as a `cache-publish` warning — the
-            sub-session holds the reporter, the build seam does not.
+        ctx: The session's cache state, threaded into every build step. A
+            publication failure it reports is emitted here as a `cache-publish`
+            warning — the sub-session holds the reporter, the build seam does
+            not.
+        admissions: The run's admission accumulator, which every build step in
+            this sub-session charges. Shared with the rest of the run, so a
+            selection run's compiles reach the terminal artifacts.
 
     Returns:
         What the sub-session folds back into `run_session`.
@@ -967,6 +972,7 @@ def _run_selection[
                     include_paths,
                     reg,
                     ctx,
+                    admissions,
                     attempts_used=step.attempt if step.recovering else 1,
                     recovering=step.recovering,
                 )

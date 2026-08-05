@@ -7,7 +7,12 @@ and make two different builds hash alike. Second, `MetaFile.parse` is total:
 a truncated, corrupt, or hand-edited file returns `None` so the caller treats
 the generation as a miss and rebuilds, rather than serving a wrong binary.
 """
-from std.testing import TestSuite, assert_equal, assert_true
+from std.testing import (
+    TestSuite,
+    assert_equal,
+    assert_false,
+    assert_true,
+)
 
 from mtest.cache import (
     ARG_FLAG,
@@ -19,6 +24,7 @@ from mtest.cache import (
     MetaFile,
     classify_build_args,
     generation_name,
+    unsafe_tag_reason,
 )
 
 
@@ -41,6 +47,44 @@ def test_newline_payload_cannot_forge_frames() raises:
     b.feed_str("arg", " two")
     if a^.digest_full() == b^.digest_full():
         raise Error("length-prefixed frames must not be forgeable")
+
+
+def test_a_tag_holding_a_nul_is_refused_by_name_and_position() raises:
+    # `feed` writes the tag bytes then one NUL, so a tag carrying its own NUL
+    # forges a frame boundary and two different builds key alike. The reason
+    # names the position rather than the tag: the tag cannot be quoted safely.
+    assert_equal(unsafe_tag_reason(["toolchain", "root"]), "")
+    assert_equal(
+        unsafe_tag_reason(["root", String("a\x00b")]),
+        "cache key tag 1 contains a NUL byte",
+    )
+    assert_equal(unsafe_tag_reason([""]), "cache key tag 0 is empty")
+
+
+def test_a_base_tag_wearing_a_reserved_suffix_is_refused() raises:
+    # `feed_file` derives `tag + ".size"` and `tag + ".sha"`, so a base tag
+    # already spelled that way collides with another tag's derived frames.
+    assert_equal(
+        unsafe_tag_reason(["source.size"]),
+        "cache key tag 'source.size' ends in the reserved '.size' suffix",
+    )
+    assert_equal(
+        unsafe_tag_reason(["source.sha"]),
+        "cache key tag 'source.sha' ends in the reserved '.sha' suffix",
+    )
+
+
+def test_feed_accepts_exactly_the_tags_feed_file_derives() raises:
+    # The asymmetry is deliberate and load-bearing: `feed_file` hands `feed` the
+    # two suffixed tags it just built, so the rule that refuses a BASE tag
+    # wearing either suffix must never reach the frames `feed_file` derives.
+    var a = KeyBuilder()
+    a.feed_file("source", "tests/a.mojo", 3, "ab")
+    var b = KeyBuilder()
+    b.feed_str("source", "tests/a.mojo")
+    b.feed_str("source.size", "3")
+    b.feed_str("source.sha", "ab")
+    assert_equal(a^.digest_full(), b^.digest_full())
 
 
 def test_digest32_is_prefix_of_full() raises:

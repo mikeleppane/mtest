@@ -31,7 +31,7 @@ from mtest.session.build import (
     _build_for_selection,
     _probe_file,
 )
-from mtest.session.file_result import FileResult
+from mtest.session.file_result import CacheAdmissions, FileResult
 from mtest.session.effective_settings import (
     _compat_resolved_config,
     effective_file_settings,
@@ -170,6 +170,9 @@ def run_collect(
         ctx = CacheContext.disabled("--no-cache")
     else:
         ctx = collect_env_base(runtime, config, root)
+    # Collect reports a node-id listing, never a run's admissions: the
+    # accumulator the shared build path charges is local and discarded.
+    var admissions = CacheAdmissions.zeros()
     var includes = config.include_paths.copy()
     var node_ids = List[String]()
     var diags = List[String]()
@@ -251,7 +254,15 @@ def run_collect(
             var bo: _BuildOutcome
             try:
                 bo = _build_for_selection(
-                    runtime, config, settings, root, rel, includes, reg, ctx
+                    runtime,
+                    config,
+                    settings,
+                    root,
+                    rel,
+                    includes,
+                    reg,
+                    ctx,
+                    admissions,
                 )
             except:
                 diags.append(

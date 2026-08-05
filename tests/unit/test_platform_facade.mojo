@@ -1,5 +1,5 @@
 """What `mtest.platform` re-exports: `EINTR`, the four `S_IF*` mode values,
-and the raw fd primitives.
+`path_kind`, and the raw fd primitives.
 
 A POSIX constant centralized at one owning site is only actually centralized
 if the facade re-exports the same name callers reach for, and if the value is
@@ -7,7 +7,7 @@ the real POSIX one rather than a copy that drifted. These tests pin both: the
 values against a real `lstat` and a real fd, not just the numeral.
 """
 from std.os import lstat, mkdir, symlink
-from std.testing import assert_equal, assert_true, TestSuite
+from std.testing import assert_equal, assert_raises, assert_true, TestSuite
 
 from mtest.platform import (
     CreatResult,
@@ -19,6 +19,7 @@ from mtest.platform import (
     close_fd,
     create_truncate_fd_guarded,
     errno_now,
+    path_kind,
     read_fd,
     write_fd,
 )
@@ -57,6 +58,38 @@ def test_s_ifmt_classifies_a_real_file_dir_and_symlink() raises:
         assert_equal(file_mode & S_IFMT, S_IFREG)
         assert_equal(dir_mode & S_IFMT, S_IFDIR)
         assert_equal(link_mode & S_IFMT, S_IFLNK)
+    finally:
+        remove_tree(root)
+
+
+def test_path_kind_reports_the_link_never_its_target() raises:
+    """The one property every no-follow caller depends on: a symlink to a
+    directory reports `S_IFLNK`, not the `S_IFDIR` a following stat would."""
+    var root = temp_root()
+    try:
+        var file_path = root + "/plain"
+        with open(file_path, "w") as destination:
+            destination.write("x")
+        var dir_path = root + "/sub"
+        mkdir(dir_path)
+        symlink(file_path, root + "/file_link")
+        symlink(dir_path, root + "/dir_link")
+
+        assert_equal(path_kind(file_path), S_IFREG)
+        assert_equal(path_kind(dir_path), S_IFDIR)
+        assert_equal(path_kind(root + "/file_link"), S_IFLNK)
+        assert_equal(path_kind(root + "/dir_link"), S_IFLNK)
+    finally:
+        remove_tree(root)
+
+
+def test_path_kind_raises_for_a_path_it_cannot_characterize() raises:
+    """An absent path is an error rather than a kind, so a caller cannot read
+    "not a directory" out of a question the filesystem never answered."""
+    var root = temp_root()
+    try:
+        with assert_raises():
+            _ = path_kind(root + "/absent")
     finally:
         remove_tree(root)
 

@@ -69,6 +69,7 @@ from mtest.session.effective_settings import (
     effective_file_settings,
 )
 from mtest.session.file_result import (
+    CacheAdmissions,
     RunTally,
     _failing_count,
     settle_file,
@@ -172,23 +173,25 @@ def _warn_cache_off[
 
 
 def _absorb_batch(
-    mut tally: RunTally, mut ctx: CacheContext, batch: PoolBatchResult
+    mut tally: RunTally,
+    mut admissions: CacheAdmissions,
+    batch: PoolBatchResult,
 ):
     """Fold one pooled batch's whole result into the session.
 
-    The batch's cache admissions land on the session's one context here rather
+    The batch's cache admissions land on the run's one accumulator here rather
     than being counted inside the batch: the gate, parallel, and serial batches
     each account for themselves, and every fold happens long before the terminal
     artifacts read the totals.
 
     Args:
         tally: The session accumulator every driver's work lands in.
-        ctx: The session's cache state, whose admission counters advance.
+        admissions: The run's admission accumulator, which the batch's charges
+            are added to.
         batch: The finished batch. Copied, not consumed.
     """
     tally.merge(batch.tally)
-    ctx.built_files += batch.built_files
-    ctx.cached_files += batch.cached_files
+    admissions.merge(batch.admissions)
 
 
 def _is_gate_file(gate_files: List[String], path: String) -> Bool:
@@ -500,6 +503,9 @@ def run_session[
     # the gate loop and the plain run loop settle straight into it, and the
     # selection sub-session and each pooled batch fold theirs back into it.
     var tally = RunTally.zeros()
+    # The run's build-cache accounting, charged by every driver and read once
+    # by both terminal artifacts after the last file has settled.
+    var admissions = CacheAdmissions.zeros()
     # The console report is the run's primary output, so a destination
     # that would not take it is a delivery failure the model ranks —
     # latched across every drain, both drivers, and never cleared.
@@ -648,7 +654,7 @@ def run_session[
             console_fd,
             ctx,
         )
-        _absorb_batch(tally, ctx, gb)
+        _absorb_batch(tally, admissions, gb)
     if proceed and resolved_workers <= 1:
         for gi in range(len(disc.gate_files)):
             if interrupt_requested():
@@ -670,6 +676,7 @@ def run_session[
                     disc.gate_files[gi],
                     includes,
                     ctx,
+                    admissions,
                 )
                 if fr.interrupted:
                     tally.interrupted = True
@@ -742,6 +749,7 @@ def run_session[
             summary,
             reg,
             ctx,
+            admissions,
         )
         tally.merge(sel.tally)
     elif proceed_runs and resolved_workers > 1:
@@ -780,7 +788,7 @@ def run_session[
             console_fd,
             ctx,
         )
-        _absorb_batch(tally, ctx, rb)
+        _absorb_batch(tally, admissions, rb)
 
         # The serial pass runs at capacity one AFTER the parallel batch drains.
         # Capacity one is the whole-pipeline drain: a single Supervisor slot
@@ -814,7 +822,7 @@ def run_session[
                 serial=True,
                 initial_failing=_failing_count(rb.tally.run_outcomes),
             )
-            _absorb_batch(tally, ctx, sb)
+            _absorb_batch(tally, admissions, sb)
     elif proceed_runs:
         if config.failed_first and ff_has_match:
             var ordered = order_failed_first(
@@ -858,6 +866,7 @@ def run_session[
                     disc.run_files[ri],
                     includes,
                     ctx,
+                    admissions,
                 )
                 if fr.interrupted:
                     tally.interrupted = True
@@ -1003,18 +1012,17 @@ def run_session[
     # makes this a no-op whenever the warning already fired up top.
     _warn_cache_off(ctx, config, reporter)
 
-    # The run-wide build-cache accounting, stated once and read by BOTH terminal
-    # artifacts below: the JUnit finalize (which has no event to ride, so the
-    # counters travel on the call) and the SessionFinished payload. The build
-    # seams keep the counts on the session's one `CacheContext` and they are
-    # folded HERE, ahead of both, so the XML and the JSON stream can never carry
-    # different numbers. The rule those seams obey: `built_files` counts a
-    # FIRST-ATTEMPT compile admission, compile FAILURES included; `cached_files`
-    # a cache-hit admission; retries, probes and precompile steps count as
-    # neither. So `built_files + cached_files == first-attempt compile
-    # admissions`, gates included.
-    var built_files = ctx.built_files
-    var cached_files = ctx.cached_files
+    # The run-wide build-cache accounting, read once here and handed to BOTH
+    # terminal artifacts below: the JUnit finalize (which has no event to ride,
+    # so the counts travel on the call) and the SessionFinished payload. Every
+    # driver charges the run's one accumulator, and it is read HERE, ahead of
+    # both, so the XML and the JSON stream can never carry different numbers.
+    # The rule the drivers obey: `built` counts a FIRST-ATTEMPT compile
+    # admission, compile FAILURES included; `cached` a cache-hit admission;
+    # retries, probes and precompile steps count as neither. So
+    # `built + cached == first-attempt compile admissions`, gates included.
+    var built_files = admissions.built
+    var cached_files = admissions.cached
     var junit_fin = reporter.finalize_junit(built_files, cached_files)
     var finalize_failed = junit_fin.failed
     if finalize_failed:

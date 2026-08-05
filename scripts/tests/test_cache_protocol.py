@@ -12,7 +12,7 @@ one call at a time. Five properties are invisible from there.
 - Faults in a window no fake compiler can reach. The two windows worth
   faulting, before the durability flush and between the flush and the commit
   rename, are inside mtest's own process after the compiler child has exited.
-  `src/mtest/session/store.mojo` therefore carries a test-only seam,
+  `src/mtest/session/store/artifact.mojo` therefore carries a test-only seam,
   `MTEST_STORE_FAULT`, which these scenarios drive from the environment; see
   that module's docstring for what each value abandons.
 - The build window itself. Whether publication refuses an input that was

@@ -50,7 +50,11 @@ from mtest.session.classify import (
     classify,
     resolve_report,
 )
-from mtest.session.file_result import FileResult, _prepend_events
+from mtest.session.file_result import (
+    CacheAdmissions,
+    FileResult,
+    _prepend_events,
+)
 from mtest.session.effective_settings import EffectiveFileSettings
 from mtest.session.retry_class import RetryClass, retry_classify
 from mtest.session.scratch import (
@@ -803,6 +807,7 @@ def _run_one(
     rel: String,
     include_paths: List[String],
     mut ctx: CacheContext,
+    mut admissions: CacheAdmissions,
 ) raises -> FileResult:
     """Build `rel`, execute it, and retry a crash-class failure up to budget.
 
@@ -835,10 +840,11 @@ def _run_one(
         root: The invocation root the child processes run in.
         rel: The root-relative path of the file to build and run.
         include_paths: Directories passed to the compiler as `-I`.
-        ctx: The session's cache state. Its counters are advanced here — one
-            `built_files` per first-attempt compile admission (compile failures
-            included), one `cached_files` per hit — and it is switched off if
-            this file proves the store unusable.
+        ctx: The session's cache state, switched off if this file proves the
+            store unusable.
+        admissions: The run's admission accumulator. Exactly one admission is
+            charged here — `built` when the file reaches the compiler (compile
+            failures included), `cached` on a store hit.
 
     Returns:
         The file's terminal result, with each non-final attempt's events
@@ -907,7 +913,7 @@ def _run_one(
         prior_bterm = Termination.exited(0)
         prior_bdur = staging.build_seconds
         store_hit = True
-        ctx.cached_files += 1
+        admissions.cached += 1
     else:
         seam_stage(ctx, staging, root, mangled)
         if staging.target.ok():
@@ -919,8 +925,8 @@ def _run_one(
         # whatever the compiler goes on to say about it. The spawn happens one
         # call down, inside `_single_attempt`, so counting on the way back would
         # quietly drop every compile error out of the accounting and break
-        # `built_files + cached_files == first-attempt admissions`.
-        ctx.built_files += 1
+        # `built + cached == first-attempt admissions`.
+        admissions.built += 1
 
     var attempt_index = 1
     while True:

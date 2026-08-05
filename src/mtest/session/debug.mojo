@@ -42,7 +42,7 @@ from mtest.session.build import (
     _build_for_selection,
     _probe_file,
 )
-from mtest.session.file_result import FileResult
+from mtest.session.file_result import CacheAdmissions, FileResult
 from mtest.session.effective_settings import (
     _compat_resolved_config,
     effective_file_settings,
@@ -468,8 +468,11 @@ def prepare_debug(
     settings.retries = 0
 
     var reg = BuildRegistry()
+    # Collecting a debug plan builds one file, and nothing downstream of here
+    # reports a run's admissions: the accumulator is local and discarded.
+    var admissions = CacheAdmissions.zeros()
     var bo = _build_for_selection(
-        runtime, config, settings, root, rel, includes, reg, ctx
+        runtime, config, settings, root, rel, includes, reg, ctx, admissions
     )
     if bo.terminal:
         return _from_build(rel, bo)
