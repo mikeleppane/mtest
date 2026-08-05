@@ -74,6 +74,12 @@ MATRIX = [
 # treated as crash streams and collapsed to <STACK-DUMP>.
 CRASH_FIXTURES = {"crashing", "segfault"}
 
+# The `mojo --version` banner, as the pinned toolchain prints it. Named here
+# because the header this generator stamps is read back by other tooling, and a
+# second spelling of the same pattern would let the writer and the reader
+# disagree about what a toolchain identity looks like.
+MOJO_VERSION_RE = re.compile(r"Mojo (\S+) \(([0-9a-f]+)\)")
+
 # --- Normalization patterns --------------------------------------------------
 RUNNING_RE = re.compile(r"^Running \d+ tests for ")
 REPORT_LINE_RE = re.compile(r"^(    (?:PASS|FAIL|SKIP)) \[ [^\]]* \] (.*)$")
@@ -103,7 +109,7 @@ def toolchain() -> tuple[str, str]:
     out = subprocess.run(
         ["mojo", "--version"], check=True, capture_output=True, text=True
     ).stdout.strip()
-    m = re.search(r"Mojo (\S+) \(([0-9a-f]+)\)", out)
+    m = MOJO_VERSION_RE.search(out)
     if not m:
         raise GenError(f"cannot parse mojo version from: {out!r}")
     return m.group(1), m.group(2)
