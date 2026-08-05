@@ -241,6 +241,22 @@ _CONTRACT_FAILURE = re.compile(
     r"^  - (?P<name>.+?)  \((?P<ref>.+?)\): (?P<detail>.*)$", re.MULTILINE
 )
 
+# What that gate exits when a contract check failed. It exits 2 for a setup
+# failure — no toolchain, a binary it will not build, a roster it cannot vouch
+# for — and 0 when everything passed, and pixi hands the task's code straight
+# back, so any other value describes a run that did not end the way the roster
+# printed above it says.
+CONTRACT_FAILURE_EXIT = 1
+
+# How many checks that gate performs when nothing narrows it. Independently
+# transcribed from `scripts.qa.contract.EXPECTED_CHECK_NAMES`, which a test
+# reconciles this against, because importing the gate here would put its
+# module-level repository lookup into the import graph of the privileged
+# notifier. Without the count, `0 passed, 3 failed` reconciled perfectly
+# against itself: three counted, three named, all three tolerated, and a gate
+# that had exercised none of the contract was read as an ordinary probe day.
+EXPECTED_CONTRACT_CHECKS = 127
+
 # Stands in for a toolchain identity the probe never got to observe.
 UNKNOWN = "unknown"
 _UNKNOWN = ResolvedToolchain(UNKNOWN, UNKNOWN)
@@ -747,6 +763,9 @@ class ContractReport:
     """What one strict contract run said about its own roster.
 
     Attributes:
+        passed: How many checks its summary line counted as passed. Read rather
+            than discarded because the three counts together are the only
+            statement the gate makes about how much of its roster it performed.
         failed: How many checks its summary line counted as failed.
         skipped: How many it counted as skipped. Under `--strict` a skip fails
             the gate without ever reaching the roll-call, so this count is the
@@ -755,9 +774,15 @@ class ContractReport:
             its detail.
     """
 
+    passed: int
     failed: int
     skipped: int
     failures: tuple[tuple[str, str], ...]
+
+    @property
+    def accounted(self) -> int:
+        """How many checks the summary line accounts for in total."""
+        return self.passed + self.failed + self.skipped
 
 
 def read_contract_report(stdout: str) -> ContractReport | None:
@@ -776,6 +801,7 @@ def read_contract_report(stdout: str) -> ContractReport | None:
         return None
     summary = summaries[0]
     return ContractReport(
+        passed=int(summary.group("passed")),
         failed=int(summary.group("failed")),
         skipped=int(summary.group("skipped")),
         failures=tuple(
@@ -795,15 +821,26 @@ def contract_verdict(result: CommandResult, *, toolchain_moved: bool) -> str | N
 
     It is drawn as narrowly as the gate's own reporting allows: the failing set
     must be *exactly* `TOLERATED_CONTRACT_FAILURES`, check name and reported
-    detail both. One extra failure condemns; one extra clause inside a
-    tolerated check's detail condemns; a skip, which `--strict` fails the gate
-    for without printing a roll-call entry, condemns; a roll-call that does not
-    account for the count printed above it condemns, in either direction,
+    detail both, each named exactly once. One extra failure condemns; one extra
+    clause inside a tolerated check's detail condemns; the same tolerated check
+    reported twice condemns, because membership is not multiplicity and a
+    roll-call that repeats itself is not one; a skip, which `--strict` fails the
+    gate for without printing a roll-call entry, condemns; a roll-call that does
+    not account for the count printed above it condemns, in either direction,
     because a reader who cannot match the two cannot say every failure was
     tolerable. And a run where the identity checks did *not* fail condemns too:
     on a moved toolchain they must, so a gate whose other checks failed while
     they passed is a gate whose guard has stopped guarding, which is a finding
     rather than a licence.
+
+    Two of those readings are about the run rather than the roster, and they
+    exist because a roster is only worth reading if the run that printed it did
+    what it says. The three counts must add up to `EXPECTED_CONTRACT_CHECKS`,
+    or a gate reduced to performing three checks reconciles perfectly against
+    itself while having exercised none of the contract. And the exit status
+    must be `CONTRACT_FAILURE_EXIT`: that gate exits 2 for a setup failure and
+    0 for a clean run, so the tolerated roster under any other code describes a
+    run that printed its account and then ended some other way.
 
     This is asked of every run of that gate rather than of the failing ones
     alone, and the difference is the whole point. An exit of 0 is not the
@@ -837,10 +874,23 @@ def contract_verdict(result: CommandResult, *, toolchain_moved: bool) -> str | N
             f"the strict contract gate skipped {report.skipped} check(s), and a "
             "skip is not a pass"
         )
+    if report.accounted != EXPECTED_CONTRACT_CHECKS:
+        return (
+            f"the strict contract gate accounted for {report.accounted} checks "
+            f"and this repository defines {EXPECTED_CONTRACT_CHECKS}, so it did "
+            "not run the roster its tolerance is written against"
+        )
     if report.failed != len(report.failures):
         return (
             f"the strict contract gate counted {report.failed} failures and named "
             f"{len(report.failures)}, so its roll-call cannot be read"
+        )
+    named = [name for name, _detail in report.failures]
+    repeated = tuple(sorted({name for name in named if named.count(name) > 1}))
+    if repeated:
+        return (
+            "the strict contract gate named a failing check more than once, so "
+            f"its roll-call is not a roll-call: {', '.join(repeated)}"
         )
     unexpected = tuple(
         f"{name} ({detail})"
@@ -852,7 +902,6 @@ def contract_verdict(result: CommandResult, *, toolchain_moved: bool) -> str | N
             "strict contract checks failed outside mtest's toolchain-identity "
             f"report: {'; '.join(unexpected)}"
         )
-    named = {name for name, _detail in report.failures}
     absent = tuple(
         name for name, _detail in TOLERATED_CONTRACT_FAILURES if name not in named
     )
@@ -861,6 +910,13 @@ def contract_verdict(result: CommandResult, *, toolchain_moved: bool) -> str | N
             "the strict contract gate did not fail the checks a moved toolchain "
             f"must fail: {', '.join(absent)}; mtest's pinned-identity guard has "
             "stopped guarding"
+        )
+    if result.returncode != CONTRACT_FAILURE_EXIT:
+        return (
+            f"the strict contract gate named the failures a moved toolchain "
+            f"produces and then exited {result.returncode}; that gate exits "
+            f"{CONTRACT_FAILURE_EXIT} for a contract failure, so this run did not "
+            "end the way its own roster says it did"
         )
     if not toolchain_moved:
         return (

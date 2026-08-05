@@ -177,14 +177,23 @@ _CANDIDATES = _search_answer(CANDIDATE.version)
 
 
 def _contract_output(
-    *failures: tuple[str, str], passed: int = 124, skipped: int = 0
+    *failures: tuple[str, str], passed: int | None = None, skipped: int = 0
 ) -> str:
     """Render `contract-check-strict` output the way that gate really prints it.
 
     Independently transcribed from `scripts/qa/contract.py`'s own format
     strings: one summary line, then a roll-call naming each failing check, its
     contract reference, and the first line of its detail.
+
+    `passed` defaults to whatever leaves the three counts adding up to the
+    gate's whole roster, which is the arithmetic every unfiltered run of it
+    produces. Pinned at a literal instead, these fixtures described runs that
+    had performed a different number of checks each time — and a probe reading
+    the summary as a statement about coverage has to be given summaries that
+    are one.
     """
+    if passed is None:
+        passed = len(EXPECTED_CHECK_NAMES) - len(failures) - skipped
     lines = [
         f"\n===== {passed} passed, {len(failures)} failed, {skipped} skipped ====="
     ]
@@ -724,7 +733,10 @@ class E2eGuardTests(CanaryTestCase):
 
 
 def _contract_result(
-    *failures: tuple[str, str], passed: int = 124, skipped: int = 0, exit_code: int = 1
+    *failures: tuple[str, str],
+    passed: int | None = None,
+    skipped: int = 0,
+    exit_code: int = 1,
 ) -> CommandResult:
     """A completed `contract-check-strict` reporting exactly these failures."""
     return CommandResult(
@@ -865,6 +877,75 @@ class ContractGuardTests(CanaryTestCase):
         self.assertNotEqual(truncated.stdout, whole.stdout)
         verdict = contract_verdict(truncated, toolchain_moved=True)
         self.assertIsNotNone(verdict)
+
+    def test_only_the_exit_a_contract_failure_produces_is_accepted(self) -> None:
+        """The roster was parsed out of stdout and the exit code never read.
+
+        `scripts/qa/contract.py` returns 1 for a contract failure, 2 for a
+        setup failure or a roster it cannot vouch for, and 0 when everything
+        passed, and pixi hands that code straight back. So the same three
+        tolerated lines under exit 2, 124 or -9 describe a gate that printed a
+        roster and then did something else entirely — a scaffold that could not
+        be built, a stage the kernel killed — and every one of them was read as
+        the ordinary moved-toolchain day and reported `PASS`.
+        """
+        for exit_code in (2, 124, -9):
+            with self.subTest(exit_code=exit_code):
+                verdict = contract_verdict(
+                    _contract_result(*_IDENTITY_FAILURES, exit_code=exit_code),
+                    toolchain_moved=True,
+                )
+                self.assertIsNotNone(verdict)
+                self.assertIn(str(exit_code), str(verdict))
+
+    def test_a_duplicated_tolerated_failure_condemns(self) -> None:
+        """Membership is not multiplicity, and the roll-call is a roll-call.
+
+        Three tolerated names, each reported twice, is a gate that ran its
+        checks more than once or a reader that has lost the boundary between
+        entries. Tested with `in`, all six lines were tolerated and the count
+        reconciled against itself, so the run passed.
+        """
+        verdict = contract_verdict(
+            _contract_result(*_IDENTITY_FAILURES, *_IDENTITY_FAILURES, passed=121),
+            toolchain_moved=True,
+        )
+        self.assertIsNotNone(verdict)
+        self.assertIn("more than once", str(verdict))
+
+    def test_a_gate_that_ran_only_the_tolerated_checks_condemns(self) -> None:
+        """`0 passed, 3 failed` is not the day this tolerance was written for.
+
+        Reconciled against the failure count alone, a run that performed three
+        checks out of the whole roster balanced perfectly: three counted, three
+        named, all three tolerated. What it actually describes is a gate that
+        never exercised the contract at all, and the candidate that reduced it
+        to that was reported as `PASS`.
+        """
+        verdict = contract_verdict(
+            _contract_result(*_IDENTITY_FAILURES, passed=0), toolchain_moved=True
+        )
+        self.assertIsNotNone(verdict)
+        self.assertIn("3", str(verdict))
+        self.assertIn(str(canary_run.EXPECTED_CONTRACT_CHECKS), str(verdict))
+
+    def test_the_expected_check_count_is_the_gates_own(self) -> None:
+        """A ledger that drifted would let a shrunken roster reconcile again."""
+        self.assertEqual(canary_run.EXPECTED_CONTRACT_CHECKS, len(EXPECTED_CHECK_NAMES))
+
+    def test_the_ordinary_day_still_reconciles(self) -> None:
+        # The negative control for the three checks above: the gate's real
+        # arithmetic on a moved toolchain has to keep passing all of them.
+        self.assertIsNone(
+            contract_verdict(
+                _contract_result(
+                    *_IDENTITY_FAILURES,
+                    passed=canary_run.EXPECTED_CONTRACT_CHECKS - 3,
+                    exit_code=1,
+                ),
+                toolchain_moved=True,
+            )
+        )
 
     def test_identity_failures_condemn_an_unmoved_toolchain(self) -> None:
         verdict = contract_verdict(
