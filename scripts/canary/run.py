@@ -64,6 +64,7 @@ from scripts.canary.protocol_compare import (
 )
 from scripts.canary.toolchain import (
     DOCTOR_PREFIX,
+    FORCE_ENV_VALUE,
     FORCE_ENV_VAR,
     LANES,
     STABLE_LANE,
@@ -735,7 +736,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     out_dir: Path = args.out if args.out is not None else args.repo / "build" / "canary"
     if args.force:
-        os.environ[FORCE_ENV_VAR] = "1"
+        os.environ[FORCE_ENV_VAR] = FORCE_ENV_VALUE
 
     try:
         result = classify(args.repo, args.lane, run=subprocess_runner(args.repo))

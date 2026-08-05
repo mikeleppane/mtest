@@ -54,6 +54,7 @@ from scripts.canary.run import (
     search_versions,
 )
 from scripts.canary.toolchain import (
+    CI_ENV_VAR,
     DOCTOR_PREFIX,
     FORCE_ENV_VAR,
     NIGHTLY_CHANNEL,
@@ -63,6 +64,7 @@ from scripts.canary.toolchain import (
     candidate_channels,
     candidate_matchspec,
     floor_matchspec,
+    mutation_permitted,
     pin_recipe_to_candidate,
     relax_workspace_pin,
     relaxed_spec,
@@ -258,6 +260,39 @@ class MutationGuardTests(CanaryTestCase):
             pin_recipe_to_candidate(repo, CANDIDATE)
         self.assertIn("GITHUB_ACTIONS", str(raised.exception))
         self.assertEqual(recipe.read_text(encoding="utf-8"), before)
+
+    def test_a_marker_that_denies_ci_permits_nothing(self) -> None:
+        # `GITHUB_ACTIONS=false` is what a step exports to say it is NOT
+        # hosted, and `MTEST_CANARY_FORCE=0` is how an operator spells "not
+        # this time". Reading either as "set, therefore permitted" turned both
+        # into authorization to rewrite a contributor's tracked files.
+        repo = _copy_repo(self.root)
+        before = (repo / "pixi.toml").read_text(encoding="utf-8")
+        for variable, value in (
+            (CI_ENV_VAR, "false"),
+            (CI_ENV_VAR, "0"),
+            (CI_ENV_VAR, "no"),
+            (FORCE_ENV_VAR, "0"),
+            (FORCE_ENV_VAR, "false"),
+        ):
+            with (
+                self.subTest(variable=variable, value=value),
+                mock.patch.dict(os.environ, {variable: value}, clear=True),
+            ):
+                self.assertFalse(mutation_permitted())
+                with self.assertRaises(ToolchainError):
+                    relax_workspace_pin(repo, STABLE)
+        self.assertEqual((repo / "pixi.toml").read_text(encoding="utf-8"), before)
+
+    def test_only_the_documented_values_permit_a_rewrite(self) -> None:
+        # Independently transcribed: GitHub exports `GITHUB_ACTIONS=true`, and
+        # `--force` exports `MTEST_CANARY_FORCE=1`.
+        for variable, value in ((CI_ENV_VAR, "true"), (FORCE_ENV_VAR, "1")):
+            with (
+                self.subTest(variable=variable),
+                mock.patch.dict(os.environ, {variable: value}, clear=True),
+            ):
+                self.assertTrue(mutation_permitted())
 
     def test_an_explicit_force_permits_both_outside_ci(self) -> None:
         repo = _copy_repo(self.root)

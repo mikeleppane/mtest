@@ -45,9 +45,11 @@ if TYPE_CHECKING:
 # GitHub sets this to "true" in every hosted step. Its absence means a
 # developer's checkout, where rewriting tracked files would destroy work.
 CI_ENV_VAR = "GITHUB_ACTIONS"
+CI_ENV_VALUE = "true"
 # The deliberate escape hatch, set by `scripts.canary.run --force`. Named in
 # the environment so it survives into any child that repeats a rewrite.
 FORCE_ENV_VAR = "MTEST_CANARY_FORCE"
+FORCE_ENV_VALUE = "1"
 
 STABLE_LANE = "stable"
 NIGHTLY_LANE = "nightly"
@@ -119,10 +121,19 @@ class ResolvedToolchain:
 def mutation_permitted() -> bool:
     """Report whether this process may rewrite tracked files.
 
+    Each variable is compared against its exact documented value rather than
+    tested for presence. `GITHUB_ACTIONS=false` is the spelling a step uses to
+    say it is *not* hosted, and `MTEST_CANARY_FORCE=0` is how an operator turns
+    the override off; reading either as "set, therefore permitted" would make
+    both of them authorization to rewrite a contributor's tracked files.
+
     Returns:
         True on a hosted run, or when the force override is set.
     """
-    return bool(os.environ.get(CI_ENV_VAR)) or bool(os.environ.get(FORCE_ENV_VAR))
+    return (
+        os.environ.get(CI_ENV_VAR) == CI_ENV_VALUE
+        or os.environ.get(FORCE_ENV_VAR) == FORCE_ENV_VALUE
+    )
 
 
 def _require_mutation_permission(action: str) -> None:
@@ -136,9 +147,9 @@ def _require_mutation_permission(action: str) -> None:
     """
     if not mutation_permitted():
         raise ToolchainError(
-            f"refusing to {action}: {CI_ENV_VAR} is unset, so this looks like a "
-            f"working checkout rather than a throwaway CI one. Set "
-            f"{FORCE_ENV_VAR}=1 (or pass --force) to override."
+            f"refusing to {action}: {CI_ENV_VAR} is not {CI_ENV_VALUE!r}, so this "
+            f"looks like a working checkout rather than a throwaway CI one. Set "
+            f"{FORCE_ENV_VAR}={FORCE_ENV_VALUE} (or pass --force) to override."
         )
 
 
