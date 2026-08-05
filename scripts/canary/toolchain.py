@@ -53,9 +53,11 @@ STABLE_LANE = "stable"
 NIGHTLY_LANE = "nightly"
 LANES = (STABLE_LANE, NIGHTLY_LANE)
 
-# Modular publishes nightly builds to their own channel; the stable lane must
-# never see them, which is why the channel is added per lane rather than pinned
-# into the manifest.
+# Modular publishes prereleases to their own channel; the stable lane must never
+# see them, which is why the channel is added per lane rather than pinned into
+# the manifest. Verified against the live index: this channel serves `mojo` and
+# `mojo-compiler` for both gated subdirs, and is where the only versions newer
+# than the current pin are published today.
 NIGHTLY_CHANNEL = "https://conda.modular.com/max-nightly/"
 
 # The e2e scenarios that report the toolchain mtest found. They legitimately
@@ -65,10 +67,13 @@ DOCTOR_PREFIX = "doctor-"
 # The workspace's mojo dependency, in both the committed spelling and the
 # relaxed one this module writes. One pattern reads both so the pin can be
 # looked up whether or not the relaxation has already happened.
-_WORKSPACE_SPEC = re.compile(r'^mojo = "(==|>)([^",]+),<2"$', re.MULTILINE)
+_WORKSPACE_SPEC = re.compile(
+    r'^mojo = "(?P<spec>(?P<operator>==|>)(?P<version>[^",]+),<2)"$', re.MULTILINE
+)
 
-# The channel list this module prepends the nightly channel to.
-_CHANNELS = re.compile(r"^channels = \[", re.MULTILINE)
+# The workspace's channel list, and the entries inside it.
+_CHANNELS = re.compile(r"^channels = \[(?P<items>[^\]]*)\]$", re.MULTILINE)
+_CHANNEL_ENTRY = re.compile(r'"([^"]*)"')
 
 # The three compiler pins, as (requirements section, package name). `mojo` is
 # the driver that runs on the build machine; `mojo-compiler` owns the runtime
@@ -144,7 +149,7 @@ def workspace_pin(repo: Path) -> str:
         OSError: `pixi.toml` cannot be read.
     """
     text = (repo / "pixi.toml").read_text(encoding="utf-8")
-    return _sole_workspace_spec(text).group(2)
+    return _sole_workspace_spec(text).group("version")
 
 
 def _sole_workspace_spec(text: str) -> re.Match[str]:
@@ -168,6 +173,101 @@ def _sole_workspace_spec(text: str) -> re.Match[str]:
             "to say which toolchain this checkout resolves"
         )
     return matches[0]
+
+
+def relaxed_spec(pin: str) -> str:
+    """Render the version spec admitting every toolchain newer than the pin.
+
+    The upper bound is kept: this project probes the next release of the line
+    it targets, not the next major, whose incompatibilities would be a
+    different question with a different answer.
+
+    Args:
+        pin: The pinned version.
+
+    Returns:
+        A conda version spec, for example `>1.0.0b2,<2`.
+    """
+    return f">{pin},<2"
+
+
+def candidate_matchspec(pin: str) -> str:
+    """Render the package match a candidate toolchain has to satisfy.
+
+    Args:
+        pin: The pinned version.
+
+    Returns:
+        A conda matchspec naming the package and the relaxed version spec.
+    """
+    return f"mojo {relaxed_spec(pin)}"
+
+
+def _sole_channel_list(text: str) -> re.Match[str]:
+    """Locate the manifest's one and only channel list.
+
+    Args:
+        text: The contents of `pixi.toml`.
+
+    Returns:
+        The match, whose `items` group spans the quoted entries.
+
+    Raises:
+        ToolchainError: There is not exactly one channel list.
+    """
+    matches = list(_CHANNELS.finditer(text))
+    if len(matches) != 1:
+        raise ToolchainError(
+            f"pixi.toml names {len(matches)} channel lists; exactly one is "
+            "required to say where a toolchain would come from"
+        )
+    return matches[0]
+
+
+def workspace_channels(repo: Path) -> tuple[str, ...]:
+    """Read the channels the workspace manifest resolves against.
+
+    Args:
+        repo: A checkout root holding `pixi.toml`.
+
+    Returns:
+        The channel names or URLs, in manifest order.
+
+    Raises:
+        ToolchainError: The manifest does not hold exactly one channel list.
+        OSError: `pixi.toml` cannot be read.
+    """
+    text = (repo / "pixi.toml").read_text(encoding="utf-8")
+    return tuple(_CHANNEL_ENTRY.findall(_sole_channel_list(text).group("items")))
+
+
+def candidate_channels(repo: Path, lane: str) -> tuple[str, ...]:
+    """List the channels a lane may draw a candidate toolchain from.
+
+    These are the channels the search is asked about and, after
+    `relax_workspace_pin`, the ones the install resolves against — one
+    derivation, so the probe cannot screen against a different index than the
+    solver later reads.
+
+    Args:
+        repo: A checkout root holding `pixi.toml`.
+        lane: `stable` or `nightly`.
+
+    Returns:
+        The workspace's own channels, with the nightly channel ahead of them on
+        the nightly lane.
+
+    Raises:
+        ToolchainError: The lane is unknown, or the manifest does not hold
+            exactly one channel list.
+        OSError: `pixi.toml` cannot be read.
+    """
+    if lane not in LANES:
+        raise ToolchainError(f"unknown canary lane {lane!r}; expected one of {LANES}")
+    channels = workspace_channels(repo)
+    if lane == NIGHTLY_LANE:
+        return (NIGHTLY_CHANNEL, *channels)
+    return channels
 
 
 def relax_workspace_pin(repo: Path, lane: str) -> None:
@@ -196,12 +296,16 @@ def relax_workspace_pin(repo: Path, lane: str) -> None:
     path = repo / "pixi.toml"
     text = path.read_text(encoding="utf-8")
     spec = _sole_workspace_spec(text)
-    if spec.group(1) != "==":
+    if spec.group("operator") != "==":
         raise ToolchainError(
             f"pixi.toml's mojo spec is already relaxed to {spec.group(0)!r}; "
             "rewriting it again would say nothing about the pinned version"
         )
-    text = f"{text[: spec.start(1)]}>{text[spec.end(1) :]}"
+    # Written through the same renderer the candidate search asks with, so the
+    # question the probe screened for and the one the solver is handed cannot
+    # drift apart.
+    relaxed = relaxed_spec(spec.group("version"))
+    text = f"{text[: spec.start('spec')]}{relaxed}{text[spec.end('spec') :]}"
     if lane == NIGHTLY_LANE:
         text = _prepend_nightly_channel(text)
     path.write_text(text, encoding="utf-8")
@@ -225,13 +329,8 @@ def _prepend_nightly_channel(text: str) -> str:
             f"pixi.toml already lists {NIGHTLY_CHANNEL}; this checkout has been "
             "rewritten once already"
         )
-    matches = list(_CHANNELS.finditer(text))
-    if len(matches) != 1:
-        raise ToolchainError(
-            f"pixi.toml names {len(matches)} channel lists; exactly one is "
-            "required to add the nightly channel to"
-        )
-    return _CHANNELS.sub(f'channels = ["{NIGHTLY_CHANNEL}", ', text, count=1)
+    items = _sole_channel_list(text).start("items")
+    return f'{text[:items]}"{NIGHTLY_CHANNEL}", {text[items:]}'
 
 
 def resolved_toolchain() -> ResolvedToolchain:

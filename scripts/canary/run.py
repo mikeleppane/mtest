@@ -24,13 +24,21 @@ the only thing an exit code here can usefully mean. A nonzero exit therefore
 says exactly one thing: this module crashed, and the traceback it left behind is
 about itself rather than about Mojo.
 
-The ordering of the stages is not cosmetic. The workspace pin is relaxed before
-anything is installed, because installing first resolves the committed pin and
-would classify every single day as `NO_NEWER_CANDIDATE` — a canary that is
-permanently, silently green. The recipe is retargeted before the packaging leg
-for the mirror-image reason. And the cheap, specific failures are asked first,
-so a toolchain that simply does not compile the sources is named that way
-rather than by whichever expensive gate happened to notice.
+The ordering of the stages is not cosmetic. "Is there anything newer" is asked
+of the channels FIRST, as a question, before a single tracked file is touched:
+the relaxed spec can be unsatisfiable — it is on the stable channel today,
+where the pinned version is also the newest published — and a probe that only
+discovered that by watching the install fail would report `INFRA_FAILURE`
+forever while a lane that is simply idle looks broken. Asking first also means
+an idle day leaves the checkout unmodified.
+
+The pin is then relaxed before anything is installed, because installing under
+the committed spec resolves the pinned version and would classify every day as
+`NO_NEWER_CANDIDATE` — the mirror-image permanent silence. The recipe is
+retargeted before the packaging leg for the same reason. And the cheap,
+specific failures are asked before the expensive ones, so a toolchain that
+simply does not compile the sources is named that way rather than by whichever
+long gate happened to notice.
 """
 
 from __future__ import annotations
@@ -61,6 +69,8 @@ from scripts.canary.toolchain import (
     STABLE_LANE,
     ResolvedToolchain,
     ToolchainError,
+    candidate_channels,
+    candidate_matchspec,
     pin_recipe_to_candidate,
     relax_workspace_pin,
     resolved_toolchain,
@@ -127,8 +137,9 @@ _DIAGNOSTIC = re.compile(r"^.*?: error: .*$", re.MULTILINE)
 # The e2e gate's failure roll-call, printed once per failing scenario.
 _E2E_FAILURE = re.compile(r"^FAILED: (\S+)$", re.MULTILINE)
 
-# Stands in for the toolchain identity before the install has produced one.
-_UNKNOWN = ResolvedToolchain("unknown", "unknown")
+# Stands in for a toolchain identity the probe never got to observe.
+UNKNOWN = "unknown"
+_UNKNOWN = ResolvedToolchain(UNKNOWN, UNKNOWN)
 
 
 @dataclass(frozen=True)
@@ -258,6 +269,71 @@ def first_diagnostic(result: CommandResult) -> str:
     return command_failure(result)
 
 
+def search_argv(channels: Sequence[str], matchspec: str) -> tuple[str, ...]:
+    """Build the command that asks a set of channels what they publish.
+
+    No `--platform` is passed, so pixi answers for every platform the manifest
+    declares. This is a screen rather than a solve: its question is whether
+    anything newer has been published at all, and the install that follows
+    remains the authority on whether it is installable on this runner.
+
+    Args:
+        channels: The channels to consider, in preference order.
+        matchspec: A conda matchspec, for example `mojo >1.0.0b2,<2`.
+
+    Returns:
+        The `pixi search` argv.
+    """
+    argv = ["pixi", "search", "--json"]
+    for channel in channels:
+        argv.extend(["-c", channel])
+    argv.append(matchspec)
+    return tuple(argv)
+
+
+def search_versions(result: CommandResult) -> tuple[str, ...]:
+    """Read the versions out of one `pixi search --json` answer.
+
+    pixi answers with an object keyed by subdir, each holding package records
+    newest first in conda's own version ordering. That ordering is the reason
+    this delegates rather than comparing versions itself: `1.0.0rc0` outranks
+    `1.0.0b3.dev2026080406`, and every naive lexical or dotted-numeric
+    comparison gets that backwards.
+
+    Args:
+        result: A completed, successful search.
+
+    Returns:
+        The distinct versions offered, newest first, deduplicated across
+        subdirs with the first occurrence winning.
+
+    Raises:
+        ValueError: The output is not the subdir-keyed object pixi documents,
+            which means this reader and that tool have drifted apart.
+    """
+    described = shlex.join(result.argv)
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"`{described}` did not print JSON: {error}") from error
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"`{described}` printed {type(payload).__name__}, not an object"
+        )
+
+    versions: list[str] = []
+    for records in payload.values():
+        if not isinstance(records, list):
+            raise ValueError(f"`{described}` printed a non-list of package records")
+        for record in records:
+            version = record.get("version") if isinstance(record, dict) else None
+            if not isinstance(version, str):
+                raise ValueError(f"`{described}` printed a record with no version")
+            if version not in versions:
+                versions.append(version)
+    return tuple(versions)
+
+
 def failed_scenarios(stdout: str) -> tuple[str, ...]:
     """List the e2e scenarios a failing roster named.
 
@@ -385,6 +461,40 @@ def classify(
             two toolchains, which is a broken repository rather than a verdict.
     """
     pin = workspace_pin(repo)
+    channels = candidate_channels(repo, lane)
+
+    # Ask before mutating. Two searches, back to back against the same cached
+    # index: the first proves the channels are readable and says what they
+    # publish, the second asks conda's own version ordering whether any of it
+    # is newer than the pin. That split is what tells an idle lane from a
+    # broken one — with only the second, an unsatisfiable spec and an
+    # unreachable channel look identical, and the stable lane's spec IS
+    # unsatisfiable whenever the pin is also the newest release.
+    published = run(search_argv(channels, "mojo"))
+    if published.returncode != 0:
+        return _result(lane, _UNKNOWN, INFRA_FAILURE, command_failure(published))
+    try:
+        available = search_versions(published)
+    except ValueError as error:
+        return _result(lane, _UNKNOWN, INFRA_FAILURE, str(error))
+
+    matchspec = candidate_matchspec(pin)
+    found = run(search_argv(channels, matchspec))
+    # The channels answered a moment ago, so an empty or failed answer here is
+    # the channels saying "nothing matches", not the network saying nothing.
+    try:
+        candidates = search_versions(found) if found.returncode == 0 else ()
+    except ValueError as error:
+        return _result(lane, _UNKNOWN, INFRA_FAILURE, str(error))
+    if not candidates:
+        newest = available[0] if available else UNKNOWN
+        return _result(
+            lane,
+            ResolvedToolchain(pin, UNKNOWN),
+            NO_NEWER_CANDIDATE,
+            f"nothing matches `{matchspec}` on {', '.join(channels)}; the newest "
+            f"mojo published there is {newest}",
+        )
 
     relax_workspace_pin(repo, lane)
     install = run(["pixi", "install"])

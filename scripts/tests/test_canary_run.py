@@ -46,6 +46,8 @@ from scripts.canary.run import (
     failed_scenarios,
     first_diagnostic,
     main,
+    search_argv,
+    search_versions,
 )
 from scripts.canary.toolchain import (
     DOCTOR_PREFIX,
@@ -53,9 +55,13 @@ from scripts.canary.toolchain import (
     NIGHTLY_CHANNEL,
     ResolvedToolchain,
     ToolchainError,
+    candidate_channels,
+    candidate_matchspec,
     pin_recipe_to_candidate,
     relax_workspace_pin,
+    relaxed_spec,
     resolved_toolchain,
+    workspace_channels,
     workspace_pin,
 )
 from scripts.e2e.__main__ import SCENARIOS
@@ -93,6 +99,10 @@ def _copy_repo(root: Path, fixture: str = "identical_newer") -> Path:
 def _stage_of(argv: Sequence[str]) -> str:
     """Name the pipeline stage one probe command belongs to."""
     parts = list(argv)
+    if parts[:2] == ["pixi", "search"]:
+        # The two searches differ only in their matchspec: the reachability
+        # probe asks for the bare package, the candidate probe adds a bound.
+        return "search-candidates" if " " in parts[-1] else "search-published"
     if parts[:2] == ["pixi", "install"]:
         return "install"
     if parts[:2] == ["pixi", "run"]:
@@ -113,6 +123,22 @@ class _Outcome:
     stderr: str
 
 
+def _search_answer(*versions: str) -> str:
+    """Render a `pixi search --json` answer offering exactly these versions.
+
+    Trimmed from a real answer: pixi keys the object by subdir and lists the
+    same versions under each, newest first.
+    """
+    records = [{"name": "mojo", "version": version} for version in versions]
+    return json.dumps({"linux-64": records, "osx-arm64": records})
+
+
+# What the channels offer on an ordinary probe day: something newer than the
+# pin exists, so the search stage waves the pipeline through.
+_PUBLISHED = _search_answer(CANDIDATE.version, PINNED_MOJO)
+_CANDIDATES = _search_answer(CANDIDATE.version)
+
+
 class FakeRunner:
     """Stand in for every probe subprocess and record what was asked of it.
 
@@ -127,7 +153,10 @@ class FakeRunner:
         self.calls: list[tuple[str, ...]] = []
         self.stages: list[str] = []
         self.pixi_toml_seen_by_install: list[str] = []
-        self._outcomes: dict[str, list[_Outcome]] = {}
+        self._outcomes: dict[str, list[_Outcome]] = {
+            "search-published": [_Outcome(0, _PUBLISHED, "")],
+            "search-candidates": [_Outcome(0, _CANDIDATES, "")],
+        }
 
     def outcomes(self, stage: str, *outcomes: _Outcome) -> None:
         """Queue results for one stage; the last one repeats."""
@@ -476,6 +505,171 @@ class E2eGuardTests(CanaryTestCase):
         self.assertIsNotNone(verdict)
 
 
+class ChannelSearchTests(CanaryTestCase):
+    """Reading what a channel publishes, in conda's ordering rather than ours."""
+
+    def test_it_reads_versions_newest_first(self) -> None:
+        # Trimmed from a real `pixi search --json` answer. The ordering is
+        # pixi's, and it is the reason the versions are never compared here:
+        # 1.0.0rc0 outranks 1.0.0b3.dev2026080406, which no lexical or
+        # dotted-numeric comparison gets right.
+        answer = CommandResult(
+            ("pixi", "search", "--json", "mojo"),
+            0,
+            json.dumps(
+                {
+                    "linux-64": [
+                        {"name": "mojo", "version": "1.0.0rc0"},
+                        {"name": "mojo", "version": "1.0.0b3.dev2026080406"},
+                    ],
+                    "osx-arm64": [
+                        {"name": "mojo", "version": "1.0.0rc0"},
+                        {"name": "mojo", "version": "1.0.0b3.dev2026080406"},
+                    ],
+                }
+            ),
+            "",
+        )
+        self.assertEqual(search_versions(answer), ("1.0.0rc0", "1.0.0b3.dev2026080406"))
+
+    def test_an_empty_answer_offers_nothing(self) -> None:
+        answer = CommandResult(("pixi", "search"), 0, json.dumps({"linux-64": []}), "")
+        self.assertEqual(search_versions(answer), ())
+
+    def test_it_refuses_output_that_is_not_json(self) -> None:
+        answer = CommandResult(("pixi", "search"), 0, "No packages found\n", "")
+        with self.assertRaises(ValueError):
+            search_versions(answer)
+
+    def test_it_refuses_records_without_a_version(self) -> None:
+        answer = CommandResult(
+            ("pixi", "search"), 0, json.dumps({"linux-64": [{"name": "mojo"}]}), ""
+        )
+        with self.assertRaises(ValueError):
+            search_versions(answer)
+
+    def test_the_command_names_every_channel(self) -> None:
+        self.assertEqual(
+            search_argv(("one", "two"), "mojo >1.0.0b2,<2"),
+            ("pixi", "search", "--json", "-c", "one", "-c", "two", "mojo >1.0.0b2,<2"),
+        )
+
+    def test_this_repository_resolves_against_two_channels(self) -> None:
+        # Independently transcribed from pixi.toml.
+        self.assertEqual(
+            workspace_channels(REPO_ROOT),
+            ("https://conda.modular.com/max/", "conda-forge"),
+        )
+
+    def test_the_nightly_lane_searches_its_channel_first(self) -> None:
+        self.assertEqual(
+            candidate_channels(REPO_ROOT, NIGHTLY),
+            (NIGHTLY_CHANNEL, "https://conda.modular.com/max/", "conda-forge"),
+        )
+        self.assertEqual(
+            candidate_channels(REPO_ROOT, STABLE), workspace_channels(REPO_ROOT)
+        )
+
+    def test_the_searched_spec_is_the_one_the_manifest_gets(self) -> None:
+        # The screen would be worthless if it asked a different question than
+        # the solver is later handed.
+        repo, runner = self.build()
+        self.classify(repo, runner)
+        search = next(
+            call for call in runner.calls if _stage_of(call) == "search-candidates"
+        )
+        self.assertEqual(search[-1], candidate_matchspec(PINNED_MOJO))
+        self.assertIn(
+            f'mojo = "{relaxed_spec(PINNED_MOJO)}"',
+            (repo / "pixi.toml").read_text(encoding="utf-8"),
+        )
+
+    def test_the_search_asks_the_lanes_channels(self) -> None:
+        repo, runner = self.build()
+        self.classify(repo, runner, lane=NIGHTLY)
+        for stage in ("search-published", "search-candidates"):
+            call = next(c for c in runner.calls if _stage_of(c) == stage)
+            self.assertEqual(
+                [call[index + 1] for index, part in enumerate(call) if part == "-c"],
+                list(candidate_channels(REPO_ROOT, NIGHTLY)),
+            )
+
+
+class IdleLaneTests(CanaryTestCase):
+    """A channel with nothing newer is an idle lane, never a broken one."""
+
+    def test_an_unsatisfiable_spec_is_no_newer_candidate(self) -> None:
+        # The stable channel's state today: the pinned version is also the
+        # newest published, so `>pin,<2` matches nothing and pixi says so by
+        # failing. Read as an install failure this would be INFRA_FAILURE
+        # forever, and the lane would be silently dead.
+        repo, runner = self.build()
+        runner.outcomes(
+            "search-published", _Outcome(0, _search_answer(PINNED_MOJO), "")
+        )
+        runner.fails(
+            "search-candidates",
+            stderr=f"Error: No packages found matching 'mojo >{PINNED_MOJO},<2'\n",
+        )
+        result = self.classify(repo, runner)
+        self.assertEqual(result.classification, NO_NEWER_CANDIDATE)
+        self.assertEqual(result.version, PINNED_MOJO)
+        self.assertEqual(runner.stages, ["search-published", "search-candidates"])
+
+    def test_an_empty_match_set_is_no_newer_candidate(self) -> None:
+        repo, runner = self.build()
+        runner.outcomes(
+            "search-published", _Outcome(0, _search_answer(PINNED_MOJO), "")
+        )
+        runner.outcomes("search-candidates", _Outcome(0, _search_answer(), ""))
+        result = self.classify(repo, runner)
+        self.assertEqual(result.classification, NO_NEWER_CANDIDATE)
+
+    def test_the_detail_names_the_channel_and_the_newest_release(self) -> None:
+        repo, runner = self.build()
+        runner.outcomes(
+            "search-published", _Outcome(0, _search_answer(PINNED_MOJO), "")
+        )
+        runner.fails("search-candidates")
+        result = self.classify(repo, runner)
+        self.assertIn("https://conda.modular.com/max/", result.detail)
+        self.assertIn(candidate_matchspec(PINNED_MOJO), result.detail)
+        self.assertIn(
+            f"the newest mojo published there is {PINNED_MOJO}", result.detail
+        )
+
+    def test_an_idle_lane_leaves_the_checkout_untouched(self) -> None:
+        repo, runner = self.build()
+        pixi_before = (repo / "pixi.toml").read_text(encoding="utf-8")
+        recipe_before = (repo / "recipe" / "recipe.yaml").read_text(encoding="utf-8")
+        runner.fails("search-candidates")
+        self.classify(repo, runner)
+        self.assertEqual((repo / "pixi.toml").read_text(encoding="utf-8"), pixi_before)
+        self.assertEqual(
+            (repo / "recipe" / "recipe.yaml").read_text(encoding="utf-8"),
+            recipe_before,
+        )
+
+    def test_unreadable_channels_stay_infra_failure(self) -> None:
+        # The other side of the discrimination: a channel that cannot be read
+        # says nothing about whether a candidate exists.
+        repo, runner = self.build()
+        runner.fails(
+            "search-published",
+            stderr="could not find subdir 'noarch' in channel (404 Not Found)\n",
+        )
+        result = self.classify(repo, runner)
+        self.assertEqual(result.classification, INFRA_FAILURE)
+        self.assertIn("404 Not Found", result.detail)
+        self.assertEqual(runner.stages, ["search-published"])
+
+    def test_an_unreadable_answer_stays_infra_failure(self) -> None:
+        repo, runner = self.build()
+        runner.outcomes("search-published", _Outcome(0, "not json at all", ""))
+        result = self.classify(repo, runner)
+        self.assertEqual(result.classification, INFRA_FAILURE)
+
+
 class PipelineOrderingTests(CanaryTestCase):
     """The install must see the relaxed pin, or the canary is permanently green."""
 
@@ -497,6 +691,8 @@ class PipelineOrderingTests(CanaryTestCase):
         self.assertEqual(
             runner.stages,
             [
+                "search-published",
+                "search-candidates",
                 "install",
                 "build-bin",
                 "test-unit",
@@ -517,7 +713,10 @@ class StageClassificationTests(CanaryTestCase):
         runner.fails("install", stderr="could not solve mojo >1.0.0b2,<2\n")
         result = self.classify(repo, runner)
         self.assertEqual(result.classification, INFRA_FAILURE)
-        self.assertEqual(runner.stages, ["install", "install"])
+        self.assertEqual(
+            runner.stages,
+            ["search-published", "search-candidates", "install", "install"],
+        )
         self.assertIn("could not solve", result.detail)
 
     def test_a_retried_install_that_succeeds_continues(self) -> None:
@@ -534,7 +733,9 @@ class StageClassificationTests(CanaryTestCase):
         )
         self.assertEqual(result.classification, NO_NEWER_CANDIDATE)
         self.assertEqual(result.version, PINNED_MOJO)
-        self.assertEqual(runner.stages, ["install"])
+        self.assertEqual(
+            runner.stages, ["search-published", "search-candidates", "install"]
+        )
         self.assertIn(
             f"    - mojo =={PINNED_MOJO}\n",
             (repo / "recipe" / "recipe.yaml").read_text(encoding="utf-8"),
@@ -550,14 +751,26 @@ class StageClassificationTests(CanaryTestCase):
         self.assertEqual(
             result.detail, "/repo/src/main.mojo:9:1: error: unknown decorator"
         )
-        self.assertEqual(runner.stages, ["install", "build-bin"])
+        self.assertEqual(
+            runner.stages,
+            ["search-published", "search-candidates", "install", "build-bin"],
+        )
 
     def test_a_failing_unit_lane_is_source_incompatible(self) -> None:
         repo, runner = self.build()
         runner.fails("test-unit")
         result = self.classify(repo, runner)
         self.assertEqual(result.classification, SOURCE_INCOMPATIBLE)
-        self.assertEqual(runner.stages, ["install", "build-bin", "test-unit"])
+        self.assertEqual(
+            runner.stages,
+            [
+                "search-published",
+                "search-candidates",
+                "install",
+                "build-bin",
+                "test-unit",
+            ],
+        )
 
     def test_a_failing_contract_check_is_source_incompatible(self) -> None:
         repo, runner = self.build()
@@ -687,6 +900,8 @@ class NightlyLaneTests(CanaryTestCase):
         self.assertEqual(
             runner.stages,
             [
+                "search-published",
+                "search-candidates",
                 "install",
                 "build-bin",
                 "test-unit",
