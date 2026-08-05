@@ -61,9 +61,15 @@ GREEN = "PASS"
 PROTOCOL_DRIFT = "PROTOCOL_DRIFT"
 SOURCE_INCOMPATIBLE = "SOURCE_INCOMPATIBLE"
 PACKAGE_FAILED = "PACKAGE_FAILED"
+STAGE_TIMEOUT = "STAGE_TIMEOUT"
 
 CANDIDATE_VERSION = "1.0.0b3"
 CANDIDATE_COMMIT = "cafef00d"
+# What the probe records when there was no candidate: the pinned version for a
+# lane with nothing newer, `unknown` when nothing resolved at all. Neither is a
+# candidate, and a body that presents one as such is telling a maintainer that
+# a compiler was exercised when none was.
+PINNED_VERSION = "1.0.0b2"
 
 
 class FakeGh:
@@ -267,7 +273,58 @@ class QuietDayTests(NotifyTestCase):
                 self.assertEqual(gh.subcommands(), ["list", "close"])
                 self.assertIn("12", gh.calls[1])
 
+    def test_a_no_candidate_closing_comment_claims_nothing_was_probed(self) -> None:
+        """A durable artifact must not say a compiler was exercised that was not.
+
+        `NO_NEWER_CANDIDATE` means the channels published nothing beyond the
+        pin, and `INFRA_FAILURE` means no toolchain could be obtained at all.
+        A body opening "probed against a toolchain newer than the one this
+        repository pins", with the pinned version underneath it labelled
+        `Candidate`, is false in both cases — and these are the two results a
+        maintainer sees most often.
+        """
+        for classification, subcommand, flag in (
+            (NO_NEWER_CANDIDATE, "close", "--comment"),
+            (INFRA_FAILURE, "comment", "--body"),
+        ):
+            with self.subTest(classification=classification):
+                gh = FakeGh([_issue(12, STABLE, "OPEN")])
+                self.write_result(STABLE, classification, version=PINNED_VERSION)
+                code, _log = self.notify(gh)
+                self.assertEqual(code, 0)
+                body = gh.argument(subcommand, flag)
+                self.assertNotIn("newer than the one this repository pins", body)
+                self.assertNotIn(f"mojo {PINNED_VERSION}", body)
+                self.assertIn("none was exercised", body)
+                self.assertIn(classification, body)
+
+    def test_a_finding_body_still_names_the_candidate_it_condemns(self) -> None:
+        gh = FakeGh()
+        self.write_result(STABLE, PROTOCOL_DRIFT)
+        code, _log = self.notify(gh)
+        self.assertEqual(code, 1)
+        body = gh.argument("create", "--body")
+        self.assertIn("newer than the one this repository pins", body)
+        self.assertIn(f"mojo {CANDIDATE_VERSION} ({CANDIDATE_COMMIT})", body)
+
+    def test_a_killed_stage_says_the_question_went_unanswered(self) -> None:
+        gh = FakeGh()
+        self.write_result(STABLE, STAGE_TIMEOUT)
+        code, _log = self.notify(gh)
+        self.assertEqual(code, 1)
+        body = gh.argument("create", "--body")
+        self.assertIn("outlived its budget", body)
+        self.assertNotIn("newer than the one this repository pins", body)
+
     def test_a_green_lane_with_no_issue_creates_nothing(self) -> None:
+        """A lane's issue begins at its first finding, not at its first run.
+
+        The pinned issue is where a finding lives, so a lane that has never had
+        one has nothing to pin. Opening an empty issue on day one and closing
+        it in the same run would put the canary's first two notifications in a
+        maintainer's inbox with nothing in them, which is how a scheduled job
+        teaches everyone to stop reading it.
+        """
         gh = FakeGh()
         self.write_result(STABLE, GREEN)
         code, _log = self.notify(gh)

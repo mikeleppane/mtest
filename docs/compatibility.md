@@ -154,12 +154,17 @@ the canary.
 
 ## Where the results are
 
-**One pinned issue per lane**, titled `canary: stable` and `canary: nightly`.
-The title is the lane and never the weather, so each lane keeps one issue a
-maintainer can watch, mute, or close; the body is rewritten in place on every
-run. A lane that goes quiet — `PASS` or `NO_NEWER_CANDIDATE` — closes its issue
-with the result as the closing comment, and the next finding reopens that same
-issue rather than starting the story over in a new one.
+**One pinned issue per lane, from that lane's first finding onwards**, titled
+`canary: stable` and `canary: nightly`. A lane that has never had anything to
+report has no issue at all: the canary opens one the first time that lane finds
+something, and from then on it is that lane's issue forever. The title is the
+lane and never the weather, so each lane keeps one issue a maintainer can watch,
+mute, or close; the body is rewritten in place on every run with a finding. A
+lane that goes quiet — `PASS` or `NO_NEWER_CANDIDATE` — closes its issue with
+the result as the closing comment, and the next finding reopens that same issue
+rather than starting the story over in a new one. A quiet lane whose issue is
+already closed is left exactly as it is, so a run with nothing to say says
+nothing.
 
 **One artifact per lane per run**, named `canary-result-<lane>`, holding the
 machine-readable `result.json` and a rendered `summary.md`. If the probe crashed

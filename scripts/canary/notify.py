@@ -267,21 +267,64 @@ def run_reference() -> str:
     return f"{server}/{repository}/actions/runs/{run_id}"
 
 
-def render_body(result: CanaryResult) -> str:
-    """Render the issue body describing one lane's finding.
+def _opening_sentence(result: CanaryResult) -> str:
+    """State what actually happened, in the terms of this classification.
 
     Args:
         result: The classification the probe wrote.
 
     Returns:
-        A Markdown body naming the lane, the candidate, and the evidence.
+        One sentence. `NO_NEWER_CANDIDATE` and `INFRA_FAILURE` each mean no
+        newer toolchain was exercised, so a body that opened by saying one was
+        would be a false statement standing in a durable, maintainer-facing
+        artifact — and the two most common quiet results are exactly where a
+        reader stops reading.
     """
+    lane = f"**{result.lane}**"
+    if result.classification == NO_NEWER_CANDIDATE:
+        return (
+            f"The compatibility canary found nothing newer than the pinned "
+            f"toolchain on the {lane} lane's channels, so no gate ran against "
+            "a candidate."
+        )
+    if result.classification == INFRA_FAILURE:
+        return (
+            f"The compatibility canary never obtained a toolchain to ask the "
+            f"{lane} lane's question of. This says nothing about any "
+            "candidate; it is news about the canary."
+        )
+    if result.classification == STAGE_TIMEOUT:
+        return (
+            f"A stage of the compatibility canary's {lane} probe outlived its "
+            "budget and was killed, so the day's question went unanswered."
+        )
     return (
-        f"The compatibility canary probed the **{result.lane}** lane against a "
-        "toolchain newer than the one this repository pins.\n"
+        f"The compatibility canary probed the {lane} lane against a toolchain "
+        "newer than the one this repository pins."
+    )
+
+
+def render_body(result: CanaryResult) -> str:
+    """Render the issue body describing one lane's result.
+
+    Args:
+        result: The classification the probe wrote.
+
+    Returns:
+        A Markdown body naming the lane, what was probed, and the evidence.
+    """
+    if result.classification in (NO_NEWER_CANDIDATE, INFRA_FAILURE):
+        # `version` here is the pin or `unknown`, neither of which is a
+        # candidate. Labelling it as one puts a version this repository
+        # already ships under a heading that says something was tried.
+        candidate = "- **Candidate:** none was exercised\n"
+    else:
+        candidate = f"- **Candidate:** mojo {result.version} ({result.commit})\n"
+    return (
+        f"{_opening_sentence(result)}\n"
         "\n"
         f"- **Classification:** {result.classification}\n"
-        f"- **Candidate:** mojo {result.version} ({result.commit})\n"
+        f"{candidate}"
         f"- **Run:** {run_reference()}\n"
         "\n"
         "```text\n"
