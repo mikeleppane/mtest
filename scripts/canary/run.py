@@ -678,10 +678,20 @@ def e2e_failure_verdict(failed: Sequence[str], *, toolchain_moved: bool) -> str 
     the scenarios that require it to report a healthy one genuinely fail as
     soon as the toolchain moves. That tolerance is narrow on purpose, because
     "some failures are expected" degrades into "failures are ignored" the
-    moment it stops being checked: the tolerated scenarios are named one by one
-    in `TOLERATED_E2E_SCENARIOS`, any other failing scenario condemns, and so
-    does a failure that named no scenario at all, which means the roll-call
-    this reads has changed shape and the guard has stopped guarding.
+    moment it stops being checked: the failing set must be *exactly*
+    `TOLERATED_E2E_SCENARIOS`, each scenario named once. Any other failing
+    scenario condemns.
+
+    So does a subset. Every tolerated scenario asserts that `doctor` exits 0 on
+    a healthy environment, so on a moved toolchain every one of them must fail,
+    and a roster naming only some of them describes a candidate that made one
+    of those assertions hold — which is to say a `doctor` that stopped
+    refusing an unpinned compiler, the finding this lane exists to produce. An
+    empty roster is the same finding at its limit, whether it comes from a gate
+    that failed without naming a scenario or from one that passed outright,
+    which is why this is asked of every run of the gate rather than of the
+    failing ones alone. It is the rule `contract_verdict` states for the strict
+    contract roster, applied to this one.
 
     `toolchain_moved` is a **precondition, not a live guard**. `classify` can
     only reach this with a toolchain that differs from the pin, because a solve
@@ -695,11 +705,12 @@ def e2e_failure_verdict(failed: Sequence[str], *, toolchain_moved: bool) -> str 
     silent pass.
 
     Args:
-        failed: The scenario ids that failed.
+        failed: The scenario ids the gate's roll-call named, empty for a gate
+            that failed silently or did not fail at all.
         toolchain_moved: Whether the resolved toolchain differs from the pin.
 
     Returns:
-        The reason these failures condemn the toolchain, or None when they are
+        The reason this roster condemns the toolchain, or None when it is
         exactly the expected toolchain-reporting drift.
     """
     unexpected = tuple(name for name in failed if name not in TOLERATED_E2E_SCENARIOS)
@@ -708,10 +719,20 @@ def e2e_failure_verdict(failed: Sequence[str], *, toolchain_moved: bool) -> str 
             "e2e scenarios failed outside the toolchain-reporting surface: "
             f"{', '.join(unexpected)}"
         )
-    if not failed:
+    repeated = tuple(sorted({name for name in failed if list(failed).count(name) > 1}))
+    if repeated:
         return (
-            "the e2e gate failed without naming a scenario, so no failure could "
-            "be attributed to the toolchain report"
+            "the e2e gate named a failing scenario more than once, so its "
+            f"roll-call is not the set that failed: {', '.join(repeated)}"
+        )
+    absent = tuple(
+        sorted(name for name in TOLERATED_E2E_SCENARIOS if name not in failed)
+    )
+    if absent:
+        return (
+            "the e2e gate did not fail the toolchain-reporting scenarios a moved "
+            f"toolchain must fail: {', '.join(absent)}; mtest's pinned-identity "
+            "guard has stopped guarding"
         )
     if not toolchain_moved:
         return (
@@ -1276,20 +1297,22 @@ def classify(repo: Path, lane: str, *, run: Runner) -> CanaryResult:
                 lane, resolved, cross, SOURCE_INCOMPATIBLE, first_diagnostic(cross)
             )
 
-    tolerated: tuple[str, ...] = ()
+    # Read whatever it exits, for the reason `contract_verdict` gives about the
+    # gate above: both tolerated scenarios assert that `mtest doctor` reports a
+    # healthy toolchain, so on a candidate both must fail. A green suite is
+    # therefore not silence but the claim that `doctor` accepted a compiler it
+    # was not built against — the same finding as a failure elsewhere — and
+    # read on the nonzero branch alone it was reported as `PASS`.
     e2e = run(["pixi", "run", "e2e"])
-    if e2e.returncode != 0:
-        tolerated = failed_scenarios(e2e.stdout)
-        # Always True here — a solve that produced the pin is not in the
-        # searched candidate set and stopped the pipeline long before this
-        # line. Computed rather than passed as a literal so that if that
-        # earlier return ever moves, the tolerance narrows with it instead of
-        # quietly outliving its precondition.
-        verdict = e2e_failure_verdict(
-            tolerated, toolchain_moved=resolved.version != pin
-        )
-        if verdict is not None:
-            return _stage_failure(lane, resolved, e2e, SOURCE_INCOMPATIBLE, verdict)
+    tolerated = failed_scenarios(e2e.stdout)
+    # `toolchain_moved` is always True here — a solve that produced the pin is
+    # not in the searched candidate set and stopped the pipeline long before
+    # this line. Computed rather than passed as a literal so that if that
+    # earlier return ever moves, the tolerance narrows with it instead of
+    # quietly outliving its precondition.
+    verdict = e2e_failure_verdict(tolerated, toolchain_moved=resolved.version != pin)
+    if verdict is not None:
+        return _stage_failure(lane, resolved, e2e, SOURCE_INCOMPATIBLE, verdict)
 
     # Packaging is last because of what its name claims. `PACKAGE_FAILED` says
     # the sources are fine and the shipped package is not, and that sentence is
@@ -1307,17 +1330,18 @@ def classify(repo: Path, lane: str, *, run: Runner) -> CanaryResult:
             )
 
     detail = f"every gate held on mojo {resolved.version} ({resolved.commit})"
-    # Unconditional: reaching this line means `contract_verdict` returned None,
-    # which it only does for a gate that failed exactly the three identity
-    # checks. There is no path here on which they were not tolerated.
+    # Both unconditional: reaching this line means each verdict returned None,
+    # which they only do for a gate that failed exactly the checks a moved
+    # toolchain must fail. There is no path here on which either roster was
+    # anything else, and a note printed only when it happened to be non-empty
+    # read as though the tolerance were optional.
     notes: list[str] = [
         (
             f"tolerated the {CONTRACT_TASK} failures `mtest doctor` reports for "
             "an unpinned toolchain"
-        )
+        ),
+        f"tolerated toolchain-reporting drift in {', '.join(tolerated)}",
     ]
-    if tolerated:
-        notes.append(f"tolerated toolchain-reporting drift in {', '.join(tolerated)}")
     for note in notes:
         detail = f"{detail}; {note}"
     return _result(lane, resolved, PASS, detail)

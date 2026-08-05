@@ -220,6 +220,17 @@ _IDENTITY_FAILURES = (
     ("served: doctor --cache-clear accepted, inert (not exit 4)", "exit 1, want 0"),
 )
 
+# What the e2e gate prints on the same day, in the shape it really prints it:
+# both scenarios that expect `mtest doctor` to report a healthy toolchain fail,
+# and nothing else does.
+_E2E_IDENTITY_FAILURES = (
+    "=== 219/221 scenarios passed ===\n"
+    "FAILED: doctor-healthy\n"
+    "  stdout did not name the resolved toolchain\n"
+    "FAILED: doctor-config-free\n"
+    "  exit 1 != 0\n"
+)
+
 
 class FakeRunner:
     """Stand in for every probe subprocess and record what was asked of it.
@@ -248,6 +259,14 @@ class FakeRunner:
             "contract-check-strict": [
                 _Outcome(1, _contract_output(*_IDENTITY_FAILURES), "")
             ],
+            # Nor is a green e2e suite. Both tolerated scenarios assert that
+            # `mtest doctor` reports a healthy toolchain, so on a candidate
+            # both fail and the gate exits nonzero. Defaulted to exit 0, every
+            # pipeline test ran against a suite that a moved toolchain cannot
+            # produce, and the day a candidate makes it green — by breaking the
+            # identity guard this lane probes — was the day nothing here could
+            # see.
+            "e2e": [_Outcome(1, _E2E_IDENTITY_FAILURES, "")],
             "mojo-version": [_Outcome(0, _version_banner(CANDIDATE), "")],
         }
 
@@ -711,13 +730,47 @@ class E2eGuardTests(CanaryTestCase):
 
     def test_doctor_failures_are_tolerated_when_the_toolchain_moved(self) -> None:
         self.assertIsNone(
-            e2e_failure_verdict(("doctor-healthy",), toolchain_moved=True)
+            e2e_failure_verdict(
+                ("doctor-healthy", "doctor-config-free"), toolchain_moved=True
+            )
         )
 
     def test_doctor_failures_condemn_an_unmoved_toolchain(self) -> None:
-        verdict = e2e_failure_verdict(("doctor-healthy",), toolchain_moved=False)
+        verdict = e2e_failure_verdict(
+            ("doctor-healthy", "doctor-config-free"), toolchain_moved=False
+        )
         self.assertIsNotNone(verdict)
         self.assertIn("doctor-healthy", str(verdict))
+
+    def test_a_tolerated_scenario_that_did_not_fail_condemns(self) -> None:
+        """Both scenarios assert a healthy `doctor`, so a moved toolchain fails both.
+
+        Any nonempty subset was tolerated, so a candidate that made
+        `doctor-config-free` stop enforcing the identity check left
+        `doctor-healthy` failing alone — and the lane called that the ordinary
+        moved-toolchain day, reported `PASS` and closed its issue on the one
+        candidate it exists to catch. This is the rule the contract gate
+        already applies to its own roster: an expected failure that did not
+        happen is itself the finding.
+        """
+        for roster in (("doctor-healthy",), ("doctor-config-free",)):
+            with self.subTest(roster=roster):
+                verdict = e2e_failure_verdict(roster, toolchain_moved=True)
+                self.assertIsNotNone(verdict)
+                self.assertIn("stopped guarding", str(verdict))
+                for name in TOLERATED_E2E_SCENARIOS - set(roster):
+                    self.assertIn(name, str(verdict))
+
+    def test_a_repeated_scenario_condemns(self) -> None:
+        # A roll-call that names the same scenario twice is a gate that ran it
+        # twice or a reader that has lost the boundary between entries; either
+        # way the set it reports is not the set that failed.
+        verdict = e2e_failure_verdict(
+            ("doctor-healthy", "doctor-healthy", "doctor-config-free"),
+            toolchain_moved=True,
+        )
+        self.assertIsNotNone(verdict)
+        self.assertIn("more than once", str(verdict))
 
     def test_any_other_failure_condemns(self) -> None:
         verdict = e2e_failure_verdict(
@@ -2069,10 +2122,41 @@ class StageClassificationTests(CanaryTestCase):
 
     def test_doctor_only_e2e_failures_still_pass(self) -> None:
         repo, runner = self.build()
+        runner.fails(
+            "e2e",
+            stdout=(
+                "FAILED: doctor-healthy\n  toolchain moved\n"
+                "FAILED: doctor-config-free\n  toolchain moved\n"
+            ),
+        )
+        result = self.classify(repo, runner)
+        self.assertEqual(result.classification, PASS, result.detail)
+        self.assertIn("doctor-healthy", result.detail)
+        self.assertIn("doctor-config-free", result.detail)
+
+    def test_an_e2e_gate_that_passed_everything_stops_the_pipeline(self) -> None:
+        """The roster was read on the nonzero branch and nowhere else.
+
+        Both tolerated scenarios assert that `mtest doctor` reports a healthy
+        toolchain, so on a candidate they must fail and the gate must exit
+        nonzero. A candidate that broke the identity check the other way — a
+        `doctor` that accepts any compiler — makes the whole suite green, and a
+        green suite skipped this reading entirely and was reported as `PASS`.
+        """
+        repo, runner = self.build()
+        runner.outcomes("e2e", _Outcome(0, "=== 221/221 scenarios passed ===\n", ""))
+        result = self.classify(repo, runner)
+        self.assertEqual(result.classification, SOURCE_INCOMPATIBLE, result.detail)
+        self.assertIn("stopped guarding", result.detail)
+        self.assertNotIn("package-check", runner.stages)
+
+    def test_one_missing_tolerated_scenario_stops_the_pipeline(self) -> None:
+        repo, runner = self.build()
         runner.fails("e2e", stdout="FAILED: doctor-healthy\n  toolchain moved\n")
         result = self.classify(repo, runner)
-        self.assertEqual(result.classification, PASS)
-        self.assertIn("doctor-healthy", result.detail)
+        self.assertEqual(result.classification, SOURCE_INCOMPATIBLE, result.detail)
+        self.assertIn("doctor-config-free", result.detail)
+        self.assertNotIn("package-check", runner.stages)
 
     def test_another_e2e_failure_is_source_incompatible(self) -> None:
         repo, runner = self.build()
