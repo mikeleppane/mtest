@@ -87,15 +87,16 @@ stable lane alone.
 
 ## What a result means
 
-Every probe ends in exactly one of six classifications.
+Every probe ends in exactly one of seven classifications.
 
 | Classification | What it says |
 |----------------|--------------|
 | `PASS` | Every gate above held on a toolchain newer than the pin. |
 | `NO_NEWER_CANDIDATE` | Nothing newer is published on that lane's channels, so nothing was probed. |
 | `PROTOCOL_DRIFT` | The `TestSuite` report format the runner parses moved. |
-| `SOURCE_INCOMPATIBLE` | The sources no longer compile, test, or behave. |
+| `SOURCE_INCOMPATIBLE` | The repository as committed does not solve, compile, test, or behave on the candidate. |
 | `PACKAGE_FAILED` | The sources are fine; the package built against the candidate is not. |
+| `STAGE_TIMEOUT` | A probe stage outlived its 45-minute budget and was killed, so the day's question was never answered. |
 | `INFRA_FAILURE` | The probe never obtained a toolchain to ask about. |
 
 ### `PASS`
@@ -139,18 +140,40 @@ scenarios outside the tolerated `doctor` ones. The result quotes the compiler's
 own first diagnostic verbatim rather than paraphrasing it, so the finding can be
 triaged from the issue body without re-running anything.
 
+It also covers a candidate that never got as far as installing. A relaxed solve
+that reached the index and could not produce an environment — because the
+candidate's own dependencies cannot sit beside the `python`, `clang` and
+platform set `pixi.toml` pins — says the repository as committed cannot adopt
+that toolchain, which is the earliest and most total form of the same finding.
+
 ### `PACKAGE_FAILED`
 
 The sources compiled, tested, and behaved on the candidate, but the conda
 package built and installed against it did not. Only the stable lane can report
 this, because it is the only lane that packages.
 
+### `STAGE_TIMEOUT`
+
+A gate ran past the 45-minute budget the probe allows one stage and was killed.
+Nothing is known about the candidate from a stage that never finished: three
+quarters of an hour of silence on a compiler no cache has been warmed for is not
+evidence that the sources stopped compiling, and reporting it as though it were
+would put a red in front of a maintainer that cannot be triaged.
+
+It is loud anyway. A lane whose probe cannot finish has stopped answering the
+question it exists to answer, and a canary reporting the same quiet non-answer
+every day for a month is the failure mode this workflow was built to prevent.
+
 ### `INFRA_FAILURE`
 
 The probe never got as far as having a toolchain to ask about: a channel was
-unreachable, a search answered with something unreadable, or the install failed
-twice in a row. This says nothing whatever about the candidate. It is news about
-the canary.
+unreachable, a search answered with something unreadable, or an install failed
+twice and the channels could no longer answer the control question either. This
+says nothing whatever about the candidate. It is news about the canary.
+
+An install that failed while the channels still answer is **not** this. That is
+the candidate refusing to coexist with this repository's pinned environment, and
+it is reported as `SOURCE_INCOMPATIBLE`.
 
 ## Where the results are
 
@@ -172,9 +195,9 @@ instead of classifying, the artifact holds `diagnostics.txt` with the traceback
 and no result at all.
 
 The workflow run goes red when any lane reports `PROTOCOL_DRIFT`,
-`SOURCE_INCOMPATIBLE`, or `PACKAGE_FAILED`, and also when a lane that was
-supposed to report produced no readable result — silence is the failure mode a
-canary exists to make impossible. `INFRA_FAILURE` is deliberately quiet: it
+`SOURCE_INCOMPATIBLE`, `PACKAGE_FAILED`, or `STAGE_TIMEOUT`, and also when a lane
+that was supposed to report produced no readable result — silence is the failure
+mode a canary exists to make impossible. `INFRA_FAILURE` is deliberately quiet: it
 comments on an issue that is already open and otherwise leaves the run green,
 because a scheduled job that opened an issue every time a network call flaked
 would teach everyone to close its issues unread, including the one that had
