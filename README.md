@@ -84,6 +84,10 @@ serves one toolchain; accepting a report the runner does not fully understand
 is how a runner produces a false green, and this one exits 3 on protocol drift
 instead.
 
+A weekday canary probes toolchains newer than the pin and records what would
+break on each; [docs/compatibility.md](docs/compatibility.md) describes what it
+covers and what its results do and do not say about support.
+
 ## Starting a project
 
 `mtest init` writes the files a project needs before any of the rest of this is

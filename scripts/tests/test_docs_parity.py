@@ -55,6 +55,7 @@ class RepositoryParityTests(unittest.TestCase):
                 Path("docs/cli-contract.md"),
                 Path("docs/json-stream.md"),
                 Path("docs/collect-stream.md"),
+                Path("docs/compatibility.md"),
                 Path("docs/releasing.md"),
             ),
         )
