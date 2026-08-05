@@ -28,11 +28,10 @@ from std.sys.info import CompilationTarget
 from mtest.platform.cstring import c_string_bytes
 from mtest.platform.process import process_id
 from mtest.platform.regular_file import observe_path
-from mtest.platform.stream import close_fd, errno_now
+from mtest.platform.stream import EINTR, close_fd, errno_now
 from mtest.platform.temp_file import close_checked_fd, create_unique_temp
 
 
-comptime _EINTR = 4
 comptime _EEXIST = 17
 """`EEXIST`, identical on Linux and Darwin: the destination name is taken."""
 comptime _EPERM = 1
@@ -42,8 +41,14 @@ comptime _EOPNOTSUPP = 45 if CompilationTarget.is_macos() else 95
 comptime _CREATE_MODE = 0o666
 """The mode `open(2)` is given for a new ordinary file, before the umask."""
 comptime _STAT_BYTES = 144
-comptime _S_IFMT = 0o170000
-comptime _S_IFDIR = 0o40000
+comptime S_IFMT = 0o170000
+"""File-type mask over `st_mode`; POSIX fixes it on Linux and Darwin alike."""
+comptime S_IFDIR = 0o40000
+"""`st_mode` file-type value for a directory."""
+comptime S_IFREG = 0o100000
+"""`st_mode` file-type value for a regular file."""
+comptime S_IFLNK = 0o120000
+"""`st_mode` file-type value for a symbolic link."""
 comptime _DARWIN_AT_SYMLINK_NOFOLLOW_ANY = 0x0800
 comptime _DARWIN_ANCHOR_OPEN_FLAGS = (
     0x40000000  # O_EXEC, making O_SEARCH with O_DIRECTORY
@@ -423,7 +428,7 @@ def prepare_directory_for_rename(
             if raw_fd >= 0:
                 break
             open_errno = errno_now()
-            if open_errno != _EINTR:
+            if open_errno != EINTR:
                 break
         _ = anchor_c^
         if raw_fd < 0:
@@ -462,7 +467,7 @@ def prepare_directory_for_rename(
             if stat_rc == 0:
                 break
             stat_errno = errno_now()
-            if stat_errno != _EINTR:
+            if stat_errno != EINTR:
                 break
         if stat_rc != 0:
             # SAFETY: no view of the allocation exists and `fstatat` retained
@@ -491,7 +496,7 @@ def prepare_directory_for_rename(
         # this is the allocation's sole owner and frees it exactly once.
         stat_storage.free()
         if (
-            opened_mode & _S_IFMT != _S_IFDIR
+            opened_mode & S_IFMT != S_IFDIR
             or opened_dev != expected_dev
             or opened_ino != expected_ino
         ):
@@ -521,7 +526,7 @@ def prepare_directory_for_rename(
             if chmod_rc == 0:
                 break
             chmod_errno = errno_now()
-            if chmod_errno != _EINTR:
+            if chmod_errno != EINTR:
                 break
         _ = c^
         var close_rc = close_fd(fd)

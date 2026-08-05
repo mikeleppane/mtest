@@ -52,21 +52,10 @@ from std.os.path import isdir, isfile
 
 from mtest.discover.fnmatch import fnmatch
 from mtest.model import escape_one_line
+from mtest.platform import S_IFDIR, S_IFLNK, S_IFMT, S_IFREG
 
 comptime _TEST_GLOB = "test_*.mojo"
 """The directory-walk pattern, matched against each file's basename."""
-
-comptime _S_IFMT = 0xF000
-"""File-type mask over `st_mode`; POSIX fixes it on Linux and Darwin alike."""
-
-comptime _S_IFDIR = 0x4000
-"""`S_IFDIR`: the `st_mode` file-type value for a directory."""
-
-comptime _S_IFLNK = 0xA000
-"""`S_IFLNK`: the `st_mode` file-type value for a symbolic link."""
-
-comptime _S_IFREG = 0x8000
-"""`S_IFREG`: the `st_mode` file-type value for a regular file."""
 
 comptime NODE_ID_SEPARATOR = "::"
 """What separates a file from a test name in a node id, and so what a path may
@@ -197,12 +186,12 @@ def walk_dir(abs_dir: String, rel_prefix: String) raises -> WalkResult:
         # refused, not framed as empty.
         var kind: Int
         try:
-            kind = Int(lstat(full).st_mode) & _S_IFMT
+            kind = Int(lstat(full).st_mode) & S_IFMT
         except:
             raise Error(
                 "discover: cannot inspect '" + escape_one_line(rel) + "'"
             )
-        if kind == _S_IFLNK:
+        if kind == S_IFLNK:
             # The target's type decides; `isdir`/`isfile` follow the link.
             if isdir(full):
                 # A symlinked subtree could close a cycle: refuse, but loudly.
@@ -218,7 +207,7 @@ def walk_dir(abs_dir: String, rel_prefix: String) raises -> WalkResult:
                 # Dangling, and named like a test the user expects to run.
                 skipped.append(rel^)
             continue
-        if kind == _S_IFDIR:
+        if kind == S_IFDIR:
             if is_discovered_test_name(name):
                 # A directory NAMED like a test file: descending it would run
                 # tests under a name nothing treats as a container, or
@@ -235,7 +224,7 @@ def walk_dir(abs_dir: String, rel_prefix: String) raises -> WalkResult:
                     nonregular.append(s)
                 for s in sub.skipped_unaddressable:
                     unaddressable.append(s)
-        elif kind == _S_IFREG:
+        elif kind == S_IFREG:
             if is_discovered_test_name(name):
                 # The addressability rule applies HERE and at the symlinked
                 # twin above, and nowhere earlier: those are the only two

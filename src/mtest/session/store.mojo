@@ -138,6 +138,10 @@ from mtest.config import RunnerConfig
 from mtest.discover import is_discovered_test_name
 from mtest.exec import ExecRuntime, ProcessResult, ProcessSpec, run_supervised
 from mtest.platform import (
+    S_IFDIR,
+    S_IFLNK,
+    S_IFMT,
+    S_IFREG,
     close_checked_fd,
     create_unique_temp,
     fsync_path,
@@ -696,19 +700,6 @@ struct WalkOutcome(Copyable, Movable):
         return WalkOutcome(False, reason)
 
 
-comptime _S_IFMT = 0xF000
-"""File-type mask over `st_mode`; POSIX fixes it on Linux and Darwin alike."""
-
-comptime _S_IFDIR = 0x4000
-"""`S_IFDIR`: the `st_mode` file-type value for a directory."""
-
-comptime _S_IFLNK = 0xA000
-"""`S_IFLNK`: the `st_mode` file-type value for a symbolic link."""
-
-comptime _S_IFREG = 0x8000
-"""`S_IFREG`: the `st_mode` file-type value for a regular file."""
-
-
 def _list_sorted(abs_dir: String) -> Optional[List[String]]:
     """The entries of `abs_dir` in byte order, or nothing if it cannot be read.
 
@@ -1119,17 +1110,17 @@ def _walk_into(
         # one.
         var kind: Int
         try:
-            kind = Int(lstat(full).st_mode) & _S_IFMT
+            kind = Int(lstat(full).st_mode) & S_IFMT
         except:
             return WalkOutcome.failure(
                 "cannot inspect '" + rel + "' (in '" + abs_dir + "')"
             )
-        var is_link = kind == _S_IFLNK
+        var is_link = kind == S_IFLNK
         # For a link, the type that matters is the target's. A dangling link
         # answers False here and falls through to the file path below, where a
         # source-named one fails the read (correctly) and anything else is
         # ignored (also correctly — the compiler would not have read it either).
-        var is_dir = kind == _S_IFDIR or (is_link and isdir(full))
+        var is_dir = kind == S_IFDIR or (is_link and isdir(full))
 
         if is_dir:
             # Captured BEFORE the listing, and kept only if this directory
@@ -1951,7 +1942,7 @@ def _toolchain_lib_entries(
         var info: _LibEntry
         try:
             var st = lstat(lib_dir + "/" + name)
-            info = _LibEntry(name^, Int(st.st_mode) & _S_IFMT, Int(st.st_size))
+            info = _LibEntry(name^, Int(st.st_mode) & S_IFMT, Int(st.st_size))
         except:
             return None
         out.append(info^)
@@ -1986,7 +1977,7 @@ def _toolchain_lib_content(
     """
     var total = 0
     for entry in entries:
-        if entry.kind == _S_IFREG:
+        if entry.kind == S_IFREG:
             total += entry.size
     try:
         var slot = _TOOLCHAIN_LIB_MEMO.get_or_create_ptr()
@@ -1997,7 +1988,7 @@ def _toolchain_lib_content(
     var kb = KeyBuilder()
     var read_bytes = 0
     for entry in entries:
-        if entry.kind != _S_IFREG:
+        if entry.kind != S_IFREG:
             continue
         var name = String(entry.name)
         var data: List[UInt8]
@@ -2511,8 +2502,8 @@ def _remove_dir_contents_no_follow(dir: String) raises:
         # symlink-to-directory would be recursed into and the TARGET's contents
         # deleted. It also folds an unreadable entry into False, which would
         # make this unlink something it could not characterize.
-        var kind = Int(lstat(child).st_mode) & _S_IFMT
-        if kind == _S_IFDIR:
+        var kind = Int(lstat(child).st_mode) & S_IFMT
+        if kind == S_IFDIR:
             _remove_dir_contents_no_follow(child)
             rmdir(child)
         else:
@@ -2559,14 +2550,14 @@ def remove_tree_no_follow(path: String) raises:
     # three more foreign declarations. The window is inside a directory mtest
     # created and owns, and the no-follow checks still make every step refuse
     # what it can see; this is a narrowing, not a proof.
-    var kind = Int(lstat(path).st_mode) & _S_IFMT
-    if kind == _S_IFLNK:
+    var kind = Int(lstat(path).st_mode) & S_IFMT
+    if kind == S_IFLNK:
         raise Error(
             "session: refusing to remove '"
             + path
             + "': it is a symlink, and the cache deletes only what it owns"
         )
-    if kind != _S_IFDIR:
+    if kind != S_IFDIR:
         unlink(path)
         return
     _remove_dir_contents_no_follow(path)
@@ -2653,10 +2644,10 @@ def _discard_unreadable_generation(
         var observed = lstat(gen_abs)
         observed_dev = Int(observed.st_dev)
         observed_ino = Int(observed.st_ino)
-        kind = Int(observed.st_mode) & _S_IFMT
+        kind = Int(observed.st_mode) & S_IFMT
     except:
         return
-    if kind != _S_IFDIR:
+    if kind != S_IFDIR:
         return
     if _list_sorted(gen_abs):
         return
@@ -2808,7 +2799,7 @@ def _deletion_authorization_failure(root: String) -> Optional[String]:
     # would follow it and answer yes.
     var kind: Int
     try:
-        kind = Int(lstat(tag).st_mode) & _S_IFMT
+        kind = Int(lstat(tag).st_mode) & S_IFMT
     except:
         var absent = quoted + "is missing. mtest writes that marker only when"
         absent += " it creates '"
@@ -2820,7 +2811,7 @@ def _deletion_authorization_failure(root: String) -> Optional[String]:
         return Optional[String](absent^)
 
     var foreign = String("")
-    if kind != _S_IFREG:
+    if kind != S_IFREG:
         foreign = quoted + "is not a regular file"
     else:
         var text: String
@@ -2904,7 +2895,7 @@ def clear_cache_root(root: String) -> Optional[String]:
     # removal proceed straight through one.
     var kind: Int
     try:
-        kind = Int(lstat(cache_root).st_mode) & _S_IFMT
+        kind = Int(lstat(cache_root).st_mode) & S_IFMT
     except:
         # Absent, or a parent that cannot be searched. `lstat` cannot separate
         # the two through a Mojo `Error`, and both resolve identically here:
@@ -2912,7 +2903,7 @@ def clear_cache_root(root: String) -> Optional[String]:
         # cold run that was already going to be cold; guessing the other way
         # would fail runs over a cache directory that never existed.
         return Optional[String](None)
-    if kind == _S_IFLNK:
+    if kind == S_IFLNK:
         var symlink_note = String("cache-clear: ") + cache_root
         symlink_note += ": refusing to delete a symlink"
         symlink_note += " — only a real cache directory carrying mtest's exact"
@@ -3488,14 +3479,14 @@ def store_probe(root: String, key: FileKey) -> ProbeResult:
     # --- Check 1: a real directory, characterized without following. --------
     var kind: Int
     try:
-        kind = Int(lstat(gen_abs).st_mode) & _S_IFMT
+        kind = Int(lstat(gen_abs).st_mode) & S_IFMT
     except:
         # Absent, or in a directory this process cannot search. Either way
         # there is nothing here to trust and nothing to delete.
         return _probe_miss()
-    if kind == _S_IFLNK:
+    if kind == S_IFLNK:
         return _probe_miss()
-    if kind != _S_IFDIR:
+    if kind != S_IFDIR:
         # A plain file (or a device, or a socket) where a generation belongs is
         # not a generation, and it occupies the name the next publish needs.
         _discard(gen_abs)
@@ -3544,11 +3535,11 @@ def store_probe(root: String, key: FileKey) -> ProbeResult:
     var bin_abs = gen_abs + "/" + _BIN_NAME
     var bin_kind: Int
     try:
-        bin_kind = Int(lstat(bin_abs).st_mode) & _S_IFMT
+        bin_kind = Int(lstat(bin_abs).st_mode) & S_IFMT
     except:
         _discard(gen_abs)
         return _probe_miss()
-    if bin_kind != _S_IFREG:
+    if bin_kind != S_IFREG:
         _discard(gen_abs)
         return _probe_miss()
 
@@ -3892,11 +3883,11 @@ def _read_seq(path: String) -> Int:
     var size: Int
     try:
         var info = lstat(path)
-        kind = Int(info.st_mode) & _S_IFMT
+        kind = Int(info.st_mode) & S_IFMT
         size = Int(info.st_size)
     except:
         return 0
-    if kind != _S_IFREG or size > _SEQ_CAP:
+    if kind != S_IFREG or size > _SEQ_CAP:
         return 0
     var data: List[UInt8]
     try:
@@ -4904,12 +4895,12 @@ def precompile_probe(root: String, key: FileKey, out_path: String) -> Bool:
     # change lands on the wrong side of it.
     var kind: Int
     try:
-        kind = Int(lstat(stamp_abs).st_mode) & _S_IFMT
+        kind = Int(lstat(stamp_abs).st_mode) & S_IFMT
     except:
         # Absent, or in a directory this process cannot search. Either way there
         # is nothing here to trust and nothing to delete.
         return False
-    if kind == _S_IFLNK:
+    if kind == S_IFLNK:
         return False
 
     var stamp_text: String

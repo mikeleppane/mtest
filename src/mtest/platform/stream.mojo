@@ -36,8 +36,8 @@ from mtest.platform.cstring import c_string_bytes
 # does not place a fixed argument in the variadic stack area.
 comptime _CREATE_MODE = 0o644
 
-comptime _EINTR = 4
-"""`EINTR`, identical on Linux and Darwin: retry the interrupted open."""
+comptime EINTR = 4
+"""`errno` for an interrupted syscall, identical on Linux and Darwin: retry."""
 
 comptime _ENOENT = 2
 """`ENOENT`, identical on Linux and Darwin: the destination does not exist."""
@@ -393,7 +393,7 @@ def create_truncate_fd_guarded(path: String) -> CreatResult:
             break
         # Snapshot while the failing `open` is still the last syscall.
         err = errno_now()
-        if err != _EINTR:
+        if err != EINTR:
             break
     _ = terminated^
     if probe < 0 and err != _ENOENT:
