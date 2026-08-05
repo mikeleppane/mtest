@@ -1682,5 +1682,349 @@ class CompatCanaryWorkflowTests(unittest.TestCase):
         )
 
 
+class CompatCanaryNonCanonicalYamlTests(unittest.TestCase):
+    """Mutations written in YAML the canary oracle's regexes cannot read.
+
+    Every other canary mutation in this file is written in the same block
+    mapping idiom the live workflow uses, which is also the idiom those regexes
+    were built around — so a suite made only of those cannot discover the forms
+    they never see. YAML admits many spellings of one structure: a step in
+    inline sequence form opens with `- run:` rather than `- name:`, a mapping
+    can be written between braces on one line, a key can be quoted or padded
+    away from its colon, and a command can live in a block scalar under the line
+    that names it. Each parses to exactly the structure the block form parses
+    to, and none of them is what a `^      - name: (.+)$` or a
+    `line.strip() == "env:"` is looking at.
+
+    So the property asserted here is not "these particular spellings are
+    caught". It is that the oracle refuses anything outside the one spelling it
+    can read, before it asserts a single property — which is the only version of
+    this that does not have to be re-won against the next spelling nobody
+    thought of.
+    """
+
+    def _workflow(self) -> str:
+        """Return the live compatibility-canary workflow text."""
+        return (
+            workflow_security.REPO_ROOT / ".github" / "workflows" / "compat-canary.yml"
+        ).read_text(encoding="utf-8")
+
+    def _reject(self, mutated: str, pattern: str) -> None:
+        """Require the canary oracle to reject one mutated workflow."""
+        self.assertNotEqual(mutated, self._workflow())
+        with tempfile.TemporaryDirectory(prefix="mtest-canary-yaml-") as raw_tmp:
+            repo = Path(raw_tmp)
+            workflow_path = repo / ".github" / "workflows" / "compat-canary.yml"
+            workflow_path.parent.mkdir(parents=True)
+            workflow_path.write_text(mutated, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, pattern):
+                workflow_security.check_compat_canary_workflow(repo)
+
+    # The payload every mutation below reaches for. The probe downloads and
+    # executes a compiler from a package channel; whatever that compiler leaves
+    # in `build/canary/` is uploaded as the lane artifact and unpacked here, in
+    # the job holding `issues: write`.
+    HOOK = "build/canary-results/canary-result-stable/hook.sh"
+    UPSERT = "      - name: Upsert the pinned issues\n"
+    PROBE_RUN = '        run: python3 -m scripts.canary.run --lane "$CANARY_LANE"\n'
+
+    def test_a_step_that_does_not_open_with_a_name_is_rejected(self) -> None:
+        """Arbitrary code in the privileged job, in a step neither scan sees.
+
+        Steps are collected as `- name:` lines and commands as `run:` lines at
+        one exact indent. A step written `- run:` is a step by every rule YAML
+        has and appears in neither collection, so the step sequence still reads
+        as the four reviewed names and the command list still reads as the one
+        reviewed notifier invocation.
+        """
+        workflow = self._workflow()
+        for label, mutated in {
+            "notify-runs-the-artifact": workflow.replace(
+                self.UPSERT, f"      - run: bash {self.HOOK}\n{self.UPSERT}", 1
+            ),
+            "probe-forges-a-verdict": workflow.replace(
+                self.PROBE_RUN,
+                f"{self.PROBE_RUN}"
+                "      - run: cp loot/result.json build/canary/result.json\n",
+                1,
+            ),
+            "local-action": workflow.replace(
+                self.UPSERT,
+                f"      - uses: ./.github/actions/collect\n{self.UPSERT}",
+                1,
+            ),
+        }.items():
+            with self.subTest(step=label):
+                self._reject(mutated, "readable subset")
+
+    def test_a_padded_sequence_dash_is_rejected(self) -> None:
+        """One extra space moves a whole step out of both scans.
+
+        `-   name:` is the same step as `- name:`, but its keys sit two columns
+        further right, so the step name matches no collection and the `run:`
+        beneath it is not at the indent the command list reads.
+        """
+        self._reject(
+            self._workflow().replace(
+                self.UPSERT,
+                "      -   name: Collect the downloads\n"
+                f"          run: bash {self.HOOK}\n"
+                f"{self.UPSERT}",
+                1,
+            ),
+            "readable subset",
+        )
+
+    def test_a_block_scalar_command_is_rejected(self) -> None:
+        """A payload on no scanned line at all.
+
+        `run: |` puts the command on the lines beneath it, where no `run:`
+        pattern looks and no expression rule applies.
+        """
+        self._reject(
+            self._workflow().replace(
+                self.UPSERT,
+                f"      - run: |\n          bash {self.HOOK}\n{self.UPSERT}",
+                1,
+            ),
+            "readable subset",
+        )
+
+    def test_a_flow_mapping_environment_is_rejected(self) -> None:
+        """The env pinning that stops `BASH_ENV`, bypassed by a brace.
+
+        The binding scanner recognises a line whose stripped form is exactly
+        `env:` and reads the block beneath it. `env: {BASH_ENV: hook.sh}` binds
+        the same name and is not that line, so every binding in it is invisible
+        to the comparison the module's own docstring rests its `BASH_ENV`
+        argument on. GitHub runs a `run:` step under non-interactive bash, which
+        sources whatever `BASH_ENV` names before it reads the script — so the
+        artifact executes ahead of the reviewed notifier command.
+        """
+        workflow = self._workflow()
+        binding = "env: {BASH_ENV: " + self.HOOK + "}"
+        for label, mutated in {
+            "step-level": workflow.replace(
+                self.UPSERT, f"{self.UPSERT}        {binding}\n", 1
+            ),
+            "workflow-level": workflow.replace("jobs:\n", f"{binding}\njobs:\n", 1),
+            "beside-the-block-form": workflow.replace(
+                "        env:\n          GH_TOKEN:",
+                f"        {binding}\n        env:\n          GH_TOKEN:",
+                1,
+            ),
+            "expression-valued": workflow.replace(
+                self.UPSERT,
+                f"{self.UPSERT}        env: "
+                '${{ fromJSON(\'{"BASH_ENV":"' + self.HOOK + "\"}') }}\n",
+                1,
+            ),
+        }.items():
+            with self.subTest(env=label):
+                self._reject(mutated, "readable subset")
+
+    def test_a_quoted_or_padded_mapping_key_is_rejected(self) -> None:
+        r"""A key YAML reads and no `^\s*<key>:` pattern here does.
+
+        `"env":`, `"working-directory":` and `audit :` are the same keys as
+        their plain spellings. Quoted or padded, each one defeats the exact
+        pattern that governs it while the workflow still means what the pattern
+        was written to forbid.
+        """
+        workflow = self._workflow()
+        for label, mutated in {
+            "quoted-env": workflow.replace(
+                self.UPSERT,
+                f'{self.UPSERT}        "env":\n          BASH_ENV: {self.HOOK}\n',
+                1,
+            ),
+            "quoted-working-directory": workflow.replace(
+                self.UPSERT,
+                f'{self.UPSERT}        "working-directory": '
+                "build/canary-results/canary-result-stable\n",
+                1,
+            ),
+            "padded-key": workflow.replace(
+                "    timeout-minutes: 10\n", "    timeout-minutes : 10\n", 1
+            ),
+        }.items():
+            with self.subTest(key=label):
+                self._reject(mutated, "readable subset")
+
+    def _third_job(self, job_id: str) -> str:
+        """Render a third job that grants itself issue-write authority.
+
+        Args:
+            job_id: How the job's key is spelled, including its colon.
+
+        Returns:
+            A job block that needs the probe, unpacks the lane artifacts, and
+            executes one of them under `issues: write`.
+        """
+        return (
+            f"\n{job_id}\n"
+            "    name: Audit\n"
+            "    runs-on: ubuntu-24.04\n"
+            "    needs: probe\n"
+            "    timeout-minutes: 10\n"
+            "    permissions: {contents: read, issues: write}\n"
+            "    steps:\n"
+            "      - uses: actions/download-artifact@"
+            f"{workflow_security.DOWNLOAD_ARTIFACT_ACTION_SHA} # v8.0.1\n"
+            "        with:\n"
+            "          path: build/canary-results/\n"
+            f"      - run: bash {self.HOOK}\n"
+        )
+
+    def test_a_third_job_cannot_hide_from_the_roster(self) -> None:
+        """The whole credential split, restated in a job nothing counted.
+
+        The job roster is read as plain keys at indent two, the permission
+        override count as `^    permissions:$` lines, and the issue-write grant
+        as lines whose stripped form is exactly `issues: write`. A quoted or
+        padded job id is seen by none of the first, and a flow-style
+        `permissions:` by neither of the others — so a third job can need the
+        probe, unpack its artifact and run it with `issues: write` while the two
+        reviewed jobs still read exactly as reviewed.
+        """
+        workflow = self._workflow()
+        for label, job_id in {
+            "quoted": '  "audit":',
+            "padded": "  audit :",
+            "plain": "  audit:",
+        }.items():
+            with self.subTest(job=label):
+                self._reject(
+                    workflow + self._third_job(job_id),
+                    "readable subset|job membership mismatch",
+                )
+
+    def test_a_flow_style_permission_grant_is_rejected(self) -> None:
+        """`permissions: {…}` is counted by neither grant scan."""
+        workflow = self._workflow()
+        for label, mutated in {
+            "probe-widened": workflow.replace(
+                "    permissions:\n      contents: read\n    strategy:\n",
+                "    permissions: {contents: read, issues: write}\n    strategy:\n",
+                1,
+            ),
+            "everything": workflow.replace(
+                "    permissions:\n      contents: read\n    strategy:\n",
+                "    permissions: write-all\n    strategy:\n",
+                1,
+            ),
+        }.items():
+            with self.subTest(grant=label):
+                self._reject(mutated, "readable subset")
+
+    def test_a_flow_style_action_input_is_rejected(self) -> None:
+        """`with: {…}` hands an action inputs the input scan never lists."""
+        self._reject(
+            self._workflow().replace(
+                "        with:\n          persist-credentials: false\n",
+                "        with: {persist-credentials: false, "
+                "repository: attacker/evil}\n",
+                1,
+            ),
+            "readable subset",
+        )
+
+    def test_a_flow_style_lane_matrix_is_rejected(self) -> None:
+        """A matrix written between braces is compared against nothing."""
+        marker = (
+            "      matrix:\n"
+            "        lane: ${{ fromJSON(github.event_name == 'workflow_dispatch' "
+            '&& format(\'["{0}"]\', inputs.channel) || \'["stable","nightly"]\') }}\n'
+        )
+        workflow = self._workflow()
+        self.assertIn(marker, workflow)
+        self._reject(
+            workflow.replace(marker, '      matrix: {lane: ["stable"]}\n', 1),
+            "readable subset",
+        )
+
+    def test_an_anchor_or_alias_is_rejected(self) -> None:
+        """One node, written once and used twice, read once by every scan.
+
+        An anchored mapping is expanded by YAML wherever its alias appears, so
+        an alias in the privileged job carries whatever the anchor holds while
+        every pattern here reads only the line the alias is written on. The
+        merge key does the same to a mapping.
+        """
+        workflow = self._workflow()
+        for label, mutated in {
+            "anchor": workflow.replace(
+                "        env:\n          # Through the environment",
+                "        env: &canary_env\n          # Through the environment",
+                1,
+            ),
+            "alias": workflow.replace(
+                self.UPSERT, f"{self.UPSERT}        env: *canary_env\n", 1
+            ),
+            "merge-key": workflow.replace(
+                self.UPSERT, f"{self.UPSERT}        <<: *canary_env\n", 1
+            ),
+        }.items():
+            with self.subTest(node=label):
+                self._reject(mutated, "readable subset")
+
+    def test_a_tab_or_trailing_space_is_rejected(self) -> None:
+        """Whitespace YAML and these patterns disagree about.
+
+        A tab is not indentation in YAML at all, and trailing whitespace rides
+        along inside every value a `(.+)$` capture reads, so both are refused
+        rather than left to be read two ways.
+        """
+        workflow = self._workflow()
+        for label, mutated in {
+            "tab": workflow.replace(
+                "    timeout-minutes: 10\n", "\ttimeout-minutes: 10\n", 1
+            ),
+            "trailing-space": workflow.replace(
+                "    needs: probe\n", "    needs: probe \n", 1
+            ),
+            "odd-indent": workflow.replace(
+                "    needs: probe\n", "     needs: probe\n", 1
+            ),
+        }.items():
+            with self.subTest(whitespace=label):
+                self._reject(mutated, "readable subset")
+
+    def test_a_second_document_is_rejected(self) -> None:
+        """A file can hold two documents; every scan here reads one text."""
+        self._reject(
+            self._workflow() + "---\njobs:\n  audit:\n    runs-on: ubuntu-24.04\n",
+            "readable subset",
+        )
+
+    def test_the_live_workflow_is_inside_the_readable_subset(self) -> None:
+        """The subset is a description of this file, not a wish about it."""
+        workflow_security.check_compat_canary_workflow()
+
+    def test_the_run_token_is_counted_in_every_expression_form(self) -> None:
+        """`github.token` and `github['token']` name one value.
+
+        The credential count matches the literal `${{ github.token }}` with its
+        inner spaces, so both `${{github.token}}` and `${{ github['token'] }}`
+        are free of it. The bracket form is already handled by this module's own
+        credential pattern; the canary simply never applied it.
+        """
+        workflow = self._workflow()
+        for label, expression in {
+            "spaceless": "${{github.token}}",
+            "bracket": "${{ github['token'] }}",
+        }.items():
+            with self.subTest(form=label):
+                self._reject(
+                    workflow.replace(
+                        "          CANARY_LANE: ${{ matrix.lane }}\n",
+                        "          CANARY_LANE: ${{ matrix.lane }}\n"
+                        f"          GH_TOKEN: {expression}\n",
+                        1,
+                    ),
+                    "credential mismatch",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

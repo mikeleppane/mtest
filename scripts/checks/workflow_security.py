@@ -31,6 +31,7 @@ from __future__ import annotations
 from pathlib import Path
 import re
 import sys
+from typing import NoReturn
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -105,6 +106,77 @@ CANARY_RESULTS_ROOT = "build/canary-results/"
 
 `scripts/canary/notify.py` reads `<root>/<prefix><lane>/result.json`, and the
 download that puts it there is pinned per lane below.
+"""
+
+CANARY_CANONICAL_NODE_RE = re.compile(
+    r"^(?P<indent> *)(?P<dash>- )?(?P<key>[A-Za-z0-9_-]+):(?P<value>(?: .*)?)$"
+)
+"""The one line shape a mapping or sequence entry in the canary may take.
+
+The key class is exactly `_yaml_mapping_keys`', and the colon must be followed
+by end-of-line or a single space exactly as every `re.findall` over this
+workflow assumes. A line this matches is a line those readers and YAML agree
+about; a line it does not match is one they can disagree about, which is the
+whole subject of `_require_canonical_canary`.
+"""
+
+CANARY_SEQUENCE_ENTRY_KEYS = frozenset({"cron", "name"})
+"""The only keys a `- ` entry in the canary may open with.
+
+An allow-list rather than a list of the dangerous openers. A step is collected
+here as a `- name:` line, so a step written `- run:` or `- uses:` is a step to
+YAML and to nothing in this module; refusing the two keys known to do that
+leaves `- shell:`, `- with:` and whatever GitHub adds next.
+"""
+
+CANARY_BLOCK_MAPPING_KEYS = frozenset(
+    {
+        "concurrency",
+        "env",
+        "environment",
+        "inputs",
+        "jobs",
+        "matrix",
+        "on",
+        "outputs",
+        "permissions",
+        "schedule",
+        "secrets",
+        "steps",
+        "strategy",
+        "with",
+        "workflow_dispatch",
+    }
+)
+"""Keys whose value is a collection, which must therefore be written as a block.
+
+`env: {BASH_ENV: ./hook.sh}` and `permissions: {issues: write}` bind and grant
+exactly what their block spellings do while sitting on one line that no header
+scan here recognises. So does `env: ${{ fromJSON(...) }}`, where the mapping
+does not exist until GitHub evaluates the expression. Requiring these keys to
+carry nothing at all refuses every one of those without having to enumerate the
+ways a collection can be spelled inline.
+
+`defaults:`, `container:` and `services:` are deliberately absent: they are
+refused outright below, in any form, and listing them here would answer a
+`container: image` mutation with "outside the readable subset" instead of the
+rule that actually governs it.
+"""
+
+CANARY_BLOCK_SCALAR_RE = re.compile(r"[|>][+-]?[0-9]*")
+"""A `run: |` style indicator, which moves the value off the line naming it.
+
+The reviewed commands are compared as whole `run:` lines. A block scalar puts
+the command on the following lines instead, where no command scan, no
+expression rule and no credential count looks at it.
+"""
+
+CANARY_FLOW_SEQUENCE_RE = re.compile(r"""\[[A-Za-z0-9_. ,'"-]*\]""")
+"""The one inline collection the canary may write: a list of plain scalars.
+
+`options: [stable, nightly]` is the closed lane choice, and it is compared as
+written. Restricting the characters keeps `steps: [{run: ...}]` — a sequence of
+mappings, which is where a step could hide — outside the subset.
 """
 
 CREDENTIAL_REFERENCE_RE = re.compile(
@@ -212,16 +284,27 @@ def _yaml_mapping_keys(block: str, indent: int) -> list[str]:
 
 
 def _env_bindings(block: str) -> list[str]:
-    """Return every binding made by every `env:` mapping in one block, in order.
+    """Return every binding made by every block `env:` mapping, in order.
+
+    Lines are returned whole rather than split into key and value, so a caller
+    comparing the result against a reviewed list rejects a binding this cannot
+    read instead of accepting a half-read one.
+
+    What it does not see is the header: only a line whose stripped form is
+    exactly `env:` opens a mapping here, so `env: {BASH_ENV: ./hook.sh}`,
+    `"env":` and `env: &anchor` each bind names this returns nothing about. That
+    is a completeness gap in the scanner, not in its callers, and it is why
+    `_require_canonical_canary` refuses those spellings outright before the
+    canary's bindings are compared. In the published `action.yml`,
+    `check_published_action` carries the same burden through its expression and
+    key pins.
 
     Args:
         block: The YAML body to scan, at whatever indentation it sits.
 
     Returns:
-        One entry per line under every `env:` header found, stripped, in
-        document order. A line the scanner cannot read as `KEY: value` is
-        returned whole, so an unreadable binding is rejected by the caller's
-        comparison rather than dropped from it.
+        One entry per line under every block `env:` header found, stripped, in
+        document order.
     """
     lines = block.splitlines()
     bindings: list[str] = []
@@ -584,6 +667,102 @@ def check_codeql_workflow(repo_root: Path = REPO_ROOT) -> None:
         )
 
 
+def _require_canonical_canary(workflow: str) -> None:
+    """Refuse a canary workflow written outside the subset read below.
+
+    Every assertion in `check_compat_canary_workflow` is a regular expression
+    over the workflow text, because `scripts/` carries no runtime dependencies
+    and there is no YAML parser here to borrow. That is workable only while the
+    file is written the one way those expressions read, and YAML does not
+    enforce it: a step in inline sequence form opens with `- run:` rather than
+    `- name:`, a mapping can be written between braces on the line that names
+    it, a key can be quoted or padded away from its colon, an anchor can be
+    expanded somewhere else entirely, and a command can live in a block scalar
+    under the line naming it. Each parses to exactly the structure the block
+    form parses to, and none of them is what a `^      - name: (.+)$` or a
+    `line.strip() == "env:"` is looking at.
+
+    Patching each spelling as it is found does not converge, because the next
+    one nobody thought of is still accepted by default. So this states the
+    subset positively — one line shape, one key class, one dash form, block
+    collections only — and refuses everything else *before* any property below
+    is asserted. A future YAML form these expressions cannot read is then a
+    rejection with a line number rather than a silent pass, and the price is
+    that the canary must be written the way it is written today.
+
+    Args:
+        workflow: The compatibility-canary workflow text.
+
+    Raises:
+        AssertionError: Some line falls outside the subset, naming the line
+            number and the line.
+    """
+
+    def refuse(number: int, line: str, why: str) -> NoReturn:
+        raise AssertionError(
+            "compat canary is outside the readable subset: this file is "
+            "reviewed by pattern rather than by a YAML parser, so a spelling "
+            "those patterns cannot read is refused rather than reviewed "
+            f"wrongly — line {number} {why}: {line!r}"
+        )
+
+    for number, line in enumerate(workflow.splitlines(), start=1):
+        if "\t" in line:
+            refuse(number, line, "indents with a tab, which is not YAML indentation")
+        if line != line.rstrip():
+            # A `(.+)$` capture reads trailing whitespace into the value it
+            # pins, so two lines that differ only there compare unequal here
+            # and identically to GitHub.
+            refuse(number, line, "carries trailing whitespace")
+        if not line or line.lstrip(" ").startswith("#"):
+            continue
+        match = CANARY_CANONICAL_NODE_RE.fullmatch(line)
+        if match is None:
+            refuse(
+                number,
+                line,
+                "is neither blank, a comment, nor `<key>: <value>` with an "
+                "unquoted key against its colon",
+            )
+        if len(match.group("indent")) % 2:
+            # Odd indentation nests somewhere the fixed-indent scans below do
+            # not read, while YAML nests it perfectly happily.
+            refuse(number, line, "is indented an odd number of columns")
+        key = match.group("key")
+        value = match.group("value").strip()
+        if match.group("dash") and key not in CANARY_SEQUENCE_ENTRY_KEYS:
+            refuse(
+                number,
+                line,
+                f"opens a sequence entry with {key!r} rather than "
+                f"{sorted(CANARY_SEQUENCE_ENTRY_KEYS)}, so it is a step no step "
+                "scan can see",
+            )
+        if key in CANARY_BLOCK_MAPPING_KEYS and value:
+            refuse(
+                number,
+                line,
+                f"gives {key!r} an inline value, and a collection written on "
+                "the line that names it is read by no header scan here",
+            )
+        if value[:1] in {"{", "&", "*", "?", "!"}:
+            refuse(
+                number,
+                line,
+                "opens its value with a flow mapping, an anchor, an alias or a "
+                "tag, none of which is where this file's value is read from",
+            )
+        if CANARY_BLOCK_SCALAR_RE.fullmatch(value):
+            refuse(
+                number,
+                line,
+                "moves its value into a block scalar, off the line every "
+                "command, expression and credential scan here reads",
+            )
+        if value.startswith("[") and not CANARY_FLOW_SEQUENCE_RE.fullmatch(value):
+            refuse(number, line, "writes an inline collection of anything but scalars")
+
+
 def check_compat_canary_workflow(repo_root: Path = REPO_ROOT) -> None:
     """Pin the compatibility canary's credential split, schedule, and steps.
 
@@ -597,6 +776,15 @@ def check_compat_canary_workflow(repo_root: Path = REPO_ROOT) -> None:
     pinned here, positively (what each job runs, in which order, with which
     grants) and negatively (what the privileged job may never contain).
 
+    Every assertion here is a pattern over the workflow text, so the first one
+    is about the text itself: `_require_canonical_canary` refuses any spelling
+    those patterns cannot read — an inline sequence entry, a flow mapping, a
+    quoted or padded key, an anchor, a block scalar — before a single property
+    is asserted. Read that function before trusting anything below it. Without
+    it each rule here governs one spelling of the thing it names and silently
+    permits the others, which is how a step, an `env:` mapping and a whole third
+    job can each be written where nothing looks.
+
     The probe job's property is stated as a scope rather than as an absence.
     GitHub mints a `GITHUB_TOKEN` for every job whether the workflow asks for
     one or not, so "the probe holds no token" is simply false, and a security
@@ -605,16 +793,19 @@ def check_compat_canary_workflow(repo_root: Path = REPO_ROOT) -> None:
     `contents: read` — the least a job that checks this repository out can be
     given — that its checkout sets `persist-credentials: false` so nothing
     lands in `.git/config` beside the downloaded compiler, and that the only
-    environment binding in that job is the lane name.
+    environment binding this workflow makes in that job is the lane name. The
+    runner's own variables are not this workflow's to constrain and are not
+    claimed here.
 
-    Everything a step or a job can be handed is pinned by value, not by shape.
-    An `env:` mapping is compared binding by binding rather than key by key,
-    because a key set that still reads `CANARY_LANES` says nothing about a job
-    told to report on one lane and stay quiet about the other; a `with:` map is
-    compared line by line for the same reason, because the input this workflow
-    can least afford to have moved — the `repository:` and `ref:` the
-    privileged job checks out and then executes — is spelled exactly like the
-    input beside it.
+    Within that subset, what a step or a job is handed is pinned by value rather
+    than by shape. An `env:` mapping is compared binding by binding rather than
+    key by key, because a key set that still reads `CANARY_LANES` says nothing
+    about a job told to report on one lane and stay quiet about the other; a
+    `with:` map is compared line by line for the same reason, because the input
+    this workflow can least afford to have moved — the `repository:` and `ref:`
+    the privileged job checks out and then executes — is spelled exactly like
+    the input beside it. Credential references are counted in both expression
+    forms, since `github.token` and `github['token']` name one value.
 
     Five keys are refused outright rather than reviewed: `defaults:`,
     `container:` and `services:` on a job, and `shell:` and
@@ -648,6 +839,10 @@ def check_compat_canary_workflow(repo_root: Path = REPO_ROOT) -> None:
     """
     workflow_path = repo_root / ".github" / "workflows" / "compat-canary.yml"
     workflow = workflow_path.read_text(encoding="utf-8")
+    # First, and before any property below is asserted: every one of them is a
+    # pattern over this text, and a pattern is only a review while the text is
+    # written the one way the pattern reads.
+    _require_canonical_canary(workflow)
     if not workflow.startswith("name: Compat Canary\n"):
         raise AssertionError("compat canary workflow name mismatch")
     if "continue-on-error:" in workflow:
@@ -722,15 +917,35 @@ def check_compat_canary_workflow(repo_root: Path = REPO_ROOT) -> None:
         )
 
     expected_jobs = ["probe", "notify"]
-    jobs = _yaml_mapping_keys(_yaml_block(workflow, "jobs:"), 2)
-    if jobs != expected_jobs:
+    jobs_block = _yaml_block(workflow, "jobs:")
+    jobs = _yaml_mapping_keys(jobs_block, 2)
+    # Read twice, once as keys the rest of this function can look up and once as
+    # raw lines. The second reading assumes nothing about what a key may look
+    # like, so a third job cannot become invisible by being spelled in some way
+    # the key pattern happens not to match — which is the same failure the
+    # canonical-subset check above refuses, asserted here where losing it would
+    # cost the credential split rather than a diagnostic.
+    job_lines = [line for line in jobs_block.splitlines() if re.match(r"^  \S", line)]
+    if jobs != expected_jobs or job_lines != [f"  {name}:" for name in expected_jobs]:
         raise AssertionError(
             "compat canary job membership mismatch: the split into an "
             "unprivileged probe and a privileged notifier is the whole security "
-            f"design, expected={expected_jobs}, actual={jobs}"
+            f"design, expected={expected_jobs}, actual={jobs or job_lines}"
         )
     probe = _yaml_block(workflow, "  probe:")
     notify = _yaml_block(workflow, "  notify:")
+
+    # The run's own token, counted in both expression spellings rather than in
+    # the one this file happens to use. `github.token` and `github['token']` name
+    # the same value, and a count of the literal `${{ github.token }}` — inner
+    # spaces and all — sees neither `${{github.token}}` nor the bracket form.
+    credentials = CREDENTIAL_REFERENCE_RE.findall(workflow)
+    if len(credentials) != 1 or CREDENTIAL_REFERENCE_RE.search(probe) is not None:
+        raise AssertionError(
+            "compat canary credential mismatch: exactly one credential "
+            "reference belongs in this workflow and it belongs to the notifier "
+            f"job, found {credentials}"
+        )
 
     expected_job_names = {"probe": '"Probe / ${{ matrix.lane }}"', "notify": "Notify"}
     for name, job in (("probe", probe), ("notify", notify)):
