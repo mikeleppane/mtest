@@ -69,6 +69,7 @@ without a network, a token, or a repository.
 from __future__ import annotations
 
 import argparse
+import contextlib
 from dataclasses import fields
 import json
 import os
@@ -76,6 +77,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import tempfile
 from typing import TYPE_CHECKING
 
 from scripts.canary.protocol_compare import PASS, PROTOCOL_DRIFT
@@ -106,7 +108,7 @@ from scripts.canary.toolchain import LANES
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
 
 # The workflow uploads one artifact per lane under this name, and one download
@@ -415,6 +417,38 @@ def render_silence_body(lane: str, reason: str) -> str:
     )
 
 
+@contextlib.contextmanager
+def body_file(body: str) -> Iterator[str]:
+    """Stage one issue body where `gh` can read it instead of taking it in argv.
+
+    An issue body carries the probe's `detail`, and a `detail` is whatever the
+    candidate compiler printed. A body long enough to exceed `ARG_MAX` — one
+    miscompiled source file's worth of diagnostics is enough — makes the spawn
+    itself fail with `E2BIG`, so a candidate's own output could stop the
+    notifier before it had reported any lane. `--body-file` moves that text out
+    of the argv the kernel has to copy, and `gh` documents the flag on every
+    command here that takes a body.
+
+    Args:
+        body: The Markdown to publish.
+
+    Yields:
+        The path to a file holding it, for the duration of the call that reads
+        it.
+
+    Raises:
+        NotifyError: The body could not be staged, which is this module failing
+            at its job rather than a lane having something to report.
+    """
+    with tempfile.TemporaryDirectory(prefix="canary-notify-") as raw:
+        path = Path(raw) / "body.md"
+        try:
+            path.write_text(body, encoding="utf-8")
+        except OSError as error:
+            raise NotifyError(f"an issue body could not be staged: {error}") from error
+        yield str(path)
+
+
 def _gh(gh: Gh, argv: Sequence[str]) -> CommandResult:
     """Run one `gh` command and refuse to continue if it failed.
 
@@ -426,12 +460,19 @@ def _gh(gh: Gh, argv: Sequence[str]) -> CommandResult:
         The completed command.
 
     Raises:
-        NotifyError: The command failed. Every call here either reads the issue
-            state this module decides from or performs the decision, so a
-            failure that was swallowed would leave the run green and the issue
-            wrong.
+        NotifyError: The command failed, or could not be spawned at all. Every
+            call here either reads the issue state this module decides from or
+            performs the decision, so a failure that was swallowed would leave
+            the run green and the issue wrong — and one that escaped as an
+            `OSError` ended the whole loop, so the lanes after it went
+            unreported too.
     """
-    result = gh(argv)
+    try:
+        result = gh(argv)
+    except OSError as error:
+        raise NotifyError(
+            f"`{shlex.join(tuple(argv))}` could not be spawned: {error}"
+        ) from error
     if result.returncode != 0:
         tail = result.stderr.strip() or result.stdout.strip()
         raise NotifyError(
@@ -511,16 +552,17 @@ def upsert_issue(gh: Gh, title: str, body: str) -> None:
         body: The body to publish.
 
     Raises:
-        NotifyError: A `gh` call failed.
+        NotifyError: A `gh` call failed, or the body could not be staged.
     """
     found = find_issue(gh, title)
-    if found is None:
-        _gh(gh, ["gh", "issue", "create", "--title", title, "--body", body])
-        return
-    number, state = found
-    if state != OPEN:
-        _gh(gh, ["gh", "issue", "reopen", str(number)])
-    _gh(gh, ["gh", "issue", "edit", str(number), "--body", body])
+    with body_file(body) as path:
+        if found is None:
+            _gh(gh, ["gh", "issue", "create", "--title", title, "--body-file", path])
+            return
+        number, state = found
+        if state != OPEN:
+            _gh(gh, ["gh", "issue", "reopen", str(number)])
+        _gh(gh, ["gh", "issue", "edit", str(number), "--body-file", path])
 
 
 def notify_lane(gh: Gh, results: Path, lane: str) -> bool:
@@ -549,17 +591,16 @@ def notify_lane(gh: Gh, results: Path, lane: str) -> bool:
     if result.classification in QUIET_CLASSIFICATIONS:
         found = find_issue(gh, title)
         if found is not None and found[1] == OPEN:
-            _gh(
-                gh,
-                [
-                    "gh",
-                    "issue",
-                    "close",
-                    str(found[0]),
-                    "--comment",
-                    render_body(result),
-                ],
-            )
+            # Commented and then closed, rather than closed with a comment:
+            # `gh issue close` accepts a closing note only as `--comment`, in
+            # the argv, and this note carries the probe's detail. Left there, a
+            # `PASS` whose detail quotes a candidate's own version banner is
+            # the same unbounded argv the finding path had. If the close fails
+            # after the comment lands, the issue stays open and tomorrow's run
+            # closes it; the reverse order would lose the note entirely.
+            with body_file(render_body(result)) as path:
+                _gh(gh, ["gh", "issue", "comment", str(found[0]), "--body-file", path])
+            _gh(gh, ["gh", "issue", "close", str(found[0])])
         return False
     upsert_issue(gh, title, render_body(result))
     # Written down like every finding, and still not a red run: this is the one

@@ -17,6 +17,7 @@ token, and no repository.
 from __future__ import annotations
 
 import contextlib
+import errno
 import io
 import json
 import os
@@ -112,15 +113,25 @@ class FakeGh:
     def __init__(self, issues: Sequence[dict[str, object]] = ()) -> None:
         self.issues = list(issues)
         self.calls: list[tuple[str, ...]] = []
+        self.bodies: dict[str, str] = {}
         self.list_output: str | None = None
         self.failing: str | None = None
         self.failing_lane: str | None = None
+        self.spawn_error: OSError | None = None
 
     def __call__(self, argv: Sequence[str]) -> CommandResult:
         """Answer one `gh` command, refusing any search it does not recognise."""
         recorded = tuple(argv)
         self.calls.append(recorded)
         subcommand = recorded[2] if len(recorded) > 2 else ""
+        if "--body-file" in recorded:
+            # Read at call time, not afterwards: the file lives only for the
+            # duration of the call, which is the property being pinned.
+            self.bodies[subcommand] = Path(
+                recorded[recorded.index("--body-file") + 1]
+            ).read_text(encoding="utf-8")
+        if self.spawn_error is not None:
+            raise self.spawn_error
         if subcommand == "list" and recorded not in {
             _search_argv(issue_title(lane)) for lane in LANES
         }:
@@ -151,6 +162,22 @@ class FakeGh:
             raise AssertionError(f"expected one {subcommand!r} call, got {matching}")
         call = matching[0]
         return call[call.index(flag) + 1]
+
+    def body(self, subcommand: str) -> str:
+        """Return the body one subcommand handed `gh`, read from where it put it.
+
+        Bodies travel by file rather than in the argv, so this follows
+        `--body-file` to what it names. A body passed as `--body` would not be
+        found here, and that is the assertion: a compiler-controlled diagnostic
+        on a command line is what raised `E2BIG` out of the spawn and stopped
+        the notifier reporting any lane after it.
+        """
+        if subcommand not in self.bodies:
+            raise AssertionError(
+                f"no {subcommand!r} call passed a body by file; it was called with "
+                f"{[call for call in self.calls if call[2] == subcommand]}"
+            )
+        return self.bodies[subcommand]
 
 
 def _issue(number: int, lane: str, state: str) -> dict[str, object]:
@@ -232,7 +259,7 @@ class IssueIdentityTests(NotifyTestCase):
         code, _log = self.notify(gh)
         self.assertEqual(code, 1)
         self.assertEqual(gh.argument("create", "--title"), "canary: stable")
-        body = gh.argument("create", "--body")
+        body = gh.body("create")
         self.assertIn(SOURCE_INCOMPATIBLE, body)
         self.assertIn("error: no decorator", body)
         self.assertIn(CANDIDATE_VERSION, body)
@@ -338,8 +365,12 @@ class QuietDayTests(NotifyTestCase):
                 self.write_result(STABLE, classification)
                 code, _log = self.notify(gh)
                 self.assertEqual(code, 0)
-                self.assertEqual(gh.subcommands(), ["list", "close"])
+                # The closing note is a comment of its own: `gh issue close`
+                # takes a closing comment only in its argv, and this body
+                # carries the probe's detail.
+                self.assertEqual(gh.subcommands(), ["list", "comment", "close"])
                 self.assertIn("12", gh.calls[1])
+                self.assertIn("12", gh.calls[2])
 
     def test_a_no_candidate_closing_comment_claims_nothing_was_probed(self) -> None:
         """A durable artifact must not say a compiler was exercised that was not.
@@ -351,9 +382,9 @@ class QuietDayTests(NotifyTestCase):
         `Candidate`, is false in both cases — and these are the two results a
         maintainer sees most often.
         """
-        for classification, subcommand, flag in (
-            (NO_NEWER_CANDIDATE, "close", "--comment"),
-            (INFRA_FAILURE, "edit", "--body"),
+        for classification, subcommand in (
+            (NO_NEWER_CANDIDATE, "comment"),
+            (INFRA_FAILURE, "edit"),
         ):
             with self.subTest(classification=classification):
                 gh = FakeGh([_issue(12, STABLE, "OPEN")])
@@ -365,7 +396,7 @@ class QuietDayTests(NotifyTestCase):
                 )
                 code, _log = self.notify(gh)
                 self.assertEqual(code, 0)
-                body = gh.argument(subcommand, flag)
+                body = gh.body(subcommand)
                 self.assertNotIn("newer than the one this repository pins", body)
                 self.assertNotIn(f"mojo {PINNED_VERSION}", body)
                 self.assertIn("none was exercised", body)
@@ -376,7 +407,7 @@ class QuietDayTests(NotifyTestCase):
         self.write_result(STABLE, PROTOCOL_DRIFT)
         code, _log = self.notify(gh)
         self.assertEqual(code, 1)
-        body = gh.argument("create", "--body")
+        body = gh.body("create")
         self.assertIn("newer than the one this repository pins", body)
         self.assertIn(f"mojo {CANDIDATE_VERSION} ({CANDIDATE_COMMIT})", body)
 
@@ -385,7 +416,7 @@ class QuietDayTests(NotifyTestCase):
         self.write_result(STABLE, STAGE_TIMEOUT)
         code, _log = self.notify(gh)
         self.assertEqual(code, 1)
-        body = gh.argument("create", "--body")
+        body = gh.body("create")
         self.assertIn("outlived its budget", body)
         self.assertNotIn("newer than the one this repository pins", body)
 
@@ -412,7 +443,7 @@ class QuietDayTests(NotifyTestCase):
                 )
                 code, _log = self.notify(gh)
                 self.assertEqual(code, 1)
-                body = gh.argument("create", "--body")
+                body = gh.body("create")
                 self.assertNotIn("newer than the one this repository pins", body)
                 self.assertNotIn(UNKNOWN_VERSION, body)
                 self.assertIn("nothing was compiled, tested or run", body)
@@ -436,7 +467,7 @@ class QuietDayTests(NotifyTestCase):
         )
         code, _log = self.notify(gh)
         self.assertEqual(code, 1)
-        body = gh.argument("create", "--body")
+        body = gh.body("create")
         self.assertIn(
             f"- **Candidate:** none was exercised; the channels published mojo "
             f"{CANDIDATE_VERSION}\n",
@@ -478,7 +509,7 @@ class FindingTests(NotifyTestCase):
                 code, _log = self.notify(gh)
                 self.assertEqual(code, 1)
                 self.assertEqual(gh.subcommands(), ["list", "create"])
-                self.assertIn(classification, gh.argument("create", "--body"))
+                self.assertIn(classification, gh.body("create"))
 
     def test_a_repeat_finding_updates_rather_than_duplicates(self) -> None:
         gh = FakeGh([_issue(12, STABLE, "OPEN")])
@@ -521,7 +552,7 @@ class InfraFailureTests(NotifyTestCase):
         code, _log = self.notify(gh)
         self.assertEqual(code, 0)
         self.assertEqual(gh.subcommands(), ["list", "edit"])
-        self.assertIn("404 Not Found", gh.argument("edit", "--body"))
+        self.assertIn("404 Not Found", gh.body("edit"))
 
     def test_it_opens_an_issue_when_nobody_is_watching(self) -> None:
         """Writing nothing was the permanent silence in a different place.
@@ -538,7 +569,7 @@ class InfraFailureTests(NotifyTestCase):
         code, _log = self.notify(gh)
         self.assertEqual(code, 0)
         self.assertEqual(gh.subcommands(), ["list", "create"])
-        self.assertIn("404 Not Found", gh.argument("create", "--body"))
+        self.assertIn("404 Not Found", gh.body("create"))
 
     def test_it_reopens_a_closed_issue(self) -> None:
         gh = FakeGh([_issue(12, STABLE, "CLOSED")])
@@ -557,7 +588,7 @@ class InfraFailureTests(NotifyTestCase):
         self.write_result(STABLE, GREEN)
         code, _log = self.notify(gh)
         self.assertEqual(code, 0)
-        self.assertEqual(gh.subcommands(), ["list", "close"])
+        self.assertEqual(gh.subcommands(), ["list", "comment", "close"])
 
 
 class CanaryBrokenTests(NotifyTestCase):
@@ -579,7 +610,7 @@ class CanaryBrokenTests(NotifyTestCase):
         code, _log = self.notify(gh)
         self.assertEqual(code, 1)
         self.assertEqual(gh.subcommands(), ["list", "create"])
-        body = gh.argument("create", "--body")
+        body = gh.body("create")
         self.assertIn(CANARY_BROKEN, body)
         self.assertIn("did not print JSON", body)
 
@@ -590,7 +621,7 @@ class CanaryBrokenTests(NotifyTestCase):
         )
         code, _log = self.notify(gh)
         self.assertEqual(code, 1)
-        body = gh.argument("create", "--body")
+        body = gh.body("create")
         self.assertNotIn("newer than the one this repository pins", body)
         self.assertIn("stopped probing", body)
         self.assertIn("none was exercised", body)
@@ -619,7 +650,7 @@ class SilentCanaryTests(NotifyTestCase):
         gh = FakeGh()
         code, _log = self.notify(gh)
         self.assertEqual(code, 1)
-        self.assertIn("is not JSON", gh.argument("create", "--body"))
+        self.assertIn("is not JSON", gh.body("create"))
 
     def test_an_artifact_missing_a_field_fails_the_run(self) -> None:
         path = result_path(self.results, STABLE)
@@ -628,7 +659,7 @@ class SilentCanaryTests(NotifyTestCase):
         gh = FakeGh()
         code, _log = self.notify(gh)
         self.assertEqual(code, 1)
-        self.assertIn("has no string 'version'", gh.argument("create", "--body"))
+        self.assertIn("has no string 'version'", gh.body("create"))
 
     def test_an_artifact_describing_another_lane_fails_the_run(self) -> None:
         """The wrong artifact would otherwise close the wrong issue."""
@@ -643,7 +674,7 @@ class SilentCanaryTests(NotifyTestCase):
         self.write_result(STABLE, "EVERYTHING_IS_FINE")
         code, _log = self.notify(gh)
         self.assertEqual(code, 1)
-        self.assertIn("EVERYTHING_IS_FINE", gh.argument("create", "--body"))
+        self.assertIn("EVERYTHING_IS_FINE", gh.body("create"))
 
     def test_a_lane_that_was_never_asked_for_is_not_missing(self) -> None:
         """A dispatch runs one lane, and the other one owes no report."""
@@ -655,6 +686,54 @@ class SilentCanaryTests(NotifyTestCase):
 
 class OperatorErrorTests(NotifyTestCase):
     """The notifier's own failures are told apart from the canary's findings."""
+
+    def test_a_body_never_travels_in_the_argv(self) -> None:
+        """The one input here that a candidate compiler writes.
+
+        A `detail` is a compiler diagnostic, and a candidate that emits a
+        megabyte of them produces an issue body of the same size. Passed as
+        `--body`, that body is part of the argv the kernel has to copy, so the
+        spawn fails with `E2BIG` — attacker-influenced input reaching a crash,
+        during the FIRST lane, taking the second lane's report with it.
+        """
+        enormous = "error: " + ("x" * 400_000)
+        gh = FakeGh()
+        self.write_result(STABLE, SOURCE_INCOMPATIBLE, detail=enormous)
+        code, _log = self.notify(gh)
+        self.assertEqual(code, 1)
+        self.assertIn(enormous, gh.body("create"))
+        for call in gh.calls:
+            self.assertNotIn("--body", call)
+            self.assertNotIn("--comment", call)
+            for argument in call:
+                self.assertLess(len(argument), 4096, f"{argument[:80]}... in argv")
+
+    def test_a_spawn_that_fails_is_this_modules_error_not_a_crash(self) -> None:
+        """`gh` is spawned, and spawning is a syscall that can refuse.
+
+        `OSError` from the spawn — `E2BIG` from an oversized argv, `ENOENT`
+        from a `gh` that is not installed, `EAGAIN` from a runner out of
+        process slots — escaped uncaught, so it aborted the loop rather than
+        being reported as the lane failure it is, and every lane after it went
+        unreported.
+        """
+        for error in (
+            OSError(errno.E2BIG, "Argument list too long"),
+            FileNotFoundError(errno.ENOENT, "No such file or directory: 'gh'"),
+        ):
+            with self.subTest(error=error):
+                gh = FakeGh()
+                gh.spawn_error = error
+                self.write_result(STABLE, SOURCE_INCOMPATIBLE)
+                self.write_result(NIGHTLY, PROTOCOL_DRIFT)
+                code, log = self.notify(gh, lanes="stable nightly")
+                self.assertEqual(code, 2)
+                self.assertIn("stable", log)
+                self.assertIn("nightly", log)
+                self.assertIn(error.strerror or "", log)
+                # Both lanes were attempted rather than the first one ending
+                # the run: the second lane's failure is in the log too.
+                self.assertEqual(len(gh.calls), 2)
 
     def test_an_unreachable_github_exits_two(self) -> None:
         gh = FakeGh()
@@ -681,7 +760,7 @@ class OperatorErrorTests(NotifyTestCase):
         self.assertEqual(code, 2)
         self.assertIn("stable", log)
         self.assertEqual(gh.argument("create", "--title"), "canary: nightly")
-        self.assertIn("transcripts moved", gh.argument("create", "--body"))
+        self.assertIn("transcripts moved", gh.body("create"))
 
     def test_an_unreadable_search_answer_exits_two(self) -> None:
         gh = FakeGh()
