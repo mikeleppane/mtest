@@ -174,6 +174,50 @@ refused outright below, in any form, and listing them here would answer a
 rule that actually governs it.
 """
 
+CANARY_WORKFLOW_KEYS = ["name", "on", "permissions", "concurrency", "jobs"]
+"""Every key the workflow itself may carry."""
+
+CANARY_JOB_KEYS = {
+    "probe": ["name", "runs-on", "timeout-minutes", "permissions", "strategy", "steps"],
+    "notify": [
+        "name",
+        "runs-on",
+        "needs",
+        "if",
+        "timeout-minutes",
+        "permissions",
+        "steps",
+    ],
+}
+"""Every key each job may carry.
+
+An exact set, not a list of the dangerous ones: a deny-list is a race against
+GitHub's schema and losing it is silent. `environment:` parks the job pending an
+approval nobody gives; a job-level `concurrency:` overrides the top-level one
+and can cancel the notifier mid-run.
+"""
+
+CANARY_STEP_KEYS = {
+    "probe": [
+        ("name", "uses", "with"),
+        ("name", "uses", "with"),
+        ("name", "env", "run"),
+        ("name", "if", "uses", "with"),
+    ],
+    "notify": [
+        ("name", "uses", "with"),
+        ("name", "if", "uses", "with"),
+        ("name", "if", "uses", "with"),
+        ("name", "if", "env", "run"),
+    ],
+}
+"""Every key each step may carry, step by step.
+
+Per step rather than one shared vocabulary: a `with:` on a step that runs a
+command, or an `env:` on one that only downloads, are well-formed and mean
+something no rule below reads.
+"""
+
 CANARY_BLOCK_SCALAR_RE = re.compile(r"[|>][+-]?[0-9]*")
 """A `run: |` style indicator, which moves the value off the line naming it.
 
@@ -292,6 +336,33 @@ def _yaml_mapping_keys(block: str, indent: int) -> list[str]:
         for line in block.splitlines()
         if (match := pattern.match(line)) is not None
     ]
+
+
+def _canary_step_keys(job: str) -> list[tuple[str, ...]]:
+    """Return the keys each step of one canary job carries, in order.
+
+    Args:
+        job: One job's block, as `_yaml_block` returns it.
+
+    Returns:
+        One tuple per step, opening with the key the `- ` entry names. A key
+        nested inside a step's own `with:` or `env:` mapping sits two columns
+        further in and is not a step key, so it is not collected.
+    """
+    steps: list[tuple[str, ...]] = []
+    current: list[str] = []
+    for line in _yaml_block(job, "    steps:").splitlines():
+        opener = re.match(r"^      - ([A-Za-z0-9_-]+):", line)
+        if opener is not None:
+            current = [opener.group(1)]
+            steps.append(())
+            steps[-1] = tuple(current)
+            continue
+        nested = re.match(r"^        ([A-Za-z0-9_-]+):", line)
+        if nested is not None and steps:
+            current.append(nested.group(1))
+            steps[-1] = tuple(current)
+    return steps
 
 
 def _env_bindings(block: str) -> list[str]:
@@ -1297,6 +1368,36 @@ def check_compat_canary_workflow(repo_root: Path = REPO_ROOT) -> None:
             "compat canary credential mismatch: the run token belongs to the "
             "notifier job alone"
         )
+
+    # Last, so every rule above gets first say on a key it owns. What is left is
+    # a key no rule reads at all, which is how `environment:` would park this
+    # run forever: the protection rule holding it lives in repository settings,
+    # not in the diff. Only extra keys are reported; a missing one is the
+    # business of whichever rule expected it.
+    top_level = [
+        match.group(1)
+        for line in workflow.splitlines()
+        if (match := re.match(r"^([A-Za-z0-9_-]+):", line)) is not None
+    ]
+    scopes: list[tuple[str, list[str], list[str]]] = [
+        ("workflow", top_level, CANARY_WORKFLOW_KEYS)
+    ]
+    for name, job in (("probe", probe), ("notify", notify)):
+        job_keys = _yaml_mapping_keys(job, 4)
+        scopes.append((f"job {name!r}", job_keys, CANARY_JOB_KEYS[name]))
+        reviewed_steps = CANARY_STEP_KEYS[name]
+        for index, step in enumerate(_canary_step_keys(job)):
+            expected = (
+                list(reviewed_steps[index]) if index < len(reviewed_steps) else []
+            )
+            scopes.append((f"job {name!r} step {index}", list(step), expected))
+    for scope, actual, reviewed in scopes:
+        unreviewed = [key for key in actual if key not in reviewed]
+        if unreviewed:
+            raise AssertionError(
+                f"compat canary {scope} carries unreviewed keys {unreviewed}: "
+                "a key no rule here reads is a capability nobody reviewed"
+            )
 
 
 def check_docs_workflow(repo_root: Path = REPO_ROOT) -> None:

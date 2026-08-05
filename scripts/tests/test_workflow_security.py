@@ -1559,6 +1559,111 @@ class CompatCanaryWorkflowTests(unittest.TestCase):
             with self.subTest(input=label):
                 self._reject(mutated, "step input mismatch")
 
+    def test_a_key_nobody_reviewed_is_rejected_at_every_level(self) -> None:
+        """The keys a workflow, a job and a step may carry are closed sets.
+
+        Every other rule reads a key it already expects, so a key nobody
+        expected is read by nothing. `environment:` is why that matters: one
+        canonical line, and the protection rule that parks the job pending an
+        approval nobody gives is attached in repository settings, where no diff
+        shows it. A parked run is neither red nor green and writes no issue.
+        """
+        workflow = self._workflow()
+        for label, old, new in (
+            (
+                "probe environment",
+                "  probe:\n    name:",
+                "  probe:\n    environment:\n      name: staging\n    name:",
+            ),
+            (
+                "notify environment",
+                "  notify:\n    name: Notify\n",
+                "  notify:\n    environment:\n      name: staging\n    name: Notify\n",
+            ),
+            (
+                "job concurrency",
+                "  probe:\n    name:",
+                (
+                    "  probe:\n    concurrency:\n"
+                    "      group: shared\n"
+                    "      cancel-in-progress: true\n    name:"
+                ),
+            ),
+            (
+                "job outputs",
+                "  probe:\n    name:",
+                "  probe:\n    outputs:\n      leaked: done\n    name:",
+            ),
+            (
+                "step timeout",
+                "      - name: Upsert the pinned issues\n",
+                "      - name: Upsert the pinned issues\n        timeout-minutes: 1\n",
+            ),
+            (
+                "step with on a command",
+                "        run: python3 -m scripts.canary.notify",
+                (
+                    "        with:\n"
+                    "          path: .\n"
+                    "        run: python3 -m scripts.canary.notify"
+                ),
+            ),
+            (
+                "workflow run-name",
+                "name: Compat Canary\n",
+                "name: Compat Canary\nrun-name: ${{ github.actor }}\n",
+            ),
+        ):
+            with self.subTest(mutation=label):
+                self.assertIn(old, workflow)
+                self._reject(workflow.replace(old, new, 1), "unreviewed keys")
+
+    def test_the_pinned_key_sets_are_the_ones_the_workflow_carries(self) -> None:
+        """The closed sets, transcribed here rather than read from the oracle.
+
+        Comparing the oracle's constants against the oracle's own reader would
+        pass whatever the two agreed on. These are read off the workflow by eye,
+        so a key quietly added to both sides still reds this.
+        """
+        self.assertEqual(
+            workflow_security.CANARY_WORKFLOW_KEYS,
+            ["name", "on", "permissions", "concurrency", "jobs"],
+        )
+        self.assertEqual(
+            workflow_security.CANARY_JOB_KEYS["probe"],
+            ["name", "runs-on", "timeout-minutes", "permissions", "strategy", "steps"],
+        )
+        self.assertEqual(
+            workflow_security.CANARY_JOB_KEYS["notify"],
+            [
+                "name",
+                "runs-on",
+                "needs",
+                "if",
+                "timeout-minutes",
+                "permissions",
+                "steps",
+            ],
+        )
+        self.assertEqual(
+            workflow_security.CANARY_STEP_KEYS["probe"],
+            [
+                ("name", "uses", "with"),
+                ("name", "uses", "with"),
+                ("name", "env", "run"),
+                ("name", "if", "uses", "with"),
+            ],
+        )
+        self.assertEqual(
+            workflow_security.CANARY_STEP_KEYS["notify"],
+            [
+                ("name", "uses", "with"),
+                ("name", "if", "uses", "with"),
+                ("name", "if", "uses", "with"),
+                ("name", "if", "env", "run"),
+            ],
+        )
+
     def test_a_recombining_job_or_step_key_is_rejected(self) -> None:
         """Five ways to change what runs without changing a `run:` line.
 

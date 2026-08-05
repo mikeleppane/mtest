@@ -1,20 +1,12 @@
 name: Compat Canary
 
-# Every other gate here asks "does mtest work on the pinned toolchain". This one
-# asks the opposite question -- "would it still work if the pin moved" -- by
-# relaxing the committed Mojo pin in a throwaway checkout, installing whatever
-# the channels publish beyond it, and naming what broke. Weekdays only: the
-# answer only changes when Modular publishes, and a weekend issue is read on
-# Monday anyway.
+# Asks what would break if the Mojo pin moved: relax the pin in a throwaway
+# checkout, install whatever the channels publish beyond it, name what broke.
+# Weekdays only -- the answer changes only when Modular publishes.
 #
-# The two jobs are split by credential rather than by convenience. `probe`
-# downloads a compiler from a package channel and executes it against this
-# source tree, so it holds no write scope anywhere and nothing it runs is
-# handed a credential; `notify` holds `issues: write` and never runs pixi,
-# Mojo, or anything else that came off the network.
-# `scripts/checks/workflow_security.py` pins that split, step by step, because
-# the whole security argument for scheduling this workflow is that the two
-# halves cannot be brought back together in a diff nobody reads.
+# The jobs are split by credential. `probe` runs a downloaded compiler and holds
+# no write scope or token; `notify` holds `issues: write` and runs nothing that
+# came off the network. `scripts/checks/workflow_security.py` pins that split.
 on:
   # Off the top of the hour deliberately. GitHub queues scheduled runs and
   # documents that the start of an hour is when the queue is deepest, so a
