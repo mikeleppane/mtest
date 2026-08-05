@@ -61,12 +61,14 @@ premise the name rests on would have gone unexamined.
 from __future__ import annotations
 
 import argparse
+import contextlib
 from dataclasses import asdict, dataclass
 import json
 import os
 from pathlib import Path
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -270,11 +272,66 @@ if TYPE_CHECKING:
     Resolver = Callable[[Path], ResolvedToolchain]
 
 
+def timed_out(result: CommandResult) -> bool:
+    """Report whether the probe killed this command for outliving its budget.
+
+    A killed stage produced no evidence, so every reading of its output has to
+    be skipped rather than merely distrusted, and the exit status is the only
+    place that shows. Asked through a name instead of compared against 124 at
+    each site, because the two readings are opposites — 124 from a stage means
+    "this said nothing", and every other nonzero means "this said no".
+
+    Args:
+        result: A completed probe command.
+
+    Returns:
+        True when the runner stopped the command at `STAGE_TIMEOUT_SECONDS`.
+    """
+    return result.returncode == TIMEOUT_RETURNCODE
+
+
+def kill_process_group(process: subprocess.Popen[str]) -> None:
+    """Kill everything a timed-out stage spawned, and reap what is left of it.
+
+    Killing the direct child is the wrong unit here. Every stage is a pixi
+    task, which is to say a launcher for a compiler, a test runner or a package
+    build, and those outlive their launcher happily. Left running they keep
+    writing to the same caches, prefixes and build directories as the stages
+    that follow — inside a probe that has already given up on them and reported
+    `STAGE_TIMEOUT` — so what gets signalled is the process group the stage was
+    started in.
+
+    The pipes are closed rather than read to end-of-file. Anything that escaped
+    the group by starting a session of its own still holds their write ends,
+    and a reader waiting on that would hold the job open exactly as the stage
+    it replaced did.
+
+    Args:
+        process: The stage, started with `start_new_session=True` so that its
+            process group holds it and its descendants and nothing else.
+    """
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+    with contextlib.suppress(ProcessLookupError):
+        process.kill()
+    # Safe to wait on: the direct child was sent an uncatchable signal, so this
+    # reaps a process that is already gone rather than waiting for one to stop.
+    process.wait()
+    for stream in (process.stdout, process.stderr):
+        if stream is not None:
+            stream.close()
+
+
 def subprocess_runner(repo: Path) -> Runner:
     """Build the runner that really spawns probe commands.
 
     Every probe command is captured rather than streamed, because its output is
     the detail a classification carries and has to survive into the artifact.
+
+    Each one is started in a session of its own, so that the budget below can
+    be enforced against everything the stage spawned rather than against the
+    one process this module can see. `kill_process_group` says what goes wrong
+    without that.
 
     Args:
         repo: The checkout every command runs in.
@@ -286,16 +343,18 @@ def subprocess_runner(repo: Path) -> Runner:
     def run(argv: Sequence[str]) -> CommandResult:
         recorded = tuple(argv)
         print(f"canary: $ {shlex.join(recorded)}", flush=True)
+        process = subprocess.Popen(
+            recorded,
+            cwd=repo,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
         try:
-            completed = subprocess.run(
-                recorded,
-                cwd=repo,
-                capture_output=True,
-                text=True,
-                timeout=STAGE_TIMEOUT_SECONDS,
-                check=False,
-            )
+            stdout, stderr = process.communicate(timeout=STAGE_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
+            kill_process_group(process)
             # The partial output a killed child left behind is not worth
             # decoding: what a reader needs is that this stage never finished.
             return CommandResult(
@@ -304,9 +363,7 @@ def subprocess_runner(repo: Path) -> Runner:
                 "",
                 f"timed out after {STAGE_TIMEOUT_SECONDS:.0f}s",
             )
-        return CommandResult(
-            recorded, completed.returncode, completed.stdout, completed.stderr
-        )
+        return CommandResult(recorded, process.returncode, stdout, stderr)
 
     return run
 
@@ -580,7 +637,7 @@ def generator_failure(result: CommandResult) -> CompareResult:
     Returns:
         The classification and the evidence for it.
     """
-    if result.returncode == TIMEOUT_RETURNCODE:
+    if timed_out(result):
         return CompareResult(STAGE_TIMEOUT, command_failure(result))
     if (
         result.returncode == GENERATOR_PIN_EXIT
@@ -861,7 +918,7 @@ def classify(
 
     relax_workspace_pin(repo, lane)
     install = run(["pixi", "install"])
-    if install.returncode not in (0, TIMEOUT_RETURNCODE):
+    if install.returncode != 0 and not timed_out(install):
         # One retry, because a conda solve reaches the network and a single
         # transient failure is not evidence about a toolchain — after a wait,
         # because an outage is still there microseconds later. A stage the
@@ -869,7 +926,7 @@ def classify(
         # the job past its own deadline and the day would end with no artifact.
         time.sleep(INSTALL_RETRY_BACKOFF_SECONDS)
         install = run(["pixi", "install"])
-    if install.returncode == TIMEOUT_RETURNCODE:
+    if timed_out(install):
         return _result(lane, _UNKNOWN, STAGE_TIMEOUT, command_failure(install))
     if install.returncode != 0:
         # A solve that failed twice is one of two opposite things, and the
@@ -1020,7 +1077,7 @@ def _stage_failure(
     Returns:
         The classification, or `STAGE_TIMEOUT` when the stage was killed.
     """
-    if result.returncode == TIMEOUT_RETURNCODE:
+    if timed_out(result):
         return _result(lane, resolved, STAGE_TIMEOUT, command_failure(result))
     return _result(lane, resolved, classification, detail)
 

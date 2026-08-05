@@ -1238,6 +1238,46 @@ class StageBudgetTests(CanaryTestCase):
         self.assertEqual(finished.returncode, 0)
         self.assertIn("done", finished.stdout)
 
+    def test_a_killed_stage_takes_everything_it_spawned_with_it(self) -> None:
+        """A stage is a pixi task, so the thing doing the work is a grandchild.
+
+        Killing only the direct child left the compiler, test runner or package
+        build underneath it running — writing to the caches, prefixes and build
+        directories of a probe that had already reported `STAGE_TIMEOUT` and
+        moved on to the next stage. Reproduced here with a child that spawns a
+        sleeper and records its pid, under a budget short enough to be
+        affordable: the sleeper has to be gone once the runner has answered.
+        """
+        marker = self.root / "grandchild.pid"
+        spawner = (
+            "import subprocess, sys, time\n"
+            "child = subprocess.Popen([sys.executable, '-c', "
+            "'import time; time.sleep(120)'])\n"
+            f"open({str(marker)!r}, 'w').write(str(child.pid))\n"
+            "time.sleep(120)\n"
+        )
+        runner = canary_run.subprocess_runner(Path.cwd())
+        with (
+            mock.patch.object(canary_run, "STAGE_TIMEOUT_SECONDS", 1.0),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            killed = runner([sys.executable, "-c", spawner])
+        self.assertEqual(killed.returncode, TIMEOUT_RETURNCODE)
+
+        grandchild = int(marker.read_text(encoding="utf-8"))
+        # Signal 0 checks for the process without touching it. Polled rather
+        # than asserted once, because a SIGKILL is delivered asynchronously and
+        # the pid stays visible until its reparented parent reaps it.
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            try:
+                os.kill(grandchild, 0)
+            except ProcessLookupError:
+                break
+        else:
+            os.kill(grandchild, 9)
+            raise AssertionError(f"pid {grandchild} outlived the stage that spawned it")
+
     def test_a_wedged_install_is_not_retried_into_a_second_budget(self) -> None:
         repo, runner = self.build()
         runner.outcomes("install", _Outcome(TIMEOUT_RETURNCODE, "", "timed out"))
