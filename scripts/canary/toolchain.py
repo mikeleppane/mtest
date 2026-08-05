@@ -211,6 +211,25 @@ def candidate_matchspec(pin: str) -> str:
     return f"mojo {relaxed_spec(pin)}"
 
 
+def floor_matchspec(pin: str) -> str:
+    """Render the control question a working channel must always answer.
+
+    This is `candidate_matchspec` with its lower bound made inclusive, and
+    nothing else: the same package, the same version literal, the same upper
+    bound, the same grammar. That makes it a control worth running. It admits
+    the pinned version itself, which the channels must carry for this
+    repository to build at all, so a channel that can answer questions of this
+    shape answers it with at least one record.
+
+    Args:
+        pin: The pinned version.
+
+    Returns:
+        A conda matchspec, for example `mojo >=1.0.0b2,<2`.
+    """
+    return f"mojo >={pin},<2"
+
+
 def _sole_channel_list(text: str) -> re.Match[str]:
     """Locate the manifest's one and only channel list.
 

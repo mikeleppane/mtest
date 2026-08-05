@@ -71,6 +71,7 @@ from scripts.canary.toolchain import (
     ToolchainError,
     candidate_channels,
     candidate_matchspec,
+    floor_matchspec,
     pin_recipe_to_candidate,
     relax_workspace_pin,
     resolved_toolchain,
@@ -334,6 +335,30 @@ def search_versions(result: CommandResult) -> tuple[str, ...]:
     return tuple(versions)
 
 
+def control_confirms_channels(control: CommandResult, pin: str) -> bool:
+    """Decide whether a control search proved the channels can be questioned.
+
+    The bar is deliberately higher than "it exited 0": the control has to come
+    back naming the pinned version. An answer that parses but does not carry
+    the version this repository is built against is not evidence that the
+    channels hold nothing newer — it is evidence that they are not the channels
+    this probe thinks it is asking.
+
+    Args:
+        control: The completed control search.
+        pin: The pinned version the control admits.
+
+    Returns:
+        True when the control succeeded, parsed, and named the pin.
+    """
+    if control.returncode != 0:
+        return False
+    try:
+        return pin in search_versions(control)
+    except ValueError:
+        return False
+
+
 def failed_scenarios(stdout: str) -> tuple[str, ...]:
     """List the e2e scenarios a failing roster named.
 
@@ -480,12 +505,34 @@ def classify(
 
     matchspec = candidate_matchspec(pin)
     found = run(search_argv(channels, matchspec))
-    # The channels answered a moment ago, so an empty or failed answer here is
-    # the channels saying "nothing matches", not the network saying nothing.
-    try:
-        candidates = search_versions(found) if found.returncode == 0 else ()
-    except ValueError as error:
-        return _result(lane, _UNKNOWN, INFRA_FAILURE, str(error))
+    if found.returncode == 0:
+        try:
+            candidates = search_versions(found)
+        except ValueError as error:
+            return _result(lane, _UNKNOWN, INFRA_FAILURE, str(error))
+    else:
+        # pixi exits 1 BOTH when a spec matches nothing and when it cannot
+        # answer the question at all, printing nothing to stdout either way, so
+        # the exit code is not evidence about the channel's inventory. Reading
+        # it as "nothing newer" would silence both lanes for good the first
+        # time this one argv failed for a reason the unbounded search cannot
+        # exhibit — a rejected matchspec spelling, a channel that went away
+        # between the two calls. So the failure is corroborated instead: ask
+        # the control, which differs by one operator and names the pinned
+        # version the channels must carry. Answered, and the failure above was
+        # an empty match set. Unanswered, and the probe cannot ask its own
+        # question, which is infrastructure rather than a verdict.
+        control = run(search_argv(channels, floor_matchspec(pin)))
+        if not control_confirms_channels(control, pin):
+            return _result(
+                lane,
+                _UNKNOWN,
+                INFRA_FAILURE,
+                f"{command_failure(found)}; the control "
+                f"`{floor_matchspec(pin)}` did not confirm the channels can "
+                f"answer that, so an empty match set cannot be inferred",
+            )
+        candidates = ()
     if not candidates:
         newest = available[0] if available else UNKNOWN
         return _result(

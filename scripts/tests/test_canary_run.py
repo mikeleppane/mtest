@@ -42,6 +42,7 @@ from scripts.canary.run import (
     CanaryResult,
     CommandResult,
     classify,
+    control_confirms_channels,
     e2e_failure_verdict,
     failed_scenarios,
     first_diagnostic,
@@ -58,6 +59,7 @@ from scripts.canary.toolchain import (
     ToolchainError,
     candidate_channels,
     candidate_matchspec,
+    floor_matchspec,
     pin_recipe_to_candidate,
     relax_workspace_pin,
     relaxed_spec,
@@ -101,9 +103,15 @@ def _stage_of(argv: Sequence[str]) -> str:
     """Name the pipeline stage one probe command belongs to."""
     parts = list(argv)
     if parts[:2] == ["pixi", "search"]:
-        # The two searches differ only in their matchspec: the reachability
-        # probe asks for the bare package, the candidate probe adds a bound.
-        return "search-candidates" if " " in parts[-1] else "search-published"
+        # The three searches differ only in their matchspec: the reachability
+        # probe asks for the bare package, the candidate probe bounds it above
+        # the pin, and the control admits the pin itself.
+        spec = parts[-1]
+        if " >=" in spec:
+            return "search-control"
+        if " >" in spec:
+            return "search-candidates"
+        return "search-published"
     if parts[:2] == ["pixi", "install"]:
         return "install"
     if parts[:2] == ["pixi", "run"]:
@@ -157,6 +165,7 @@ class FakeRunner:
         self._outcomes: dict[str, list[_Outcome]] = {
             "search-published": [_Outcome(0, _PUBLISHED, "")],
             "search-candidates": [_Outcome(0, _CANDIDATES, "")],
+            "search-control": [_Outcome(0, _PUBLISHED, "")],
         }
 
     def outcomes(self, stage: str, *outcomes: _Outcome) -> None:
@@ -593,6 +602,31 @@ class ChannelSearchTests(CanaryTestCase):
             candidate_channels(REPO_ROOT, STABLE), workspace_channels(REPO_ROOT)
         )
 
+    def test_the_control_differs_by_one_operator(self) -> None:
+        # The corroboration is only worth anything if the control is the same
+        # question: same package, same version literal, same bound, same argv
+        # shape. One operator apart is the whole difference.
+        self.assertEqual(candidate_matchspec(PINNED_MOJO), f"mojo >{PINNED_MOJO},<2")
+        self.assertEqual(floor_matchspec(PINNED_MOJO), f"mojo >={PINNED_MOJO},<2")
+        self.assertEqual(
+            floor_matchspec(PINNED_MOJO).replace(">=", ">"),
+            candidate_matchspec(PINNED_MOJO),
+        )
+
+    def test_a_control_naming_the_pin_confirms_the_channels(self) -> None:
+        answer = CommandResult(("pixi", "search"), 0, _search_answer(PINNED_MOJO), "")
+        self.assertTrue(control_confirms_channels(answer, PINNED_MOJO))
+
+    def test_a_failed_or_silent_control_confirms_nothing(self) -> None:
+        for answer in (
+            CommandResult(("pixi", "search"), 1, "", "boom"),
+            CommandResult(("pixi", "search"), 0, _search_answer(), ""),
+            CommandResult(("pixi", "search"), 0, "not json", ""),
+            CommandResult(("pixi", "search"), 0, _search_answer("0.26.2.0"), ""),
+        ):
+            with self.subTest(returncode=answer.returncode, stdout=answer.stdout):
+                self.assertFalse(control_confirms_channels(answer, PINNED_MOJO))
+
     def test_the_searched_spec_is_the_one_the_manifest_gets(self) -> None:
         # The screen would be worthless if it asked a different question than
         # the solver is later handed.
@@ -621,25 +655,77 @@ class ChannelSearchTests(CanaryTestCase):
 class IdleLaneTests(CanaryTestCase):
     """A channel with nothing newer is an idle lane, never a broken one."""
 
-    def test_an_unsatisfiable_spec_is_no_newer_candidate(self) -> None:
-        # The stable channel's state today: the pinned version is also the
-        # newest published, so `>pin,<2` matches nothing and pixi says so by
-        # failing. Read as an install failure this would be INFRA_FAILURE
-        # forever, and the lane would be silently dead.
-        repo, runner = self.build()
+    def _idle_stable_channel(self, runner: FakeRunner) -> None:
+        """Make the channels look the way the stable channel looks today."""
         runner.outcomes(
             "search-published", _Outcome(0, _search_answer(PINNED_MOJO), "")
         )
-        runner.fails(
+        # Verbatim from `pixi search --json -c .../max/ -c conda-forge
+        # 'mojo >1.0.0b2,<2'`: exit 1, nothing on stdout, the refusal on
+        # stderr. An unreachable channel exits 1 with an empty stdout too,
+        # which is exactly why the exit code cannot be read on its own.
+        runner.outcomes(
             "search-candidates",
-            stderr=f"Error: No packages found matching 'mojo >{PINNED_MOJO},<2'\n",
+            _Outcome(
+                1,
+                "",
+                f"Error:   \u00d7 No packages found matching "
+                f"'mojo >{PINNED_MOJO},<2'\n",
+            ),
         )
+
+    def test_an_unsatisfiable_spec_is_no_newer_candidate(self) -> None:
+        # The stable channel's state today: the pinned version is also the
+        # newest published, so `>pin,<2` matches nothing and pixi says so by
+        # failing. The control answers, so the failure is an empty match set.
+        repo, runner = self.build()
+        self._idle_stable_channel(runner)
+        runner.outcomes("search-control", _Outcome(0, _search_answer(PINNED_MOJO), ""))
         result = self.classify(repo, runner)
         self.assertEqual(result.classification, NO_NEWER_CANDIDATE)
         self.assertEqual(result.version, PINNED_MOJO)
-        self.assertEqual(runner.stages, ["search-published", "search-candidates"])
+        self.assertEqual(
+            runner.stages,
+            ["search-published", "search-candidates", "search-control"],
+        )
 
-    def test_an_empty_match_set_is_no_newer_candidate(self) -> None:
+    def test_a_bounded_search_that_cannot_be_corroborated_is_infra(self) -> None:
+        # The defect this guards: a failure specific to the bounded argv — a
+        # rejected matchspec spelling, a channel that vanished between the two
+        # calls — read as "nothing newer" would silence both lanes for good.
+        repo, runner = self.build()
+        self._idle_stable_channel(runner)
+        runner.fails(
+            "search-control", stderr="error: invalid version spec '>=1.0.0b2,<2'\n"
+        )
+        result = self.classify(repo, runner)
+        self.assertEqual(result.classification, INFRA_FAILURE)
+        self.assertIn(candidate_matchspec(PINNED_MOJO), result.detail)
+        self.assertEqual(
+            runner.stages,
+            ["search-published", "search-candidates", "search-control"],
+        )
+
+    def test_a_control_that_cannot_see_the_pin_is_infra(self) -> None:
+        # The channels answered, but not with the version this repository is
+        # built against. Whatever that is, it is not evidence that nothing
+        # newer exists.
+        repo, runner = self.build()
+        self._idle_stable_channel(runner)
+        runner.outcomes("search-control", _Outcome(0, _search_answer(), ""))
+        result = self.classify(repo, runner)
+        self.assertEqual(result.classification, INFRA_FAILURE)
+
+    def test_a_control_that_does_not_parse_is_infra(self) -> None:
+        repo, runner = self.build()
+        self._idle_stable_channel(runner)
+        runner.outcomes("search-control", _Outcome(0, "No packages found\n", ""))
+        result = self.classify(repo, runner)
+        self.assertEqual(result.classification, INFRA_FAILURE)
+
+    def test_an_empty_match_set_needs_no_control(self) -> None:
+        # A search that answered, with nothing in the answer, is already the
+        # evidence; there is nothing left for the control to corroborate.
         repo, runner = self.build()
         runner.outcomes(
             "search-published", _Outcome(0, _search_answer(PINNED_MOJO), "")
@@ -647,6 +733,7 @@ class IdleLaneTests(CanaryTestCase):
         runner.outcomes("search-candidates", _Outcome(0, _search_answer(), ""))
         result = self.classify(repo, runner)
         self.assertEqual(result.classification, NO_NEWER_CANDIDATE)
+        self.assertEqual(runner.stages, ["search-published", "search-candidates"])
 
     def test_the_detail_names_the_channel_and_the_newest_release(self) -> None:
         repo, runner = self.build()
