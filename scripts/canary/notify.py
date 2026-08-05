@@ -64,6 +64,15 @@ import sys
 from typing import TYPE_CHECKING
 
 from scripts.canary.protocol_compare import PASS, PROTOCOL_DRIFT
+
+# The probe's classification vocabulary and its two records, imported rather
+# than restated so a name added on one side cannot go unhandled on the other.
+# This does load the probe module in the job holding `issues: write`, and that
+# is a smaller thing than it sounds: the import runs constants and dataclass
+# definitions out of this repository's own checked-out source, spawns nothing,
+# and reads nothing that came off the network. The property the workflow oracle
+# pins is that this job never *invokes* the probe, which is about what the
+# workflow runs rather than about what an import graph touches.
 from scripts.canary.run import (
     CLASSIFICATIONS,
     INFRA_FAILURE,
