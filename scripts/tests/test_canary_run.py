@@ -47,6 +47,7 @@ from scripts.canary.run import (
     CanaryResult,
     CommandResult,
     classify,
+    contract_failure_verdict,
     control_confirms_channels,
     e2e_failure_verdict,
     failed_scenarios,
@@ -60,6 +61,7 @@ from scripts.canary.toolchain import (
     FORCE_ENV_VAR,
     NIGHTLY_CHANNEL,
     RESOLVE_ARGV,
+    TOLERATED_CONTRACT_FAILURES,
     TOLERATED_E2E_SCENARIOS,
     ResolvedToolchain,
     ToolchainError,
@@ -76,6 +78,8 @@ from scripts.canary.toolchain import (
 )
 from scripts import gen_transcripts
 from scripts.e2e.__main__ import SCENARIOS
+from scripts.qa.contract import EXPECTED_CHECK_NAMES, Runner, build_matrix
+from scripts.qa.contract import main as contract_main
 from scripts.gen_transcripts import MOJO_VERSION_RE as GENERATOR_VERSION_RE
 
 
@@ -643,6 +647,167 @@ class E2eGuardTests(CanaryTestCase):
         self.assertIsNotNone(verdict)
 
 
+def _contract_output(
+    *failures: tuple[str, str], passed: int = 124, skipped: int = 0
+) -> str:
+    """Render `contract-check-strict` output the way that gate really prints it.
+
+    Independently transcribed from `scripts/qa/contract.py`'s own format
+    strings: one summary line, then a roll-call naming each failing check, its
+    contract reference, and the first line of its detail.
+    """
+    lines = [f"\n===== {passed} passed, {len(failures)} failed, {skipped} skipped ====="]
+    if failures:
+        lines.append("\nFAILURES (contract clauses NOT upheld):")
+        lines += [f"  - {name}  (§9/§27): {detail}" for name, detail in failures]
+    if skipped:
+        lines.append(
+            f"\nNOTE: {skipped} check(s) SKIPPED (not a pass). Use --strict to "
+            "fail on skip."
+        )
+    return "\n".join(lines) + "\n"
+
+
+# What the gate prints on a candidate toolchain when nothing is wrong except
+# that the toolchain moved: `mtest doctor` reports `FAIL toolchain` and exits
+# 1, and the three checks that invoke it expecting a healthy 0 say so.
+_IDENTITY_FAILURES = (
+    (
+        "pipe: every direct-output command survives a closed stdout",
+        "doctor: exit 1, want 0",
+    ),
+    ("served: doctor --no-cache accepted, inert (not exit 4)", "exit 1, want 0"),
+    ("served: doctor --cache-clear accepted, inert (not exit 4)", "exit 1, want 0"),
+)
+
+
+class ContractGuardTests(CanaryTestCase):
+    """The gate that runs `doctor` may fail for that reason and no other."""
+
+    def test_the_tolerated_failures_are_the_gates_own_doctor_checks(self) -> None:
+        """Derived from the live contract tables, not transcribed beside them.
+
+        A fourth check that runs `mtest doctor` expecting a healthy exit would
+        fail on every candidate and, unlisted, would condemn every one of them
+        — the permanent red this tolerance exists to end.
+        """
+        healthy = [
+            check.name
+            for check in build_matrix()
+            if check.argv and check.argv[0] == "doctor" and check.exit == 0
+        ]
+        self.assertEqual(
+            healthy,
+            [
+                "served: doctor --no-cache accepted, inert (not exit 4)",
+                "served: doctor --cache-clear accepted, inert (not exit 4)",
+            ],
+        )
+        # The third is bespoke rather than table-driven: one check that drives
+        # every direct-output command, `doctor` among them, at its own exit.
+        self.assertIn(
+            '("doctor", ["doctor"], 0, "")',
+            inspect.getsource(Runner.check_direct_output_closed_pipe),
+        )
+        tolerated = {name for name, _detail in TOLERATED_CONTRACT_FAILURES}
+        self.assertEqual(
+            tolerated,
+            {*healthy, "pipe: every direct-output command survives a closed stdout"},
+        )
+        for name in tolerated:
+            self.assertIn(name, EXPECTED_CHECK_NAMES)
+
+    def test_the_gate_still_reports_the_way_this_reads_it(self) -> None:
+        source = inspect.getsource(contract_main)
+        self.assertIn(
+            'f"\\n===== {n_pass} passed, {n_fail} failed, {n_skip} skipped ====="',
+            source,
+        )
+        self.assertIn('f"  - {name}  ({ref}): "', source)
+        # The roll-call's name and reference are separated by two spaces, and
+        # that is the only boundary a reader has, so no check name may contain
+        # a double space of its own.
+        for name in EXPECTED_CHECK_NAMES:
+            self.assertNotIn("  ", name)
+
+    def test_the_identity_failures_alone_are_tolerated(self) -> None:
+        self.assertIsNone(
+            contract_failure_verdict(
+                _contract_output(*_IDENTITY_FAILURES), toolchain_moved=True
+            )
+        )
+
+    def test_any_other_failing_check_condemns(self) -> None:
+        verdict = contract_failure_verdict(
+            _contract_output(
+                *_IDENTITY_FAILURES,
+                ("outcome: TIMEOUT -> 1", "exit 0, want 1"),
+            ),
+            toolchain_moved=True,
+        )
+        self.assertIsNotNone(verdict)
+        self.assertIn("outcome: TIMEOUT -> 1", str(verdict))
+        self.assertNotIn("served: doctor", str(verdict))
+
+    def test_a_second_command_inside_a_tolerated_check_condemns(self) -> None:
+        # The pipe check drives ten commands and reports a clause for each one
+        # that misbehaved. Keyed on the check name alone, a candidate that
+        # broke `run`'s EPIPE handling would have ridden along inside a
+        # tolerated line.
+        verdict = contract_failure_verdict(
+            _contract_output(
+                (
+                    "pipe: every direct-output command survives a closed stdout",
+                    "doctor: exit 1, want 0; run: exit 141, want 0",
+                ),
+                *_IDENTITY_FAILURES[1:],
+            ),
+            toolchain_moved=True,
+        )
+        self.assertIsNotNone(verdict)
+        self.assertIn("run: exit 141", str(verdict))
+
+    def test_an_identity_check_that_did_not_fail_condemns(self) -> None:
+        # `doctor` refusing an unpinned toolchain is the product behaviour this
+        # lane is probing. A gate that failed without it is a gate whose guard
+        # has stopped guarding, which is a finding of its own.
+        verdict = contract_failure_verdict(
+            _contract_output(*_IDENTITY_FAILURES[1:]), toolchain_moved=True
+        )
+        self.assertIsNotNone(verdict)
+        self.assertIn("pipe: every direct-output command", str(verdict))
+
+    def test_a_strict_skip_condemns(self) -> None:
+        # Under --strict a skip fails the gate without ever reaching the
+        # roll-call, so the count is the only place it shows.
+        verdict = contract_failure_verdict(
+            _contract_output(*_IDENTITY_FAILURES, skipped=1), toolchain_moved=True
+        )
+        self.assertIsNotNone(verdict)
+        self.assertIn("skip", str(verdict))
+
+    def test_a_gate_that_printed_no_roster_condemns(self) -> None:
+        for stdout in ("", "error: no checks ran (filter matched nothing)\n"):
+            with self.subTest(stdout=stdout):
+                verdict = contract_failure_verdict(stdout, toolchain_moved=True)
+                self.assertIsNotNone(verdict)
+
+    def test_a_roll_call_shorter_than_its_own_count_condemns(self) -> None:
+        truncated = _contract_output(*_IDENTITY_FAILURES).replace(
+            "  - served: doctor --cache-clear accepted, inert (not exit 4)  "
+            "(§9/§27): exit 1, want 0\n",
+            "",
+        )
+        verdict = contract_failure_verdict(truncated, toolchain_moved=True)
+        self.assertIsNotNone(verdict)
+
+    def test_identity_failures_condemn_an_unmoved_toolchain(self) -> None:
+        verdict = contract_failure_verdict(
+            _contract_output(*_IDENTITY_FAILURES), toolchain_moved=False
+        )
+        self.assertIsNotNone(verdict)
+
+
 class ChannelSearchTests(CanaryTestCase):
     """Reading what a channel publishes, in conda's ordering rather than ours."""
 
@@ -1126,10 +1291,38 @@ class StageClassificationTests(CanaryTestCase):
 
     def test_a_failing_contract_check_is_source_incompatible(self) -> None:
         repo, runner = self.build()
-        runner.fails("contract-check-strict")
+        runner.outcomes(
+            "contract-check-strict",
+            _Outcome(
+                1,
+                _contract_output(("outcome: TIMEOUT -> 1", "exit 0, want 1")),
+                "",
+            ),
+        )
         result = self.classify(repo, runner)
         self.assertEqual(result.classification, SOURCE_INCOMPATIBLE)
+        self.assertIn("outcome: TIMEOUT -> 1", result.detail)
         self.assertNotIn("transcripts", runner.stages)
+
+    def test_a_candidate_passes_the_gate_that_doctor_has_to_fail(self) -> None:
+        """Without this the probe could not report PASS for any candidate at all.
+
+        `contract-check-strict` runs `mtest doctor`, which compiles the pinned
+        toolchain identity in and refuses every other one — correct product
+        behaviour. So the third source gate failed on every candidate however
+        compatible, every probe came back SOURCE_INCOMPATIBLE, and the lane
+        read the same on the day a candidate really broke the sources as on
+        every other day of its life.
+        """
+        repo, runner = self.build()
+        runner.outcomes(
+            "contract-check-strict",
+            _Outcome(1, _contract_output(*_IDENTITY_FAILURES), ""),
+        )
+        result = self.classify(repo, runner)
+        self.assertEqual(result.classification, PASS, result.detail)
+        self.assertIn("doctor", result.detail)
+        self.assertIn("e2e", runner.stages)
 
     def test_moved_transcripts_are_protocol_drift(self) -> None:
         repo, runner = self.build("drifted_stdout")

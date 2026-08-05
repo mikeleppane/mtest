@@ -78,6 +78,37 @@ NIGHTLY_CHANNEL = "https://conda.modular.com/max-nightly/"
 # the lane's issue with `PASS`.
 TOLERATED_E2E_SCENARIOS = frozenset({"doctor-healthy", "doctor-config-free"})
 
+# What `contract-check-strict` looks like when the only thing wrong is that the
+# toolchain moved, as (check name, the whole detail that check reports).
+#
+# `mtest doctor` compiles the pinned toolchain identity in and reports
+# `FAIL toolchain` for any other, which makes it exit 1 — correct product
+# behaviour, and the reason the canary needs this list at all. Three contract
+# checks invoke `mtest doctor` expecting the 0 a healthy environment gives, so
+# on any candidate whatsoever the strict gate failed, the probe called the
+# sources incompatible, and no candidate could ever be reported as passing. A
+# canary that is permanently red says exactly as little as one that is
+# permanently green: every day reads the same, and the day a candidate really
+# breaks the sources is indistinguishable from the rest.
+#
+# Nothing else in that gate is affected. The two `doctor: --report*` checks are
+# parser refusals that return before any diagnosis runs, and the
+# unwritable-descriptor check expects the 3 that an undelivered report produces
+# whatever the diagnosis said.
+#
+# The detail is part of the key, not decoration. The first check drives ten
+# different commands and reports one clause per misbehaving command, so a
+# tolerance keyed on the check name alone would have hidden a candidate's
+# broken `EPIPE` handling in `run` or `collect` inside a tolerated line.
+TOLERATED_CONTRACT_FAILURES: tuple[tuple[str, str], ...] = (
+    (
+        "pipe: every direct-output command survives a closed stdout",
+        "doctor: exit 1, want 0",
+    ),
+    ("served: doctor --no-cache accepted, inert (not exit 4)", "exit 1, want 0"),
+    ("served: doctor --cache-clear accepted, inert (not exit 4)", "exit 1, want 0"),
+)
+
 # How the probe asks which toolchain the install produced. Everything the probe
 # spawns goes through pixi, which is the only tool the runner provisions ahead
 # of it: the workspace environment is created by the probe's own install, after

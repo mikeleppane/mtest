@@ -79,6 +79,7 @@ from scripts.canary.toolchain import (
     FORCE_ENV_VAR,
     LANES,
     STABLE_LANE,
+    TOLERATED_CONTRACT_FAILURES,
     TOLERATED_E2E_SCENARIOS,
     ResolvedToolchain,
     ToolchainError,
@@ -117,7 +118,12 @@ CLASSIFICATIONS = (
 )
 
 # The gates run against the candidate, cheapest and most specific first.
-SOURCE_TASKS = ("build-bin", "test-unit", "contract-check-strict")
+SOURCE_TASKS = ("build-bin", "test-unit")
+
+# The strict black-box gate, run after those two and read rather than merely
+# waited on: it is the one source gate a moved toolchain is *expected* to fail,
+# because `mtest doctor` refuses any compiler but the pinned one.
+CONTRACT_TASK = "contract-check-strict"
 
 # The macOS frontend probe. No pixi task owns this: the hosted macOS lane
 # compiles natively and owns that verdict for ordinary changes, so this
@@ -186,6 +192,20 @@ _E2E_FAILURE = re.compile(r"^FAILED: (\S+)$", re.MULTILINE)
 # generator that changed how it reports would quietly widen the reading below.
 GENERATOR_PIN_EXIT = 2
 GENERATOR_PIN_MARKER = "STRUCTURAL PIN FAILED"
+
+# How the strict contract gate accounts for itself: one summary line, then one
+# roll-call entry per failing check naming the check, its contract reference,
+# and the first line of its detail. Both are pinned against `scripts.qa.contract`
+# by a test, because a gate that changed how it reports would leave the reader
+# below finding nothing and the probe condemning every candidate.
+_CONTRACT_SUMMARY = re.compile(
+    r"^===== (?P<passed>\d+) passed, (?P<failed>\d+) failed, "
+    r"(?P<skipped>\d+) skipped =====$",
+    re.MULTILINE,
+)
+_CONTRACT_FAILURE = re.compile(
+    r"^  - (?P<name>.+?)  \((?P<ref>.+?)\): (?P<detail>.*)$", re.MULTILINE
+)
 
 # Stands in for a toolchain identity the probe never got to observe.
 UNKNOWN = "unknown"
@@ -506,6 +526,120 @@ def generator_failure(result: CommandResult) -> CompareResult:
     return CompareResult(SOURCE_INCOMPATIBLE, first_diagnostic(result))
 
 
+@dataclass(frozen=True)
+class ContractReport:
+    """What one strict contract run said about its own roster.
+
+    Attributes:
+        failed: How many checks its summary line counted as failed.
+        skipped: How many it counted as skipped. Under `--strict` a skip fails
+            the gate without ever reaching the roll-call, so this count is the
+            only place one is visible.
+        failures: Each named failure, as the check's name and the first line of
+            its detail.
+    """
+
+    failed: int
+    skipped: int
+    failures: tuple[tuple[str, str], ...]
+
+
+def read_contract_report(stdout: str) -> ContractReport | None:
+    """Read the roster a strict contract run printed about itself.
+
+    Args:
+        stdout: The gate's captured output.
+
+    Returns:
+        The report, or None when the output holds no single summary line —
+        the gate died, or was killed, before it could account for itself, and
+        there is no roster to attribute anything to.
+    """
+    summaries = list(_CONTRACT_SUMMARY.finditer(stdout))
+    if len(summaries) != 1:
+        return None
+    summary = summaries[0]
+    return ContractReport(
+        failed=int(summary.group("failed")),
+        skipped=int(summary.group("skipped")),
+        failures=tuple(
+            (match.group("name"), match.group("detail"))
+            for match in _CONTRACT_FAILURE.finditer(stdout)
+        ),
+    )
+
+
+def contract_failure_verdict(stdout: str, *, toolchain_moved: bool) -> str | None:
+    """Decide whether a failing strict contract gate condemns the candidate.
+
+    The gate runs `mtest doctor`, and `doctor` refuses any toolchain but the
+    one mtest was built against. That refusal is correct — it is the product
+    behaviour this lane is probing, not a bug to be relaxed — so the tolerance
+    belongs here, in the one process deliberately running an unpinned compiler.
+
+    It is drawn as narrowly as the gate's own reporting allows: the failing set
+    must be *exactly* `TOLERATED_CONTRACT_FAILURES`, check name and reported
+    detail both. One extra failure condemns; one extra clause inside a
+    tolerated check's detail condemns; a skip, which `--strict` fails the gate
+    for without printing a roll-call entry, condemns; a roll-call shorter than
+    the count above it condemns, because a reader that cannot see every failure
+    cannot say they were all tolerable. And a run where the identity checks did
+    *not* fail condemns too: on a moved toolchain they must, so a gate that
+    failed elsewhere while they passed is a gate whose guard has stopped
+    guarding, which is a finding rather than a licence.
+
+    Args:
+        stdout: The gate's captured output.
+        toolchain_moved: Whether the resolved toolchain differs from the pin.
+
+    Returns:
+        The reason this failure condemns the candidate, or None when the gate
+        failed exactly the way a moved toolchain makes it fail.
+    """
+    report = read_contract_report(stdout)
+    if report is None:
+        return (
+            "the strict contract gate failed without printing its roster, so no "
+            "failure could be attributed to the toolchain identity check"
+        )
+    if report.skipped:
+        return (
+            f"the strict contract gate skipped {report.skipped} check(s), and a "
+            "skip is not a pass"
+        )
+    if report.failed != len(report.failures):
+        return (
+            f"the strict contract gate counted {report.failed} failures and named "
+            f"{len(report.failures)}, so its roll-call cannot be read"
+        )
+    unexpected = tuple(
+        f"{name} ({detail})"
+        for name, detail in report.failures
+        if (name, detail) not in TOLERATED_CONTRACT_FAILURES
+    )
+    if unexpected:
+        return (
+            "strict contract checks failed outside mtest's toolchain-identity "
+            f"report: {'; '.join(unexpected)}"
+        )
+    named = {name for name, _detail in report.failures}
+    absent = tuple(
+        name for name, _detail in TOLERATED_CONTRACT_FAILURES if name not in named
+    )
+    if absent:
+        return (
+            "the strict contract gate did not fail the checks a moved toolchain "
+            f"must fail: {', '.join(absent)}; mtest's pinned-identity guard has "
+            "stopped guarding"
+        )
+    if not toolchain_moved:
+        return (
+            "the strict contract gate reported the toolchain-identity failures "
+            "against the pinned toolchain itself"
+        )
+    return None
+
+
 def _regenerate_and_compare(repo: Path, run: Runner) -> CompareResult:
     """Regenerate the protocol transcripts on the candidate and diff them.
 
@@ -728,6 +862,18 @@ def classify(
                 lane, resolved, result, SOURCE_INCOMPATIBLE, first_diagnostic(result)
             )
 
+    contract = run(["pixi", "run", CONTRACT_TASK])
+    tolerated_contract = False
+    if contract.returncode != 0:
+        verdict = contract_failure_verdict(
+            contract.stdout, toolchain_moved=resolved.version != pin
+        )
+        if verdict is not None:
+            return _stage_failure(
+                lane, resolved, contract, SOURCE_INCOMPATIBLE, verdict
+            )
+        tolerated_contract = True
+
     comparison = _regenerate_and_compare(repo, run)
     if comparison.classification != PASS:
         return _result(lane, resolved, comparison.classification, comparison.detail)
@@ -762,10 +908,16 @@ def classify(
             return _stage_failure(lane, resolved, e2e, SOURCE_INCOMPATIBLE, verdict)
 
     detail = f"every gate held on mojo {resolved.version} ({resolved.commit})"
-    if tolerated:
-        detail = (
-            f"{detail}; tolerated toolchain-reporting drift in {', '.join(tolerated)}"
+    notes: list[str] = []
+    if tolerated_contract:
+        notes.append(
+            f"tolerated the {CONTRACT_TASK} failures `mtest doctor` reports for "
+            "an unpinned toolchain"
         )
+    if tolerated:
+        notes.append(f"tolerated toolchain-reporting drift in {', '.join(tolerated)}")
+    for note in notes:
+        detail = f"{detail}; {note}"
     return _result(lane, resolved, PASS, detail)
 
 
