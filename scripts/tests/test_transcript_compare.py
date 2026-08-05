@@ -197,7 +197,18 @@ def test_protocol_snapshot_check_mutations() -> None:
 
 
 def test_protocol_snapshot_check_delegates_to_the_generator() -> None:
-    """The check command invokes the provenance-pinned writer as a module."""
+    """The check command invokes the provenance-pinned writer as a module.
+
+    The argv is pinned against a mock because spawning the real generator here
+    would mean a compiler and minutes of wall time. A pinned argv alone would
+    still hold against a module that no longer exists, so the module it names
+    is looked for on disk: renaming or deleting the sole transcript writer has
+    to fail here rather than in a scheduled run.
+    """
+    writer = protocol_snapshots.REPO_ROOT / "scripts" / "gen_transcripts.py"
+    if not writer.is_file():
+        raise AssertionError(f"the transcript writer this argv names is gone: {writer}")
+
     output_dir = Path("/tmp/mtest-generated-protocol-test")
     completed: subprocess.CompletedProcess[bytes] = subprocess.CompletedProcess([], 0)
     with mock.patch.object(
@@ -219,6 +230,32 @@ def test_protocol_snapshot_check_delegates_to_the_generator() -> None:
         stdout=subprocess.DEVNULL,
         check=False,
     )
+
+
+def test_protocol_snapshot_generation_refuses_a_failed_writer() -> None:
+    """A writer that failed produced no tree, and must not be compared to one.
+
+    `generate_into` sends the generator's own output to `DEVNULL`, so its exit
+    code is the only thing left that says whether a tree was written. Swallowed,
+    the comparison that follows runs against a directory holding whatever the
+    generator managed before it died — most likely nothing — and reports every
+    committed transcript as removed, which reads as catastrophic drift rather
+    than as a generator that crashed.
+    """
+    completed: subprocess.CompletedProcess[bytes] = subprocess.CompletedProcess([], 3)
+    with (
+        tempfile.TemporaryDirectory(prefix="mtest-generator-failure-") as raw_tmp,
+        mock.patch.object(subprocess, "run", return_value=completed),
+    ):
+        try:
+            protocol_snapshots.generate_into(Path(raw_tmp))
+        except protocol_snapshots.SnapshotGenerationError as error:
+            if "3" not in str(error):
+                raise AssertionError(
+                    f"generator failure did not report its exit code: {error}"
+                ) from error
+        else:
+            raise AssertionError("a generator that exited 3 was treated as a success")
 
 
 def test_protocol_snapshot_failure_retains_lifecycle_warning() -> None:
@@ -255,6 +292,7 @@ def main() -> int:
     test_header_replacement_reaches_line_one_only()
     test_protocol_snapshot_check_mutations()
     test_protocol_snapshot_check_delegates_to_the_generator()
+    test_protocol_snapshot_generation_refuses_a_failed_writer()
     test_protocol_snapshot_failure_retains_lifecycle_warning()
     print("transcript-comparator: OK")
     return 0

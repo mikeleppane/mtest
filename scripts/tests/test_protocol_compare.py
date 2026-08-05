@@ -43,9 +43,44 @@ def _tree(name: str, side: str) -> Path:
 class HeaderParsingTests(unittest.TestCase):
     """Line one of a transcript, read the way the generator writes it."""
 
-    def test_the_fixture_roots_are_exact(self) -> None:
-        self.assertEqual(FIXTURES, REPO_ROOT / "scripts/fixtures/canary")
-        self.assertEqual(COMMITTED_SNAPSHOTS, REPO_ROOT / "tests/snapshots/protocol")
+    def test_every_tree_this_suite_reads_is_present(self) -> None:
+        """A fixture that went away must fail here, not somewhere confusing.
+
+        Comparing the two roots against a second spelling of themselves proved
+        only that `pathlib` normalises paths — it held while the fixture tree
+        was deleted, leaving every test below to fail with a file-not-found
+        from inside the comparator. These are the trees the suite reads, named
+        one by one, and each has to exist and hold both sides.
+        """
+        self.assertTrue(COMMITTED_SNAPSHOTS.is_dir(), COMMITTED_SNAPSHOTS)
+        for name in (
+            "disagreeing_pinned",
+            "drifted_stdout",
+            "identical_newer",
+            "malformed_candidate_header",
+            "malformed_pinned_header",
+            "malformed_shared_baseline",
+            "missing_transcript",
+            "os_arch_differs",
+        ):
+            for side in ("pinned", "candidate"):
+                with self.subTest(fixture=name, side=side):
+                    tree = _tree(name, side)
+                    self.assertTrue(tree.is_dir(), tree)
+                    self.assertTrue(any(tree.iterdir()), tree)
+        self.assertEqual(
+            sorted(path.name for path in FIXTURES.iterdir()),
+            [
+                "disagreeing_pinned",
+                "drifted_stdout",
+                "identical_newer",
+                "malformed_candidate_header",
+                "malformed_pinned_header",
+                "malformed_shared_baseline",
+                "missing_transcript",
+                "os_arch_differs",
+            ],
+        )
 
     def test_it_reads_the_version_and_commit(self) -> None:
         parsed = parse_header_identity(
