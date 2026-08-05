@@ -63,7 +63,7 @@ from mtest.session.build import (
     _build_for_selection,
     _probe_file,
 )
-from mtest.session.classify import classify, resolve_report
+from mtest.session.classify import Classification, classify, resolve_report
 from mtest.session.effective_settings import (
     EffectiveFileSettings,
     effective_file_settings,

@@ -206,7 +206,7 @@ struct RunPipeline(Movable):
     Examples:
 
     ```mojo
-    from mtest.session import RunPipeline
+    from mtest.session.pipeline import RunPipeline
 
     var p = RunPipeline(1, 0, False, 0)
     p.record_build_ready(0)
@@ -282,7 +282,7 @@ struct RunPipeline(Movable):
         Examples:
 
         ```mojo
-        from mtest.session import RunPipeline
+        from mtest.session.pipeline import RunPipeline
 
         var p = RunPipeline.from_retry_budgets([0, 2], False, 0)
         var again = p.admit_crash_retry(1)  # True: file 1 may retry twice

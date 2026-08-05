@@ -48,7 +48,7 @@ def clamp_stream(
     Examples:
 
     ```mojo
-    from mtest.session import clamp_stream
+    from mtest.session.clamp import clamp_stream
 
     var data = List[UInt8]()
     for i in range(100):

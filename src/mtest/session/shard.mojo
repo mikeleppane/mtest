@@ -77,7 +77,7 @@ def shard_owns(path: String, m: Int, n: Int) -> Bool:
     Examples:
 
     ```mojo
-    from mtest.session import shard_owns
+    from mtest.session.shard import shard_owns
 
     # Shard 1 of 4 runs only the paths it owns.
     var mine = shard_owns("tests/test_a.mojo", 1, 4)
@@ -110,7 +110,7 @@ def partition(
 
     ```mojo
     from mtest.config import ShardMode
-    from mtest.session import partition
+    from mtest.session.shard import partition
 
     var files: List[String] = ["tests/test_a.mojo", "tests/test_b.mojo"]
     var mine = partition(files^, ShardMode.HASH, 1, 2)

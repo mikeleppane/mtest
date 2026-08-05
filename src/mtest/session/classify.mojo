@@ -132,7 +132,7 @@ def resolve_report(
 
     ```mojo
     from mtest.exec import Termination
-    from mtest.session import classify, resolve_report
+    from mtest.session.classify import classify, resolve_report
 
     var stdout_text = String("")
     var trusted = resolve_report(stdout_text, "/root/tests/test_a.mojo", False)
@@ -215,7 +215,7 @@ def classify(
     ```mojo
     from mtest.exec import Termination
     from mtest.protocol import ParsedReport
-    from mtest.session import classify
+    from mtest.session.classify import classify
 
     var c = classify(Termination.signaled(11), ParsedReport.absent(), False)
     # c.file_outcome is Outcome.CRASH: a crash never consults the parser.

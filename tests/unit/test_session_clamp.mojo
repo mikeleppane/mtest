@@ -7,7 +7,7 @@ helper is pure — no processes, no filesystem — and total over its inputs.
 """
 from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
-from mtest.session import ClampedStream, clamp_stream
+from mtest.session.clamp import ClampedStream, clamp_stream
 
 
 def _seq(n: Int) -> List[UInt8]:

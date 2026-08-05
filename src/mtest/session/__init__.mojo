@@ -13,8 +13,12 @@ and the last-run state file lives inside it whether or not the cache is
 enabled, so the composition root has to be able to create and delete it without
 knowing anything else about the store.
 
-The public surface is re-exported here, so callers write
-`from mtest.session import run_session, run_verdict, build_verdict`.
+What is re-exported here is what a caller outside the package uses, so they
+write `from mtest.session import run_session, run_verdict, build_verdict`: the
+four entrypoints with their result types, the two verdict maps, and the two
+cache-root operations. The clamp, the shard, the retry classes, the pipeline
+kernel and the attribution bounds are internal policy and are imported from the
+module that owns them, so adding a name here is a decision to support it.
 """
 from mtest.session.store import clear_cache_root, ensure_cache_root
 from mtest.session.session import (
@@ -24,37 +28,4 @@ from mtest.session.session import (
 )
 from mtest.session.collect import CollectResult, run_collect
 from mtest.session.debug import DebugOutcome, DebugPlan, prepare_debug
-from mtest.session.effective_settings import (
-    EffectiveFileSettings,
-    effective_file_settings,
-)
 from mtest.session.verdict import run_verdict, build_verdict
-from mtest.session.classify import (
-    Classification,
-    TrustedReport,
-    classify,
-    resolve_report,
-)
-from mtest.session.clamp import ClampedStream, clamp_stream
-from mtest.session.shard import fnv1a64, partition, shard_owns
-from mtest.session.retry_class import (
-    RetryClass,
-    has_crash_signature,
-    retry_classify,
-)
-from mtest.session.pipeline import (
-    FileStage,
-    PipelineHalt,
-    RunPipeline,
-    StepKind,
-    StepRequest,
-)
-from mtest.session.attribution import (
-    ATTRIBUTION_FILE_BUDGET_SECONDS,
-    ATTRIBUTION_SESSION_BUDGET_SECONDS,
-    ISOLATION_RUN_CAP,
-    ISOLATION_TIMEOUT_CAP_SECS,
-    AttributionStep,
-    attribution_step,
-    isolation_timeout_secs,
-)

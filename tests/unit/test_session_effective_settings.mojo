@@ -17,7 +17,8 @@ from mtest.config import (
     RunnerConfig,
     resolve_config,
 )
-from mtest.session import RunPipeline, effective_file_settings
+from mtest.session.effective_settings import effective_file_settings
+from mtest.session.pipeline import RunPipeline
 
 
 def _rule(files: List[String]) -> OverrideRule:

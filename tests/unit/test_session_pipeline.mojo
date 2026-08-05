@@ -11,7 +11,7 @@ by some case below, because the sequential driver reaches all of them today.
 """
 from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
-from mtest.session import (
+from mtest.session.pipeline import (
     FileStage,
     PipelineHalt,
     RunPipeline,
