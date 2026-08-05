@@ -523,6 +523,22 @@ def classify(
         available = search_versions(published)
     except ValueError as error:
         return _result(lane, _UNKNOWN, INFRA_FAILURE, str(error))
+    # The same bar the control is held to, for the same reason. An unbounded
+    # search that exits 0 with parseable JSON has proved that pixi ran, not
+    # that it asked this repository's channels: an answer carrying no `mojo`
+    # at all, or one carrying only versions this project was never built
+    # against, describes some other index. Waved through, it left the bounded
+    # search free to come back empty and the lane free to report a quiet
+    # NO_NEWER_CANDIDATE without ever reaching the corroboration below.
+    if pin not in available:
+        return _result(
+            lane,
+            _UNKNOWN,
+            INFRA_FAILURE,
+            f"`{shlex.join(published.argv)}` never named the pinned mojo {pin}, "
+            f"so these are not the channels this repository resolves against "
+            f"and nothing they say about a candidate can be read",
+        )
 
     matchspec = candidate_matchspec(pin)
     found = run(search_argv(channels, matchspec))

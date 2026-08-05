@@ -869,6 +869,23 @@ class IdleLaneTests(CanaryTestCase):
         self.assertIn("404 Not Found", result.detail)
         self.assertEqual(runner.stages, ["search-published"])
 
+    def test_a_published_search_that_cannot_see_the_pin_is_infra(self) -> None:
+        # The two searches are held to one bar. Accepting the unbounded one on
+        # exit 0 and parseable JSON alone let an answer that names no mojo at
+        # all — the wrong channels, an index that lost the package — wave the
+        # pipeline through to a bounded search that also came back empty, and
+        # the lane reported a quiet NO_NEWER_CANDIDATE without ever consulting
+        # the control that exists to catch exactly this.
+        repo, runner = self.build()
+        for answer in (_search_answer(), _search_answer("0.26.2.0")):
+            with self.subTest(answer=answer):
+                runner = FakeRunner(repo)
+                runner.outcomes("search-published", _Outcome(0, answer, ""))
+                result = self.classify(repo, runner)
+                self.assertEqual(result.classification, INFRA_FAILURE)
+                self.assertIn(PINNED_MOJO, result.detail)
+                self.assertEqual(runner.stages, ["search-published"])
+
     def test_an_unreadable_answer_stays_infra_failure(self) -> None:
         repo, runner = self.build()
         runner.outcomes("search-published", _Outcome(0, "not json at all", ""))
