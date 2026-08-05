@@ -139,6 +139,25 @@ CANARY_CLASSIFICATION_PAGE = Path("docs/compatibility.md")
 """The reference page that documents what the compatibility canary can report."""
 
 CANARY_CLASSIFICATION_HEADING_RE = re.compile(r"(?m)^### `([A-Z_]+)`$")
+
+CANARY_CLASSIFICATION_ROW_RE = re.compile(r"(?m)^\| `([A-Z_]+)` \|")
+"""One row of the page's summary table, which reads as the exhaustive list."""
+
+CANARY_CLASSIFICATION_COUNT_RE = re.compile(
+    r"ends in exactly one of ([a-z]+) classifications\."
+)
+"""The sentence stating how many outcomes there are, just above the table."""
+
+NUMBER_WORDS = {
+    6: "six",
+    7: "seven",
+    8: "eight",
+    9: "nine",
+    10: "ten",
+}
+"""Spellings the count sentence may use, for the sizes this list can plausibly
+reach. A count outside it fails with a `KeyError` naming the size, which is the
+honest outcome: the sentence needs writing, not guessing."""
 """How that page gives one classification its own section."""
 
 EXCLUDED_DOC_DIRECTORIES = ("plans/", "superpowers/")
@@ -977,6 +996,24 @@ def check_canary_classifications(repo_root: Path = REPO_ROOT) -> None:
             "promise about a report that never arrives; undocumented="
             f"{sorted(produced - documented)}, "
             f"unproduced={sorted(documented - produced)}"
+        )
+    # The summary table and the count above it, which a reader consults before
+    # any section. Headings alone leave both free to drift: a deleted row and a
+    # stale number each read as a complete list that is missing an outcome.
+    tabulated = set(CANARY_CLASSIFICATION_ROW_RE.findall(page))
+    if tabulated != produced:
+        raise AssertionError(
+            f"{CANARY_CLASSIFICATION_PAGE} classification table mismatch: the "
+            "table is read as the exhaustive list; untabulated="
+            f"{sorted(produced - tabulated)}, "
+            f"untabulated_extra={sorted(tabulated - produced)}"
+        )
+    counted = CANARY_CLASSIFICATION_COUNT_RE.search(page)
+    if counted is None or counted.group(1) != NUMBER_WORDS[len(produced)]:
+        raise AssertionError(
+            f"{CANARY_CLASSIFICATION_PAGE} classification count mismatch: "
+            f"expected {NUMBER_WORDS[len(produced)]!r}, "
+            f"found {counted.group(1) if counted else 'no count sentence'!r}"
         )
 
 

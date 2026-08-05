@@ -885,6 +885,38 @@ class CanaryClassificationTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "TOOLCHAIN_MISSING"):
                 docs_parity.check_canary_classifications(root)
 
+    def test_a_deleted_table_row_is_rejected(self) -> None:
+        """The table is read as the exhaustive list, so a gap in it is a lie.
+
+        Headings alone left this free: the section could stay while the row a
+        reader actually consults disappeared.
+        """
+        with tempfile.TemporaryDirectory(prefix="mtest-canary-docs-") as raw:
+            root = Path(raw)
+            page = self._page(root)
+            page.write_text(
+                page.read_text(encoding="utf-8").replace(
+                    "| `CANARY_BROKEN` |", "| ~~CANARY_BROKEN~~ |", 1
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(AssertionError, "table mismatch"):
+                docs_parity.check_canary_classifications(root)
+
+    def test_a_stale_count_sentence_is_rejected(self) -> None:
+        """A number that no longer matches reads as a complete list."""
+        with tempfile.TemporaryDirectory(prefix="mtest-canary-docs-") as raw:
+            root = Path(raw)
+            page = self._page(root)
+            page.write_text(
+                page.read_text(encoding="utf-8").replace(
+                    "one of eight classifications", "one of seven classifications", 1
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(AssertionError, "count mismatch"):
+                docs_parity.check_canary_classifications(root)
+
     def test_a_vanished_page_is_reported_not_crashed(self) -> None:
         with (
             tempfile.TemporaryDirectory(prefix="mtest-canary-docs-") as raw,

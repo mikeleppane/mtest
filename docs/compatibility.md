@@ -22,9 +22,13 @@ dependency, and the support table move together, in a release, deliberately.
 Until that happens a green lane is an observation about a compiler nothing has
 shipped against.
 
-A red canary is a maintainer signal in the same way. It says a toolchain that is
-not the one mtest is built against would break something. It is not a defect in
-any released mtest, and it does not affect an installation, because every
+A red canary is a maintainer signal in the same way. Some red results say a
+toolchain that is not the one mtest is built against would break something;
+others — `STAGE_TIMEOUT`, `CANARY_BROKEN`, and a lane that reported nothing —
+say only that the probe could not answer the question, and are facts about the
+canary rather than about the candidate. The table below says which is which.
+Neither kind is a defect in any released mtest, and neither affects an
+installation, because every
 published package declares the pinned compiler as its run dependency and
 therefore resolves it.
 
@@ -101,7 +105,9 @@ stable lane alone.
 
 ## What a result means
 
-Every probe ends in exactly one of eight classifications.
+A probe that reaches a verdict ends in exactly one of eight classifications. One
+that crashes instead reaches none, and is reported as a lane that produced no
+readable result.
 
 | Classification | What it says |
 |----------------|--------------|
@@ -166,11 +172,12 @@ The candidate could not build the sources, could not run the suite, failed the
 strict contract checks, failed the macOS cross-compile, or failed end-to-end
 scenarios outside the tolerated `doctor` ones.
 
-It also covers a candidate that never got as far as installing. A relaxed solve
-that reached the index and could not produce an environment — because the
-candidate's own dependencies cannot sit beside the `python`, `clang` and
-platform set `pixi.toml` pins — says the repository as committed cannot adopt
-that toolchain, which is the earliest and most total form of the same finding.
+It also covers a candidate that never got as far as installing. A relaxed
+install that failed twice while the channels still answered says the repository
+as committed cannot adopt that toolchain, which is the earliest and most total
+form of the same finding. `pixi install` solves, fetches and links, and the
+probe does not observe which of the three stopped, so the result reports the
+attempt and the failure's own last line rather than naming a cause.
 
 The evidence in the result differs by which of those routes produced it. Where a
 compiler spoke, the result quotes its own first diagnostic verbatim: the build,
@@ -220,9 +227,14 @@ workflow exists to prevent.
 A command the probe depends on never ran to completion, so it never got as far
 as having a toolchain to ask about: a channel search that failed outright, or an
 install that failed twice while the control question could no longer be answered
-either. It is transient by construction — nothing but a command that failed to
-run produces it — which is why it is the one finding that writes an issue and
-still leaves the run green.
+either. Nothing but a command that failed to run produces it, and it says
+nothing whatever about the candidate, which is why it is the one finding that
+writes an issue and still leaves the run green.
+
+Most causes clear on their own — a channel that flaked, a runner that lost the
+network. A cause that does not, such as a channel that stays unreachable, will
+repeat every weekday, so a lane sitting on this result across several runs is
+worth looking at even though no run went red.
 
 Two neighbours are deliberately **not** this. An answer that came back unreadable
 is `CANARY_BROKEN`, because it does not clear on its own. An install that failed
