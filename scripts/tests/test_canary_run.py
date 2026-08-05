@@ -39,6 +39,7 @@ from scripts.canary import run as canary_run
 from scripts.canary import toolchain
 from scripts.canary.protocol_compare import PASS, PROTOCOL_DRIFT
 from scripts.canary.run import (
+    CANARY_BROKEN,
     INFRA_FAILURE,
     JOB_TIMEOUT_HEADROOM_SECONDS,
     MACOS_CROSS_COMPILE,
@@ -1084,22 +1085,22 @@ class IdleLaneTests(CanaryTestCase):
             ["search-published", "search-candidates", "search-control"],
         )
 
-    def test_a_control_that_cannot_see_the_pin_is_infra(self) -> None:
-        # The channels answered, but not with the version this repository is
-        # built against. Whatever that is, it is not evidence that nothing
-        # newer exists.
-        repo, runner = self.build()
-        self._idle_stable_channel(runner)
-        runner.outcomes("search-control", _Outcome(0, _search_answer(), ""))
-        result = self.classify(repo, runner)
-        self.assertEqual(result.classification, INFRA_FAILURE)
+    def test_a_control_that_answered_but_confirmed_nothing_is_loud(self) -> None:
+        """A control that ran and said the wrong thing is not an outage.
 
-    def test_a_control_that_does_not_parse_is_infra(self) -> None:
-        repo, runner = self.build()
-        self._idle_stable_channel(runner)
-        runner.outcomes("search-control", _Outcome(0, "No packages found\n", ""))
-        result = self.classify(repo, runner)
-        self.assertEqual(result.classification, INFRA_FAILURE)
+        The channels answered, but not with the version this repository is
+        built against, or not in a shape this reads. Neither clears by itself:
+        the same wrong channel set answers the same way tomorrow. Filed as
+        INFRA_FAILURE it wrote nothing and exited 0, so a lane that had stopped
+        probing entirely reported a green day, every day.
+        """
+        for stdout in (_search_answer(), "No packages found\n"):
+            with self.subTest(stdout=stdout):
+                repo, runner = self.build()
+                self._idle_stable_channel(runner)
+                runner.outcomes("search-control", _Outcome(0, stdout, ""))
+                result = self.classify(repo, runner)
+                self.assertEqual(result.classification, CANARY_BROKEN)
 
     def test_an_empty_match_set_needs_no_control(self) -> None:
         # A search that answered, with nothing in the answer, is already the
@@ -1151,28 +1152,40 @@ class IdleLaneTests(CanaryTestCase):
         self.assertIn("404 Not Found", result.detail)
         self.assertEqual(runner.stages, ["search-published"])
 
-    def test_a_published_search_that_cannot_see_the_pin_is_infra(self) -> None:
+    def test_a_published_search_that_cannot_see_the_pin_is_loud(self) -> None:
         # The two searches are held to one bar. Accepting the unbounded one on
         # exit 0 and parseable JSON alone let an answer that names no mojo at
         # all — the wrong channels, an index that lost the package — wave the
         # pipeline through to a bounded search that also came back empty, and
         # the lane reported a quiet NO_NEWER_CANDIDATE without ever consulting
-        # the control that exists to catch exactly this.
+        # the control that exists to catch exactly this. Loud rather than
+        # infrastructure because the wrong channel set is still the wrong
+        # channel set tomorrow.
         repo, runner = self.build()
         for answer in (_search_answer(), _search_answer("0.26.2.0")):
             with self.subTest(answer=answer):
                 runner = FakeRunner(repo)
                 runner.outcomes("search-published", _Outcome(0, answer, ""))
                 result = self.classify(repo, runner)
-                self.assertEqual(result.classification, INFRA_FAILURE)
+                self.assertEqual(result.classification, CANARY_BROKEN)
                 self.assertIn(PINNED_MOJO, result.detail)
                 self.assertEqual(runner.stages, ["search-published"])
 
-    def test_an_unreadable_answer_stays_infra_failure(self) -> None:
-        repo, runner = self.build()
-        runner.outcomes("search-published", _Outcome(0, "not json at all", ""))
-        result = self.classify(repo, runner)
-        self.assertEqual(result.classification, INFRA_FAILURE)
+    def test_an_answer_this_cannot_read_is_loud(self) -> None:
+        """Pixi floats, so the day its `search --json` shape moves is permanent.
+
+        The workflow provisions pixi without a version, so a release that
+        changes the shape of this answer raises here on every run of both lanes
+        until someone notices. Quiet, nobody does: the probe has stopped
+        probing and every scheduled run still reports green. In `ci.yml` the
+        same pixi change would have turned a build red the day it landed.
+        """
+        for stage in ("search-published", "search-candidates"):
+            with self.subTest(stage=stage):
+                repo, runner = self.build()
+                runner.outcomes(stage, _Outcome(0, "not json at all", ""))
+                result = self.classify(repo, runner)
+                self.assertEqual(result.classification, CANARY_BROKEN)
 
 
 class StageBudgetTests(CanaryTestCase):

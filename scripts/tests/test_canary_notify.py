@@ -62,6 +62,7 @@ PROTOCOL_DRIFT = "PROTOCOL_DRIFT"
 SOURCE_INCOMPATIBLE = "SOURCE_INCOMPATIBLE"
 PACKAGE_FAILED = "PACKAGE_FAILED"
 STAGE_TIMEOUT = "STAGE_TIMEOUT"
+CANARY_BROKEN = "CANARY_BROKEN"
 
 CANDIDATE_VERSION = "1.0.0b3"
 CANDIDATE_COMMIT = "cafef00d"
@@ -70,6 +71,7 @@ CANDIDATE_COMMIT = "cafef00d"
 # candidate, and a body that presents one as such is telling a maintainer that
 # a compiler was exercised when none was.
 PINNED_VERSION = "1.0.0b2"
+UNKNOWN_VERSION = "unknown"
 
 
 class FakeGh:
@@ -285,7 +287,7 @@ class QuietDayTests(NotifyTestCase):
         """
         for classification, subcommand, flag in (
             (NO_NEWER_CANDIDATE, "close", "--comment"),
-            (INFRA_FAILURE, "comment", "--body"),
+            (INFRA_FAILURE, "edit", "--body"),
         ):
             with self.subTest(classification=classification):
                 gh = FakeGh([_issue(12, STABLE, "OPEN")])
@@ -378,29 +380,92 @@ class FindingTests(NotifyTestCase):
 
 
 class InfraFailureTests(NotifyTestCase):
-    """The canary failing to reach a toolchain is not news about the toolchain."""
+    """The canary failing to reach a toolchain is not news about the toolchain.
 
-    def test_it_comments_on_an_issue_someone_is_already_watching(self) -> None:
+    It is still news, though, and that is the distinction this class holds
+    open: `INFRA_FAILURE` is the one row where "write it down" and "fail the
+    run" come apart. It says nothing about the candidate, so the run stays
+    green; it can also repeat every weekday, and nothing here keeps streak
+    state, so it has to be written somewhere a person will eventually see.
+    """
+
+    def test_it_updates_an_issue_someone_is_already_watching(self) -> None:
         gh = FakeGh([_issue(12, STABLE, "OPEN")])
         self.write_result(STABLE, INFRA_FAILURE, detail="404 Not Found")
         code, _log = self.notify(gh)
         self.assertEqual(code, 0)
-        self.assertEqual(gh.subcommands(), ["list", "comment"])
-        self.assertIn("404 Not Found", gh.argument("comment", "--body"))
+        self.assertEqual(gh.subcommands(), ["list", "edit"])
+        self.assertIn("404 Not Found", gh.argument("edit", "--body"))
 
-    def test_it_opens_nothing_when_nobody_is_watching(self) -> None:
+    def test_it_opens_an_issue_when_nobody_is_watching(self) -> None:
+        """Writing nothing was the permanent silence in a different place.
+
+        An unreachable channel is unreachable again tomorrow, and there is no
+        streak or repetition state anywhere in this workflow, so a lane with no
+        issue already open could report this every weekday forever while every
+        scheduled run stayed green — the canary having silently stopped probing
+        at all. One issue per lane, rewritten in place and closed by the next
+        real answer, is what that costs.
+        """
         gh = FakeGh()
-        self.write_result(STABLE, INFRA_FAILURE)
+        self.write_result(STABLE, INFRA_FAILURE, detail="404 Not Found")
         code, _log = self.notify(gh)
         self.assertEqual(code, 0)
-        self.assertEqual(gh.subcommands(), ["list"])
+        self.assertEqual(gh.subcommands(), ["list", "create"])
+        self.assertIn("404 Not Found", gh.argument("create", "--body"))
 
-    def test_it_does_not_reopen_a_closed_issue(self) -> None:
+    def test_it_reopens_a_closed_issue(self) -> None:
         gh = FakeGh([_issue(12, STABLE, "CLOSED")])
         self.write_result(STABLE, INFRA_FAILURE)
         code, _log = self.notify(gh)
         self.assertEqual(code, 0)
-        self.assertEqual(gh.subcommands(), ["list"])
+        self.assertEqual(gh.subcommands(), ["list", "reopen", "edit"])
+
+    def test_a_green_day_closes_the_issue_it_opened(self) -> None:
+        """The self-healing half of the argument above.
+
+        A flake that opens an issue is only tolerable because the next answer
+        takes it away again without anyone doing anything.
+        """
+        gh = FakeGh([_issue(12, STABLE, "OPEN")])
+        self.write_result(STABLE, GREEN)
+        code, _log = self.notify(gh)
+        self.assertEqual(code, 0)
+        self.assertEqual(gh.subcommands(), ["list", "close"])
+
+
+class CanaryBrokenTests(NotifyTestCase):
+    """A plumbing failure that will not clear on its own is a finding.
+
+    `INFRA_FAILURE` is justified by transience — a network call flaked — and
+    several of the probe's readers cannot flake. pixi changing the shape of
+    `search --json`, a channel set that no longer carries the pinned version, a
+    solve that produced a toolchain the search never offered: each recurs on
+    every run until a person changes something. Under one quiet row they meant
+    both lanes reporting green every weekday, having stopped probing entirely.
+    """
+
+    def test_it_opens_an_issue_and_fails_the_run(self) -> None:
+        gh = FakeGh()
+        self.write_result(
+            STABLE, CANARY_BROKEN, detail="`pixi search --json mojo` did not print JSON"
+        )
+        code, _log = self.notify(gh)
+        self.assertEqual(code, 1)
+        self.assertEqual(gh.subcommands(), ["list", "create"])
+        body = gh.argument("create", "--body")
+        self.assertIn(CANARY_BROKEN, body)
+        self.assertIn("did not print JSON", body)
+
+    def test_its_body_blames_the_canary_rather_than_a_candidate(self) -> None:
+        gh = FakeGh()
+        self.write_result(STABLE, CANARY_BROKEN, version=UNKNOWN_VERSION)
+        code, _log = self.notify(gh)
+        self.assertEqual(code, 1)
+        body = gh.argument("create", "--body")
+        self.assertNotIn("newer than the one this repository pins", body)
+        self.assertIn("stopped probing", body)
+        self.assertIn("none was exercised", body)
 
 
 class SilentCanaryTests(NotifyTestCase):

@@ -15,7 +15,8 @@ what exactly would break". This module answers that with a classification:
 | `SOURCE_INCOMPATIBLE` | The tree cannot solve, compile, test, or behave.  |
 | `PACKAGE_FAILED`      | The sources are fine; the shipped package is not.  |
 | `STAGE_TIMEOUT`       | A stage outlived its budget and answered nothing.  |
-| `INFRA_FAILURE`       | The probe never got a toolchain to ask about.      |
+| `CANARY_BROKEN`       | The probe cannot read or trust the answers it got. |
+| `INFRA_FAILURE`       | The probe could not reach the outside world.       |
 
 The classification is DATA, not a verdict, which is why this exits 0 for every
 one of them including the red ones. Whether `PROTOCOL_DRIFT` should wake anyone
@@ -25,15 +26,29 @@ the only thing an exit code here can usefully mean. A nonzero exit therefore
 says exactly one thing: this module crashed, and the traceback it left behind is
 about itself rather than about Mojo.
 
-Only one row is quiet, and the line between it and `SOURCE_INCOMPATIBLE` is
-where this module has been wrong twice. `INFRA_FAILURE` means the probe could
-not ask its question — an unreachable channel, an answer it cannot read. It
-does NOT mean "the environment would not build", because a candidate whose
+Only one row is quiet, and the line around it is where this module has been
+wrong three times. `INFRA_FAILURE` means the probe could not reach the outside
+world, and it is transient by construction: nothing produces it but a command
+that failed to run to completion.
+
+It does NOT mean "the environment would not build", because a candidate whose
 dependencies cannot sit beside the python, clang and platform set this
 repository pins is a fact about that candidate, discovered exactly where this
-lane is meant to discover things. Every failure the probe cannot attribute to
-its own plumbing therefore lands on a loud row, and the ones it can are named
-one at a time with the evidence that named them.
+lane is meant to discover things. And it does NOT mean "an answer came back and
+could not be read". pixi changing the shape of `search --json`, a channel set
+that no longer carries the version this repository is built against, a solve
+that produced a toolchain the search never offered — those are permanent, they
+recur every weekday until a person changes something, and reported quietly they
+let the probe stop probing while every scheduled run stayed green. They are
+`CANARY_BROKEN`, which is loud, because what broke is this module's own grip on
+the world rather than any candidate's behaviour, and because "the same quiet
+non-answer every day for a month" is the failure mode this whole workflow was
+built to prevent.
+
+Every failure the probe cannot attribute to its own plumbing therefore lands on
+a loud row, the ones it can are named one at a time with the evidence that
+named them, and the only row that stays silent about a candidate is the one
+that cannot outlive the outage that produced it.
 
 The ordering of the stages is not cosmetic. "Is there anything newer" is asked
 of the channels FIRST, as a question, before a single tracked file is touched:
@@ -113,6 +128,7 @@ NO_NEWER_CANDIDATE = "NO_NEWER_CANDIDATE"
 SOURCE_INCOMPATIBLE = "SOURCE_INCOMPATIBLE"
 PACKAGE_FAILED = "PACKAGE_FAILED"
 STAGE_TIMEOUT = "STAGE_TIMEOUT"
+CANARY_BROKEN = "CANARY_BROKEN"
 INFRA_FAILURE = "INFRA_FAILURE"
 
 CLASSIFICATIONS = (
@@ -122,6 +138,7 @@ CLASSIFICATIONS = (
     SOURCE_INCOMPATIBLE,
     PACKAGE_FAILED,
     STAGE_TIMEOUT,
+    CANARY_BROKEN,
     INFRA_FAILURE,
 )
 
@@ -554,6 +571,27 @@ def control_confirms_channels(control: CommandResult, pin: str) -> bool:
         return False
 
 
+def uncorroborated_classification(control: CommandResult) -> str:
+    """Name what a control that did not confirm the channels leaves to report.
+
+    There are two ways for the corroboration to come back unconfirmed and they
+    are opposites. The control can have failed to run — which is an outage,
+    says nothing about anything, and clears when the outage does. Or it can
+    have run, answered, and not named the version this repository is built
+    against, which is a channel set that is not the one this probe thinks it is
+    asking; that condition does not clear, it recurs every weekday, and quiet
+    it would let the lane report a green non-answer indefinitely.
+
+    Args:
+        control: The completed control search, which did not confirm.
+
+    Returns:
+        `INFRA_FAILURE` when the control never answered, `CANARY_BROKEN` when
+        it answered with something this probe cannot build on.
+    """
+    return INFRA_FAILURE if control.returncode != 0 else CANARY_BROKEN
+
+
 def failed_scenarios(stdout: str) -> tuple[str, ...]:
     """List the e2e scenarios a failing roster named.
 
@@ -874,7 +912,12 @@ def classify(
         available = search_versions(published)
         newest = search_newest(published)
     except ValueError as error:
-        return _result(lane, _UNKNOWN, INFRA_FAILURE, str(error))
+        # The search ran and answered; this module could not read the answer.
+        # pixi is not pinned by the workflow that provisions it, so it floats,
+        # and the day it changes the shape of `search --json` this raises on
+        # every run of both lanes forever. Quiet, that is a canary that has
+        # silently stopped probing while every scheduled run reports green.
+        return _result(lane, _UNKNOWN, CANARY_BROKEN, str(error))
     # The same bar the control is held to, for the same reason. An unbounded
     # search that exits 0 with parseable JSON has proved that pixi ran, not
     # that it asked this repository's channels: an answer carrying no `mojo`
@@ -886,7 +929,7 @@ def classify(
         return _result(
             lane,
             _UNKNOWN,
-            INFRA_FAILURE,
+            CANARY_BROKEN,
             f"`{shlex.join(published.argv)}` never named the pinned mojo {pin}, "
             f"so these are not the channels this repository resolves against "
             f"and nothing they say about a candidate can be read",
@@ -907,7 +950,7 @@ def classify(
         try:
             candidates = search_versions(found)
         except ValueError as error:
-            return _result(lane, _UNKNOWN, INFRA_FAILURE, str(error))
+            return _result(lane, _UNKNOWN, CANARY_BROKEN, str(error))
     else:
         # pixi exits 1 BOTH when a spec matches nothing and when it cannot
         # answer the question at all, printing nothing to stdout either way, so
@@ -927,7 +970,7 @@ def classify(
             return _result(
                 lane,
                 _UNKNOWN,
-                INFRA_FAILURE,
+                uncorroborated_classification(control),
                 f"{command_failure(found)}; the control "
                 f"`{floor_matchspec(pin)}` did not confirm the channels can "
                 f"answer that, so an empty match set cannot be inferred",
@@ -980,7 +1023,7 @@ def classify(
             return _result(
                 lane,
                 _UNKNOWN,
-                INFRA_FAILURE,
+                uncorroborated_classification(control),
                 f"{command_failure(install)}; the control "
                 f"`{floor_matchspec(pin)}` did not answer either, so the probe "
                 f"had lost its reach rather than learned anything",

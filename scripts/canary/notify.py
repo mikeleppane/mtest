@@ -9,8 +9,8 @@ policy is deliberately narrow:
 |-----------------------------------------------------------|-------------------------|
 | `PASS`, `NO_NEWER_CANDIDATE`                              | close the issue, exit 0 |
 | `PROTOCOL_DRIFT`, `SOURCE_INCOMPATIBLE`, `PACKAGE_FAILED` | upsert, exit 1          |
-| `STAGE_TIMEOUT`                                           | upsert, exit 1          |
-| `INFRA_FAILURE`                                           | comment if open, exit 0 |
+| `STAGE_TIMEOUT`, `CANARY_BROKEN`                          | upsert, exit 1          |
+| `INFRA_FAILURE`                                           | upsert, exit 0          |
 | no artifact, or one this cannot read                      | upsert, exit 1          |
 
 Three of those rows are worth arguing for.
@@ -21,10 +21,25 @@ answering the question it exists to answer, and a canary that reports the same
 quiet non-answer every day for a month is the failure mode this workflow was
 built to prevent.
 
-`INFRA_FAILURE` is quiet on purpose. The canary failing to reach a channel is
-news about the canary, not about the toolchain, and a scheduled job that opens
-an issue every time a network call flaked teaches everyone to close its issues
-unread — after which the day it has something real to say is also unread.
+`INFRA_FAILURE` writes an issue and still exits 0, which is the only row where
+those two come apart. It is the one classification produced solely by a command
+that failed to run, so it says nothing about the candidate and must not turn a
+scheduled run red over a flaked network call. But writing nothing at all was
+the same permanent-silence hole in a different place: an unreachable channel is
+unreachable again tomorrow, and this workflow keeps no streak state anywhere,
+so a lane nobody had already opened an issue for could report a green
+non-answer every weekday forever. The issue is the durable artifact, there is
+exactly one per lane and it is rewritten in place, and the next real answer
+closes it — so the cost of saying so is one notification, and the cost of not
+saying so is the whole point of the canary.
+
+`CANARY_BROKEN` is loud, and it is the row that keeps the one above honest. It
+carries the failures that look like plumbing but do not clear: an answer whose
+shape this repository can no longer read, a channel set that does not carry the
+pinned version, a solve that produced a toolchain the search never offered.
+Filed as infrastructure, each of them would recur on every run until a person
+intervened, and in `ci.yml` the same underlying change would have turned a
+build red the day it landed.
 
 A **missing or unreadable artifact is loud**, and it is the assertion that makes
 this a canary rather than a decoration. Every other failure mode here announces
@@ -74,12 +89,14 @@ from scripts.canary.protocol_compare import PASS, PROTOCOL_DRIFT
 # pins is that this job never *invokes* the probe, which is about what the
 # workflow runs rather than about what an import graph touches.
 from scripts.canary.run import (
+    CANARY_BROKEN,
     CLASSIFICATIONS,
     INFRA_FAILURE,
     NO_NEWER_CANDIDATE,
     PACKAGE_FAILED,
     SOURCE_INCOMPATIBLE,
     STAGE_TIMEOUT,
+    TIMEOUT_RETURNCODE,
     CanaryResult,
     CommandResult,
 )
@@ -114,6 +131,7 @@ LOUD_CLASSIFICATIONS = (
     SOURCE_INCOMPATIBLE,
     PACKAGE_FAILED,
     STAGE_TIMEOUT,
+    CANARY_BROKEN,
 )
 
 # `gh` reaches the network; none of these calls should take anything like this
@@ -169,7 +187,10 @@ def gh_runner() -> Gh:
             )
         except subprocess.TimeoutExpired:
             return CommandResult(
-                recorded, 124, "", f"timed out after {GH_TIMEOUT_SECONDS:.0f}s"
+                recorded,
+                TIMEOUT_RETURNCODE,
+                "",
+                f"timed out after {GH_TIMEOUT_SECONDS:.0f}s",
             )
         return CommandResult(
             recorded, completed.returncode, completed.stdout, completed.stderr
@@ -302,6 +323,13 @@ def _opening_sentence(result: CanaryResult) -> str:
             f"{lane} lane's question of. This says nothing about any "
             "candidate; it is news about the canary."
         )
+    if result.classification == CANARY_BROKEN:
+        return (
+            f"The compatibility canary can no longer read the answers its "
+            f"{lane} lane probe depends on, so it has stopped probing. This "
+            "says nothing about any candidate, and it will not clear on its "
+            "own."
+        )
     if result.classification == STAGE_TIMEOUT:
         return (
             f"A stage of the compatibility canary's {lane} probe outlived its "
@@ -322,7 +350,7 @@ def render_body(result: CanaryResult) -> str:
     Returns:
         A Markdown body naming the lane, what was probed, and the evidence.
     """
-    if result.classification in (NO_NEWER_CANDIDATE, INFRA_FAILURE):
+    if result.classification in (NO_NEWER_CANDIDATE, INFRA_FAILURE, CANARY_BROKEN):
         # `version` here is the pin or `unknown`, neither of which is a
         # candidate. Labelling it as one puts a version this repository
         # already ships under a heading that says something was tried.
@@ -516,21 +544,13 @@ def notify_lane(gh: Gh, results: Path, lane: str) -> bool:
                 ],
             )
         return False
-    if result.classification == INFRA_FAILURE:
-        # Deliberately quiet, and deliberately not silent: a lane already under
-        # investigation gets the evidence that its probe could not run, while a
-        # lane nobody is looking at does not gain an issue about the canary's
-        # own plumbing.
-        found = find_issue(gh, title)
-        if found is not None and found[1] == OPEN:
-            number, _state = found
-            _gh(
-                gh,
-                ["gh", "issue", "comment", str(number), "--body", render_body(result)],
-            )
-        return False
     upsert_issue(gh, title, render_body(result))
-    return True
+    # Written down like every finding, and still not a red run: this is the one
+    # classification produced solely by a command that failed to run, so it
+    # says nothing about the candidate. Left unwritten, it was also the one
+    # that could repeat every weekday without anyone learning that the lane had
+    # stopped probing.
+    return result.classification != INFRA_FAILURE
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
