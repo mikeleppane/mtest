@@ -60,6 +60,7 @@ from mtest.model import (
     ParseDisposition,
     PrecompileFailedPayload,
     SessionFinishedPayload,
+    TerminationKind,
     TestReportedPayload,
     TestResult,
 )
@@ -313,25 +314,23 @@ def _flaky_row(
 def _precompile_ending_words(e: PrecompileFailedPayload) -> String:
     """How the step's final attempt ended, in words, or `""` if unknown.
 
-    Reads the decomposed exec-layer termination kinds the event carries: 0
-    EXITED, 1 SIGNALED, 2 TIMED_OUT, 3 SPAWN_FAILED. Mirrors `console.mojo`'s
-    `_precompile_ending_phrase` in spirit, kept as its own small copy rather
-    than a cross-reporter import.
+    Mirrors `console.mojo`'s `_precompile_ending_phrase` in spirit, kept as its
+    own small copy rather than a cross-reporter import.
     """
     if not e.ending_known:
         return String("")
-    if e.term_kind == 1:
+    if e.term_kind == TerminationKind.SIGNALED:
         var name = signal_name_for_target(e.term_value)
         var base = "died by signal " + String(e.term_value)
         if name != "":
             base += " (" + name + ")"
         return base
-    if e.term_kind == 2:
+    if e.term_kind == TerminationKind.TIMED_OUT:
         var s = "timed out after " + String(e.timeout_seconds) + "s"
         if e.escalated:
             s += ", escalated to SIGKILL"
         return s
-    if e.term_kind == 3:
+    if e.term_kind == TerminationKind.SPAWN_FAILED:
         return "could not be spawned (errno " + String(e.term_value) + ")"
     return "exited " + String(e.term_value)
 

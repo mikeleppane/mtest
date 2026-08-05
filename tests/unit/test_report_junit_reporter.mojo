@@ -21,7 +21,7 @@ from std.testing import (
     assert_true,
 )
 
-from mtest.model.events import Event
+from mtest.model.events import Event, TerminationKind
 from mtest.model.node_id import NodeId
 from mtest.model.outcome import Outcome
 from mtest.model.test_result import TestResult
@@ -63,9 +63,9 @@ def _attempt(path: String, idx: Int) -> Event:
         "run",
         idx,
         3,
-        1,  # term_kind = SIGNALED
+        TerminationKind.SIGNALED,
         11,
-        1,
+        TerminationKind.SIGNALED,
         11,
         False,
         True,

@@ -30,7 +30,7 @@ from std.pathlib import cwd
 from std.testing import assert_equal, assert_true, TestSuite
 
 from mtest.model.attribution import AttributionDisposition
-from mtest.model.events import Event, EventKind, Summary
+from mtest.model.events import Event, EventKind, Summary, TerminationKind
 from mtest.model.exit_code import (
     EXIT_FAILURE,
     EXIT_INTERNAL_ERROR,
@@ -126,9 +126,9 @@ def _sample_event(code: Int) -> Event:
             "run",
             1,
             2,
+            TerminationKind.EXITED,
             0,
-            0,
-            0,
+            TerminationKind.EXITED,
             0,
             False,
             False,

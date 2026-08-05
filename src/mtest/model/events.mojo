@@ -73,6 +73,54 @@ struct EventKind(Equatable, ImplicitlyCopyable, Movable):
 
 
 @fieldwise_init
+struct TerminationKind(Equatable, ImplicitlyCopyable, Movable):
+    """How a supervised child ended, as the events carry it.
+
+    A thin wrapper over a stable integer discriminant, so the four endings the
+    runner keeps distinct form a closed set of named constants that compare by
+    value. The exec layer produces the same four discriminants; this is the
+    model-layer name for them, so every reporter reads one vocabulary instead
+    of restating the integers.
+
+    Examples:
+
+    ```mojo
+    from mtest.model import TerminationKind
+
+    var kind = TerminationKind.SIGNALED
+    var crashed = kind == TerminationKind.SIGNALED  # True: a real crash
+    var wire = kind.code  # 1, the integer the JSON stream encodes
+    ```
+    """
+
+    var code: Int
+    """The stable integer discriminant identifying this ending."""
+
+    comptime EXITED = Self(0)
+    """The child exited under its own control; the paired value is its exit
+    status."""
+    comptime SIGNALED = Self(1)
+    """A signal terminated the child, which is a crash; the paired value is the
+    signal number."""
+    comptime TIMED_OUT = Self(2)
+    """An mtest deadline killed the child, which is attributable to the runner
+    rather than to the test."""
+    comptime SPAWN_FAILED = Self(3)
+    """The child could not be exec'd at all; the paired value is the errno."""
+
+    comptime COUNT = 4
+    """The number of distinct kinds in the vocabulary."""
+
+    def __eq__(self, other: Self) -> Bool:
+        """Two kinds are equal iff their discriminants match."""
+        return self.code == other.code
+
+    def __ne__(self, other: Self) -> Bool:
+        """Negation of `__eq__`."""
+        return self.code != other.code
+
+
+@fieldwise_init
 struct Summary(Copyable, Movable):
     """A per-outcome tally, indexed by outcome discriminant.
 
@@ -203,8 +251,8 @@ struct PrecompileFailedPayload(EventPayload):
     `term_kind`/`term_value`/`escalated`/`timeout_seconds`/`attempts_used`
     fields. This flag says those fields were populated, so a reporter never
     renders an unset termination as "exited 0"."""
-    var term_kind: Int
-    """The decomposed exec-layer termination kind of the step's last attempt."""
+    var term_kind: TerminationKind
+    """How the step's last attempt ended."""
     var term_value: Int
     """The value paired with `term_kind` (e.g. a signal number or exit
     status)."""
@@ -367,9 +415,10 @@ struct AttemptFinishedPayload(EventPayload):
     """The `ATTEMPT_FINISHED` payload: one non-final retry attempt's record.
 
     Carries everything a reporter needs to render the attempt now and to
-    serialize it later without re-parsing bytes. The termination identity rides
-    as plain Int fields, decomposed from an `exec.Termination`, so this layer
-    imports nothing above it.
+    serialize it later without re-parsing bytes. The termination identity is
+    decomposed from an `exec.Termination` into this layer's own
+    `TerminationKind` plus its paired value, so this layer imports nothing
+    above it.
     """
 
     comptime KIND = EventKind.ATTEMPT_FINISHED
@@ -382,13 +431,12 @@ struct AttemptFinishedPayload(EventPayload):
     """Which attempt this was, 1-based (the k-th of the planned attempts)."""
     var attempts_planned: Int
     """How many attempts were planned in total (the retry budget, N+1)."""
-    var term_kind: Int
-    """This attempt's raw termination kind, decomposed from an
-    `exec.Termination`."""
+    var term_kind: TerminationKind
+    """How this attempt ended."""
     var term_value: Int
     """The termination value paired with `term_kind` (e.g. the signal number or
     exit status of this attempt)."""
-    var term_final_kind: Int
+    var term_final_kind: TerminationKind
     """The latched final termination kind after any escalation, meaningful only
     when `term_kind` is TIMED_OUT.
 
@@ -597,7 +645,7 @@ struct Event(Copyable, Movable):
         casualty_count: Int,
         casualties: List[String] = List[String](),
         ending_known: Bool = False,
-        term_kind: Int = 0,
+        term_kind: TerminationKind = TerminationKind.EXITED,
         term_value: Int = 0,
         escalated: Bool = False,
         timeout_seconds: Int = 0,
@@ -620,8 +668,7 @@ struct Event(Copyable, Movable):
                 lists these rather than merely counting them, so pass them
                 whenever they are known.
             ending_known: Whether the termination fields below were populated.
-            term_kind: The decomposed exec-layer termination kind: 0 EXITED,
-                1 SIGNALED, 2 TIMED_OUT, 3 SPAWN_FAILED.
+            term_kind: How the step's last attempt ended.
             term_value: The value paired with `term_kind`, such as a signal
                 number or exit status.
             escalated: Whether the runner escalated to SIGKILL.
@@ -874,9 +921,9 @@ struct Event(Copyable, Movable):
         step: String,
         attempt_index: Int,
         attempts_planned: Int,
-        term_kind: Int,
+        term_kind: TerminationKind,
         term_value: Int,
-        term_final_kind: Int,
+        term_final_kind: TerminationKind,
         term_final_value: Int,
         escalated: Bool,
         retry_eligible: Bool,
@@ -891,16 +938,17 @@ struct Event(Copyable, Movable):
         """One non-final retry attempt's full record, for a "TRY" block.
 
         Carries everything a reporter needs to render the attempt now and to
-        serialize it later without re-parsing bytes. The termination identity
-        rides as plain Int fields, decomposed from an `exec.Termination`, so
-        this layer imports nothing above it.
+        serialize it later without re-parsing bytes. The termination identity is
+        decomposed from an `exec.Termination` into this layer's own
+        `TerminationKind` plus its paired value, so this layer imports nothing
+        above it.
 
         Args:
             path: The file this attempt belongs to.
             step: The attempted step: `"build"`, `"run"`, or `"precompile"`.
             attempt_index: Which attempt this was, 1-based.
             attempts_planned: How many attempts were planned in total.
-            term_kind: This attempt's raw termination kind.
+            term_kind: How this attempt ended.
             term_value: The value paired with `term_kind`.
             term_final_kind: The latched final termination kind after any
                 escalation.

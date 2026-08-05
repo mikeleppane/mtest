@@ -45,6 +45,7 @@ from mtest.model import (
     FileStartedPayload,
     Outcome,
     PrecompileFailedPayload,
+    TerminationKind,
     TestReportedPayload,
     TestResult,
 )
@@ -65,12 +66,6 @@ from mtest.report.junit import (
     render_suite,
 )
 from mtest.report.reporter import Reporter
-
-# Decomposed exec-layer termination kinds (as carried on the events).
-comptime _TERM_EXITED = 0
-comptime _TERM_SIGNALED = 1
-comptime _TERM_TIMED_OUT = 2
-comptime _TERM_SPAWN_FAILED = 3
 
 
 def _junit_nonce() -> String:
@@ -213,7 +208,7 @@ struct _AttemptRec(Copyable, Movable):
     """One non-final retry attempt's typed record, kept until the file finishes.
     """
 
-    var term_kind: Int
+    var term_kind: TerminationKind
     var term_value: Int
     var escalated: Bool
     var stdout_text: String
@@ -262,14 +257,14 @@ def _bound_str(s: String) -> String:
 
 def _attempt_diag(a: _AttemptRec) -> _Diag:
     """The derived descriptor for one non-final attempt's termination."""
-    if a.term_kind == _TERM_SIGNALED:
+    if a.term_kind == TerminationKind.SIGNALED:
         var m = "killed by signal " + String(a.term_value)
         if a.escalated:
             m += " (escalated to SIGKILL)"
         return _Diag(True, "Signal", m, "signal " + String(a.term_value))
-    if a.term_kind == _TERM_TIMED_OUT:
+    if a.term_kind == TerminationKind.TIMED_OUT:
         return _Diag(True, "Timeout", "timed out", "timed out")
-    if a.term_kind == _TERM_SPAWN_FAILED:
+    if a.term_kind == TerminationKind.SPAWN_FAILED:
         return _Diag(
             True,
             "SpawnError",

@@ -24,6 +24,7 @@ from mtest.model.attribution import AttributionDisposition
 from mtest.model.test_counts import TestCounts
 from mtest.model.events import (
     EventKind,
+    TerminationKind,
     Summary,
     Event,
     EventPayload,

@@ -22,6 +22,7 @@ from mtest.model import (
     Outcome,
     NodeId,
     ParseDisposition,
+    TerminationKind,
     TestCounts,
     TestResult,
 )
@@ -1660,24 +1661,25 @@ def test_precompile_failed_banner_verbatim() raises:
 
 
 def test_term_phrase_names_a_signal_in_words_and_falls_back_to_the_number() raises:
-    # The PURE phrase builder behind the TRY lines. The decomposed termination
-    # kinds are the exec-layer discriminants: 0 EXITED, 1 SIGNALED, 2 TIMED_OUT,
-    # 3 SPAWN_FAILED.
+    # The PURE phrase builder behind the TRY lines.
     assert_equal(
-        _term_phrase(1, 11, False),
+        _term_phrase(TerminationKind.SIGNALED, 11, False),
         "signal 11 — SIGSEGV, segmentation fault",
     )
     # A signal OUTSIDE the named set must still read as the bare number — never
     # an empty phrase and never a neighbour's name.
-    assert_equal(_term_phrase(1, 31, False), "signal 31")
-    assert_equal(_term_phrase(1, 62, False), "signal 62")
+    assert_equal(_term_phrase(TerminationKind.SIGNALED, 31, False), "signal 31")
+    assert_equal(_term_phrase(TerminationKind.SIGNALED, 62, False), "signal 62")
 
 
 def test_term_phrase_notes_the_sigkill_escalation_of_a_deadline() raises:
     # A deadline the child survived until SIGKILL says so; a child that went
     # down on the polite SIGTERM must not claim an escalation that never ran.
-    assert_equal(_term_phrase(2, 0, False), "timed out")
-    assert_equal(_term_phrase(2, 0, True), "timed out, escalated to SIGKILL")
+    assert_equal(_term_phrase(TerminationKind.TIMED_OUT, 0, False), "timed out")
+    assert_equal(
+        _term_phrase(TerminationKind.TIMED_OUT, 0, True),
+        "timed out, escalated to SIGKILL",
+    )
 
 
 def test_crash_narrative_reads_a_segfault_with_no_stdout_and_no_abort() raises:
@@ -1712,27 +1714,30 @@ def test_crash_narrative_reads_a_segfault_with_no_stdout_and_no_abort() raises:
 
 
 def test_precompile_ending_phrase_names_each_ending_in_words() raises:
-    # The PURE phrase builder behind the banner's "how it ended" clause. The
-    # decomposed termination kinds are the exec-layer discriminants: 0 EXITED,
-    # 1 SIGNALED, 2 TIMED_OUT, 3 SPAWN_FAILED.
+    # The PURE phrase builder behind the banner's "how it ended" clause.
     assert_equal(
-        _precompile_ending_phrase(2, 0, False, 600), "timed out after 600s"
+        _precompile_ending_phrase(TerminationKind.TIMED_OUT, 0, False, 600),
+        "timed out after 600s",
     )
     assert_equal(
-        _precompile_ending_phrase(2, 0, True, 600),
+        _precompile_ending_phrase(TerminationKind.TIMED_OUT, 0, True, 600),
         "timed out after 600s, escalated to SIGKILL",
     )
     assert_equal(
-        _precompile_ending_phrase(1, 11, False, 0),
+        _precompile_ending_phrase(TerminationKind.SIGNALED, 11, False, 0),
         "died by signal 11 (SIGSEGV, segmentation fault)",
     )
     # A signal outside the named set still reads as words, minus the name.
     assert_equal(
-        _precompile_ending_phrase(1, 62, False, 0), "died by signal 62"
+        _precompile_ending_phrase(TerminationKind.SIGNALED, 62, False, 0),
+        "died by signal 62",
     )
-    assert_equal(_precompile_ending_phrase(0, 1, False, 0), "exited 1")
     assert_equal(
-        _precompile_ending_phrase(3, 2, False, 0),
+        _precompile_ending_phrase(TerminationKind.EXITED, 1, False, 0),
+        "exited 1",
+    )
+    assert_equal(
+        _precompile_ending_phrase(TerminationKind.SPAWN_FAILED, 2, False, 0),
         "could not be spawned (errno 2)",
     )
 
@@ -1747,7 +1752,7 @@ def test_precompile_failed_banner_names_a_timeout_ending() raises:
             0,
             casualties=[String("tests/test_a.mojo")],
             ending_known=True,
-            term_kind=2,
+            term_kind=TerminationKind.TIMED_OUT,
             term_value=0,
             escalated=False,
             timeout_seconds=600,
@@ -1774,7 +1779,7 @@ def test_precompile_failed_banner_names_a_signal_ending() raises:
             0,
             casualties=[String("tests/test_a.mojo")],
             ending_known=True,
-            term_kind=1,
+            term_kind=TerminationKind.SIGNALED,
             term_value=11,
             attempts_used=2,
         )
@@ -2600,9 +2605,9 @@ def _feed_attempt(
             step,
             1,
             2,
-            0,
+            TerminationKind.EXITED,
             1,
-            0,
+            TerminationKind.EXITED,
             1,
             False,
             True,

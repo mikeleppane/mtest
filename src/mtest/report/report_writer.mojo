@@ -53,6 +53,7 @@ from mtest.model import (
     NotRunRecord,
     Outcome,
     PrecompileFailedPayload,
+    TerminationKind,
     TestReportedPayload,
     TestResult,
 )
@@ -97,14 +98,6 @@ comptime _FORMAT_MD = 0
 """The Markdown sink's discriminant, used only inside this module."""
 comptime _FORMAT_HTML = 1
 """The HTML sink's discriminant, used only inside this module."""
-
-# Decomposed exec-layer termination kinds, as the events carry them. Restated
-# here with the same meaning `junit_reporter` restates them with: this layer
-# cannot import `exec`, which sits below it.
-comptime _TERM_EXITED = 0
-comptime _TERM_SIGNALED = 1
-comptime _TERM_TIMED_OUT = 2
-comptime _TERM_SPAWN_FAILED = 3
 
 comptime _ATTEMPT_LINE_CODEPOINTS = 200
 """How many codepoints of one attempt summary survive; the rest is elided, so
@@ -242,16 +235,18 @@ def _bounded_line(text: String) -> String:
     return out + _ELISION
 
 
-def _termination_phrase(kind: Int, value: Int, escalated: Bool) -> String:
+def _termination_phrase(
+    kind: TerminationKind, value: Int, escalated: Bool
+) -> String:
     """How one attempt ended, in the same words the JUnit reporter uses."""
-    if kind == _TERM_SIGNALED:
+    if kind == TerminationKind.SIGNALED:
         var m = "killed by signal " + String(value)
         if escalated:
             m += " (escalated to SIGKILL)"
         return m^
-    if kind == _TERM_TIMED_OUT:
+    if kind == TerminationKind.TIMED_OUT:
         return String("timed out")
-    if kind == _TERM_SPAWN_FAILED:
+    if kind == TerminationKind.SPAWN_FAILED:
         return "spawn failed (errno " + String(value) + ")"
     return "exited with status " + String(value)
 

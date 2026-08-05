@@ -13,7 +13,7 @@ from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.cli.parser import MTEST_VERSION
 from mtest.model.attribution import AttributionDisposition
-from mtest.model.events import Event, Summary
+from mtest.model.events import Event, Summary, TerminationKind
 from mtest.model.node_id import NodeId
 from mtest.model.outcome import Outcome
 from mtest.model.parse_disposition import ParseDisposition
@@ -131,7 +131,7 @@ def test_precompile_failed_exact() raises:
         0,
         ["a.mojo", "b.mojo"],
         True,
-        2,
+        TerminationKind.TIMED_OUT,
         0,
         True,
         5,
@@ -233,9 +233,9 @@ def test_attempt_finished_exact() raises:
         "run",
         1,
         3,
-        1,
+        TerminationKind.SIGNALED,
         11,
-        1,
+        TerminationKind.SIGNALED,
         9,
         True,
         True,

@@ -11,7 +11,7 @@ assembles the whole `<testsuites>` document, and prints it to stdout. The gate
 then runs `scripts/formats/junit.py` over that output — so the oracle validates
 the shipped renderer's OWN bytes, not a hand-authored mock.
 """
-from mtest.model.events import Event
+from mtest.model.events import Event, TerminationKind
 from mtest.model.node_id import NodeId
 from mtest.model.outcome import Outcome
 from mtest.model.test_result import TestResult
@@ -31,9 +31,9 @@ def _attempt(path: String, idx: Int) -> Event:
         "run",
         idx,
         3,
-        1,  # SIGNALED
+        TerminationKind.SIGNALED,
         11,
-        1,
+        TerminationKind.SIGNALED,
         11,
         False,
         True,

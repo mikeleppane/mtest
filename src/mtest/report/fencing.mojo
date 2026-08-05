@@ -3,15 +3,63 @@
 GitHub Actions lets a workflow disable command processing with
 `::stop-commands::<token>` and re-enable it with `::<token>::`. mtest fences
 untrusted captured child output between those markers so the output can never
-forge a workflow command. This module supplies the resume-delimiter predicate,
-collision-free token selection over an injected candidate source, and the
-fenced-output assembly; the entropy source that mints the real per-run token
-wires in elsewhere, after the producing child has exited.
+forge a workflow command. This module supplies the whole protocol: minting the
+per-run candidate tokens, the resume-delimiter predicate, collision-free
+selection among the candidates, and the fenced-output assembly.
 
-These are pure string operations with no I/O and no private helper shared with
-the escapers in `escape.mojo`. Escaping and fencing are separate concerns, so
-they live in separate modules.
+Everything but `mint_fence_tokens` is a pure string operation; that one reads
+`/dev/urandom`, and a caller mints only after the producing child has exited so
+the token is never exposed to it. The module shares no private helper with the
+escapers in `escape.mojo`: escaping and fencing are separate concerns, so they
+live in separate modules.
 """
+
+comptime _HEX: StaticString = "0123456789abcdef"
+"""Lowercase hex alphabet for rendering a token's random bytes."""
+
+comptime _FENCE_TOKEN_BYTES = 16
+"""Random bytes per fence token candidate; 16 bytes is 128 bits of entropy."""
+
+comptime FENCE_TOKEN_POOL = 4
+"""How many independent candidate tokens to mint per run. A region that already
+contains the primary token's resume delimiter falls through to the next
+candidate; four independent 128-bit tokens make an all-collision draw
+impossible in practice."""
+
+
+def mint_fence_tokens(count: Int) raises -> List[String]:
+    """Mint `count` independent high-entropy fence tokens from `/dev/urandom`.
+
+    Each token is `_FENCE_TOKEN_BYTES` random bytes rendered as lowercase hex,
+    giving 128 bits of entropy apiece, unique per run. The entropy comes from
+    ordinary std file I/O; the exec and native layers are never touched.
+
+    Args:
+        count: How many tokens to mint.
+
+    Returns:
+        `count` hex token strings, in draw order. Allocates.
+
+    Raises:
+        Error: When `/dev/urandom` could not be read or returned a short read.
+            The caller withholds the region it meant to fence rather than emit
+            it unfenced.
+    """
+    var need = count * _FENCE_TOKEN_BYTES
+    var raw: List[UInt8]
+    with open("/dev/urandom", "r") as f:
+        raw = f.read_bytes(need)
+    if len(raw) < need:
+        raise Error("fencing: short read from /dev/urandom for fence tokens")
+    var out = List[String]()
+    for t in range(count):
+        var token = String("")
+        for b in range(_FENCE_TOKEN_BYTES):
+            var v = Int(raw[t * _FENCE_TOKEN_BYTES + b])
+            token += String(_HEX[byte=v >> 4])
+            token += String(_HEX[byte=v & 0xF])
+        out.append(token^)
+    return out^
 
 
 def resume_delimiter(token: String) -> String:
