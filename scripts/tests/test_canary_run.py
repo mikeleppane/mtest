@@ -1073,7 +1073,13 @@ class IdleLaneTests(CanaryTestCase):
         runner.outcomes("search-control", _Outcome(0, _search_answer(PINNED_MOJO), ""))
         result = self.classify(repo, runner)
         self.assertEqual(result.classification, NO_NEWER_CANDIDATE)
-        self.assertEqual(result.version, PINNED_MOJO)
+        # `unknown`, not the pin. The pin is what this repository already
+        # ships, and recorded as the day's version it reached the issue body
+        # under a heading reading "Candidate" — a compiler presented as
+        # exercised on the commonest quiet day there is. The detail names the
+        # newest release instead.
+        self.assertEqual(result.version, canary_run.UNKNOWN)
+        self.assertIn(PINNED_MOJO, result.detail)
         self.assertEqual(
             runner.stages,
             ["search-published", "search-candidates", "search-control"],
@@ -1450,6 +1456,38 @@ class StageClassificationTests(CanaryTestCase):
         self.assertEqual(result.classification, SOURCE_INCOMPATIBLE)
         self.assertIn("needs python 3.13", result.detail)
         self.assertIn(floor_matchspec(PINNED_MOJO), result.detail)
+        # The searched newest was computed and thrown away, so the issue body
+        # read `mojo unknown (unknown)` about a candidate the probe could name.
+        self.assertEqual(result.version, CANDIDATE.version)
+        self.assertEqual(result.commit, canary_run.UNKNOWN)
+        self.assertIn(
+            "- **Candidate:** none was exercised; the channels published mojo "
+            f"{CANDIDATE.version}\n",
+            canary_run.render_summary(result),
+        )
+
+    def test_a_twice_failed_install_claims_only_what_it_saw(self) -> None:
+        """`pixi install` solves, fetches and links; the wording claimed a solve.
+
+        The direction is deliberate and stays — a wrong red is read and
+        corrected the same day, a wrong green is the silence this workflow
+        exists to end. But a CDN 5xx on a `.conda` payload, a 429, a truncated
+        transfer or a full prefix all leave repodata search healthy and land
+        here, and every one of them was reported as a spec that "cannot be
+        satisfied beside this repository's own pinned dependencies on every
+        platform the manifest declares" — a solver verdict this probe never
+        observed, standing in a durable artifact.
+        """
+        repo, runner = self.build()
+        runner.fails(
+            "install",
+            stderr="ERROR failed to fetch mojo-1.0.0b3.conda: HTTP status 503\n",
+        )
+        result = self.classify(repo, runner)
+        self.assertEqual(result.classification, SOURCE_INCOMPATIBLE)
+        self.assertNotIn("cannot be satisfied", result.detail)
+        self.assertIn("did not install", result.detail)
+        self.assertIn("solving, fetching and linking", result.detail)
         self.assertEqual(
             runner.stages,
             [

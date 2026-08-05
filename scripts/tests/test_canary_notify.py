@@ -33,6 +33,7 @@ from scripts.canary.notify import (
     find_issue,
     issue_title,
     main,
+    render_body,
     result_path,
     run_reference,
 )
@@ -40,7 +41,9 @@ from scripts.canary.run import (
     CLASSIFICATIONS,
     INFRA_FAILURE,
     NO_NEWER_CANDIDATE,
+    CanaryResult,
     CommandResult,
+    render_summary,
 )
 from scripts.canary.toolchain import LANES
 
@@ -133,9 +136,18 @@ class NotifyTestCase(unittest.TestCase):
         *,
         detail: str = "evidence",
         version: str = CANDIDATE_VERSION,
+        commit: str = CANDIDATE_COMMIT,
         reported_lane: str | None = None,
     ) -> None:
-        """Lay down one lane's artifact exactly where the download puts it."""
+        """Lay down one lane's artifact exactly where the download puts it.
+
+        `commit` is a parameter because it is what says whether a candidate was
+        ever installed: the probe reads a version and a build commit out of one
+        `mojo --version` banner, and it only gets to ask that once an install
+        has succeeded. A fixture that always supplied one described a run in
+        which a compiler had been exercised, which is not the run several of
+        these classifications come from.
+        """
         path = result_path(self.results, lane)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
@@ -143,7 +155,7 @@ class NotifyTestCase(unittest.TestCase):
                 {
                     "lane": lane if reported_lane is None else reported_lane,
                     "version": version,
-                    "commit": CANDIDATE_COMMIT,
+                    "commit": commit,
                     "classification": classification,
                     "detail": detail,
                 }
@@ -291,7 +303,12 @@ class QuietDayTests(NotifyTestCase):
         ):
             with self.subTest(classification=classification):
                 gh = FakeGh([_issue(12, STABLE, "OPEN")])
-                self.write_result(STABLE, classification, version=PINNED_VERSION)
+                self.write_result(
+                    STABLE,
+                    classification,
+                    version=UNKNOWN_VERSION,
+                    commit=UNKNOWN_VERSION,
+                )
                 code, _log = self.notify(gh)
                 self.assertEqual(code, 0)
                 body = gh.argument(subcommand, flag)
@@ -316,6 +333,61 @@ class QuietDayTests(NotifyTestCase):
         self.assertEqual(code, 1)
         body = gh.argument("create", "--body")
         self.assertIn("outlived its budget", body)
+        self.assertNotIn("newer than the one this repository pins", body)
+
+    def test_a_loud_result_with_no_candidate_does_not_claim_one(self) -> None:
+        """The pair the probe really produces, which nothing here rendered.
+
+        Both of these are loud, and in both of them nothing was installed. The
+        unsatisfiable-solve path reports `SOURCE_INCOMPATIBLE` after two failed
+        installs, and a stage killed before the install reports `STAGE_TIMEOUT`
+        the same way. Keyed on the classification, the body opened by saying
+        the lane had been "probed against a toolchain newer than the one this
+        repository pins" and then listed `mojo unknown (unknown)` underneath
+        it: a claim that a compiler had been exercised, in a durable artifact,
+        on a day when none was.
+        """
+        for classification in (SOURCE_INCOMPATIBLE, PROTOCOL_DRIFT, PACKAGE_FAILED):
+            with self.subTest(classification=classification):
+                gh = FakeGh()
+                self.write_result(
+                    STABLE,
+                    classification,
+                    version=UNKNOWN_VERSION,
+                    commit=UNKNOWN_VERSION,
+                )
+                code, _log = self.notify(gh)
+                self.assertEqual(code, 1)
+                body = gh.argument("create", "--body")
+                self.assertNotIn("newer than the one this repository pins", body)
+                self.assertNotIn(UNKNOWN_VERSION, body)
+                self.assertIn("nothing was compiled, tested or run", body)
+                self.assertIn("- **Candidate:** none was exercised\n", body)
+
+    def test_a_version_the_channels_named_is_reported_without_a_claim(self) -> None:
+        """The unsatisfiable-solve result knows the version it failed to install.
+
+        The searched newest was computed and thrown away, so a maintainer read
+        `mojo unknown (unknown)` about a candidate the probe could name. It is
+        named now, and named as published rather than as exercised, because no
+        install of it ever succeeded.
+        """
+        gh = FakeGh()
+        self.write_result(
+            STABLE,
+            SOURCE_INCOMPATIBLE,
+            version=CANDIDATE_VERSION,
+            commit=UNKNOWN_VERSION,
+            detail="`pixi install` exited 1",
+        )
+        code, _log = self.notify(gh)
+        self.assertEqual(code, 1)
+        body = gh.argument("create", "--body")
+        self.assertIn(
+            f"- **Candidate:** none was exercised; the channels published mojo "
+            f"{CANDIDATE_VERSION}\n",
+            body,
+        )
         self.assertNotIn("newer than the one this repository pins", body)
 
     def test_a_green_lane_with_no_issue_creates_nothing(self) -> None:
@@ -459,7 +531,9 @@ class CanaryBrokenTests(NotifyTestCase):
 
     def test_its_body_blames_the_canary_rather_than_a_candidate(self) -> None:
         gh = FakeGh()
-        self.write_result(STABLE, CANARY_BROKEN, version=UNKNOWN_VERSION)
+        self.write_result(
+            STABLE, CANARY_BROKEN, version=UNKNOWN_VERSION, commit=UNKNOWN_VERSION
+        )
         code, _log = self.notify(gh)
         self.assertEqual(code, 1)
         body = gh.argument("create", "--body")
@@ -559,6 +633,51 @@ class OperatorErrorTests(NotifyTestCase):
 
     def test_the_lane_vocabulary_is_the_probes(self) -> None:
         self.assertEqual(LANES, (STABLE, NIGHTLY))
+
+
+class ArtifactAgreementTests(NotifyTestCase):
+    """The two durable descriptions of one run must say the same thing.
+
+    `summary.md` is uploaded beside `result.json` and the issue body is written
+    from the same record, and they had two candidate renderers between them:
+    the summary emitted the line unconditionally, so it read `mojo unknown
+    (unknown)` on every day nothing resolved, while the body suppressed it for
+    two classifications and not for the rest.
+    """
+
+    def test_the_summary_and_the_body_render_one_candidate_line(self) -> None:
+        for version, commit in (
+            (CANDIDATE_VERSION, CANDIDATE_COMMIT),
+            (UNKNOWN_VERSION, UNKNOWN_VERSION),
+            (CANDIDATE_VERSION, UNKNOWN_VERSION),
+        ):
+            for classification in CLASSIFICATIONS:
+                with self.subTest(classification=classification, commit=commit):
+                    result = CanaryResult(
+                        lane=STABLE,
+                        version=version,
+                        commit=commit,
+                        classification=classification,
+                        detail="evidence",
+                    )
+                    line = next(
+                        row
+                        for row in render_summary(result).splitlines()
+                        if row.startswith("- **Candidate:**")
+                    )
+                    self.assertIn(f"{line}\n", render_body(result))
+
+    def test_neither_artifact_calls_an_unknown_toolchain_a_candidate(self) -> None:
+        result = CanaryResult(
+            lane=STABLE,
+            version=UNKNOWN_VERSION,
+            commit=UNKNOWN_VERSION,
+            classification=SOURCE_INCOMPATIBLE,
+            detail="`pixi install` exited 1",
+        )
+        for rendered in (render_summary(result), render_body(result)):
+            self.assertNotIn(UNKNOWN_VERSION, rendered)
+            self.assertIn("- **Candidate:** none was exercised\n", rendered)
 
 
 class RunReferenceTests(NotifyTestCase):

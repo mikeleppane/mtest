@@ -99,6 +99,8 @@ from scripts.canary.run import (
     TIMEOUT_RETURNCODE,
     CanaryResult,
     CommandResult,
+    candidate_line,
+    candidate_was_probed,
 )
 from scripts.canary.toolchain import LANES
 
@@ -300,15 +302,23 @@ def run_reference() -> str:
 def _opening_sentence(result: CanaryResult) -> str:
     """State what actually happened, in the terms of this classification.
 
+    The last branch is the one this function exists for, and it is keyed on
+    whether a candidate was ever installed rather than on the classification.
+    The two do not partition the same way: the unsatisfiable-solve path reports
+    `SOURCE_INCOMPATIBLE` having installed nothing at all, and a stage killed
+    before the install reports `STAGE_TIMEOUT` on the same terms. Keyed on the
+    name, both of those opened with "probed against a toolchain newer than the
+    one this repository pins" — a false statement about what a maintainer's
+    build machines had done, standing in a durable artifact.
+
     Args:
         result: The classification the probe wrote.
 
     Returns:
-        One sentence. `NO_NEWER_CANDIDATE` and `INFRA_FAILURE` each mean no
-        newer toolchain was exercised, so a body that opened by saying one was
-        would be a false statement standing in a durable, maintainer-facing
-        artifact — and the two most common quiet results are exactly where a
-        reader stops reading.
+        One sentence, chosen by classification for the four results that
+        describe themselves — nothing newer, unreachable, unreadable, killed —
+        then by whether a candidate was installed at all, and only then by the
+        one remaining case, where a real candidate really was probed.
     """
     lane = f"**{result.lane}**"
     if result.classification == NO_NEWER_CANDIDATE:
@@ -335,6 +345,12 @@ def _opening_sentence(result: CanaryResult) -> str:
             f"A stage of the compatibility canary's {lane} probe outlived its "
             "budget and was killed, so the day's question went unanswered."
         )
+    if not candidate_was_probed(result):
+        return (
+            f"The compatibility canary never got a candidate toolchain "
+            f"installed on the {lane} lane, so nothing was compiled, tested or "
+            "run against one. The finding below is about that attempt."
+        )
     return (
         f"The compatibility canary probed the {lane} lane against a toolchain "
         "newer than the one this repository pins."
@@ -344,24 +360,22 @@ def _opening_sentence(result: CanaryResult) -> str:
 def render_body(result: CanaryResult) -> str:
     """Render the issue body describing one lane's result.
 
+    The candidate line is the probe's own renderer rather than a second one
+    here, because this body and the `summary.md` uploaded beside it are two
+    durable descriptions of the same run and used to disagree about whether
+    anything had been installed.
+
     Args:
         result: The classification the probe wrote.
 
     Returns:
         A Markdown body naming the lane, what was probed, and the evidence.
     """
-    if result.classification in (NO_NEWER_CANDIDATE, INFRA_FAILURE, CANARY_BROKEN):
-        # `version` here is the pin or `unknown`, neither of which is a
-        # candidate. Labelling it as one puts a version this repository
-        # already ships under a heading that says something was tried.
-        candidate = "- **Candidate:** none was exercised\n"
-    else:
-        candidate = f"- **Candidate:** mojo {result.version} ({result.commit})\n"
     return (
         f"{_opening_sentence(result)}\n"
         "\n"
         f"- **Classification:** {result.classification}\n"
-        f"{candidate}"
+        f"{candidate_line(result)}\n"
         f"- **Run:** {run_reference()}\n"
         "\n"
         "```text\n"

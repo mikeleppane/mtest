@@ -63,10 +63,9 @@ the committed spec resolves the pinned version — which the bounded search neve
 offered, so every day would end on `CANARY_BROKEN` with no candidate ever
 probed. The recipe is retargeted before the packaging leg for the same reason,
 so that its build is evidence about the candidate rather than about the pin.
-And the cheap,
-specific failures are asked before the expensive ones, so a toolchain that
-simply does not compile the sources is named that way rather than by whichever
-long gate happened to notice.
+And the cheap, specific failures are asked before the expensive ones, so a
+toolchain that simply does not compile the sources is named that way rather
+than by whichever long gate happened to notice.
 
 Packaging is asked last, after every source leg, because `PACKAGE_FAILED`
 claims the sources are fine. Asked earlier it can be reported by a run that
@@ -936,6 +935,16 @@ def classify(repo: Path, lane: str, *, run: Runner) -> CanaryResult:
             f"and nothing they say about a candidate can be read",
         )
 
+    # Everything the probe knows about a candidate before one is installed: a
+    # version the channels advertised, and no build commit, because a commit
+    # only exists once a toolchain has run and said so. `candidate_was_probed`
+    # reads that missing commit as "nothing was exercised", so results carrying
+    # this name what was published without claiming anything ran on it. The
+    # alternative was throwing the version away and writing `unknown` into an
+    # issue body on days when the probe knew perfectly well what it had failed
+    # to install.
+    published_only = ResolvedToolchain(", ".join(newest) or UNKNOWN, UNKNOWN)
+
     matchspec = candidate_matchspec(pin)
     found = run(search_argv(channels, matchspec))
     # Asked before the corroboration below and not through it. A killed search
@@ -978,9 +987,13 @@ def classify(repo: Path, lane: str, *, run: Runner) -> CanaryResult:
             )
         candidates = ()
     if not candidates:
+        # `_UNKNOWN` rather than the pin. The pin is what this repository
+        # already ships; putting it under a heading that says "Candidate" told
+        # a maintainer a compiler had been exercised on the commonest quiet day
+        # there is. The detail below names the newest release anyway.
         return _result(
             lane,
-            ResolvedToolchain(pin, UNKNOWN),
+            _UNKNOWN,
             NO_NEWER_CANDIDATE,
             f"nothing matches `{matchspec}` on {', '.join(channels)}; the newest "
             f"mojo published there is {', '.join(newest) or UNKNOWN}",
@@ -997,7 +1010,7 @@ def classify(repo: Path, lane: str, *, run: Runner) -> CanaryResult:
         time.sleep(INSTALL_RETRY_BACKOFF_SECONDS)
         install = run(["pixi", "install"])
     if timed_out(install):
-        return _result(lane, _UNKNOWN, STAGE_TIMEOUT, command_failure(install))
+        return _result(lane, published_only, STAGE_TIMEOUT, command_failure(install))
     if install.returncode != 0:
         # A solve that failed twice is one of two opposite things, and the
         # difference decides whether anyone hears about it. Either the probe
@@ -1012,18 +1025,28 @@ def classify(repo: Path, lane: str, *, run: Runner) -> CanaryResult:
         # that had learned something reported a green day, every day.
         #
         # They are told apart by re-asking the control question. Answered, the
-        # index is still reachable from this runner and the solver failed on
+        # index is still reachable from this runner and the install failed on
         # its own terms. That misreads a local fault which leaves the index
         # readable — a full disk, a broken prefix — as a candidate finding, and
         # the direction is deliberate: a wrong red is read and corrected the
         # same day, a wrong green is the silence this workflow exists to end.
+        #
+        # The detail says only that, and deliberately no more. `pixi install`
+        # solves, fetches AND links, so a 5xx on a `.conda` payload, a 429, a
+        # truncated transfer or a full prefix all land here with repodata
+        # search perfectly healthy. The wording used to call every one of them
+        # a spec that "cannot be satisfied beside this repository's own pinned
+        # dependencies on every platform the manifest declares" — a solver
+        # verdict this probe never observed, standing in a durable artifact.
         control = run(search_argv(channels, floor_matchspec(pin)))
         if timed_out(control):
-            return _result(lane, _UNKNOWN, STAGE_TIMEOUT, command_failure(control))
+            return _result(
+                lane, published_only, STAGE_TIMEOUT, command_failure(control)
+            )
         if not control_confirms_channels(control, pin):
             return _result(
                 lane,
-                _UNKNOWN,
+                published_only,
                 uncorroborated_classification(control),
                 f"{command_failure(install)}; the control "
                 f"`{floor_matchspec(pin)}` did not answer either, so the probe "
@@ -1031,12 +1054,13 @@ def classify(repo: Path, lane: str, *, run: Runner) -> CanaryResult:
             )
         return _result(
             lane,
-            _UNKNOWN,
+            published_only,
             SOURCE_INCOMPATIBLE,
-            f"{command_failure(install)}; the channels still answer "
-            f"`{floor_matchspec(pin)}`, so `{matchspec}` cannot be satisfied "
-            f"beside this repository's own pinned dependencies on every "
-            f"platform the manifest declares",
+            f"{command_failure(install)}; the channels still answered "
+            f"`{floor_matchspec(pin)}` afterwards, so the index was reachable "
+            f"both times and `{matchspec}` did not install beside this "
+            f"repository's own pinned dependencies. The failure above says "
+            f"which of solving, fetching and linking did not complete",
         )
 
     identity = run(list(RESOLVE_ARGV))
@@ -1196,6 +1220,58 @@ def _result(
     )
 
 
+def candidate_was_probed(result: CanaryResult) -> bool:
+    """Report whether a candidate toolchain was really installed and exercised.
+
+    The probe learns a version and a build commit together, out of one
+    `mojo --version` banner, and it only gets to ask that question once an
+    install has succeeded. A real commit is therefore the mark of a toolchain
+    that existed on this runner; `unknown` is the mark of one that did not, in
+    which case the version field either names nothing or names what the
+    channels advertised rather than anything that ran.
+
+    Readers key their prose on this rather than on the classification, because
+    the classifications do not partition that way. The unsatisfiable-solve path
+    reports `SOURCE_INCOMPATIBLE` having installed nothing at all, and a stage
+    killed before the install reports `STAGE_TIMEOUT` on the same terms — so a
+    body that decided "a candidate was probed" from the classification told a
+    maintainer a compiler had been exercised on days when none was.
+
+    Args:
+        result: The day's classification.
+
+    Returns:
+        True when a candidate toolchain was installed and identified.
+    """
+    return result.commit != UNKNOWN
+
+
+def candidate_line(result: CanaryResult) -> str:
+    """Render the one line saying which toolchain, if any, was exercised.
+
+    Shared by this module's summary and the notifier's issue body, so that the
+    two durable artifacts of one run cannot disagree about whether anything was
+    installed. They did: the summary emitted the candidate unconditionally and
+    read `- **Candidate:** mojo unknown (unknown)` on every day nothing
+    resolved, while the body suppressed it for two classifications and not for
+    the others.
+
+    Args:
+        result: The day's classification.
+
+    Returns:
+        A Markdown list item, without its trailing newline.
+    """
+    if candidate_was_probed(result):
+        return f"- **Candidate:** mojo {result.version} ({result.commit})"
+    if result.version == UNKNOWN:
+        return "- **Candidate:** none was exercised"
+    return (
+        f"- **Candidate:** none was exercised; the channels published mojo "
+        f"{result.version}"
+    )
+
+
 def render_summary(result: CanaryResult) -> str:
     """Render the human-readable half of the probe's artifact.
 
@@ -1209,7 +1285,7 @@ def render_summary(result: CanaryResult) -> str:
         f"# Mojo compatibility canary — {result.lane}\n"
         "\n"
         f"- **Classification:** {result.classification}\n"
-        f"- **Candidate:** mojo {result.version} ({result.commit})\n"
+        f"{candidate_line(result)}\n"
         "\n"
         "```text\n"
         f"{result.detail}\n"
