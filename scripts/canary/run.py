@@ -361,21 +361,14 @@ def search_argv(channels: Sequence[str], matchspec: str) -> tuple[str, ...]:
     return tuple(argv)
 
 
-def search_versions(result: CommandResult) -> tuple[str, ...]:
-    """Read the versions out of one `pixi search --json` answer.
-
-    pixi answers with an object keyed by subdir, each holding package records
-    newest first in conda's own version ordering. That ordering is the reason
-    this delegates rather than comparing versions itself: `1.0.0rc0` outranks
-    `1.0.0b3.dev2026080406`, and every naive lexical or dotted-numeric
-    comparison gets that backwards.
+def _search_subdirs(result: CommandResult) -> tuple[tuple[str, ...], ...]:
+    """Read one `pixi search --json` answer into one version list per subdir.
 
     Args:
         result: A completed, successful search.
 
     Returns:
-        The distinct versions offered, newest first, deduplicated across
-        subdirs with the first occurrence winning.
+        Each subdir's versions, in the order pixi listed them.
 
     Raises:
         ValueError: The output is not the subdir-keyed object pixi documents,
@@ -391,17 +384,75 @@ def search_versions(result: CommandResult) -> tuple[str, ...]:
             f"`{described}` printed {type(payload).__name__}, not an object"
         )
 
-    versions: list[str] = []
+    subdirs: list[tuple[str, ...]] = []
     for records in payload.values():
         if not isinstance(records, list):
             raise ValueError(f"`{described}` printed a non-list of package records")
+        versions: list[str] = []
         for record in records:
             version = record.get("version") if isinstance(record, dict) else None
             if not isinstance(version, str):
                 raise ValueError(f"`{described}` printed a record with no version")
+            versions.append(version)
+        subdirs.append(tuple(versions))
+    return tuple(subdirs)
+
+
+def search_versions(result: CommandResult) -> tuple[str, ...]:
+    """Read every version out of one `pixi search --json` answer.
+
+    The probe searches without `--platform`, so pixi answers for each subdir
+    the manifest declares and this flattens them. The result is emphatically
+    NOT ordered newest first: pixi orders the records *within* one subdir, so
+    the head here is the newest of whichever subdir came first, and a version
+    published for only the second subdir lands behind older versions of the
+    first. Callers ask this for membership; `search_newest` is what names a
+    newest anything.
+
+    Args:
+        result: A completed, successful search.
+
+    Returns:
+        The distinct versions offered, in the order the answer listed them,
+        deduplicated with the first occurrence winning.
+
+    Raises:
+        ValueError: The output is not the subdir-keyed object pixi documents.
+    """
+    versions: list[str] = []
+    for subdir in _search_subdirs(result):
+        for version in subdir:
             if version not in versions:
                 versions.append(version)
     return tuple(versions)
+
+
+def search_newest(result: CommandResult) -> tuple[str, ...]:
+    """Name the newest version each subdir offers.
+
+    Within one subdir pixi lists records newest first in conda's own version
+    ordering, and that is the only ordering claim this module can make
+    honestly. Comparing across subdirs would mean implementing that ordering
+    here, which is exactly what must not happen: `1.0.0rc0` outranks
+    `1.0.0b3.dev2026080406`, and every naive lexical or dotted-numeric
+    comparison gets it backwards.
+
+    Args:
+        result: A completed, successful search.
+
+    Returns:
+        The distinct per-subdir newest versions, in the order the answer listed
+        the subdirs. Usually one value, and two only when the platforms this
+        repository supports have genuinely diverged.
+
+    Raises:
+        ValueError: The output is not the subdir-keyed object pixi documents.
+    """
+    newest: list[str] = []
+    for subdir in _search_subdirs(result):
+        if subdir and subdir[0] not in newest:
+            newest.append(subdir[0])
+    return tuple(newest)
 
 
 def control_confirms_channels(control: CommandResult, pin: str) -> bool:
@@ -732,6 +783,7 @@ def classify(
         )
     try:
         available = search_versions(published)
+        newest = search_newest(published)
     except ValueError as error:
         return _result(lane, _UNKNOWN, INFRA_FAILURE, str(error))
     # The same bar the control is held to, for the same reason. An unbounded
@@ -783,13 +835,12 @@ def classify(
             )
         candidates = ()
     if not candidates:
-        newest = available[0] if available else UNKNOWN
         return _result(
             lane,
             ResolvedToolchain(pin, UNKNOWN),
             NO_NEWER_CANDIDATE,
             f"nothing matches `{matchspec}` on {', '.join(channels)}; the newest "
-            f"mojo published there is {newest}",
+            f"mojo published there is {', '.join(newest) or UNKNOWN}",
         )
 
     relax_workspace_pin(repo, lane)
@@ -1009,6 +1060,11 @@ def write_diagnostics(out_dir: Path, report: str) -> None:
     Args:
         out_dir: Directory to write `diagnostics.txt` into.
         report: The formatted traceback.
+
+    Raises:
+        OSError: The diagnostics cannot be written. `main` calls this from its
+            own crash handler, so a raise here replaces the crash report with
+            a second traceback rather than hiding either one.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "diagnostics.txt").write_text(report, encoding="utf-8")

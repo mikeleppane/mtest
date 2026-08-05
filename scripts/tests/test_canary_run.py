@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, override
 import unittest
 from unittest import mock
 
+from scripts import gen_transcripts
 from scripts.canary import toolchain
 from scripts.canary.protocol_compare import PASS, PROTOCOL_DRIFT
 from scripts.canary.run import (
@@ -54,6 +55,7 @@ from scripts.canary.run import (
     first_diagnostic,
     main,
     search_argv,
+    search_newest,
     search_versions,
 )
 from scripts.canary.toolchain import (
@@ -76,11 +78,10 @@ from scripts.canary.toolchain import (
     workspace_channels,
     workspace_pin,
 )
-from scripts import gen_transcripts
 from scripts.e2e.__main__ import SCENARIOS
+from scripts.gen_transcripts import MOJO_VERSION_RE as GENERATOR_VERSION_RE
 from scripts.qa.contract import EXPECTED_CHECK_NAMES, Runner, build_matrix
 from scripts.qa.contract import main as contract_main
-from scripts.gen_transcripts import MOJO_VERSION_RE as GENERATOR_VERSION_RE
 
 
 if TYPE_CHECKING:
@@ -231,7 +232,9 @@ class CanaryTestCase(unittest.TestCase):
         os.environ.pop(FORCE_ENV_VAR, None)
         # The retry's backoff is real time the pipeline would spend asleep.
         self.slept: list[float] = []
-        self.enterContext(mock.patch("scripts.canary.run.time.sleep", self.slept.append))
+        self.enterContext(
+            mock.patch("scripts.canary.run.time.sleep", self.slept.append)
+        )
 
     def build(self, fixture: str = "identical_newer") -> tuple[Path, FakeRunner]:
         """Return a throwaway checkout and a runner primed for it."""
@@ -656,7 +659,9 @@ def _contract_output(
     strings: one summary line, then a roll-call naming each failing check, its
     contract reference, and the first line of its detail.
     """
-    lines = [f"\n===== {passed} passed, {len(failures)} failed, {skipped} skipped ====="]
+    lines = [
+        f"\n===== {passed} passed, {len(failures)} failed, {skipped} skipped ====="
+    ]
     if failures:
         lines.append("\nFAILURES (contract clauses NOT upheld):")
         lines += [f"  - {name}  (§9/§27): {detail}" for name, detail in failures]
@@ -834,6 +839,52 @@ class ChannelSearchTests(CanaryTestCase):
             "",
         )
         self.assertEqual(search_versions(answer), ("1.0.0rc0", "1.0.0b3.dev2026080406"))
+
+    def test_the_flattened_reading_is_not_a_newest_first_ordering(self) -> None:
+        # Two subdirs that have diverged, which is the case the flattening
+        # cannot represent: pixi orders records inside a subdir, so the head of
+        # the flattened list is the first subdir's newest and nothing more.
+        # Only the per-subdir maxima can be named without this module
+        # implementing conda's version ordering itself.
+        answer = CommandResult(
+            ("pixi", "search", "--json", "mojo"),
+            0,
+            json.dumps(
+                {
+                    "linux-64": [{"name": "mojo", "version": "1.0.0b2"}],
+                    "osx-arm64": [
+                        {"name": "mojo", "version": "1.0.0rc0"},
+                        {"name": "mojo", "version": "1.0.0b2"},
+                    ],
+                }
+            ),
+            "",
+        )
+        self.assertEqual(search_versions(answer), ("1.0.0b2", "1.0.0rc0"))
+        self.assertEqual(search_newest(answer), ("1.0.0b2", "1.0.0rc0"))
+
+    def test_an_idle_lane_names_every_subdirs_newest(self) -> None:
+        repo, runner = self.build()
+        runner.outcomes(
+            "search-published",
+            _Outcome(
+                0,
+                json.dumps(
+                    {
+                        "linux-64": [{"name": "mojo", "version": PINNED_MOJO}],
+                        "osx-arm64": [
+                            {"name": "mojo", "version": "1.0.0b1"},
+                            {"name": "mojo", "version": PINNED_MOJO},
+                        ],
+                    }
+                ),
+                "",
+            ),
+        )
+        runner.outcomes("search-candidates", _Outcome(0, _search_answer(), ""))
+        result = self.classify(repo, runner)
+        self.assertEqual(result.classification, NO_NEWER_CANDIDATE)
+        self.assertIn(f"published there is {PINNED_MOJO}, 1.0.0b1", result.detail)
 
     def test_an_empty_answer_offers_nothing(self) -> None:
         answer = CommandResult(("pixi", "search"), 0, json.dumps({"linux-64": []}), "")
@@ -1198,7 +1249,7 @@ class StageClassificationTests(CanaryTestCase):
         repo, runner = self.build()
         runner.fails(
             "install",
-            stderr="× cannot solve the request: mojo 1.0.0rc0 needs python 3.13\n",
+            stderr="Error: cannot solve the request: mojo 1.0.0rc0 needs python 3.13\n",
         )
         result = self.classify(repo, runner)
         self.assertEqual(result.classification, SOURCE_INCOMPATIBLE)
@@ -1372,7 +1423,8 @@ class StageClassificationTests(CanaryTestCase):
         result = self.classify(repo, runner)
         self.assertEqual(result.classification, SOURCE_INCOMPATIBLE)
         self.assertEqual(
-            result.detail, "/repo/e2e/fixtures/passing.mojo:3:1: error: unknown attribute"
+            result.detail,
+            "/repo/e2e/fixtures/passing.mojo:3:1: error: unknown attribute",
         )
 
     def test_an_unattributed_generator_death_is_not_called_drift(self) -> None:
