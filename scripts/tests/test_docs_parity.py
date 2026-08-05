@@ -25,6 +25,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from scripts.canary import run
 from scripts.checks import docs_parity, version
 
 
@@ -55,6 +56,7 @@ class RepositoryParityTests(unittest.TestCase):
                 Path("docs/cli-contract.md"),
                 Path("docs/json-stream.md"),
                 Path("docs/collect-stream.md"),
+                Path("docs/compatibility.md"),
                 Path("docs/releasing.md"),
             ),
         )
@@ -809,6 +811,118 @@ class SiteConfigurationTests(unittest.TestCase):
             self.assertRaisesRegex(AssertionError, "cannot read"),
         ):
             docs_parity.check_site_configuration(Path(raw))
+
+
+class CanaryClassificationTests(unittest.TestCase):
+    """The compatibility page's vocabulary, held against the probe's own.
+
+    That page is a reference document, so every other gate here exempts it: it
+    copies nothing and there is nothing for parity to compare. What it does own
+    is a name set the probe defines, and a documented classification the probe
+    cannot produce — or a produced one the page never mentions — is the same
+    class of drift this module exists to catch, arriving where nothing was
+    looking for it.
+    """
+
+    def _page(self, root: Path) -> Path:
+        """Copy the compatibility page into a temporary root.
+
+        Args:
+            root: Empty directory standing in for the repository root.
+
+        Returns:
+            The path the copy landed at.
+        """
+        target = root / docs_parity.CANARY_CLASSIFICATION_PAGE
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(
+            docs_parity.REPO_ROOT / docs_parity.CANARY_CLASSIFICATION_PAGE, target
+        )
+        return target
+
+    def test_the_live_page_documents_every_classification(self) -> None:
+        docs_parity.check_canary_classifications()
+
+    def test_the_expected_names_come_from_the_probe(self) -> None:
+        """Transcribed independently, so the page cannot define its own set."""
+        self.assertEqual(
+            sorted(run.CLASSIFICATIONS),
+            [
+                "CANARY_BROKEN",
+                "INFRA_FAILURE",
+                "NO_NEWER_CANDIDATE",
+                "PACKAGE_FAILED",
+                "PASS",
+                "PROTOCOL_DRIFT",
+                "SOURCE_INCOMPATIBLE",
+                "STAGE_TIMEOUT",
+            ],
+        )
+
+    def test_an_undocumented_classification_is_rejected(self) -> None:
+        """The failure the page has already had: a name the probe grew."""
+        with tempfile.TemporaryDirectory(prefix="mtest-canary-docs-") as raw:
+            root = Path(raw)
+            page = self._page(root)
+            page.write_text(
+                page.read_text(encoding="utf-8").replace(
+                    "### `CANARY_BROKEN`", "### The probe stopped probing", 1
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(AssertionError, "CANARY_BROKEN"):
+                docs_parity.check_canary_classifications(root)
+
+    def test_a_documented_name_the_probe_cannot_produce_is_rejected(self) -> None:
+        """A classification that was renamed or removed and left on the page."""
+        with tempfile.TemporaryDirectory(prefix="mtest-canary-docs-") as raw:
+            root = Path(raw)
+            page = self._page(root)
+            page.write_text(
+                page.read_text(encoding="utf-8") + "\n### `TOOLCHAIN_MISSING`\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(AssertionError, "TOOLCHAIN_MISSING"):
+                docs_parity.check_canary_classifications(root)
+
+    def test_a_deleted_table_row_is_rejected(self) -> None:
+        """The table is read as the exhaustive list, so a gap in it is a lie.
+
+        Headings alone left this free: the section could stay while the row a
+        reader actually consults disappeared.
+        """
+        with tempfile.TemporaryDirectory(prefix="mtest-canary-docs-") as raw:
+            root = Path(raw)
+            page = self._page(root)
+            page.write_text(
+                page.read_text(encoding="utf-8").replace(
+                    "| `CANARY_BROKEN` |", "| ~~CANARY_BROKEN~~ |", 1
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(AssertionError, "table mismatch"):
+                docs_parity.check_canary_classifications(root)
+
+    def test_a_stale_count_sentence_is_rejected(self) -> None:
+        """A number that no longer matches reads as a complete list."""
+        with tempfile.TemporaryDirectory(prefix="mtest-canary-docs-") as raw:
+            root = Path(raw)
+            page = self._page(root)
+            page.write_text(
+                page.read_text(encoding="utf-8").replace(
+                    "one of eight classifications", "one of seven classifications", 1
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(AssertionError, "count mismatch"):
+                docs_parity.check_canary_classifications(root)
+
+    def test_a_vanished_page_is_reported_not_crashed(self) -> None:
+        with (
+            tempfile.TemporaryDirectory(prefix="mtest-canary-docs-") as raw,
+            self.assertRaisesRegex(AssertionError, "cannot read"),
+        ):
+            docs_parity.check_canary_classifications(Path(raw))
 
 
 if __name__ == "__main__":

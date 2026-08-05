@@ -1,0 +1,694 @@
+#!/usr/bin/env python3
+"""Report each lane's canary classification as exactly one pinned issue.
+
+The probe writes a classification down and exits 0 whatever it found, because a
+classification is data. This module is where that data becomes policy, and the
+policy is deliberately narrow:
+
+| Classification                                            | What happens here       |
+|-----------------------------------------------------------|-------------------------|
+| `PASS`, `NO_NEWER_CANDIDATE`                              | close the issue, exit 0 |
+| `PROTOCOL_DRIFT`, `SOURCE_INCOMPATIBLE`, `PACKAGE_FAILED` | upsert, exit 1          |
+| `STAGE_TIMEOUT`, `CANARY_BROKEN`                          | upsert, exit 1          |
+| `INFRA_FAILURE`                                           | upsert, exit 0          |
+| no artifact, or one this cannot read                      | upsert, exit 1          |
+
+Three of those rows are worth arguing for.
+
+`STAGE_TIMEOUT` is loud even though a stage that outlived its budget proved
+nothing about the candidate. A lane whose probe cannot finish has stopped
+answering the question it exists to answer, and a canary that reports the same
+quiet non-answer every day for a month is the failure mode this workflow was
+built to prevent.
+
+`INFRA_FAILURE` writes an issue and still exits 0, which is the only row where
+those two come apart. It is the one classification produced solely by a command
+that failed to run, so it says nothing about the candidate and must not turn a
+scheduled run red over a flaked network call. But writing nothing at all was
+the same permanent-silence hole in a different place: an unreachable channel is
+unreachable again tomorrow, and this workflow keeps no streak state anywhere,
+so a lane nobody had already opened an issue for could report a green
+non-answer every weekday forever. The issue is the durable artifact, there is
+exactly one per lane and it is rewritten in place, and the next real answer
+closes it — so the cost of saying so is one notification, and the cost of not
+saying so is the whole point of the canary.
+
+`CANARY_BROKEN` is loud, and it is the row that keeps the one above honest. It
+carries the failures that look like plumbing but do not clear: an answer whose
+shape this repository can no longer read, a channel set that does not carry the
+pinned version, a solve that produced a toolchain the search never offered.
+Filed as infrastructure, each of them would recur on every run until a person
+intervened, and in `ci.yml` the same underlying change would have turned a
+build red the day it landed.
+
+A **missing or unreadable artifact is loud**, and it is the assertion that makes
+this a canary rather than a decoration. Every other failure mode here announces
+itself; a probe job that died before writing anything announces nothing at all,
+and without this row the whole workflow could quietly stop probing while every
+scheduled run reported green.
+
+The issue title is the lane and nothing else: `canary: nightly`. Putting the
+classification in the title reads better for exactly one run and then destroys
+the design, because the title is the identity — a title that tracks the weather
+opens a new issue every time the weather changes, and the one issue per lane
+that a maintainer can watch, mute, or close becomes a stream of near-duplicates
+nobody can follow. The classification lives in the body, which is rewritten in
+place on every run.
+
+Closed issues are searched alongside open ones for the same reason. The normal
+life of a lane is red for a few days and then green again, so the next
+regression finds a closed issue with the history in it, and reopening that is
+worth more than a fresh issue that starts the story over.
+
+GitHub is reached through the `gh` CLI, which reads `GH_TOKEN` from the
+environment and infers the repository from the checkout it runs in. Every call
+goes through one injected callable, so the tests below drive every branch above
+without a network, a token, or a repository.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+from dataclasses import fields
+import json
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+import tempfile
+from typing import TYPE_CHECKING
+
+from scripts.canary.protocol_compare import PASS, PROTOCOL_DRIFT
+
+# The probe's classification vocabulary and its two records, imported rather
+# than restated so a name added on one side cannot go unhandled on the other.
+# This does load the probe module in the job holding `issues: write`, and that
+# is a smaller thing than it sounds: the import runs constants and dataclass
+# definitions out of this repository's own checked-out source, spawns nothing,
+# and reads nothing that came off the network. The property the workflow oracle
+# pins is that this job never *invokes* the probe, which is about what the
+# workflow runs rather than about what an import graph touches.
+from scripts.canary.run import (
+    CANARY_BROKEN,
+    CLASSIFICATIONS,
+    INFRA_FAILURE,
+    NO_NEWER_CANDIDATE,
+    PACKAGE_FAILED,
+    SOURCE_INCOMPATIBLE,
+    STAGE_TIMEOUT,
+    TIMEOUT_RETURNCODE,
+    CanaryResult,
+    CommandResult,
+    candidate_line,
+    candidate_was_probed,
+)
+from scripts.canary.toolchain import LANES
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterator, Sequence
+
+
+# The workflow uploads one artifact per lane under this name, and one download
+# step per lane unpacks it into a directory of the same name. Per lane rather
+# than all at once because `actions/download-artifact` creates that directory
+# only while two or more artifacts matched: a run that produced exactly one
+# would have it extracted into the download root instead, where nothing below
+# looks, and the lane that did report would be indistinguishable from a lane
+# that never ran. The two spellings are pinned together:
+# `scripts/checks/workflow_security.py` holds the workflow side, and the tests
+# hold this one.
+ARTIFACT_PREFIX = "canary-result-"
+RESULT_FILENAME = "result.json"
+
+# The issue identity. Stable per lane, forever.
+TITLE_PREFIX = "canary: "
+
+# Classifications that mean the lane has nothing to report today.
+QUIET_CLASSIFICATIONS = (PASS, NO_NEWER_CANDIDATE)
+# Classifications that are findings about the candidate toolchain, which is the
+# entire product of this workflow.
+LOUD_CLASSIFICATIONS = (
+    PROTOCOL_DRIFT,
+    SOURCE_INCOMPATIBLE,
+    PACKAGE_FAILED,
+    STAGE_TIMEOUT,
+    CANARY_BROKEN,
+)
+
+# `gh` reaches the network; none of these calls should take anything like this
+# long, and a wedged one must not hold a scheduled job open.
+GH_TIMEOUT_SECONDS = 120.0
+
+# How many issues to consider when looking for one exact title. GitHub's search
+# is fuzzy, so the answer is filtered by exact title here; the limit only bounds
+# how much fuzz is examined.
+SEARCH_LIMIT = 100
+
+OPEN = "OPEN"
+
+_FOOTER = (
+    "This issue is maintained by the compatibility canary. Its body is rewritten "
+    "on every run and it closes itself once the lane is green again, so edits "
+    "here do not survive; use a comment."
+)
+
+
+class NotifyError(RuntimeError):
+    """A `gh` call this module depends on did not succeed."""
+
+
+class ArtifactError(RuntimeError):
+    """A lane's result artifact is absent, unreadable, or not what it claims."""
+
+
+if TYPE_CHECKING:
+    # The module's whole seam onto the outside world: one callable that spawns a
+    # `gh` command and reports how it went.
+    Gh = Callable[[Sequence[str]], CommandResult]
+
+
+def gh_runner() -> Gh:
+    """Build the runner that really spawns `gh`.
+
+    Returns:
+        A callable taking an argv and returning its `CommandResult`. A call that
+        outlives `GH_TIMEOUT_SECONDS` is reported as exit 124 rather than
+        allowed to hold the job open.
+    """
+
+    def run(argv: Sequence[str]) -> CommandResult:
+        recorded = tuple(argv)
+        try:
+            completed = subprocess.run(
+                recorded,
+                capture_output=True,
+                text=True,
+                timeout=GH_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return CommandResult(
+                recorded,
+                TIMEOUT_RETURNCODE,
+                "",
+                f"timed out after {GH_TIMEOUT_SECONDS:.0f}s",
+            )
+        return CommandResult(
+            recorded, completed.returncode, completed.stdout, completed.stderr
+        )
+
+    return run
+
+
+def issue_title(lane: str) -> str:
+    """Render the one issue title a lane ever uses.
+
+    Args:
+        lane: `stable` or `nightly`.
+
+    Returns:
+        The title, which names the lane and nothing about today's result.
+    """
+    return f"{TITLE_PREFIX}{lane}"
+
+
+def result_path(results: Path, lane: str) -> Path:
+    """Locate one lane's uploaded classification.
+
+    Args:
+        results: The directory the workflow downloaded every artifact into.
+        lane: `stable` or `nightly`.
+
+    Returns:
+        The path the probe's `result.json` arrives at for that lane.
+    """
+    return results / f"{ARTIFACT_PREFIX}{lane}" / RESULT_FILENAME
+
+
+def read_result(results: Path, lane: str) -> CanaryResult:
+    """Read one lane's classification back off the artifact.
+
+    Validated field by field rather than trusted, because this is the one input
+    the privileged job takes from the unprivileged one, and because a report
+    that is silently wrong about which lane it describes would close the wrong
+    issue.
+
+    Args:
+        results: The directory the workflow downloaded every artifact into.
+        lane: The lane whose artifact is expected.
+
+    Returns:
+        The classification the probe wrote.
+
+    Raises:
+        ArtifactError: The artifact is missing, is not the JSON object the probe
+            writes, describes another lane, or names a classification this
+            repository does not define.
+    """
+    path = result_path(results, lane)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise ArtifactError(f"{path} could not be read: {error}") from error
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ArtifactError(f"{path} is not JSON: {error}") from error
+    if not isinstance(payload, dict):
+        raise ArtifactError(f"{path} holds {type(payload).__name__}, not an object")
+
+    values: dict[str, str] = {}
+    for field in fields(CanaryResult):
+        value = payload.get(field.name)
+        if not isinstance(value, str):
+            raise ArtifactError(f"{path} has no string {field.name!r}")
+        values[field.name] = value
+    if values["lane"] != lane:
+        raise ArtifactError(
+            f"{path} reports lane {values['lane']!r}, not {lane!r}; the wrong "
+            "artifact would update the wrong issue"
+        )
+    if values["classification"] not in CLASSIFICATIONS:
+        raise ArtifactError(
+            f"{path} names classification {values['classification']!r}, which is "
+            "not one this repository defines"
+        )
+    return CanaryResult(
+        lane=values["lane"],
+        version=values["version"],
+        commit=values["commit"],
+        classification=values["classification"],
+        detail=values["detail"],
+    )
+
+
+def run_reference() -> str:
+    """Name the workflow run this notification came from.
+
+    Returns:
+        A URL when the hosted environment supplies one, and a plain statement
+        that it did not otherwise. An issue body that silently omits the run is
+        an issue nobody can trace back.
+    """
+    server = os.environ.get("GITHUB_SERVER_URL")
+    repository = os.environ.get("GITHUB_REPOSITORY")
+    run_id = os.environ.get("GITHUB_RUN_ID")
+    if not (server and repository and run_id):
+        return "not recorded (this notification did not come from a hosted run)"
+    return f"{server}/{repository}/actions/runs/{run_id}"
+
+
+def _opening_sentence(result: CanaryResult) -> str:
+    """State what actually happened, in the terms of this classification.
+
+    The last branch is the one this function exists for, and it is keyed on
+    whether a candidate was ever installed rather than on the classification.
+    The two do not partition the same way: the unsatisfiable-solve path reports
+    `SOURCE_INCOMPATIBLE` having installed nothing at all, and a stage killed
+    before the install reports `STAGE_TIMEOUT` on the same terms. Keyed on the
+    name, both of those opened with "probed against a toolchain newer than the
+    one this repository pins" — a false statement about what a maintainer's
+    build machines had done, standing in a durable artifact.
+
+    Args:
+        result: The classification the probe wrote.
+
+    Returns:
+        One sentence, chosen by classification for the four results that
+        describe themselves — nothing newer, unreachable, unreadable, killed —
+        then by whether a candidate was installed at all, and only then by the
+        one remaining case, where a real candidate really was probed.
+    """
+    lane = f"**{result.lane}**"
+    if result.classification == NO_NEWER_CANDIDATE:
+        return (
+            f"The compatibility canary found nothing newer than the pinned "
+            f"toolchain on the {lane} lane's channels, so no gate ran against "
+            "a candidate."
+        )
+    if result.classification == INFRA_FAILURE:
+        return (
+            f"The compatibility canary never obtained a toolchain to ask the "
+            f"{lane} lane's question of. This says nothing about any "
+            "candidate; it is news about the canary."
+        )
+    if result.classification == CANARY_BROKEN:
+        return (
+            f"The compatibility canary can no longer read the answers its "
+            f"{lane} lane probe depends on, so it has stopped probing. This "
+            "says nothing about any candidate, and it will not clear on its "
+            "own."
+        )
+    if result.classification == STAGE_TIMEOUT:
+        return (
+            f"A stage of the compatibility canary's {lane} probe outlived its "
+            "budget and was killed, so the day's question went unanswered."
+        )
+    if not candidate_was_probed(result):
+        return (
+            f"The compatibility canary never got a candidate toolchain "
+            f"installed on the {lane} lane, so nothing was compiled, tested or "
+            "run against one. The finding below is about that attempt."
+        )
+    return (
+        f"The compatibility canary probed the {lane} lane against a toolchain "
+        "newer than the one this repository pins."
+    )
+
+
+def render_body(result: CanaryResult) -> str:
+    """Render the issue body describing one lane's result.
+
+    The candidate line is the probe's own renderer rather than a second one
+    here, because this body and the `summary.md` uploaded beside it are two
+    durable descriptions of the same run and used to disagree about whether
+    anything had been installed.
+
+    Args:
+        result: The classification the probe wrote.
+
+    Returns:
+        A Markdown body naming the lane, what was probed, and the evidence.
+    """
+    return (
+        f"{_opening_sentence(result)}\n"
+        "\n"
+        f"- **Classification:** {result.classification}\n"
+        f"{candidate_line(result)}\n"
+        f"- **Run:** {run_reference()}\n"
+        "\n"
+        "```text\n"
+        f"{result.detail}\n"
+        "```\n"
+        "\n"
+        f"{_FOOTER}\n"
+    )
+
+
+def render_silence_body(lane: str, reason: str) -> str:
+    """Render the issue body for a lane that reported nothing readable.
+
+    Args:
+        lane: The lane whose artifact is missing or unreadable.
+        reason: What went wrong reading it.
+
+    Returns:
+        A Markdown body explaining that the probe itself, rather than the
+        toolchain, is what needs looking at.
+    """
+    return (
+        f"The compatibility canary produced no readable result for the "
+        f"**{lane}** lane, so nothing is known about that lane today.\n"
+        "\n"
+        f"- **Run:** {run_reference()}\n"
+        "\n"
+        "```text\n"
+        f"{reason}\n"
+        "```\n"
+        "\n"
+        "A canary that stops reporting looks exactly like a canary with nothing "
+        "to report, which is why this is a failure rather than a quiet day. The "
+        "probe job's log and its uploaded diagnostics say what happened.\n"
+        "\n"
+        f"{_FOOTER}\n"
+    )
+
+
+@contextlib.contextmanager
+def body_file(body: str) -> Iterator[str]:
+    """Stage one issue body where `gh` can read it instead of taking it in argv.
+
+    An issue body carries the probe's `detail`, and a `detail` is whatever the
+    candidate compiler printed. A body long enough to exceed `ARG_MAX` — one
+    miscompiled source file's worth of diagnostics is enough — makes the spawn
+    itself fail with `E2BIG`, so a candidate's own output could stop the
+    notifier before it had reported any lane. `--body-file` moves that text out
+    of the argv the kernel has to copy, and `gh` documents the flag on every
+    command here that takes a body.
+
+    Args:
+        body: The Markdown to publish.
+
+    Yields:
+        The path to a file holding it, for the duration of the call that reads
+        it.
+
+    Raises:
+        NotifyError: The body could not be staged, which is this module failing
+            at its job rather than a lane having something to report.
+    """
+    with tempfile.TemporaryDirectory(prefix="canary-notify-") as raw:
+        path = Path(raw) / "body.md"
+        try:
+            path.write_text(body, encoding="utf-8")
+        except OSError as error:
+            raise NotifyError(f"an issue body could not be staged: {error}") from error
+        yield str(path)
+
+
+def _gh(gh: Gh, argv: Sequence[str]) -> CommandResult:
+    """Run one `gh` command and refuse to continue if it failed.
+
+    Args:
+        gh: The injected runner.
+        argv: The command to spawn.
+
+    Returns:
+        The completed command.
+
+    Raises:
+        NotifyError: The command failed, or could not be spawned at all. Every
+            call here either reads the issue state this module decides from or
+            performs the decision, so a failure that was swallowed would leave
+            the run green and the issue wrong — and one that escaped as an
+            `OSError` ended the whole loop, so the lanes after it went
+            unreported too.
+    """
+    try:
+        result = gh(argv)
+    except OSError as error:
+        raise NotifyError(
+            f"`{shlex.join(tuple(argv))}` could not be spawned: {error}"
+        ) from error
+    if result.returncode != 0:
+        tail = result.stderr.strip() or result.stdout.strip()
+        raise NotifyError(
+            f"`{shlex.join(result.argv)}` exited {result.returncode}: {tail}"
+        )
+    return result
+
+
+def find_issue(gh: Gh, title: str) -> tuple[int, str] | None:
+    """Find the one issue a lane owns, whether it is open or closed.
+
+    GitHub's issue search is fuzzy, so its answer is filtered here by exact
+    title. When more than one issue somehow carries the title, an open one wins
+    over a closed one and the newest wins among equals, which is the issue a
+    reader would be looking at.
+
+    Args:
+        gh: The injected runner.
+        title: The exact title to look for.
+
+    Returns:
+        The issue number and state, or None when the lane has no issue yet.
+
+    Raises:
+        NotifyError: The search failed, or answered with something other than
+            the list of issue objects it was asked for.
+    """
+    result = _gh(
+        gh,
+        [
+            "gh",
+            "issue",
+            "list",
+            "--state",
+            "all",
+            "--search",
+            f"{title} in:title",
+            "--json",
+            "number,title,state",
+            "--limit",
+            str(SEARCH_LIMIT),
+        ],
+    )
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise NotifyError(f"`gh issue list` did not print JSON: {error}") from error
+    if not isinstance(payload, list):
+        raise NotifyError(
+            f"`gh issue list` printed {type(payload).__name__}, not a list"
+        )
+
+    matches: list[tuple[int, str]] = []
+    for entry in payload:
+        if not isinstance(entry, dict):
+            raise NotifyError("`gh issue list` printed a non-object issue")
+        number = entry.get("number")
+        state = entry.get("state")
+        if not isinstance(number, int) or not isinstance(state, str):
+            raise NotifyError(
+                "`gh issue list` printed an issue without both a number and a "
+                "state, so it cannot be found, reopened or closed"
+            )
+        if entry.get("title") == title:
+            matches.append((number, state))
+    if not matches:
+        return None
+    return max(matches, key=lambda match: (match[1] == OPEN, match[0]))
+
+
+def upsert_issue(gh: Gh, title: str, body: str) -> None:
+    """Make sure the lane's issue exists, is open, and says this.
+
+    Args:
+        gh: The injected runner.
+        title: The lane's stable title.
+        body: The body to publish.
+
+    Raises:
+        NotifyError: A `gh` call failed, or the body could not be staged.
+    """
+    found = find_issue(gh, title)
+    with body_file(body) as path:
+        if found is None:
+            _gh(gh, ["gh", "issue", "create", "--title", title, "--body-file", path])
+            return
+        number, state = found
+        if state != OPEN:
+            _gh(gh, ["gh", "issue", "reopen", str(number)])
+        _gh(gh, ["gh", "issue", "edit", str(number), "--body-file", path])
+
+
+def notify_lane(gh: Gh, results: Path, lane: str) -> bool:
+    """Bring one lane's pinned issue in line with what the probe found.
+
+    Args:
+        gh: The injected runner.
+        results: The directory the workflow downloaded every artifact into.
+        lane: The lane to report.
+
+    Returns:
+        True when this lane must turn the run red.
+
+    Raises:
+        NotifyError: A `gh` call failed.
+    """
+    title = issue_title(lane)
+    try:
+        result = read_result(results, lane)
+    except ArtifactError as error:
+        upsert_issue(gh, title, render_silence_body(lane, str(error)))
+        print(f"canary-notify: {lane} -> no readable result: {error}", flush=True)
+        return True
+
+    print(f"canary-notify: {lane} -> {result.classification}", flush=True)
+    if result.classification in QUIET_CLASSIFICATIONS:
+        found = find_issue(gh, title)
+        if found is not None and found[1] == OPEN:
+            # Commented and then closed, rather than closed with a comment:
+            # `gh issue close` accepts a closing note only as `--comment`, in
+            # the argv, and this note carries the probe's detail. Left there, a
+            # `PASS` whose detail quotes a candidate's own version banner is
+            # the same unbounded argv the finding path had. If the close fails
+            # after the comment lands, the issue stays open and tomorrow's run
+            # closes it; the reverse order would lose the note entirely.
+            with body_file(render_body(result)) as path:
+                _gh(gh, ["gh", "issue", "comment", str(found[0]), "--body-file", path])
+            _gh(gh, ["gh", "issue", "close", str(found[0])])
+        return False
+    upsert_issue(gh, title, render_body(result))
+    # Written down like every finding, and still not a red run: this is the one
+    # classification produced solely by a command that failed to run, so it
+    # says nothing about the candidate. Left unwritten, it was also the one
+    # that could repeat every weekday without anyone learning that the lane had
+    # stopped probing.
+    return result.classification != INFRA_FAILURE
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """Read where the artifacts landed and which lanes should have reported.
+
+    Args:
+        argv: Command-line arguments, or None to read `sys.argv`.
+
+    Returns:
+        A namespace carrying `results` and `lanes`.
+    """
+    parser = argparse.ArgumentParser(
+        prog="canary-notify",
+        description="Turn each lane's canary result into one pinned issue.",
+    )
+    parser.add_argument(
+        "--results",
+        type=Path,
+        required=True,
+        help="directory holding one downloaded artifact per lane",
+    )
+    parser.add_argument(
+        "--lanes",
+        required=True,
+        help=(
+            "whitespace-separated lanes that should have reported; a lane named "
+            "here whose artifact never arrived is a failure"
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None, *, gh: Gh | None = None) -> int:
+    """Report every lane and decide whether the run goes red.
+
+    Args:
+        argv: Command-line arguments, or None to read `sys.argv`.
+        gh: The runner to reach GitHub through, or None for the real `gh`.
+
+    Returns:
+        0 when every lane is quiet, 1 when any lane has a finding or failed to
+        report at all, and 2 when this module could not do its job for at least
+        one lane — the lanes were not named, or GitHub could not be reached.
+        A lane whose reporting failed does not stop the lanes after it from
+        being reported.
+    """
+    args = parse_args(argv)
+    lanes = str(args.lanes).split()
+    unknown = [lane for lane in lanes if lane not in LANES]
+    if not lanes or unknown:
+        print(
+            f"canary-notify: expected lanes from {LANES}, got {args.lanes!r}",
+            file=sys.stderr,
+        )
+        return 2
+
+    runner = gh_runner() if gh is None else gh
+    results = Path(args.results)
+    # Every lane is attempted, whatever the ones before it did. A `NotifyError`
+    # that ended the loop meant a `gh` outage while reporting the first lane
+    # left the second lane's finding unwritten — and the issue, not the exit
+    # code, is the artifact a maintainer eventually reads. The first lane's
+    # failure still decides the exit code, so nothing is swallowed.
+    failed: list[str] = []
+    errors: list[str] = []
+    for lane in lanes:
+        try:
+            if notify_lane(runner, results, lane):
+                failed.append(lane)
+        except NotifyError as error:
+            errors.append(f"{lane}: {error}")
+    for reported in errors:
+        print(f"canary-notify: {reported}", file=sys.stderr)
+    if errors:
+        return 2
+    if failed:
+        print(f"canary-notify: lanes needing attention: {', '.join(failed)}")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

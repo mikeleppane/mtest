@@ -53,23 +53,61 @@ def _byte_diff(name: str, expected: bytes, actual: bytes) -> str:
     return diff or f"byte mismatch in {name}"
 
 
+def _rewrite_first_line(data: bytes, old: bytes, new: bytes) -> bytes:
+    """Rewrite one span of a file's first line, at most once.
+
+    Args:
+        data: The file's bytes.
+        old: The span to look for on the first line.
+        new: What to put in its place.
+
+    Returns:
+        The bytes with the first occurrence on line one replaced. Every later
+        line, and every later occurrence on line one, is left alone.
+    """
+    head, newline, rest = data.partition(b"\n")
+    return head.replace(old, new, 1) + newline + rest
+
+
 def compare_directories(
     expected_root: Path,
     actual_root: Path,
     *,
     replacement: tuple[bytes, bytes] | None = None,
+    header_replacement: tuple[bytes, bytes] | None = None,
 ) -> DirectoryComparison:
     """Compare directory membership and bytes, optionally allowing one rewrite.
 
-    With ``replacement=(old, new)``, each expected file is transformed by the
-    exact byte replacement before comparison. No other content difference is
-    accepted.
+    The two rewrite modes differ in reach, and the difference is the whole
+    point of having both. `replacement` transforms every occurrence in every
+    expected file, which is what an approved path relocation looks like: the
+    old prefix appears wherever a source location is printed. `header_
+    replacement` transforms the first occurrence on the first line and nothing
+    else, which is what a toolchain-identity stamp looks like: it belongs to
+    the provenance header, and the same text appearing in a transcript's body
+    is report content that a comparison must not be free to erase.
+
+    Args:
+        expected_root: The committed snapshot tree.
+        actual_root: The regenerated tree to compare against it.
+        replacement: An `(old, new)` byte pair rewritten everywhere in each
+            expected file before comparison, or None.
+        header_replacement: An `(old, new)` byte pair rewritten once, on the
+            first line of each expected file, before comparison, or None.
+
+    Returns:
+        The comparison, listing the files the rewrite actually changed and
+        every difference that survived it. Supplying both modes at once, or an
+        empty source span, is reported as an error rather than guessed at.
     """
     expected, errors = _files(expected_root)
     actual, actual_errors = _files(actual_root)
     errors.extend(actual_errors)
-    if replacement is not None and replacement[0] == b"":
-        errors.append("replacement source must not be empty")
+    if replacement is not None and header_replacement is not None:
+        errors.append("only one replacement mode may be supplied")
+    for mode in (replacement, header_replacement):
+        if mode is not None and mode[0] == b"":
+            errors.append("replacement source must not be empty")
 
     expected_names = set(expected)
     actual_names = set(actual)
@@ -86,6 +124,10 @@ def compare_directories(
         wanted = original
         if replacement is not None:
             wanted = original.replace(replacement[0], replacement[1])
+        if header_replacement is not None:
+            wanted = _rewrite_first_line(
+                wanted, header_replacement[0], header_replacement[1]
+            )
         if wanted != original:
             changed.append(name)
         if actual[name] != wanted:

@@ -79,6 +79,11 @@ import re
 import subprocess
 import sys
 
+# The probe owns the classification vocabulary this module holds one page
+# against. Imported rather than restated, because a list copied here would
+# agree with whatever the page said on the day it was copied.
+from scripts.canary.run import CLASSIFICATIONS
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 README_PATH = Path("README.md")
@@ -105,21 +110,55 @@ REFERENCE_PAGES = (
     Path("docs/cli-contract.md"),
     Path("docs/json-stream.md"),
     Path("docs/collect-stream.md"),
+    Path("docs/compatibility.md"),
     Path("docs/releasing.md"),
 )
 """Documents the site navigates to, which are originals rather than copies.
 
 Excluded from parity by this explicit rule, not by being forgotten: parity is
-agreement between a copy and the source it copied, and these four copy
+agreement between a copy and the source it copied, and these five copy
 nothing. Each is the surface that owns its own content — the frozen
 command-line contract (whose documented behaviors the contract gate executes),
-the two machine-format specifications, and the release runbook — and the
-contract is a version-transcript site in its own right.
+the two machine-format specifications, the toolchain-compatibility page that
+describes what the compatibility canary probes and what its classifications
+mean, and the release runbook — and the contract is a version-transcript site
+in its own right.
 
 Naming them is what lets the sweep below invert the question. Without an
 explicit list, "not a site page" and "not gated at all" would be the same
 answer, and a new page would be indistinguishable from a reference document.
+
+Exempt from parity is not the same as ungated. `check_canary_classifications`
+holds the compatibility page against the one thing on it that another module
+owns outright — the probe's classification names — because "this page copies
+nothing" is a reason to skip the mirror comparison, not a reason to let a
+documented outcome and a produced outcome be different sets.
 """
+
+CANARY_CLASSIFICATION_PAGE = Path("docs/compatibility.md")
+"""The reference page that documents what the compatibility canary can report."""
+
+CANARY_CLASSIFICATION_HEADING_RE = re.compile(r"(?m)^### `([A-Z_]+)`$")
+
+CANARY_CLASSIFICATION_ROW_RE = re.compile(r"(?m)^\| `([A-Z_]+)` \|")
+"""One row of the page's summary table, which reads as the exhaustive list."""
+
+CANARY_CLASSIFICATION_COUNT_RE = re.compile(
+    r"ends in exactly one of ([a-z]+) classifications\."
+)
+"""The sentence stating how many outcomes there are, just above the table."""
+
+NUMBER_WORDS = {
+    6: "six",
+    7: "seven",
+    8: "eight",
+    9: "nine",
+    10: "ten",
+}
+"""Spellings the count sentence may use, for the sizes this list can plausibly
+reach. A count outside it fails with a `KeyError` naming the size, which is the
+honest outcome: the sentence needs writing, not guessing."""
+"""How that page gives one classification its own section."""
 
 EXCLUDED_DOC_DIRECTORIES = ("plans/", "superpowers/")
 """Directories under `docs/` the site configuration must refuse to publish.
@@ -925,17 +964,71 @@ def check_site_configuration(repo_root: Path = REPO_ROOT) -> None:
         )
 
 
+def check_canary_classifications(repo_root: Path = REPO_ROOT) -> None:
+    """Require the compatibility page to document exactly what the probe reports.
+
+    The names come from `scripts.canary.run`, which defines them, rather than
+    from a list restated here that would agree with whatever the page happened
+    to say.
+
+    Args:
+        repo_root: Repository root holding `docs/compatibility.md`.
+
+    Raises:
+        AssertionError: A classification the probe can produce has no section on
+            the page, a section names something the probe cannot produce, or the
+            page could not be read at all.
+    """
+    path = repo_root / CANARY_CLASSIFICATION_PAGE
+    try:
+        page = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise AssertionError(
+            f"{CANARY_CLASSIFICATION_PAGE} cannot read: {error}"
+        ) from error
+    documented = set(CANARY_CLASSIFICATION_HEADING_RE.findall(page))
+    produced = set(CLASSIFICATIONS)
+    if documented != produced:
+        raise AssertionError(
+            f"{CANARY_CLASSIFICATION_PAGE} classification mismatch: a probe "
+            "outcome nobody documented reaches a maintainer as a word with no "
+            "meaning, and a documented outcome the probe cannot produce is a "
+            "promise about a report that never arrives; undocumented="
+            f"{sorted(produced - documented)}, "
+            f"unproduced={sorted(documented - produced)}"
+        )
+    # The summary table and the count above it, which a reader consults before
+    # any section. Headings alone leave both free to drift: a deleted row and a
+    # stale number each read as a complete list that is missing an outcome.
+    tabulated = set(CANARY_CLASSIFICATION_ROW_RE.findall(page))
+    if tabulated != produced:
+        raise AssertionError(
+            f"{CANARY_CLASSIFICATION_PAGE} classification table mismatch: the "
+            "table is read as the exhaustive list; untabulated="
+            f"{sorted(produced - tabulated)}, "
+            f"untabulated_extra={sorted(tabulated - produced)}"
+        )
+    counted = CANARY_CLASSIFICATION_COUNT_RE.search(page)
+    if counted is None or counted.group(1) != NUMBER_WORDS[len(produced)]:
+        raise AssertionError(
+            f"{CANARY_CLASSIFICATION_PAGE} classification count mismatch: "
+            f"expected {NUMBER_WORDS[len(produced)]!r}, "
+            f"found {counted.group(1) if counted else 'no count sentence'!r}"
+        )
+
+
 def main() -> int:
     """Assert the site copies nothing it has not declared, and nothing stale.
 
     Returns:
         0 once every declaration is well formed, every declared mirror equals
         its README source byte for byte, no site page holds an undeclared or
-        unfenced block, every tracked page is declared, and the configuration
-        still excludes the internal directories; printing how many mirrors were
-        compared. 1 after printing the drift to stderr, so the policy run fails
-        instead of publishing a page whose commands no longer match the ones
-        this repository executes.
+        unfenced block, every tracked page is declared, the configuration still
+        excludes the internal directories, and the compatibility page documents
+        exactly the classifications the canary probe can report; printing how
+        many mirrors were compared. 1 after printing the drift to stderr, so the
+        policy run fails instead of publishing a page whose commands no longer
+        match the ones this repository executes.
     """
     try:
         check_declarations()
@@ -943,6 +1036,7 @@ def main() -> int:
         check_site_blocks_are_all_declared()
         check_no_undeclared_pages()
         check_site_configuration()
+        check_canary_classifications()
     except AssertionError as exc:
         print(f"docs-parity-check: FAIL: {exc}", file=sys.stderr)
         return 1

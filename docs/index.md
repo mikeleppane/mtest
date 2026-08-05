@@ -48,6 +48,8 @@ supports.
   event.
 - [Collect JSON stream](collect-stream.md) — the machine-readable test listing
   `collect --format json` writes.
+- [Toolchain compatibility](compatibility.md) — what the weekday canary probes
+  on newer Mojo toolchains, and what each of its results does and does not say.
 - [Releasing](releasing.md) — the maintainer runbook.
 
 Everything else stays in the

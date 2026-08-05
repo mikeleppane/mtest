@@ -16,8 +16,9 @@ is that proof, with ten ordered completion records:
      version AND build string, and the installed
      `conda-meta/mtest-<version>-<build>.json` record is compared against the
      built artifact's SHA-256 and subdir, so a same-version package pulled from
-     a remote channel fails here. Also confirms the solve pulled
-     `mojo-compiler ==1.0.0b2`.
+     a remote channel fails here. Also confirms the solve pulled the
+     `mojo-compiler` version this run expects — the production pin unless
+     `--expect-mojo-version` names another.
   3. LOADER-CLEAN PROBE on the INSTALLED binary: run `mtest --version` and
      `mtest --help` with THIS PROCESS's own child environment scrubbed, the dev
      pixi env absent from PATH and this platform's loader-path variables empty.
@@ -59,11 +60,13 @@ publishes, or authenticates anywhere. `mojo run` never appears: every binary is
 BUILT then EXECUTED directly.
 
 Usage:  pixi run package-check
+        pixi run package-check --expect-mojo-version 1.0.0b3
         python -m scripts.build.package_consumption
 """
 
 from __future__ import annotations
 
+import argparse
 import configparser
 from dataclasses import dataclass
 import difflib
@@ -78,6 +81,7 @@ import shutil
 import stat
 import subprocess
 import sys
+from typing import TYPE_CHECKING
 
 from scripts.checks.build_profile import (
     BuildProfileError,
@@ -85,6 +89,10 @@ from scripts.checks.build_profile import (
 )
 from scripts.harness import dogfood, watchdog
 from scripts.release.public_verify import COMPANION_FILES
+
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -109,6 +117,15 @@ LOADER_PROBE_CWD = SCRATCH_ROOT / "loader-probe-cwd"
 
 MODULAR_CHANNEL = "https://conda.modular.com/max/"
 CONDA_FORGE_CHANNEL = "conda-forge"
+
+# The compiler this repository ships against: the version `pixi.toml` pins and
+# `recipe/recipe.yaml` declares as the package's run dependency. It is the
+# default expectation of the install stage, so an ordinary `pixi run
+# package-check` proves exactly what it always proved. The compatibility canary
+# passes `--expect-mojo-version` instead, because it retargets the recipe at a
+# newer compiler first: without the override the install stage would demand the
+# pinned compiler and fail a candidate that was packaged correctly.
+PRODUCTION_MOJO_PIN = "1.0.0b2"
 
 # The known-failing fixture stage drives through the installed binary. It is an
 # e2e fixture with a manifest-pinned outcome (verdict FAIL, exit class 1, two
@@ -1377,15 +1394,20 @@ def verify_installed_artifact_identity(
     )
 
 
-def stage_install_from_local_channel(artifact: BuiltArtifact) -> Path:
+def stage_install_from_local_channel(
+    artifact: BuiltArtifact, expect_mojo_version: str = PRODUCTION_MOJO_PIN
+) -> Path:
     """Install the just-built package into a FRESH scratch pixi env.
 
     Solves from CONDA_CHANNEL_DIR (+ modular/conda-forge), proves the installed
-    package IS that artifact, and confirms the solve pulled
-    `mojo-compiler ==1.0.0b2` as a run dependency.
+    package IS that artifact, and confirms the solve pulled `mojo-compiler` at
+    the expected version as a run dependency.
 
     Args:
         artifact: The artifact the build stage produced.
+        expect_mojo_version: The `mojo-compiler` version the solve must have
+            pulled. Defaults to the version this repository pins, so the gate's
+            ordinary invocation asserts exactly what it always asserted.
 
     Returns:
         The absolute path to the installed `mtest` binary.
@@ -1416,13 +1438,13 @@ def stage_install_from_local_channel(artifact: BuiltArtifact) -> Path:
     verify_installed_artifact_identity(env_prefix, artifact)
 
     conda_meta = sorted(
-        (env_prefix / "conda-meta").glob("mojo-compiler-1.0.0b2-*.json")
+        (env_prefix / "conda-meta").glob(f"mojo-compiler-{expect_mojo_version}-*.json")
     )
     if not conda_meta:
         raise PackageCheckError(
-            "install did NOT pull mojo-compiler ==1.0.0b2 as a run dependency -- "
-            f"no mojo-compiler-1.0.0b2-*.json under {env_prefix / 'conda-meta'}; "
-            "this is a recipe run-dependency gap"
+            f"install did NOT pull mojo-compiler =={expect_mojo_version} as a run "
+            f"dependency -- no mojo-compiler-{expect_mojo_version}-*.json under "
+            f"{env_prefix / 'conda-meta'}; this is a recipe run-dependency gap"
         )
     print(
         f"package-check: installed {mtest_bin.relative_to(REPO_ROOT)}; "
@@ -2272,12 +2294,40 @@ def stage_tarball_fallback_smoke(target: PackagePlatform | None = None) -> None:
     record_completed_stage("tarball")
 
 
-def main() -> int:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    """Read this gate's only knob.
+
+    Args:
+        argv: Command-line arguments, or None to read `sys.argv`.
+
+    Returns:
+        A namespace carrying `expect_mojo_version`.
+    """
+    parser = argparse.ArgumentParser(
+        prog="package-check",
+        description="Build, install, and consume this repository's conda package.",
+    )
+    parser.add_argument(
+        "--expect-mojo-version",
+        default=PRODUCTION_MOJO_PIN,
+        help=(
+            "the mojo-compiler version the install must pull as a run "
+            f"dependency (default: {PRODUCTION_MOJO_PIN})"
+        ),
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
     """Run every stage of the packaged-artifact gate for this host.
+
+    Args:
+        argv: Command-line arguments, or None to read `sys.argv`.
 
     Returns:
         0 when every stage passed, 1 when any stage stopped the gate.
     """
+    args = parse_args(argv)
     reset_completed_stages()
     try:
         target = host_platform()
@@ -2287,7 +2337,7 @@ def main() -> int:
             flush=True,
         )
         artifact = stage_build_local_channel(target)
-        mtest_bin = stage_install_from_local_channel(artifact)
+        mtest_bin = stage_install_from_local_channel(artifact, args.expect_mojo_version)
         stage_loader_clean_probe(mtest_bin, target)
         stage_assertion_source_probe(
             mtest_bin.parents[1],

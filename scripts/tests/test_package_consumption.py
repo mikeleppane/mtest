@@ -2138,6 +2138,103 @@ class AssertionPackageLayoutTests(unittest.TestCase):
                 package_consumption.validate_assertion_install(prefix)
 
 
+class ExpectedMojoVersionTests(unittest.TestCase):
+    """Which compiler the install stage demands, and where that number comes from."""
+
+    def test_the_default_is_the_workspace_pin(self) -> None:
+        # Independently transcribed from pixi.toml: the gate's default and the
+        # version the workspace actually builds with are one number, and a bump
+        # that moves only one of them turns this red rather than turning the
+        # dependency proof into a check of a version nobody uses.
+        self.assertEqual(package_consumption.PRODUCTION_MOJO_PIN, "1.0.0b2")
+        self.assertIn(
+            'mojo = "==1.0.0b2,<2"',
+            (package_consumption.PIXI_TOML).read_text(encoding="utf-8"),
+        )
+
+    def test_no_argument_expects_the_production_pin(self) -> None:
+        self.assertEqual(
+            package_consumption.parse_args([]).expect_mojo_version,
+            package_consumption.PRODUCTION_MOJO_PIN,
+        )
+
+    def test_the_flag_overrides_the_pin(self) -> None:
+        self.assertEqual(
+            package_consumption.parse_args(
+                ["--expect-mojo-version", "1.0.0b3"]
+            ).expect_mojo_version,
+            "1.0.0b3",
+        )
+
+    def _installed_env(self, env_dir: Path, mojo_version: str) -> None:
+        prefix = env_dir / ".pixi" / "envs" / "default"
+        (prefix / "bin").mkdir(parents=True, exist_ok=True)
+        (prefix / "bin" / "mtest").write_text("", encoding="utf-8")
+        (prefix / "conda-meta").mkdir(parents=True, exist_ok=True)
+        record = prefix / "conda-meta" / f"mojo-compiler-{mojo_version}-release.json"
+        record.write_text("{}", encoding="utf-8")
+
+    def _install(self, installed: str, expected: str) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            env_dir = root / "package-check" / "conda-env"
+
+            def install_env(*_args: object, **_kwargs: object) -> int:
+                """Stand in for `pixi install` writing the scratch prefix."""
+                self._installed_env(env_dir, installed)
+                return 0
+
+            artifact = BuiltArtifact(
+                path=root / "channel" / "linux-64" / "mtest-x.conda",
+                version=package_consumption.repo_version(),
+                build_string="hb0f4dca_0",
+                sha256="d" * 64,
+                subdir="linux-64",
+            )
+            with (
+                mock.patch.multiple(
+                    package_consumption,
+                    REPO_ROOT=root,
+                    SCRATCH_ROOT=root / "package-check",
+                    CONDA_ENV_DIR=env_dir,
+                    CONDA_CHANNEL_DIR=root / "channel",
+                    _run_streamed=mock.Mock(side_effect=install_env),
+                    verify_installed_artifact_identity=mock.Mock(),
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                package_consumption.stage_install_from_local_channel(artifact, expected)
+
+    def test_the_install_stage_accepts_the_expected_compiler(self) -> None:
+        package_consumption.reset_completed_stages()
+        self.addCleanup(package_consumption.reset_completed_stages)
+        self._install(installed="1.0.0b3", expected="1.0.0b3")
+
+    def test_the_install_stage_rejects_a_different_compiler(self) -> None:
+        package_consumption.reset_completed_stages()
+        self.addCleanup(package_consumption.reset_completed_stages)
+        with self.assertRaisesRegex(PackageCheckError, "1.0.0b3"):
+            self._install(installed="1.0.0b2", expected="1.0.0b3")
+
+    def test_main_threads_the_expectation_into_the_install_stage(self) -> None:
+        stopped = PackageCheckError("stop after the install stage")
+        install = mock.Mock(side_effect=stopped)
+        with (
+            mock.patch.multiple(
+                package_consumption,
+                stage_build_local_channel=mock.Mock(
+                    return_value=mock.sentinel.artifact
+                ),
+                stage_install_from_local_channel=install,
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            code = package_consumption.main(["--expect-mojo-version", "1.0.0b3"])
+        self.assertEqual(code, 1)
+        install.assert_called_once_with(mock.sentinel.artifact, "1.0.0b3")
+
+
 def main() -> int:
     """Run this module's negative controls as a standalone gate step."""
     result = unittest.main(module=__name__, exit=False, verbosity=0).result

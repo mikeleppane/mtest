@@ -25,6 +25,7 @@ nav:
       - Command-line contract: cli-contract.md
       - JSON event stream: json-stream.md
       - Collect JSON stream: collect-stream.md
+      - Toolchain compatibility: compatibility.md
   - Maintainers:
       - Releasing: releasing.md
 
