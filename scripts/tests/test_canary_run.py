@@ -1323,6 +1323,49 @@ class StageBudgetTests(CanaryTestCase):
         result = self.classify(repo, runner)
         self.assertEqual(result.classification, STAGE_TIMEOUT)
 
+    def test_a_wedged_candidate_search_is_not_an_empty_channel(self) -> None:
+        """The corroboration must not be asked about a stage that said nothing.
+
+        A stalled connection to the index wedges the bounded search and it is
+        killed at the stage budget. The control then opens a fresh connection
+        and answers instantly out of cached repodata, so the failure read as an
+        empty match set and the day ended on `NO_NEWER_CANDIDATE` — a positive
+        claim about channel inventory nobody had observed, and a quiet one, so
+        the lane's open issue was closed on it.
+        """
+        repo, runner = self.build()
+        runner.outcomes(
+            "search-candidates", _Outcome(TIMEOUT_RETURNCODE, "", "timed out")
+        )
+        result = self.classify(repo, runner)
+        self.assertEqual(result.classification, STAGE_TIMEOUT, result.detail)
+        self.assertIn("timed out", result.detail)
+        # The control is not even asked: there is nothing to corroborate.
+        self.assertEqual(runner.stages, ["search-published", "search-candidates"])
+
+    def test_a_wedged_control_is_a_timeout_wherever_it_is_asked(self) -> None:
+        """A killed control was read as "the probe lost its reach", quietly.
+
+        Both places that corroborate a failure do it with the same argv, and
+        both mapped its every non-answer onto `INFRA_FAILURE`. A control the
+        probe stopped itself proved nothing about reach, and filing it as
+        infrastructure buried it on a lane that had genuinely stopped
+        answering.
+        """
+        for wedged_stage, failing_stage in (
+            ("search-control", "search-candidates"),
+            ("search-control", "install"),
+        ):
+            with self.subTest(after=failing_stage):
+                repo, runner = self.build()
+                runner.fails(failing_stage)
+                runner.outcomes(
+                    wedged_stage, _Outcome(TIMEOUT_RETURNCODE, "", "timed out")
+                )
+                result = self.classify(repo, runner)
+                self.assertEqual(result.classification, STAGE_TIMEOUT, result.detail)
+                self.assertIn(floor_matchspec(PINNED_MOJO), result.detail)
+
 
 class PipelineOrderingTests(CanaryTestCase):
     """The install must see the relaxed pin, or the canary is permanently green."""

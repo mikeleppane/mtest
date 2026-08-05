@@ -534,6 +534,11 @@ def control_confirms_channels(control: CommandResult, pin: str) -> bool:
     channels hold nothing newer — it is evidence that they are not the channels
     this probe thinks it is asking.
 
+    A control the probe killed must never reach this. It answers False, which
+    reads as "the channels could not be questioned" and is right about the
+    channels but wrong about the day: the stage said nothing because it was
+    stopped, and `timed_out` is what callers ask first.
+
     Args:
         control: The completed control search.
         pin: The pinned version the control admits.
@@ -889,6 +894,15 @@ def classify(
 
     matchspec = candidate_matchspec(pin)
     found = run(search_argv(channels, matchspec))
+    # Asked before the corroboration below and not through it. A killed search
+    # printed nothing because it was stopped, not because the channels hold
+    # nothing, and the control runs on a fresh connection and can answer
+    # instantly from cached repodata — so a stalled connection to the index
+    # ended the day with the two of them agreeing on a `NO_NEWER_CANDIDATE`
+    # nobody had observed, which is quiet, and which closed the issue of a lane
+    # sitting on yesterday's real finding.
+    if timed_out(found):
+        return _result(lane, _UNKNOWN, STAGE_TIMEOUT, command_failure(found))
     if found.returncode == 0:
         try:
             candidates = search_versions(found)
@@ -907,11 +921,12 @@ def classify(
         # an empty match set. Unanswered, and the probe cannot ask its own
         # question, which is infrastructure rather than a verdict.
         control = run(search_argv(channels, floor_matchspec(pin)))
+        if timed_out(control):
+            return _result(lane, _UNKNOWN, STAGE_TIMEOUT, command_failure(control))
         if not control_confirms_channels(control, pin):
-            return _stage_failure(
+            return _result(
                 lane,
                 _UNKNOWN,
-                found,
                 INFRA_FAILURE,
                 f"{command_failure(found)}; the control "
                 f"`{floor_matchspec(pin)}` did not confirm the channels can "
@@ -959,6 +974,8 @@ def classify(
         # the direction is deliberate: a wrong red is read and corrected the
         # same day, a wrong green is the silence this workflow exists to end.
         control = run(search_argv(channels, floor_matchspec(pin)))
+        if timed_out(control):
+            return _result(lane, _UNKNOWN, STAGE_TIMEOUT, command_failure(control))
         if not control_confirms_channels(control, pin):
             return _result(
                 lane,
