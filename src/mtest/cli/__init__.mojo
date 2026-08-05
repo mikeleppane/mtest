@@ -18,6 +18,11 @@ accept it. It parses the full v1 grammar, and the grouped help output is
 generated from that same table; `subcommand_specs()` is the matching table for
 the `Subcommands` block.
 
+`destinations.mojo` answers which report destinations one configuration would
+open, whether two of them name one file, and how each refusal is phrased. It
+is not re-exported: `main` and the doctor runner are its only callers, and both
+sit inside this package for the import rules.
+
 The layer also owns `build_flags_string`, which renders a `RunnerConfig` back
 into the shell-ready flag string the console echoes in a run-failure
 `reproduce:` line, and `render_completions`, which renders those same two

@@ -8,8 +8,10 @@ from std.testing import (
     TestSuite,
 )
 
-from mtest.cli import parse_args
+from mtest.cli import ParseResult, parse_args
 from mtest.cli.doctor import (
+    _DoctorContext,
+    _check_report_destinations,
     _doctor_cleanup_failure_probe,
     _doctor_close_failure_probe,
     _doctor_containment_probe,
@@ -20,7 +22,13 @@ from mtest.cli.doctor import (
     _safe_text,
     _toolchain_identity_is_pinned,
 )
-from mtest.config import ColorWhen, Verbosity
+from mtest.config import (
+    CliOverlay,
+    ColorWhen,
+    RunnerConfig,
+    ShardMode,
+    Verbosity,
+)
 
 
 def test_doctor_kind_and_accepted_controls() raises:
@@ -266,6 +274,103 @@ def test_doctor_control_probe_rejects_a_c1_only_identity() raises:
     assert_true(_has_control("mojo\x1b[31m"))
     assert_false(_has_control("mojo 1.0.0b2 (release)"))
     assert_false(_has_control("caf" + chr(0xE9) + chr(0xA0)))
+
+
+def _destination_context(format: String, path: String) raises -> _DoctorContext:
+    """A context whose config layer is settled and carries one destination.
+
+    Marking the config loaded is what keeps `_check_report_destinations` from
+    reading a real `mtest.toml` off disk and replacing the destination under
+    test.
+
+    Args:
+        format: The `[report]` key the destination is configured under.
+        path: The destination value that key carries.
+
+    Returns:
+        A context rooted at the working directory, with no config file
+        selected and exactly one active destination.
+    """
+    var argv: List[String] = ["doctor", "--no-config"]
+    var context = _DoctorContext(parse_args(argv))
+    context.root = String(cwd())
+    context.root_ok = True
+    context.config_loaded = True
+    if format == "json":
+        context.resolved.config.json_dest = path.copy()
+    elif format == "junit-xml":
+        context.resolved.config.junit_dest = path.copy()
+    elif format == "md":
+        context.resolved.config.report_md_dest = path.copy()
+    else:
+        context.resolved.config.report_html_dest = path.copy()
+    return context^
+
+
+def test_doctor_checks_every_configured_report_destination() raises:
+    """Doctor must diagnose all four `[report]` destinations, not two.
+
+    A `[report] md` or `html` parent that does not exist is a usage error the
+    run path refuses before it builds anything; a doctor that answers `none`
+    for the same project reports the environment healthy for a command that
+    cannot start.
+    """
+    for format in ["md", "html", "json", "junit-xml"]:
+        var missing = _destination_context(
+            format, "no-such-mtest-doctor-directory/report.out"
+        )
+        assert_equal(
+            _check_report_destinations(missing),
+            (
+                "FAIL report-destinations: "
+                + format
+                + " parent does not exist: 'no-such-mtest-doctor-directory'"
+            ),
+        )
+        var usable = _destination_context(format, "report.out")
+        assert_equal(
+            _check_report_destinations(usable),
+            "PASS report-destinations: 1 parent(s) usable",
+        )
+
+
+def test_doctor_seeds_resolution_with_every_cli_only_field() raises:
+    """Doctor seeds resolution from the same projection the run path uses.
+
+    A CLI-only field the seed drops comes back at its contract default, so
+    doctor diagnoses a configuration the run would never see. The values below
+    are all non-default on purpose: a dropped field is indistinguishable from
+    an absent one otherwise.
+    """
+    var parsed = RunnerConfig.default()
+    parsed.exitfirst = True
+    parsed.keyword = "needle"
+    parsed.collect = True
+    parsed.collect_json = True
+    parsed.last_failed = True
+    parsed.failed_first = True
+    parsed.shard_mode = ShardMode.SLICE
+    parsed.shard_m = 2
+    parsed.shard_n = 5
+    parsed.shuffle = True
+    parsed.shuffle_seed = 4242
+    parsed.no_cache = True
+    parsed.cache_clear = True
+    var request = ParseResult.doctor(parsed^, CliOverlay.default(), "", True)
+    var seeded = _DoctorContext(request).resolved.config.copy()
+    assert_true(seeded.exitfirst, "exitfirst dropped")
+    assert_equal(seeded.keyword, "needle", "keyword dropped")
+    assert_true(seeded.collect, "collect dropped")
+    assert_true(seeded.collect_json, "collect_json dropped")
+    assert_true(seeded.last_failed, "last_failed dropped")
+    assert_true(seeded.failed_first, "failed_first dropped")
+    assert_true(seeded.shard_mode == ShardMode.SLICE, "shard_mode dropped")
+    assert_equal(seeded.shard_m, 2, "shard_m dropped")
+    assert_equal(seeded.shard_n, 5, "shard_n dropped")
+    assert_true(seeded.shuffle, "shuffle dropped")
+    assert_equal(seeded.shuffle_seed, 4242, "shuffle_seed dropped")
+    assert_true(seeded.no_cache, "no_cache dropped")
+    assert_true(seeded.cache_clear, "cache_clear dropped")
 
 
 def test_doctor_platform_lines_cover_both_supported_targets() raises:

@@ -88,11 +88,16 @@ def destination_identity(path: String) -> String:
 
     Canonicalizing `path` itself is not available: `realpath(3)` resolves every
     component and fails on a final one that does not exist, which is the normal
-    state of a destination about to be written. The parent does exist (a
-    missing one is refused earlier, as a usage error), so the parent is
-    resolved and the basename appended verbatim. Two spellings of one file —
-    `out.md` and `./out.md`, a `..` segment, or a symlinked parent directory —
-    therefore produce one key, while two different names never do.
+    state of a destination about to be written. The parent is resolved instead
+    and the basename appended verbatim. Two spellings of one file — `out.md`
+    and `./out.md`, a `..` segment, or a symlinked parent directory — therefore
+    produce one key, while two different names never do.
+
+    A caller need not have established that the parent exists: the key is
+    computed for every configured destination, and one check asks precisely
+    about the missing ones. A key whose parent could not be resolved is
+    comparable but not canonical, which is why it is never the check that
+    reports the missing directory.
 
     An empty `dirname` is normalized to `.` first, so a bare filename resolves
     against the working directory instead of joining onto the filesystem root.

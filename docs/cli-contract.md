@@ -2538,10 +2538,12 @@ fixed order:
 8. `state` — `.mtest-cache/` usability and an absent or parseable v1 `lastrun`,
    including removal of any directory doctor created.
 9. `temp` — invocation-root and system-temp writability.
-10. `report-destinations` — usability of configured JUnit/JSON parent
-    directories without opening, creating, or truncating the configured files.
-    No configured destination is root-independent, as is an absolute parent;
-    relative parents require the root.
+10. `report-destinations` — usability of the parent directory of every report
+    destination the same configuration would open on the run path (`[report]`
+    `json`, `junit-xml`, `md`, and `html`), without opening, creating, or
+    truncating the configured files. `--json -` names a stream rather than a
+    file and is not checked. No configured destination is root-independent, as
+    is an absolute parent; relative parents require the root.
 
 Every check body is guarded independently. An unexpected error becomes that
 check's contained `FAIL` line, with control characters escaped; later checks

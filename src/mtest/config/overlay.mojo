@@ -8,6 +8,7 @@ between an absent value and an explicitly supplied default.
 from mtest.config.annotations_mode import AnnotationsMode
 from mtest.config.color_when import ColorWhen
 from mtest.config.precompile import Precompile
+from mtest.config.provenance import ConfigProvenance, Provenance
 from mtest.config.report_style import ReportStyle
 from mtest.config.runner_config import RunnerConfig
 from mtest.config.show_output import ShowOutput
@@ -232,12 +233,114 @@ struct CliOverlay(Copyable, Movable):
             saw_report_style=False,
         )
 
+    def apply(
+        self,
+        mut config: RunnerConfig,
+        mut state: Bool,
+        mut sources: ConfigProvenance,
+    ):
+        """Write every present argv value, and only those, over the arguments.
+
+        The one statement of what each key does when argv supplied it, shared
+        by both consumers of the overlay: the parser's `fold`, which wants the
+        values alone, and layered resolution, which also wants the source of
+        each. Two copies of this block is how a key reaches one of them and
+        silently misses the other.
+
+        Args:
+            config: The lower-precedence values. Each present key replaces the
+                whole value, lists included.
+            state: Whether last-run state is enabled, which has no
+                `RunnerConfig` field of its own.
+            sources: The per-key provenance. Every key written here becomes
+                `Provenance.CLI`.
+        """
+        if self.saw_paths:
+            config.paths = self.paths.copy()
+            config.paths_supplied = True
+            sources.paths = Provenance.CLI
+        if self.saw_excludes:
+            config.excludes = self.excludes.copy()
+            sources.excludes = Provenance.CLI
+        if self.saw_gates:
+            config.gates = self.gates.copy()
+            sources.gates = Provenance.CLI
+        if self.saw_serial:
+            config.serial_globs = self.serial_globs.copy()
+            sources.serial_globs = Provenance.CLI
+        if self.saw_workers:
+            config.workers = self.workers
+            sources.workers = Provenance.CLI
+        if self.saw_timeout:
+            config.timeout_secs = self.timeout_secs
+            sources.timeout_secs = Provenance.CLI
+        if self.saw_retries:
+            config.retries = self.retries
+            sources.retries = Provenance.CLI
+        if self.saw_maxfail:
+            config.maxfail = self.maxfail
+            sources.maxfail = Provenance.CLI
+        if self.saw_fail_on_flaky:
+            config.fail_on_flaky = self.fail_on_flaky
+            sources.fail_on_flaky = Provenance.CLI
+        if self.saw_state:
+            state = self.state
+            sources.state = Provenance.CLI
+        if self.saw_mojo:
+            config.mojo_path = self.mojo_path.copy()
+            sources.mojo_path = Provenance.CLI
+        if self.saw_include:
+            config.include_paths = self.include_paths.copy()
+            sources.include_paths = Provenance.CLI
+        if self.saw_build_args:
+            config.build_args = self.build_args.copy()
+            sources.build_args = Provenance.CLI
+        if self.saw_precompile:
+            config.precompiles = self.precompiles.copy()
+            sources.precompiles = Provenance.CLI
+        if self.saw_compile_timeout:
+            config.compile_timeout_secs = self.compile_timeout_secs
+            sources.compile_timeout_secs = Provenance.CLI
+        if self.saw_color:
+            config.color = self.color
+            sources.color = Provenance.CLI
+        if self.saw_show_output:
+            config.show_output = self.show_output
+            sources.show_output = Provenance.CLI
+        if self.saw_verbosity:
+            config.verbosity = self.verbosity
+            sources.verbosity = Provenance.CLI
+        if self.saw_durations:
+            config.durations = self.durations
+            sources.durations = Provenance.CLI
+        if self.saw_junit_xml:
+            config.junit_dest = self.junit_dest.copy()
+            sources.junit_dest = Provenance.CLI
+        if self.saw_json:
+            config.json_dest = self.json_dest.copy()
+            sources.json_dest = Provenance.CLI
+        if self.saw_gh_annotations:
+            config.gh_annotations = self.gh_annotations
+            sources.gh_annotations = Provenance.CLI
+        if self.saw_report_md:
+            config.report_md_dest = self.report_md_dest.copy()
+            sources.report_md_dest = Provenance.CLI
+        if self.saw_report_html:
+            config.report_html_dest = self.report_html_dest.copy()
+            sources.report_html_dest = Provenance.CLI
+        if self.saw_report_style:
+            config.report_style = self.report_style
+            sources.report_style = Provenance.CLI
+
     def fold(self, defaults: RunnerConfig) -> RunnerConfig:
         """Fold present argv values over `defaults`.
 
-        Non-config-eligible fields remain byte-for-byte those in `defaults`.
-        `state` is retained in the overlay for the complete key model but is
-        not yet a `RunnerConfig` field.
+        Every field but the configuration-eligible keys and `paths_supplied`
+        remains byte-for-byte the one in `defaults`; a supplied path list also
+        raises `paths_supplied`, because an explicitly empty list is a
+        selection rather than an absent one. The parser wants values alone, so
+        the `state` answer and the per-key provenance `apply` also produces are
+        discarded here: neither has a `RunnerConfig` field to land in.
 
         Args:
             defaults: The lower-precedence config. Not mutated.
@@ -258,52 +361,7 @@ struct CliOverlay(Copyable, Movable):
         ```
         """
         var config = defaults.copy()
-        if self.saw_paths:
-            config.paths = self.paths.copy()
-        if self.saw_excludes:
-            config.excludes = self.excludes.copy()
-        if self.saw_gates:
-            config.gates = self.gates.copy()
-        if self.saw_serial:
-            config.serial_globs = self.serial_globs.copy()
-        if self.saw_workers:
-            config.workers = self.workers
-        if self.saw_timeout:
-            config.timeout_secs = self.timeout_secs
-        if self.saw_retries:
-            config.retries = self.retries
-        if self.saw_maxfail:
-            config.maxfail = self.maxfail
-        if self.saw_fail_on_flaky:
-            config.fail_on_flaky = self.fail_on_flaky
-        if self.saw_mojo:
-            config.mojo_path = self.mojo_path.copy()
-        if self.saw_include:
-            config.include_paths = self.include_paths.copy()
-        if self.saw_build_args:
-            config.build_args = self.build_args.copy()
-        if self.saw_precompile:
-            config.precompiles = self.precompiles.copy()
-        if self.saw_compile_timeout:
-            config.compile_timeout_secs = self.compile_timeout_secs
-        if self.saw_color:
-            config.color = self.color
-        if self.saw_show_output:
-            config.show_output = self.show_output
-        if self.saw_verbosity:
-            config.verbosity = self.verbosity
-        if self.saw_durations:
-            config.durations = self.durations
-        if self.saw_junit_xml:
-            config.junit_dest = self.junit_dest.copy()
-        if self.saw_json:
-            config.json_dest = self.json_dest.copy()
-        if self.saw_gh_annotations:
-            config.gh_annotations = self.gh_annotations
-        if self.saw_report_md:
-            config.report_md_dest = self.report_md_dest.copy()
-        if self.saw_report_html:
-            config.report_html_dest = self.report_html_dest.copy()
-        if self.saw_report_style:
-            config.report_style = self.report_style
+        var state = True
+        var sources = ConfigProvenance.defaults()
+        self.apply(config, state, sources)
         return config^

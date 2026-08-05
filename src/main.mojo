@@ -36,7 +36,7 @@ cwd, getenv, file operations, and exit are ordinary program-level operations
 via `std`.
 """
 from std.os import getenv, listdir, remove, rmdir
-from std.os.path import basename, dirname, exists, isdir
+from std.os.path import basename, dirname, exists
 from std.pathlib import cwd
 from std.sys import argv, exit
 
@@ -53,6 +53,11 @@ from mtest.cli import (
     run_new,
     version_text,
 )
+from mtest.cli.destinations import (
+    active_destinations,
+    destination_collision,
+    destination_parent_error,
+)
 from mtest.exec import (
     ExecRuntime,
     interrupt_requested,
@@ -64,7 +69,6 @@ from mtest.config import (
     ConfigEnvironment,
     FileConfig,
     LastRunState,
-    Provenance,
     ReportStyle,
     ResolvedConfig,
     RunnerConfig,
@@ -78,6 +82,7 @@ from mtest.config import (
     parse_last_run_state,
     render_config_show,
     resolve_config,
+    safe_path_label,
     validate_resolved_config,
 )
 from mtest.model import (
@@ -93,10 +98,7 @@ from mtest.platform import (
     close_checked_fd,
     create_unique_temp,
     apply_permissions,
-    case_folded_identity,
     default_file_mode,
-    destination_identity,
-    directory_ignores_case,
     direct_write_failed,
     exec_replace,
     ignore_broken_pipe,
@@ -300,359 +302,6 @@ def _config_file_representation(root: String, absolute: String) -> String:
     return absolute
 
 
-def _safe_path_label(path: String) -> String:
-    var escaped = String("")
-    comptime HEX = "0123456789abcdef"
-    for cp in path.codepoints():
-        var value = Int(cp)
-        if value == 10:
-            escaped += "\\n"
-        elif value == 13:
-            escaped += "\\r"
-        elif value == 9:
-            escaped += "\\t"
-        elif value >= 0 and value < 32:
-            escaped += "\\x"
-            escaped += String(HEX[byte=value // 16])
-            escaped += String(HEX[byte=value % 16])
-        else:
-            escaped += String(cp)
-    if escaped.count_codepoints() <= 240:
-        return escaped
-    var shortened = String("")
-    var count = 0
-    for cp in escaped.codepoint_slices():
-        if count == 237:
-            break
-        shortened += String(cp)
-        count += 1
-    return shortened + "..."
-
-
-def _origin_label(
-    resolved: ResolvedConfig, source: Provenance, table: String, key: String
-) -> String:
-    """Name a resolved value the way its own layer spells it.
-
-    A diagnostic that says `cli: '--json'` for a value the project file set
-    names a remedy the reader cannot apply: there is no such flag on their
-    command line. Key off the provenance the resolver already tracked.
-
-    Args:
-        resolved: The layered configuration carrying provenance and the file.
-        source: The winning layer for this key.
-        table: The `mtest.toml` table holding the key.
-        key: The `mtest.toml` spelling of the key.
-
-    Returns:
-        A complete diagnostic prefix ending in the offending value's name.
-    """
-    var origin = resolved.config_file
-    if origin == "":
-        origin = String("mtest.toml")
-    if source == Provenance.MTEST_TOML:
-        return "config: " + origin + ": [" + table + "] " + key
-    return "cli: '--" + key + "'"
-
-
-def _resolved_destination_error(
-    resolved: ResolvedConfig,
-) -> Optional[String]:
-    """Refuse an active destination whose parent directory does not exist.
-
-    Every active file destination is checked, not only the ones a flag can
-    spell. `--report FORMAT:PATH` is validated as the parser reads it, so a
-    command-line value with a missing parent never reaches here — but a
-    `[report]` destination that came from the project file has no parser of its
-    own, and without a branch here it would sail past resolved validation into
-    the session's temp creation and surface as an internal error, exit 3, where
-    §15.5 and §24.4 both promise a pre-run usage error, exit 4. Its two sibling
-    keys in the same table already give 4, so the gap was also an inconsistency
-    between two halves of one feature.
-
-    Args:
-        resolved: The layered configuration, after the command projection was
-            applied. Not mutated.
-
-    Returns:
-        A complete usage diagnostic naming the offending value the way its own
-        layer spells it, or none when every active destination can be created.
-    """
-    if (
-        resolved.active_keys.json_dest
-        and resolved.config.json_dest != ""
-        and resolved.config.json_dest != "-"
-    ):
-        var parent = String(dirname(resolved.config.json_dest))
-        if parent != "" and not isdir(parent):
-            return Optional[String](
-                _origin_label(
-                    resolved, resolved.provenance.json_dest, "report", "json"
-                )
-                + " destination parent directory does not exist: '"
-                + _safe_path_label(parent)
-                + "' (see mtest --help)"
-            )
-    if resolved.active_keys.junit_dest and resolved.config.junit_dest != "":
-        var parent = String(dirname(resolved.config.junit_dest))
-        if parent != "" and not isdir(parent):
-            return Optional[String](
-                _origin_label(
-                    resolved,
-                    resolved.provenance.junit_dest,
-                    "report",
-                    "junit-xml",
-                )
-                + " destination parent directory does not exist: '"
-                + _safe_path_label(parent)
-                + "' (see mtest --help)"
-            )
-    if (
-        resolved.active_keys.report_md_dest
-        and resolved.config.report_md_dest != ""
-    ):
-        var parent = String(dirname(resolved.config.report_md_dest))
-        if parent != "" and not isdir(parent):
-            return Optional[String](
-                _report_origin_label(
-                    resolved, resolved.provenance.report_md_dest, "md"
-                )
-                + " destination parent directory does not exist: '"
-                + _safe_path_label(parent)
-                + "' (see mtest --help)"
-            )
-    if (
-        resolved.active_keys.report_html_dest
-        and resolved.config.report_html_dest != ""
-    ):
-        var parent = String(dirname(resolved.config.report_html_dest))
-        if parent != "" and not isdir(parent):
-            return Optional[String](
-                _report_origin_label(
-                    resolved, resolved.provenance.report_html_dest, "html"
-                )
-                + " destination parent directory does not exist: '"
-                + _safe_path_label(parent)
-                + "' (see mtest --help)"
-            )
-    return Optional[String](None)
-
-
-@fieldwise_init
-struct _Destination(Copyable, Movable):
-    """One active file destination, ready to be compared against its siblings.
-    """
-
-    var label: String
-    """The destination named the way its own layer spells it."""
-    var key: String
-    """The `destination_identity` key two spellings of one file share."""
-    var alias_key: String
-    """The folded key a case-ignoring volume ALSO makes two spellings share.
-
-    Empty when this destination's own directory distinguishes case, which is
-    what keeps `Run.out` and `run.out` the two different files they are on
-    Linux while catching them as one on APFS. Compared only against another
-    non-empty `alias_key`, never against `key`.
-    """
-
-
-@fieldwise_init
-struct _CaseVerdicts(Movable):
-    """One case-sensitivity answer per resolved directory, asked once each.
-
-    The probe creates and unlinks a file, so asking it once per DESTINATION
-    would touch a caller's output directory up to four times to learn one thing
-    about it. Two destinations resolving into one directory also have to be
-    given the same answer, which a cache makes structural rather than
-    incidental.
-    """
-
-    var parents: List[String]
-    """The resolved parent directories already probed, in arrival order."""
-    var ignores_case: List[Bool]
-    """Parallel to `parents`: what the probe answered for each."""
-
-    @staticmethod
-    def empty() -> Self:
-        """A cache that has probed nothing yet."""
-        return Self(List[String](), List[Bool]())
-
-    def ask(mut self, parent: String) -> Bool:
-        """The verdict for `parent`, probing the filesystem at most once."""
-        for i in range(len(self.parents)):
-            if self.parents[i] == parent:
-                return self.ignores_case[i]
-        var verdict = directory_ignores_case(parent)
-        self.parents.append(parent)
-        self.ignores_case.append(verdict)
-        return verdict
-
-
-def _active_destinations(resolved: ResolvedConfig) -> List[_Destination]:
-    """Every active destination this run will open, keyed for comparison.
-
-    `--json -` is deliberately absent: it names the inherited stdout stream,
-    which has no filesystem identity to collide with. Every other configured
-    destination is a real path that will be created or renamed onto, so two of
-    them naming one file is a request the runner cannot honor.
-
-    Every folded key starts empty. Filling one asks the filesystem a question,
-    which `_destination_collision_error` only does when there are at least two
-    destinations for the answer to decide anything between.
-
-    Args:
-        resolved: The layered configuration, after the command projection was
-            applied. Not mutated.
-
-    Returns:
-        A freshly allocated list in a fixed order, so the diagnostic for one
-        collision is the same whichever run produced it.
-    """
-    var destinations = List[_Destination]()
-    if (
-        resolved.active_keys.json_dest
-        and resolved.config.json_dest != ""
-        and resolved.config.json_dest != "-"
-    ):
-        destinations.append(
-            _Destination(
-                _origin_label(
-                    resolved, resolved.provenance.json_dest, "report", "json"
-                ),
-                destination_identity(resolved.config.json_dest),
-                "",
-            )
-        )
-    if resolved.active_keys.junit_dest and resolved.config.junit_dest != "":
-        destinations.append(
-            _Destination(
-                _origin_label(
-                    resolved,
-                    resolved.provenance.junit_dest,
-                    "report",
-                    "junit-xml",
-                ),
-                destination_identity(resolved.config.junit_dest),
-                "",
-            )
-        )
-    if (
-        resolved.active_keys.report_md_dest
-        and resolved.config.report_md_dest != ""
-    ):
-        destinations.append(
-            _Destination(
-                _report_origin_label(
-                    resolved, resolved.provenance.report_md_dest, "md"
-                ),
-                destination_identity(resolved.config.report_md_dest),
-                "",
-            )
-        )
-    if (
-        resolved.active_keys.report_html_dest
-        and resolved.config.report_html_dest != ""
-    ):
-        destinations.append(
-            _Destination(
-                _report_origin_label(
-                    resolved, resolved.provenance.report_html_dest, "html"
-                ),
-                destination_identity(resolved.config.report_html_dest),
-                "",
-            )
-        )
-    return destinations^
-
-
-def _report_origin_label(
-    resolved: ResolvedConfig, source: Provenance, format: String
-) -> String:
-    """Name a resolved run-report destination the way its own layer spells it.
-
-    `_origin_label` cannot serve here: the CLI spelling of `[report] md` is
-    `--report md:`, not `--md`.
-
-    Args:
-        resolved: The layered configuration carrying provenance and the file.
-        source: The winning layer for this destination.
-        format: The `md` or `html` half, which is both the file key and part of
-            the flag spelling.
-
-    Returns:
-        A complete diagnostic prefix ending in the offending value's name.
-    """
-    if source == Provenance.MTEST_TOML:
-        var origin = resolved.config_file
-        if origin == "":
-            origin = String("mtest.toml")
-        return "config: " + origin + ": [report] " + format
-    return "cli: '--report " + format + ":'"
-
-
-def _destination_collision_error(
-    resolved: ResolvedConfig,
-) -> Optional[String]:
-    """Refuse two active destinations that name one file.
-
-    Two reporters writing one path is not a composition: each one truncates or
-    renames over the other's work, and which of them survives depends on
-    finalization order rather than on anything the caller asked for. The
-    comparison is by resolved identity rather than by spelling, so `out.md` and
-    `./out.md` are caught as the one file they are.
-
-    Identity alone is not enough where the volume ignores case. `Run.out` and
-    `run.out` are two files on Linux and one file on APFS — the default on a
-    supported platform — so a spelling-only comparison would let that pair
-    through, publish both documents onto one inode, and exit 0 with one
-    requested artifact missing. Where a destination's own directory was
-    observed to fold case, its folded key is compared too; where it was not,
-    the folded key is empty and nothing extra can match.
-
-    Run-path only. `config show` resolves without touching the filesystem and
-    renders a collision with both provenances instead (§27.1), so the two
-    commands are deliberately different here.
-
-    Args:
-        resolved: The layered configuration, after the command projection was
-            applied. Not mutated.
-
-    Returns:
-        A complete usage diagnostic naming both offending values, or none.
-    """
-    var destinations = _active_destinations(resolved)
-    if len(destinations) < 2:
-        return Optional[String](None)
-    # Asked here rather than while the list is built: one destination can
-    # collide with nothing, so a run with a single `--junit-xml` never touches
-    # its output directory to learn something it cannot use.
-    var verdicts = _CaseVerdicts.empty()
-    for i in range(len(destinations)):
-        if verdicts.ask(String(dirname(destinations[i].key))):
-            destinations[i].alias_key = case_folded_identity(
-                destinations[i].key
-            )
-    for i in range(len(destinations)):
-        for j in range(i + 1, len(destinations)):
-            var same_key = destinations[i].key == destinations[j].key
-            var same_folded = (
-                destinations[i].alias_key != ""
-                and destinations[i].alias_key == destinations[j].alias_key
-            )
-            if same_key or same_folded:
-                return Optional[String](
-                    destinations[i].label
-                    + " and "
-                    + destinations[j].label
-                    + " name the same destination '"
-                    + _safe_path_label(destinations[j].key)
-                    + "'; each report needs its own path"
-                    + " (see mtest --help)"
-                )
-    return Optional[String](None)
-
-
 def _report_temp_template(destination: String) -> String:
     """The `mkstemp` template for one report destination's unique temp.
 
@@ -716,7 +365,7 @@ def _relax_report_temp_mode(temp_path: String, destination: String):
         return
     _eprintln(
         "mtest: report: could not give '"
-        + _safe_path_label(destination)
+        + safe_path_label(destination)
         + "' the mode an ordinary new file would have here; it is published"
         + " with the mode this filesystem allowed"
     )
@@ -767,7 +416,7 @@ def _load_config(
     var requested = explicit_path if explicit else "mtest.toml"
     var absolute = _absolute_from_root(root, requested)
     var representation = _config_file_representation(root, absolute)
-    var diagnostic_representation = _safe_path_label(representation)
+    var diagnostic_representation = safe_path_label(representation)
     var selected_exists = exists(absolute)
     if not selected_exists:
         if explicit:
@@ -1230,15 +879,16 @@ def main():
         var state_present = exists(_state_path(root))
         _exit_with_output(render_config_show(resolved, state_present), 1, 0)
 
-    var destination_error = _resolved_destination_error(resolved)
+    var destinations = active_destinations(resolved)
+    var destination_error = destination_parent_error(destinations)
     if destination_error:
         _eprintln(destination_error.value())
         exit(EXIT_USAGE_ERROR)
     # After the parent-directory check, and only on the run path: this is the
-    # command that will actually open every one of these destinations, and
-    # `destination_identity` resolves a parent the check above just proved
-    # exists.
-    var collision_error = _destination_collision_error(resolved)
+    # command that will actually open every one of these destinations, and a
+    # comparison key is meaningful only for a destination whose parent the
+    # check above just proved exists.
+    var collision_error = destination_collision(destinations)
     if collision_error:
         _eprintln(collision_error.value())
         exit(EXIT_USAGE_ERROR)

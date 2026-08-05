@@ -6,10 +6,11 @@ or reporter code. Filesystem probes are removed unless the filesystem itself
 refuses cleanup, which is reported as a failed check.
 """
 from std.os import getenv, makedirs, remove, rmdir
-from std.os.path import dirname, exists, isdir
+from std.os.path import exists, isdir
 from std.pathlib import cwd
 from std.sys.info import CompilationTarget, is_triple
 
+from mtest.cli.destinations import active_destinations
 from mtest.cli.parse_result import ParseResult
 from mtest.config import (
     CliOverlay,
@@ -19,10 +20,12 @@ from mtest.config import (
     ResolvedConfig,
     RunnerConfig,
     TOML_SOURCE_MAX_BYTES,
+    cli_only_resolution_defaults,
     lossy_utf8,
     parse_last_run_state,
     parse_toml,
     resolve_config,
+    safe_path_label,
     validate_resolved_config,
 )
 from mtest.exec import (
@@ -86,7 +89,7 @@ struct _DoctorContext(Movable):
         self.config_loaded = False
         self.config_load = _ConfigLoad(FileConfig.empty(), "", "")
         self.resolved = resolve_config(
-            _resolution_defaults(request.config),
+            cli_only_resolution_defaults(request.config),
             FileConfig.empty(),
             _environment(),
             request.overlay,
@@ -251,19 +254,6 @@ def _relative_to_root(root: String, absolute: String) -> String:
     return absolute
 
 
-def _resolution_defaults(parsed: RunnerConfig) -> RunnerConfig:
-    var defaults = RunnerConfig.default()
-    defaults.exitfirst = parsed.exitfirst
-    defaults.keyword = parsed.keyword.copy()
-    defaults.collect = parsed.collect
-    defaults.last_failed = parsed.last_failed
-    defaults.failed_first = parsed.failed_first
-    defaults.shard_mode = parsed.shard_mode
-    defaults.shard_m = parsed.shard_m
-    defaults.shard_n = parsed.shard_n
-    return defaults^
-
-
 def _environment() -> ConfigEnvironment:
     return ConfigEnvironment(
         mtest_mojo=getenv("MTEST_MOJO", ""),
@@ -341,7 +331,7 @@ def _ensure_config(mut context: _DoctorContext):
         context.root, context.root_ok, context.request
     )
     context.resolved = resolve_config(
-        _resolution_defaults(context.request.config),
+        cli_only_resolution_defaults(context.request.config),
         context.config_load.file,
         _environment(),
         context.request.overlay,
@@ -606,6 +596,12 @@ def _check_state(mut context: _DoctorContext) raises -> String:
 def _check_report_destinations(
     mut context: _DoctorContext,
 ) raises -> String:
+    """Probe the parent directory of every destination this config would open.
+
+    The destination set is the run path's own, so a project file the runner
+    would refuse cannot pass here: doctor and the run agree on which keys are
+    active and which values name a real file.
+    """
     _ensure_config(context)
     if context.config_load.error != "":
         return _line(
@@ -613,10 +609,9 @@ def _check_report_destinations(
             "report-destinations",
             "dependency config unavailable",
         )
-    var checked = 0
-    var json_dest = context.resolved.config.json_dest.copy()
-    if json_dest != "" and json_dest != "-":
-        var parent = String(dirname(json_dest))
+    var destinations = active_destinations(context.resolved)
+    for i in range(len(destinations)):
+        var parent = destinations[i].parent
         if not context.root_ok and not parent.startswith("/"):
             return _line(
                 "FAIL", "report-destinations", "dependency root unavailable"
@@ -628,32 +623,18 @@ def _check_report_destinations(
             return _line(
                 "FAIL",
                 "report-destinations",
-                "JSON parent does not exist: '" + parent + "'",
+                destinations[i].format
+                + " parent does not exist: '"
+                + safe_path_label(parent)
+                + "'",
             )
-        _probe_directory(absolute, "mtest-doctor-json")
-        checked += 1
-    var junit_dest = context.resolved.config.junit_dest.copy()
-    if junit_dest != "":
-        var parent = String(dirname(junit_dest))
-        if not context.root_ok and not parent.startswith("/"):
-            return _line(
-                "FAIL", "report-destinations", "dependency root unavailable"
-            )
-        var absolute = context.root if parent == "" else _absolute_from_root(
-            context.root, parent
-        )
-        if not isdir(absolute):
-            return _line(
-                "FAIL",
-                "report-destinations",
-                "JUnit parent does not exist: '" + parent + "'",
-            )
-        _probe_directory(absolute, "mtest-doctor-junit")
-        checked += 1
-    if checked == 0:
+        _probe_directory(absolute, "mtest-doctor-" + destinations[i].format)
+    if len(destinations) == 0:
         return _line("PASS", "report-destinations", "none")
     return _line(
-        "PASS", "report-destinations", String(checked) + " parent(s) usable"
+        "PASS",
+        "report-destinations",
+        String(len(destinations)) + " parent(s) usable",
     )
 
 
