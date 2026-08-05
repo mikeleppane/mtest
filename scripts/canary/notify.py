@@ -81,10 +81,15 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
 
-# The workflow uploads one artifact per lane under this name, and the download
-# step unpacks each into a directory of the same name. The two spellings are
-# pinned together: `scripts/checks/workflow_security.py` holds the workflow
-# side, and the tests hold this one.
+# The workflow uploads one artifact per lane under this name, and one download
+# step per lane unpacks it into a directory of the same name. Per lane rather
+# than all at once because `actions/download-artifact` creates that directory
+# only while two or more artifacts matched: a run that produced exactly one
+# would have it extracted into the download root instead, where nothing below
+# looks, and the lane that did report would be indistinguishable from a lane
+# that never ran. The two spellings are pinned together:
+# `scripts/checks/workflow_security.py` holds the workflow side, and the tests
+# hold this one.
 ARTIFACT_PREFIX = "canary-result-"
 RESULT_FILENAME = "result.json"
 

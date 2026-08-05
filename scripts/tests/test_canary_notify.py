@@ -188,7 +188,15 @@ class IssueIdentityTests(NotifyTestCase):
         self.assertEqual(set(QUIET_CLASSIFICATIONS) & set(LOUD_CLASSIFICATIONS), set())
 
     def test_the_artifact_layout_matches_the_workflow(self) -> None:
-        """The upload name and this reader are two halves of one contract."""
+        """The upload name and this reader are two halves of one contract.
+
+        The download side is asserted per lane rather than once, because
+        `actions/download-artifact` only creates a directory per artifact while
+        two or more matched. Downloaded in one step, a run that produced a sole
+        artifact — a single-lane dispatch, or a scheduled run where one lane's
+        upload never happened — would extract it into the root instead, and
+        every lane below would read as silent.
+        """
         self.assertEqual(
             result_path(Path("build/canary-results"), STABLE),
             Path("build/canary-results/canary-result-stable/result.json"),
@@ -197,7 +205,39 @@ class IssueIdentityTests(NotifyTestCase):
             REPO_ROOT / ".github" / "workflows" / "compat-canary.yml"
         ).read_text(encoding="utf-8")
         self.assertIn(f"name: {ARTIFACT_PREFIX}" + "${{ matrix.lane }}", workflow)
-        self.assertIn("path: build/canary-results/", workflow)
+        for lane in LANES:
+            self.assertIn(f"pattern: {ARTIFACT_PREFIX}{lane}\n", workflow)
+            self.assertIn(
+                f"path: build/canary-results/{ARTIFACT_PREFIX}{lane}/\n", workflow
+            )
+        self.assertNotIn("path: build/canary-results/\n", workflow)
+
+    def test_a_result_at_the_download_root_is_not_a_lane_report(self) -> None:
+        """The layout the flattened download would produce must not be readable.
+
+        This is the shape a sole downloaded artifact lands in when the workflow
+        asks for every artifact in one step. Reading it as the lane's answer
+        would be worse than reporting silence: the file names one lane and the
+        run may have expected two, so a `PASS` extracted flat would close an
+        issue on behalf of a lane that never reported at all.
+        """
+        (self.results / "result.json").write_text(
+            json.dumps(
+                {
+                    "lane": STABLE,
+                    "version": CANDIDATE_VERSION,
+                    "commit": CANDIDATE_COMMIT,
+                    "classification": GREEN,
+                    "detail": "every gate held",
+                }
+            ),
+            encoding="utf-8",
+        )
+        gh = FakeGh([_issue(12, STABLE, "OPEN")])
+        code, log = self.notify(gh, lanes=STABLE)
+        self.assertEqual(code, 1)
+        self.assertIn("no readable result", log)
+        self.assertNotIn("close", gh.subcommands())
 
     def test_an_exact_title_wins_over_a_fuzzy_search_hit(self) -> None:
         """GitHub's search is fuzzy; the identity here is not."""

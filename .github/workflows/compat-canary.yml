@@ -113,10 +113,27 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Download every lane's classification
+      # One step per lane, each with its own destination. Asked for every
+      # artifact at once, this action puts each one in a directory named after
+      # it only while two or more matched; a run that produced exactly one -- a
+      # single-lane dispatch, or a scheduled run where one lane's upload never
+      # happened -- has it extracted straight into `path:` instead, where the
+      # notifier does not look, and every lane is then reported as silent. A
+      # pattern that matches nothing downloads nothing and succeeds, which is
+      # what makes the lane the dispatch did not ask for a non-event.
+      - name: Download the stable lane's classification
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          path: build/canary-results/
+          pattern: canary-result-stable
+          path: build/canary-results/canary-result-stable/
+          merge-multiple: true
+
+      - name: Download the nightly lane's classification
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: canary-result-nightly
+          path: build/canary-results/canary-result-nightly/
+          merge-multiple: true
 
       - name: Upsert the pinned issues
         env:

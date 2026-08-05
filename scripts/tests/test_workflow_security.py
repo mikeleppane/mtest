@@ -1438,12 +1438,55 @@ class CompatCanaryWorkflowTests(unittest.TestCase):
             "upload-path": workflow.replace(
                 "          path: build/canary/", "          path: .", 1
             ),
-            "download-path": workflow.replace(
-                "          path: build/canary-results/", "          path: build/", 1
-            ),
         }.items():
             with self.subTest(artifact=label):
                 self._reject(mutated, "artifact")
+
+    def test_each_lane_is_downloaded_into_its_own_directory(self) -> None:
+        """The layout defect a two-lane run hides.
+
+        `actions/download-artifact` names a directory per artifact only while
+        two or more matched; a sole match is extracted straight into `path:`.
+        Collapsed back to one step, a single-lane dispatch — or a scheduled run
+        where one lane's upload never happened — puts `result.json` at the
+        download root, where `scripts/canary/notify.py` does not look, and
+        every lane is reported as silent while the probe was working fine.
+        """
+        workflow = self._workflow()
+        lane_steps = "".join(
+            f"      - name: Download the {lane} lane's classification\n"
+            "        uses: actions/download-artifact@"
+            f"{workflow_security.DOWNLOAD_ARTIFACT_ACTION_SHA} # v8.0.1\n"
+            "        with:\n"
+            f"          pattern: canary-result-{lane}\n"
+            f"          path: build/canary-results/canary-result-{lane}/\n"
+            "          merge-multiple: true\n"
+            "\n"
+            for lane in ("stable", "nightly")
+        )
+        self.assertIn(lane_steps, workflow)
+        collapsed = (
+            "      - name: Download the stable lane's classification\n"
+            "        uses: actions/download-artifact@"
+            f"{workflow_security.DOWNLOAD_ARTIFACT_ACTION_SHA} # v8.0.1\n"
+            "        with:\n"
+            "          path: build/canary-results/\n"
+            "\n"
+        )
+        for label, mutated in {
+            "collapsed": workflow.replace(lane_steps, collapsed, 1),
+            "shared-destination": workflow.replace(
+                "          path: build/canary-results/canary-result-nightly/",
+                "          path: build/canary-results/",
+                1,
+            ),
+            "unfiltered": workflow.replace(
+                "          pattern: canary-result-stable\n", "", 1
+            ),
+            "no-merge": workflow.replace("          merge-multiple: true\n", "", 1),
+        }.items():
+            with self.subTest(download=label):
+                self._reject(mutated, "download layout mismatch|step sequence")
 
     def test_the_notifier_may_not_run_downloaded_content(self) -> None:
         """The negative space: the privileged job runs one reviewed command.

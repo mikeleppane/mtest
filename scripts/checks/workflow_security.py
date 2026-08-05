@@ -90,6 +90,23 @@ future runner image and shell release, and losing it is silent; an exact key
 set fails closed on a name nobody here has read, whatever it turns out to do.
 """
 
+CANARY_LANES = ("stable", "nightly")
+"""The lanes the compatibility canary probes, in the order the workflow lists.
+
+Restated here rather than imported from `scripts.canary.toolchain`: this module
+is the workflow's side of that contract, and an oracle that derived its
+expectation from the code it governs would agree with any lane set the code
+happened to grow.
+"""
+
+CANARY_ARTIFACT_PREFIX = "canary-result-"
+CANARY_RESULTS_ROOT = "build/canary-results/"
+"""Where one lane's uploaded classification is named, and where it lands.
+
+`scripts/canary/notify.py` reads `<root>/<prefix><lane>/result.json`, and the
+download that puts it there is pinned per lane below.
+"""
+
 CREDENTIAL_REFERENCE_RE = re.compile(
     r"\bsecrets\s*(?:\.|\[)|\bgithub\s*(?:\.\s*token\b|\[\s*['\"]token['\"]\s*\])"
 )
@@ -250,6 +267,59 @@ def _action_step_inputs(text: str, action: str) -> list[tuple[int, dict[str, str
             if match is not None:
                 inputs[match.group(1)] = match.group(2)
         steps.append((index + 1, inputs))
+    return steps
+
+
+def _action_step_with_entries(text: str, action: str) -> list[tuple[str, ...]]:
+    """Return each use of one action's `with:` body, line by line, in order.
+
+    `_action_step_inputs` reads a step's inputs into a mapping and silently
+    drops any line it cannot read as `KEY: <one token>` — which is every value
+    carrying a space, including every `${{ }}` expression. That is safe for a
+    caller asking whether one named input has one named value, and unsafe for a
+    caller pinning the whole input map, because the input most worth seeing is
+    the one most likely to be dropped. This returns the lines instead, so an
+    input nobody here has read cannot pass by being unparseable.
+
+    Args:
+        text: The workflow or action text to scan.
+        action: The action whose uses to collect, without the `@revision`.
+
+    Returns:
+        One tuple per use of the action, in document order, holding that step's
+        `with:` entries stripped and in the order written. A step with no
+        `with:` block yields an empty tuple.
+    """
+    lines = text.splitlines()
+    marker = f"uses: {action}@"
+    steps: list[tuple[str, ...]] = []
+    for index, line in enumerate(lines):
+        if marker not in line:
+            continue
+        step_indent = len(line) - len(line.lstrip(" ")) - 2
+        end = len(lines)
+        for candidate_index in range(index + 1, len(lines)):
+            candidate = lines[candidate_index]
+            stripped = candidate.lstrip(" ")
+            if not stripped or stripped.startswith("#"):
+                continue
+            if len(candidate) - len(stripped) <= step_indent:
+                end = candidate_index
+                break
+        body = lines[index + 1 : end]
+        entries: list[str] = []
+        for offset, candidate in enumerate(body):
+            if candidate.strip() != "with:":
+                continue
+            header_indent = len(candidate) - len(candidate.lstrip(" "))
+            for following in body[offset + 1 :]:
+                stripped = following.lstrip(" ")
+                if not stripped or stripped.startswith("#"):
+                    continue
+                if len(following) - len(stripped) <= header_indent:
+                    break
+                entries.append(stripped)
+        steps.append(tuple(entries))
     return steps
 
 
@@ -704,7 +774,8 @@ def check_compat_canary_workflow(repo_root: Path = REPO_ROOT) -> None:
         ],
         "notify": [
             "Check out sources",
-            "Download every lane's classification",
+            "Download the stable lane's classification",
+            "Download the nightly lane's classification",
             "Upsert the pinned issues",
         ],
     }
@@ -727,6 +798,10 @@ def check_compat_canary_workflow(repo_root: Path = REPO_ROOT) -> None:
         ],
         "notify": [
             f"        uses: actions/checkout@{CHECKOUT_ACTION_SHA} # v7.0.1",
+            (
+                "        uses: actions/download-artifact@"
+                f"{DOWNLOAD_ARTIFACT_ACTION_SHA} # v8.0.1"
+            ),
             (
                 "        uses: actions/download-artifact@"
                 f"{DOWNLOAD_ARTIFACT_ACTION_SHA} # v8.0.1"
@@ -830,12 +905,29 @@ def check_compat_canary_workflow(repo_root: Path = REPO_ROOT) -> None:
     if (
         "          name: canary-result-${{ matrix.lane }}" not in probe
         or "          path: build/canary/" not in probe
-        or "          path: build/canary-results/" not in notify
     ):
         raise AssertionError(
             "compat canary artifact mismatch: one artifact per lane, named for "
-            "its lane, holding the directory the probe writes, downloaded where "
-            "the notifier looks for it"
+            "its lane, holding the directory the probe writes"
+        )
+    downloads = _action_step_with_entries(notify, "actions/download-artifact")
+    expected_downloads = [
+        (
+            f"pattern: {CANARY_ARTIFACT_PREFIX}{lane}",
+            f"path: {CANARY_RESULTS_ROOT}{CANARY_ARTIFACT_PREFIX}{lane}/",
+            "merge-multiple: true",
+        )
+        for lane in CANARY_LANES
+    ]
+    if downloads != expected_downloads:
+        raise AssertionError(
+            "compat canary download layout mismatch: `actions/download-artifact` "
+            "creates a directory per artifact only while two or more matched, "
+            "and extracts a sole match straight into `path:` — so a run that "
+            "produced one artifact would land it where the notifier does not "
+            "look and every lane would be reported silent. One step per lane, "
+            f"each with its own destination, expected={expected_downloads}, "
+            f"actual={downloads}"
         )
     if (
         workflow.count("${{ github.token }}") != 1
