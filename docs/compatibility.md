@@ -35,7 +35,11 @@ result is evidence about the other, and a lane that fails does not stop the
 other from reporting.
 
 - **`stable`** considers only the channels the workspace itself resolves
-  against. It answers whether the next stable Mojo release is safe to move to.
+  against. It answers whether the gates listed in the next section still hold on
+  the next stable Mojo release — not whether that release is safe to move to.
+  The canary runs neither memory lane, no assertions companion, no cache or
+  build-stamp gate, and nothing natively on macOS, so a green stable lane is a
+  subset of the evidence a re-pin needs rather than the whole of it.
 - **`nightly`** additionally considers Modular's nightly channel, so it sees
   prereleases. This is where a candidate normally appears first, well before the
   stable lane has anything to say about it.
@@ -48,7 +52,7 @@ here.
 
 A probe relaxes the toolchain pin in a throwaway checkout, installs whatever the
 channels publish beyond it, and then runs these gates against the candidate in
-this order, stopping at the first that fails.
+this order, stopping at the first that condemns it.
 
 1. **Build.** The runnable binary links.
 2. **Tests.** The classified suite — unit and integration modules together —
@@ -57,7 +61,16 @@ this order, stopping at the first that fails.
    handling are exercised, and those are exactly the behaviours a compiler
    change moves without touching a line of this repository's source.
 3. **Command-line contract.** The strict contract checks execute against the
-   candidate build.
+   candidate build, and their roll-call is read rather than merely waited on.
+   **Three named checks fail on every candidate and are tolerated**, because
+   `mtest doctor` compiles the pinned toolchain identity in and refuses any
+   other compiler — correct product behaviour, and the reason the tolerance has
+   to exist at all. It is drawn as narrowly as the gate's own reporting allows:
+   the failing set must be exactly those three, check name and reported detail
+   both. One extra failure condemns the candidate, so does a skip, so does a
+   roll-call that does not account for the count printed above it — and so does
+   a run in which those three checks *passed*, because a candidate the identity
+   guard has stopped refusing is itself the finding.
 4. **Protocol transcripts.** The `TestSuite` report snapshots are regenerated
    into a temporary directory and compared with the committed baseline. Exactly
    one difference is tolerated — the toolchain identity stamped into each
@@ -68,11 +81,12 @@ this order, stopping at the first that fails.
    `arm64-apple-macosx` as far as assembly, which catches a Darwin-only break
    from a Linux runner without a Mac.
 6. **End-to-end suite.** The committed known-outcome tree is driven through the
-   built binary. Failures are tolerated in exactly one place: the scenarios that
-   assert which toolchain `mtest doctor` reports, which genuinely fail once the
-   toolchain moves. Any other failing scenario condemns the candidate, as does a
-   failure that named no scenario at all, and as does a `doctor` scenario
-   failing when the toolchain did *not* move.
+   built binary. Failures are tolerated here on the same terms as in the
+   contract gate, and for the same reason: the scenarios that assert which
+   toolchain `mtest doctor` reports genuinely fail once the toolchain moves.
+   Those two named scenarios are the whole tolerance. Any other failing scenario
+   condemns the candidate, as does a failure that named no scenario at all, and
+   as does a `doctor` scenario failing when the toolchain did *not* move.
 7. **Packaging.** *Stable lane only.* The conda recipe's three compiler pins are
    retargeted at the candidate, the package is built, and it is installed into a
    scratch environment and run, with the candidate's version asserted as the
@@ -87,7 +101,7 @@ stable lane alone.
 
 ## What a result means
 
-Every probe ends in exactly one of seven classifications.
+Every probe ends in exactly one of eight classifications.
 
 | Classification | What it says |
 |----------------|--------------|
@@ -97,21 +111,29 @@ Every probe ends in exactly one of seven classifications.
 | `SOURCE_INCOMPATIBLE` | The repository as committed does not solve, compile, test, or behave on the candidate. |
 | `PACKAGE_FAILED` | The sources are fine; the package built against the candidate is not. |
 | `STAGE_TIMEOUT` | A probe stage outlived its 45-minute budget and was killed, so the day's question was never answered. |
-| `INFRA_FAILURE` | The probe never obtained a toolchain to ask about. |
+| `CANARY_BROKEN` | The probe can no longer read or trust the answers it works from, so it has stopped probing. |
+| `INFRA_FAILURE` | A command the probe needed never ran to completion, so it never obtained a toolchain to ask about. |
 
 ### `PASS`
 
-Every gate that lane runs held on the candidate, and the result names the exact
-version and build commit it held on. Read it as one day's evidence about one
-toolchain on one lane, and read the previous section for which gates that lane
-actually ran: a nightly `PASS` says nothing about packaging or macOS, because
-the nightly lane never asks.
+Every gate that lane runs held on the candidate, **including the three
+`contract-check-strict` failures every candidate produces**, which are tolerated
+by name and reported in the result's detail. A `PASS` is therefore not a promise
+that the strict contract gate was clean: re-pinning to this toolchain means
+re-recording what `mtest doctor` reports, and until that happens the gate fails
+in CI exactly as it failed here.
+
+The result names the exact version and build commit it held on. Read it as one
+day's evidence about one toolchain on one lane, and read the previous section
+for which gates that lane actually ran: a nightly `PASS` says nothing about
+packaging or macOS, because the nightly lane never asks, and neither lane's
+`PASS` says anything about the memory, assertions, cache, build-stamp or native
+macOS lanes, which the canary does not run at all.
 
 ### `NO_NEWER_CANDIDATE`
 
-Nothing newer than the pin matched on that lane's channels, or the solve for a
-newer one still landed on the pinned toolchain. Either way no gate ran, because
-there was no candidate to run one against.
+Nothing newer than the pin matched on that lane's channels, so no gate ran,
+because there was no candidate to run one against.
 
 This is a correct result, not a fault. The stable lane reports it on every run
 for as long as the pinned toolchain is also the newest one published on the
@@ -124,7 +146,13 @@ the one that normally has a candidate to exercise.
 ### `PROTOCOL_DRIFT`
 
 The regenerated transcripts differ from the committed baseline in something
-other than the toolchain identity, or the generator could not complete at all.
+other than the toolchain identity, or the generator failed its own structural
+pins — the set of names it emits, and two generations agreeing byte for byte —
+which are protocol assertions in their own right even though nothing was
+compared. A generator that died for any other reason is not this: killed, it is
+`STAGE_TIMEOUT`; otherwise it is `SOURCE_INCOMPATIBLE`, because a compiler that
+rejects the syntax in a protocol fixture is the candidate refusing the sources
+rather than the report format moving.
 
 This is the finding that reaches a user most directly. mtest parses the report
 `TestSuite` prints and refuses a report it does not fully understand rather than
@@ -136,15 +164,22 @@ means re-capturing the snapshots and reading what changed first.
 
 The candidate could not build the sources, could not run the suite, failed the
 strict contract checks, failed the macOS cross-compile, or failed end-to-end
-scenarios outside the tolerated `doctor` ones. The result quotes the compiler's
-own first diagnostic verbatim rather than paraphrasing it, so the finding can be
-triaged from the issue body without re-running anything.
+scenarios outside the tolerated `doctor` ones.
 
 It also covers a candidate that never got as far as installing. A relaxed solve
 that reached the index and could not produce an environment — because the
 candidate's own dependencies cannot sit beside the `python`, `clang` and
 platform set `pixi.toml` pins — says the repository as committed cannot adopt
 that toolchain, which is the earliest and most total form of the same finding.
+
+The evidence in the result differs by which of those routes produced it. Where a
+compiler spoke, the result quotes its own first diagnostic verbatim: the build,
+the suite, and the macOS cross-compile all report that way, and can be triaged
+from the issue body without re-running anything. The contract, end-to-end and
+unsatisfiable-solve routes have no single diagnostic to quote — the finding is a
+roll-call read against what was expected, or a solve that failed while the
+channels kept answering — so those results carry a sentence naming what was
+compared and what did not hold.
 
 ### `PACKAGE_FAILED`
 
@@ -164,16 +199,35 @@ It is loud anyway. A lane whose probe cannot finish has stopped answering the
 question it exists to answer, and a canary reporting the same quiet non-answer
 every day for a month is the failure mode this workflow was built to prevent.
 
+### `CANARY_BROKEN`
+
+An answer came back and the probe could not read it, or could not believe it.
+`pixi search --json` printed something that is not the shape this repository
+parses; the channels answered without carrying the pinned toolchain at all, so
+they are not the channels this repository resolves against; the installed
+environment could not say which toolchain it holds; or the relaxed solve
+produced a version the search never offered, so nothing the gates went on to
+report would have been about the candidate that was screened.
+
+This says nothing about any candidate, and it is loud anyway — louder, in a
+sense, than a finding. Each of those conditions recurs on every run until a
+person changes something, and reported quietly they would let the canary stop
+probing while every scheduled run stayed green, which is the exact failure this
+workflow exists to prevent.
+
 ### `INFRA_FAILURE`
 
-The probe never got as far as having a toolchain to ask about: a channel was
-unreachable, a search answered with something unreadable, or an install failed
-twice and the channels could no longer answer the control question either. This
-says nothing whatever about the candidate. It is news about the canary.
+A command the probe depends on never ran to completion, so it never got as far
+as having a toolchain to ask about: a channel search that failed outright, or an
+install that failed twice while the control question could no longer be answered
+either. It is transient by construction — nothing but a command that failed to
+run produces it — which is why it is the one finding that writes an issue and
+still leaves the run green.
 
-An install that failed while the channels still answer is **not** this. That is
-the candidate refusing to coexist with this repository's pinned environment, and
-it is reported as `SOURCE_INCOMPATIBLE`.
+Two neighbours are deliberately **not** this. An answer that came back unreadable
+is `CANARY_BROKEN`, because it does not clear on its own. An install that failed
+while the channels still answer is `SOURCE_INCOMPATIBLE`, because that is the
+candidate refusing to coexist with this repository's pinned environment.
 
 ## Where the results are
 
@@ -195,13 +249,17 @@ instead of classifying, the artifact holds `diagnostics.txt` with the traceback
 and no result at all.
 
 The workflow run goes red when any lane reports `PROTOCOL_DRIFT`,
-`SOURCE_INCOMPATIBLE`, `PACKAGE_FAILED`, or `STAGE_TIMEOUT`, and also when a lane
-that was supposed to report produced no readable result — silence is the failure
-mode a canary exists to make impossible. `INFRA_FAILURE` is deliberately quiet: it
-comments on an issue that is already open and otherwise leaves the run green,
-because a scheduled job that opened an issue every time a network call flaked
-would teach everyone to close its issues unread, including the one that had
-something real to say.
+`SOURCE_INCOMPATIBLE`, `PACKAGE_FAILED`, `STAGE_TIMEOUT`, or `CANARY_BROKEN`, and
+also when a lane that was supposed to report produced no readable result —
+silence is the failure mode a canary exists to make impossible. `INFRA_FAILURE`
+is the one row where the issue and the exit code come apart: it writes the lane's
+issue like any other finding and still leaves the run green, because it is
+produced solely by a command that failed to run and says nothing about the
+candidate, while a scheduled job that reddened every time a network call flaked
+would teach everyone to ignore it. It is written down rather than passed over
+because an unreachable channel is unreachable again tomorrow, and a lane nobody
+had opened an issue for could otherwise report a green non-answer every weekday
+forever.
 
 Maintainers can also dispatch the workflow by hand and pick a single lane
 through its `channel` input. There is nothing here to run against a working
