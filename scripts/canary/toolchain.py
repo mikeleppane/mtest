@@ -371,7 +371,7 @@ def _prepend_nightly_channel(text: str) -> str:
     return f'{text[:items]}"{NIGHTLY_CHANNEL}", {text[items:]}'
 
 
-def resolved_toolchain() -> ResolvedToolchain:
+def resolved_toolchain(repo: Path) -> ResolvedToolchain:
     """Ask the installed toolchain which version it actually is.
 
     Run this only AFTER the install. The toolchain is reached *through* pixi
@@ -381,6 +381,14 @@ def resolved_toolchain() -> ResolvedToolchain:
     rewritten the spec, so there is no prefix on PATH to find `mojo` in. Going
     through the manifest's own `mojo-version` task also keeps one spelling of
     "which toolchain is this" in the repository instead of two.
+
+    The checkout is a parameter rather than the process's working directory
+    because pixi answers for the manifest it finds there. Asked from anywhere
+    else, this reports a toolchain the probe never installed — and the probed
+    checkout is chosen by `--repo`, so the two are routinely different.
+
+    Args:
+        repo: The checkout whose environment was just installed.
 
     Returns:
         The version and build commit the toolchain reports.
@@ -392,7 +400,7 @@ def resolved_toolchain() -> ResolvedToolchain:
         subprocess.CalledProcessError: The task failed to run.
     """
     out = subprocess.run(
-        list(RESOLVE_ARGV), check=True, capture_output=True, text=True
+        list(RESOLVE_ARGV), cwd=repo, check=True, capture_output=True, text=True
     ).stdout.strip()
     match = MOJO_VERSION_RE.search(out)
     if match is None:

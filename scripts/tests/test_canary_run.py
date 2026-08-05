@@ -232,7 +232,7 @@ class CanaryTestCase(unittest.TestCase):
         resolved: ResolvedToolchain = CANDIDATE,
     ) -> CanaryResult:
         """Run the pipeline with everything external injected."""
-        return classify(repo, lane, run=runner, resolve=lambda: resolved)
+        return classify(repo, lane, run=runner, resolve=lambda _repo: resolved)
 
 
 class MutationGuardTests(CanaryTestCase):
@@ -470,13 +470,40 @@ class ResolvedToolchainTests(CanaryTestCase):
         pin, and the canary then reports "nothing newer" every day forever while
         every job stays green.
         """
+        repo = _copy_repo(self.root)
         completed = mock.Mock(stdout="Mojo 1.0.0b3 (cafef00d)\n")
         with mock.patch("subprocess.run", return_value=completed) as spawned:
-            resolved_toolchain()
+            resolved_toolchain(repo)
         self.assertEqual(
             list(spawned.call_args.args[0]), ["pixi", "run", "mojo-version"]
         )
         self.assertEqual(RESOLVE_ARGV, ("pixi", "run", "mojo-version"))
+
+    def test_it_asks_the_checkout_it_was_given(self) -> None:
+        """Every other outward call is bound to the probed checkout; so is this.
+
+        Spawned without a working directory, this asked whichever workspace
+        the probe happened to be launched from. `--repo /tmp/mtest-copy` then
+        relaxed and installed over there and asked THIS checkout what it had
+        resolved, was told the pinned version, and reported
+        `NO_NEWER_CANDIDATE` on a day with a candidate.
+        """
+        repo = _copy_repo(self.root)
+        completed = mock.Mock(stdout="Mojo 1.0.0b3 (cafef00d)\n")
+        with mock.patch("subprocess.run", return_value=completed) as spawned:
+            resolved_toolchain(repo)
+        self.assertEqual(spawned.call_args.kwargs["cwd"], repo)
+
+    def test_the_pipeline_resolves_against_the_checkout_it_probed(self) -> None:
+        repo, runner = self.build()
+        asked: list[Path] = []
+
+        def resolve(where: Path) -> ResolvedToolchain:
+            asked.append(where)
+            return CANDIDATE
+
+        classify(repo, STABLE, run=runner, resolve=resolve)
+        self.assertEqual(asked, [repo])
 
     def test_the_manifest_owns_the_task_the_resolver_runs(self) -> None:
         """Renaming the task would leave the canary asking for nothing."""
@@ -486,7 +513,7 @@ class ResolvedToolchainTests(CanaryTestCase):
     def test_it_parses_a_version_banner(self) -> None:
         completed = mock.Mock(stdout="Mojo 1.0.0b3 (cafef00d)\n")
         with mock.patch("subprocess.run", return_value=completed):
-            self.assertEqual(resolved_toolchain(), CANDIDATE)
+            self.assertEqual(resolved_toolchain(self.root), CANDIDATE)
 
     def test_it_refuses_an_unreadable_banner(self) -> None:
         completed = mock.Mock(stdout="mojo, but who knows which\n")
@@ -494,7 +521,7 @@ class ResolvedToolchainTests(CanaryTestCase):
             mock.patch("subprocess.run", return_value=completed),
             self.assertRaises(ToolchainError),
         ):
-            resolved_toolchain()
+            resolved_toolchain(self.root)
 
 
 class DiagnosticTests(CanaryTestCase):

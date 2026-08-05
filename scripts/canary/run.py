@@ -194,7 +194,7 @@ if TYPE_CHECKING:
     # The probe's whole seam onto the outside world: one callable that spawns a
     # command, and one that reports what the install resolved.
     Runner = Callable[[Sequence[str]], CommandResult]
-    Resolver = Callable[[], ResolvedToolchain]
+    Resolver = Callable[[Path], ResolvedToolchain]
 
 
 def subprocess_runner(repo: Path) -> Runner:
@@ -479,7 +479,9 @@ def classify(
     whose signature belongs to `scripts.canary.toolchain`) goes through
     `resolve`. Together those two arguments are the whole seam: the pipeline's
     stage ordering and failure mapping are exercised without a toolchain, a
-    network, or a package build.
+    network, or a package build. Both are bound to `repo`, `run` by its factory
+    and `resolve` by the argument it is handed, so neither can answer about a
+    checkout other than the one being probed.
 
     Args:
         repo: A DISPOSABLE checkout. This rewrites `pixi.toml` and, on the
@@ -569,7 +571,7 @@ def classify(
     if install.returncode != 0:
         return _result(lane, _UNKNOWN, INFRA_FAILURE, command_failure(install))
 
-    resolved = resolve()
+    resolved = resolve(repo)
     if resolved.version == pin:
         return _result(
             lane,
