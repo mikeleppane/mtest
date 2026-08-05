@@ -25,6 +25,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import tempfile
 from typing import TYPE_CHECKING, override
@@ -35,10 +36,12 @@ from scripts.canary import toolchain
 from scripts.canary.protocol_compare import PASS, PROTOCOL_DRIFT
 from scripts.canary.run import (
     INFRA_FAILURE,
+    JOB_TIMEOUT_HEADROOM_SECONDS,
     MACOS_CROSS_COMPILE,
     NO_NEWER_CANDIDATE,
     PACKAGE_FAILED,
     SOURCE_INCOMPATIBLE,
+    STAGE_TIMEOUT_SECONDS,
     CanaryResult,
     CommandResult,
     classify,
@@ -778,6 +781,49 @@ class IdleLaneTests(CanaryTestCase):
         runner.outcomes("search-published", _Outcome(0, "not json at all", ""))
         result = self.classify(repo, runner)
         self.assertEqual(result.classification, INFRA_FAILURE)
+
+
+class StageBudgetTests(CanaryTestCase):
+    """The stage budget has to fit inside the job that hosts it."""
+
+    @staticmethod
+    def _probe_job_timeout_minutes() -> int:
+        """Read the probe job's own budget out of the workflow."""
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "compat-canary.yml"
+        ).read_text(encoding="utf-8")
+        probe = workflow.split("\n  notify:", 1)[0].split("\n  probe:", 1)[1]
+        found = re.findall(r"^    timeout-minutes: (\d+)$", probe, re.MULTILINE)
+        if len(found) != 1:
+            raise AssertionError(
+                f"the probe job names {len(found)} timeouts; exactly one is "
+                "required to bound the stage budget against"
+            )
+        return int(found[0])
+
+    def test_the_workflow_still_bounds_the_probe(self) -> None:
+        # Independently transcribed from the workflow.
+        self.assertEqual(self._probe_job_timeout_minutes(), 60)
+
+    def test_a_wedged_stage_reports_before_the_job_is_cancelled(self) -> None:
+        # Equal budgets mean the job is cancelled at the exact moment a wedged
+        # stage would first report, so the timeout path never runs and the day
+        # produces a cancelled job with no artifact instead of a classification
+        # naming the stage that hung.
+        job_budget = self._probe_job_timeout_minutes() * 60
+        self.assertLessEqual(
+            STAGE_TIMEOUT_SECONDS + JOB_TIMEOUT_HEADROOM_SECONDS, job_budget
+        )
+        self.assertGreaterEqual(JOB_TIMEOUT_HEADROOM_SECONDS, 600)
+
+    def test_a_wedged_stage_becomes_that_stages_classification(self) -> None:
+        repo, runner = self.build()
+        runner.outcomes(
+            "build-bin", _Outcome(124, "", f"timed out after {STAGE_TIMEOUT_SECONDS}")
+        )
+        result = self.classify(repo, runner)
+        self.assertEqual(result.classification, SOURCE_INCOMPATIBLE)
+        self.assertIn("timed out", result.detail)
 
 
 class PipelineOrderingTests(CanaryTestCase):

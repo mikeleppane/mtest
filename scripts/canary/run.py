@@ -128,8 +128,16 @@ MACOS_CROSS_COMPILE = (
 )
 
 # No stage may hold the probe forever; a wedged gate becomes that stage's
-# classification rather than a scheduled job that never reports.
-STAGE_TIMEOUT_SECONDS = 3600.0
+# classification rather than a scheduled job that never reports. That only
+# works with room to spare inside the hosting job: the probe job in
+# `.github/workflows/compat-canary.yml` is cancelled at `timeout-minutes: 60`,
+# and a stage budget equal to it would be reached at the exact moment the job
+# dies, so the timeout path below could never run and a wedged stage would
+# leave a cancelled job with no `build/canary/` at all. The headroom is what
+# the wedged stage's classification is written and uploaded in; a test reads
+# both numbers from their sources and refuses to let them close up again.
+STAGE_TIMEOUT_SECONDS = 2700.0
+JOB_TIMEOUT_HEADROOM_SECONDS = 900.0
 
 # Compiler diagnostics, in the shape Mojo emits them. The first one is what a
 # reader needs; everything after it is usually cascade.
