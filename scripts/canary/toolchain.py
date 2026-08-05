@@ -32,7 +32,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 import re
-import subprocess
 from typing import TYPE_CHECKING
 
 from scripts.gen_transcripts import MOJO_VERSION_RE
@@ -112,9 +111,13 @@ TOLERATED_CONTRACT_FAILURES: tuple[tuple[str, str], ...] = (
 # How the probe asks which toolchain the install produced. Everything the probe
 # spawns goes through pixi, which is the only tool the runner provisions ahead
 # of it: the workspace environment is created by the probe's own install, after
-# the pin has been relaxed, so nothing from it is on PATH before that. The
-# manifest's `mojo-version` task is the repository's existing spelling of this
-# question and is reused rather than restated.
+# the pin has been relaxed, so nothing from it is on PATH before that — a bare
+# `mojo` would not be found. The manifest's `mojo-version` task is the
+# repository's existing spelling of this question and is reused rather than
+# restated. It is spawned by the probe's own supervised runner, which is bound
+# to the checkout being probed: pixi answers for the manifest it finds in its
+# working directory, and asked from anywhere else this reports a toolchain the
+# probe never installed.
 RESOLVE_ARGV = ("pixi", "run", "mojo-version")
 
 # The workspace's mojo dependency, in both the committed spelling and the
@@ -414,40 +417,35 @@ def _prepend_nightly_channel(text: str) -> str:
     return f'{text[:items]}"{NIGHTLY_CHANNEL}", {text[items:]}'
 
 
-def resolved_toolchain(repo: Path) -> ResolvedToolchain:
-    """Ask the installed toolchain which version it actually is.
+def parse_toolchain(output: str) -> ResolvedToolchain:
+    """Read a toolchain identity out of what `RESOLVE_ARGV` printed.
 
-    Run this only AFTER the install. The toolchain is reached *through* pixi
-    rather than as a bare `mojo`, because the probe deliberately runs on the
-    runner's own interpreter with nothing provisioned but the pixi binary: the
-    workspace environment must not exist until `relax_workspace_pin` has
-    rewritten the spec, so there is no prefix on PATH to find `mojo` in. Going
-    through the manifest's own `mojo-version` task also keeps one spelling of
-    "which toolchain is this" in the repository instead of two.
+    Asking is the caller's job, and deliberately so: the probe supervises
+    everything it spawns under one stage budget and kills the whole process
+    group of anything that overruns, and a resolve that spawned itself would be
+    the one outward call able to hold a scheduled job open until the job's own
+    deadline killed it. Splitting the reading from the asking leaves this pure,
+    and leaves the spawn where the supervision already is.
 
-    The checkout is a parameter rather than the process's working directory
-    because pixi answers for the manifest it finds there. Asked from anywhere
-    else, this reports a toolchain the probe never installed — and the probed
-    checkout is chosen by `--repo`, so the two are routinely different.
+    The pattern is the transcript generator's rather than one compiled here.
+    Two spellings of "what a toolchain identity looks like" would let the
+    module that writes transcript headers and the module that reads them back
+    disagree about the same banner.
 
     Args:
-        repo: The checkout whose environment was just installed.
+        output: Everything `pixi run mojo-version` printed.
 
     Returns:
         The version and build commit the toolchain reports.
 
     Raises:
-        ToolchainError: The task printed something this repository's transcript
-            generator could not parse either, which means no toolchain identity
-            can be recorded for the probe.
-        subprocess.CalledProcessError: The task failed to run.
+        ToolchainError: The output holds no identity this repository's
+            transcript generator could parse either, which means no toolchain
+            identity can be recorded for the probe.
     """
-    out = subprocess.run(
-        list(RESOLVE_ARGV), cwd=repo, check=True, capture_output=True, text=True
-    ).stdout.strip()
-    match = MOJO_VERSION_RE.search(out)
+    match = MOJO_VERSION_RE.search(output)
     if match is None:
-        raise ToolchainError(f"cannot parse mojo version from: {out!r}")
+        raise ToolchainError(f"cannot parse mojo version from: {output.strip()!r}")
     return ResolvedToolchain(match.group(1), match.group(2))
 
 

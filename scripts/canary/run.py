@@ -101,6 +101,7 @@ from scripts.canary.toolchain import (
     FORCE_ENV_VALUE,
     FORCE_ENV_VAR,
     LANES,
+    RESOLVE_ARGV,
     STABLE_LANE,
     TOLERATED_CONTRACT_FAILURES,
     TOLERATED_E2E_SCENARIOS,
@@ -109,9 +110,9 @@ from scripts.canary.toolchain import (
     candidate_channels,
     candidate_matchspec,
     floor_matchspec,
+    parse_toolchain,
     pin_recipe_to_candidate,
     relax_workspace_pin,
-    resolved_toolchain,
     workspace_pin,
 )
 
@@ -284,9 +285,11 @@ class CanaryResult:
 
 if TYPE_CHECKING:
     # The probe's whole seam onto the outside world: one callable that spawns a
-    # command, and one that reports what the install resolved.
+    # command. Everything the pipeline learns, including which toolchain the
+    # install produced, arrives through it, so there is one place where the
+    # stage budget, the process-group kill and the checkout binding are applied
+    # and no call that quietly sits outside all three.
     Runner = Callable[[Sequence[str]], CommandResult]
-    Resolver = Callable[[Path], ResolvedToolchain]
 
 
 def timed_out(result: CommandResult) -> bool:
@@ -854,23 +857,18 @@ def _regenerate_and_compare(repo: Path, run: Runner) -> CompareResult:
         )
 
 
-def classify(
-    repo: Path,
-    lane: str,
-    *,
-    run: Runner,
-    resolve: Resolver = resolved_toolchain,
-) -> CanaryResult:
+def classify(repo: Path, lane: str, *, run: Runner) -> CanaryResult:
     """Probe one lane's candidate toolchain and name the outcome.
 
-    Every stage that touches the outside world does so through `run`, and the
-    one stage that cannot (asking the freshly installed toolchain its version,
-    whose signature belongs to `scripts.canary.toolchain`) goes through
-    `resolve`. Together those two arguments are the whole seam: the pipeline's
-    stage ordering and failure mapping are exercised without a toolchain, a
-    network, or a package build. Both are bound to `repo`, `run` by its factory
-    and `resolve` by the argument it is handed, so neither can answer about a
-    checkout other than the one being probed.
+    Every stage that touches the outside world does so through `run`, and that
+    is the whole seam: the pipeline's stage ordering and failure mapping are
+    exercised without a toolchain, a network, or a package build. Asking the
+    freshly installed toolchain its version is a stage like the rest, because a
+    call that spawned itself would be the one outward call outside the stage
+    budget and the process-group kill, free to hold a scheduled job open until
+    the job's own deadline ended the day with no artifact at all. `run` is
+    bound to `repo` by its factory, so no stage can answer about a checkout
+    other than the one being probed.
 
     Args:
         repo: A DISPOSABLE checkout. This rewrites `pixi.toml` and, on the
@@ -880,15 +878,15 @@ def classify(
             project would ship a package against, so the packaging and Darwin
             legs are the stable lane's alone.
         run: Spawns one probe command and reports how it went.
-        resolve: Reports the toolchain the install produced.
 
     Returns:
         The day's classification and the evidence for it.
 
     Raises:
-        ToolchainError: A tracked-file rewrite was refused or impossible. That
-            is a fault in the canary or its checkout, never a fact about the
-            candidate, so it is not a classification.
+        ToolchainError: A tracked-file rewrite was refused or impossible, or
+            the installed toolchain printed no identity this repository can
+            read. Both are faults in the canary or its checkout, never facts
+            about the candidate, so neither is a classification.
         OSError: A tracked file or the committed baseline cannot be read.
         ValueError: The committed transcript baseline is unreadable or names
             two toolchains, which is a broken repository rather than a verdict.
@@ -1038,7 +1036,18 @@ def classify(
             f"platform the manifest declares",
         )
 
-    resolved = resolve(repo)
+    identity = run(list(RESOLVE_ARGV))
+    if identity.returncode != 0:
+        return _stage_failure(
+            lane,
+            _UNKNOWN,
+            identity,
+            CANARY_BROKEN,
+            f"{command_failure(identity)}; the installed environment could not "
+            f"say which toolchain it holds, so nothing the gates below reported "
+            f"could be attributed to a candidate",
+        )
+    resolved = parse_toolchain(identity.stdout)
     if resolved.version == pin:
         return _result(
             lane,

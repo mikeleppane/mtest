@@ -75,10 +75,10 @@ from scripts.canary.toolchain import (
     candidate_matchspec,
     floor_matchspec,
     mutation_permitted,
+    parse_toolchain,
     pin_recipe_to_candidate,
     relax_workspace_pin,
     relaxed_spec,
-    resolved_toolchain,
     workspace_channels,
     workspace_pin,
 )
@@ -142,6 +142,11 @@ def _stage_of(argv: Sequence[str]) -> str:
             return "cross-compile"
         return parts[2]
     return parts[0]
+
+
+def _version_banner(resolved: ResolvedToolchain) -> str:
+    """Render `mojo --version` the way the toolchain really prints it."""
+    return f"Mojo {resolved.version} ({resolved.commit})\n"
 
 
 @dataclass
@@ -232,6 +237,7 @@ class FakeRunner:
             "contract-check-strict": [
                 _Outcome(1, _contract_output(*_IDENTITY_FAILURES), "")
             ],
+            "mojo-version": [_Outcome(0, _version_banner(CANDIDATE), "")],
         }
 
     def outcomes(self, stage: str, *outcomes: _Outcome) -> None:
@@ -295,10 +301,12 @@ class CanaryTestCase(unittest.TestCase):
         repo: Path,
         runner: FakeRunner,
         lane: str = STABLE,
-        resolved: ResolvedToolchain = CANDIDATE,
+        resolved: ResolvedToolchain | None = None,
     ) -> CanaryResult:
         """Run the pipeline with everything external injected."""
-        return classify(repo, lane, run=runner, resolve=lambda _repo: resolved)
+        if resolved is not None:
+            runner.outcomes("mojo-version", _Outcome(0, _version_banner(resolved), ""))
+        return classify(repo, lane, run=runner)
 
 
 class MutationGuardTests(CanaryTestCase):
@@ -528,7 +536,7 @@ class ResolvedToolchainTests(CanaryTestCase):
         )
 
     def test_it_reaches_the_toolchain_through_pixi(self) -> None:
-        """A bare `mojo` would not be on PATH at the moment this is called.
+        """A bare `mojo` would not be on PATH at the moment this is asked.
 
         The probe runs on the runner's own interpreter with nothing provisioned
         but the pixi binary, and it must stay that way: an environment installed
@@ -536,40 +544,49 @@ class ResolvedToolchainTests(CanaryTestCase):
         pin, and the canary then reports "nothing newer" every day forever while
         every job stays green.
         """
-        repo = _copy_repo(self.root)
-        completed = mock.Mock(stdout="Mojo 1.0.0b3 (cafef00d)\n")
-        with mock.patch("subprocess.run", return_value=completed) as spawned:
-            resolved_toolchain(repo)
-        self.assertEqual(
-            list(spawned.call_args.args[0]), ["pixi", "run", "mojo-version"]
-        )
+        repo, runner = self.build()
+        self.classify(repo, runner)
+        self.assertIn(("pixi", "run", "mojo-version"), runner.calls)
+        # Independently transcribed from the constant's documented value.
         self.assertEqual(RESOLVE_ARGV, ("pixi", "run", "mojo-version"))
 
-    def test_it_asks_the_checkout_it_was_given(self) -> None:
-        """Every other outward call is bound to the probed checkout; so is this.
+    def test_the_resolve_is_supervised_like_every_other_stage(self) -> None:
+        """It was the one outward call with no timeout at all.
+
+        Spawned on its own it sat outside the stage budget and outside the
+        process-group kill, so a `pixi run mojo-version` that wedged held the
+        probe open until the hosting job's own deadline cancelled it — and a
+        cancelled job uploads no artifact, so the day ended with nothing said
+        about either lane rather than with a classification.
+        """
+        repo, runner = self.build()
+        runner.outcomes("mojo-version", _Outcome(TIMEOUT_RETURNCODE, "", "timed out"))
+        result = self.classify(repo, runner)
+        self.assertEqual(result.classification, STAGE_TIMEOUT, result.detail)
+        self.assertIn("mojo-version", result.detail)
+
+    def test_an_environment_that_cannot_name_its_toolchain_is_loud(self) -> None:
+        repo, runner = self.build()
+        runner.fails("mojo-version", stderr="error: task 'mojo-version' not found\n")
+        result = self.classify(repo, runner)
+        self.assertEqual(result.classification, CANARY_BROKEN, result.detail)
+        self.assertIn("could not say which toolchain it holds", result.detail)
+
+    def test_the_pipeline_resolves_against_the_checkout_it_probed(self) -> None:
+        """Every outward call is bound to the probed checkout, this one included.
 
         Spawned without a working directory, this asked whichever workspace
         the probe happened to be launched from. `--repo /tmp/mtest-copy` then
         relaxed and installed over there and asked THIS checkout what it had
         resolved, was told the pinned version, and reported
-        `NO_NEWER_CANDIDATE` on a day with a candidate.
+        `NO_NEWER_CANDIDATE` on a day with a candidate. The binding now lives in
+        the runner factory, which every stage shares.
         """
         repo = _copy_repo(self.root)
-        completed = mock.Mock(stdout="Mojo 1.0.0b3 (cafef00d)\n")
-        with mock.patch("subprocess.run", return_value=completed) as spawned:
-            resolved_toolchain(repo)
-        self.assertEqual(spawned.call_args.kwargs["cwd"], repo)
-
-    def test_the_pipeline_resolves_against_the_checkout_it_probed(self) -> None:
-        repo, runner = self.build()
-        asked: list[Path] = []
-
-        def resolve(where: Path) -> ResolvedToolchain:
-            asked.append(where)
-            return CANDIDATE
-
-        classify(repo, STABLE, run=runner, resolve=resolve)
-        self.assertEqual(asked, [repo])
+        runner = canary_run.subprocess_runner(repo)
+        with contextlib.redirect_stdout(io.StringIO()):
+            answered = runner([sys.executable, "-c", "import os; print(os.getcwd())"])
+        self.assertEqual(answered.stdout.strip(), str(repo))
 
     def test_the_manifest_owns_the_task_the_resolver_runs(self) -> None:
         """Renaming the task would leave the canary asking for nothing."""
@@ -577,17 +594,11 @@ class ResolvedToolchainTests(CanaryTestCase):
         self.assertIn('mojo-version = "mojo --version"\n', manifest)
 
     def test_it_parses_a_version_banner(self) -> None:
-        completed = mock.Mock(stdout="Mojo 1.0.0b3 (cafef00d)\n")
-        with mock.patch("subprocess.run", return_value=completed):
-            self.assertEqual(resolved_toolchain(self.root), CANDIDATE)
+        self.assertEqual(parse_toolchain("Mojo 1.0.0b3 (cafef00d)\n"), CANDIDATE)
 
     def test_it_refuses_an_unreadable_banner(self) -> None:
-        completed = mock.Mock(stdout="mojo, but who knows which\n")
-        with (
-            mock.patch("subprocess.run", return_value=completed),
-            self.assertRaises(ToolchainError),
-        ):
-            resolved_toolchain(self.root)
+        with self.assertRaises(ToolchainError):
+            parse_toolchain("mojo, but who knows which\n")
 
 
 class DiagnosticTests(CanaryTestCase):
@@ -1404,6 +1415,7 @@ class PipelineOrderingTests(CanaryTestCase):
                 "search-published",
                 "search-candidates",
                 "install",
+                "mojo-version",
                 "build-bin",
                 "test",
                 "contract-check-strict",
@@ -1485,7 +1497,8 @@ class StageClassificationTests(CanaryTestCase):
         self.assertEqual(result.classification, NO_NEWER_CANDIDATE)
         self.assertEqual(result.version, PINNED_MOJO)
         self.assertEqual(
-            runner.stages, ["search-published", "search-candidates", "install"]
+            runner.stages,
+            ["search-published", "search-candidates", "install", "mojo-version"],
         )
         self.assertIn(
             f"    - mojo =={PINNED_MOJO}\n",
@@ -1504,7 +1517,13 @@ class StageClassificationTests(CanaryTestCase):
         )
         self.assertEqual(
             runner.stages,
-            ["search-published", "search-candidates", "install", "build-bin"],
+            [
+                "search-published",
+                "search-candidates",
+                "install",
+                "mojo-version",
+                "build-bin",
+            ],
         )
 
     def test_a_failing_suite_is_source_incompatible(self) -> None:
@@ -1518,6 +1537,7 @@ class StageClassificationTests(CanaryTestCase):
                 "search-published",
                 "search-candidates",
                 "install",
+                "mojo-version",
                 "build-bin",
                 "test",
             ],
@@ -1779,6 +1799,7 @@ class NightlyLaneTests(CanaryTestCase):
                 "search-published",
                 "search-candidates",
                 "install",
+                "mojo-version",
                 "build-bin",
                 "test",
                 "contract-check-strict",
