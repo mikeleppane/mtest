@@ -14,6 +14,7 @@ what exactly would break". This module answers that with a classification:
 | `PROTOCOL_DRIFT`      | The runner's observable output moved.              |
 | `SOURCE_INCOMPATIBLE` | The sources no longer compile, test, or behave.    |
 | `PACKAGE_FAILED`      | The sources are fine; the shipped package is not.  |
+| `STAGE_TIMEOUT`       | A stage outlived its budget and answered nothing.  |
 | `INFRA_FAILURE`       | The probe never got a toolchain to ask about.      |
 
 The classification is DATA, not a verdict, which is why this exits 0 for every
@@ -91,6 +92,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 NO_NEWER_CANDIDATE = "NO_NEWER_CANDIDATE"
 SOURCE_INCOMPATIBLE = "SOURCE_INCOMPATIBLE"
 PACKAGE_FAILED = "PACKAGE_FAILED"
+STAGE_TIMEOUT = "STAGE_TIMEOUT"
 INFRA_FAILURE = "INFRA_FAILURE"
 
 CLASSIFICATIONS = (
@@ -99,6 +101,7 @@ CLASSIFICATIONS = (
     PROTOCOL_DRIFT,
     SOURCE_INCOMPATIBLE,
     PACKAGE_FAILED,
+    STAGE_TIMEOUT,
     INFRA_FAILURE,
 )
 
@@ -128,17 +131,28 @@ MACOS_CROSS_COMPILE = (
     "/dev/null",
 )
 
-# No stage may hold the probe forever; a wedged gate becomes that stage's
-# classification rather than a scheduled job that never reports. That only
-# works with room to spare inside the hosting job: the probe job in
-# `.github/workflows/compat-canary.yml` is cancelled at `timeout-minutes: 60`,
-# and a stage budget equal to it would be reached at the exact moment the job
-# dies, so the timeout path below could never run and a wedged stage would
-# leave a cancelled job with no `build/canary/` at all. The headroom is what
-# the wedged stage's classification is written and uploaded in; a test reads
-# both numbers from their sources and refuses to let them close up again.
+# No stage may hold the probe forever: a wedged gate is killed and reported as
+# `STAGE_TIMEOUT` rather than left to run into a scheduled job that never says
+# anything. Reporting it needs room to spare inside the hosting job — the probe
+# job in `.github/workflows/compat-canary.yml` is cancelled at
+# `timeout-minutes: 60`, and a stage budget equal to it would be reached at the
+# exact moment the job dies — so the headroom is what the classification is
+# written and uploaded in. A test reads both numbers from their sources and
+# refuses to let them close up again.
+#
+# The headroom buys the report only for a stage that wedges early: the budget
+# runs from when the STAGE started, so a gate that hangs after half an hour of
+# cold-cache building is killed past the job's own deadline and the day ends
+# with a cancelled job and no artifact. That degrades loudly — the notifier
+# treats a lane that reported nothing as a failure — which is why this is a
+# budget rather than a mechanism.
 STAGE_TIMEOUT_SECONDS = 2700.0
 JOB_TIMEOUT_HEADROOM_SECONDS = 900.0
+
+# What `subprocess_runner` reports for a stage it killed. The value is the
+# shell's own convention for "terminated by `timeout`", chosen so a reader who
+# sees it in an artifact recognises it.
+TIMEOUT_RETURNCODE = 124
 
 # Compiler diagnostics, in the shape Mojo emits them. The first one is what a
 # reader needs; everything after it is usually cascade.
@@ -227,7 +241,7 @@ def subprocess_runner(repo: Path) -> Runner:
             # decoding: what a reader needs is that this stage never finished.
             return CommandResult(
                 recorded,
-                124,
+                TIMEOUT_RETURNCODE,
                 "",
                 f"timed out after {STAGE_TIMEOUT_SECONDS:.0f}s",
             )
@@ -518,7 +532,9 @@ def classify(
     # unsatisfiable whenever the pin is also the newest release.
     published = run(search_argv(channels, "mojo"))
     if published.returncode != 0:
-        return _result(lane, _UNKNOWN, INFRA_FAILURE, command_failure(published))
+        return _stage_failure(
+            lane, _UNKNOWN, published, INFRA_FAILURE, command_failure(published)
+        )
     try:
         available = search_versions(published)
     except ValueError as error:
@@ -561,9 +577,10 @@ def classify(
         # question, which is infrastructure rather than a verdict.
         control = run(search_argv(channels, floor_matchspec(pin)))
         if not control_confirms_channels(control, pin):
-            return _result(
+            return _stage_failure(
                 lane,
                 _UNKNOWN,
+                found,
                 INFRA_FAILURE,
                 f"{command_failure(found)}; the control "
                 f"`{floor_matchspec(pin)}` did not confirm the channels can "
@@ -582,12 +599,16 @@ def classify(
 
     relax_workspace_pin(repo, lane)
     install = run(["pixi", "install"])
-    if install.returncode != 0:
+    if install.returncode not in (0, TIMEOUT_RETURNCODE):
         # One retry, because a conda solve reaches the network and a single
-        # transient failure is not evidence about a toolchain.
+        # transient failure is not evidence about a toolchain. A stage the
+        # probe killed is not retried: a second full budget would carry the job
+        # past its own deadline, and the day would end with no artifact at all.
         install = run(["pixi", "install"])
     if install.returncode != 0:
-        return _result(lane, _UNKNOWN, INFRA_FAILURE, command_failure(install))
+        return _stage_failure(
+            lane, _UNKNOWN, install, INFRA_FAILURE, command_failure(install)
+        )
 
     resolved = resolve(repo)
     if resolved.version == pin:
@@ -604,8 +625,8 @@ def classify(
     for task in SOURCE_TASKS:
         result = run(["pixi", "run", task])
         if result.returncode != 0:
-            return _result(
-                lane, resolved, SOURCE_INCOMPATIBLE, first_diagnostic(result)
+            return _stage_failure(
+                lane, resolved, result, SOURCE_INCOMPATIBLE, first_diagnostic(result)
             )
 
     comparison = _regenerate_and_compare(repo, run)
@@ -617,11 +638,15 @@ def classify(
             ["pixi", "run", "package-check", "--expect-mojo-version", resolved.version]
         )
         if packaged.returncode != 0:
-            return _result(lane, resolved, PACKAGE_FAILED, command_failure(packaged))
+            return _stage_failure(
+                lane, resolved, packaged, PACKAGE_FAILED, command_failure(packaged)
+            )
 
         cross = run(MACOS_CROSS_COMPILE)
         if cross.returncode != 0:
-            return _result(lane, resolved, SOURCE_INCOMPATIBLE, first_diagnostic(cross))
+            return _stage_failure(
+                lane, resolved, cross, SOURCE_INCOMPATIBLE, first_diagnostic(cross)
+            )
 
     tolerated: tuple[str, ...] = ()
     e2e = run(["pixi", "run", "e2e"])
@@ -635,7 +660,7 @@ def classify(
             tolerated, toolchain_moved=resolved.version != pin
         )
         if verdict is not None:
-            return _result(lane, resolved, SOURCE_INCOMPATIBLE, verdict)
+            return _stage_failure(lane, resolved, e2e, SOURCE_INCOMPATIBLE, verdict)
 
     detail = f"every gate held on mojo {resolved.version} ({resolved.commit})"
     if tolerated:
@@ -643,6 +668,36 @@ def classify(
             f"{detail}; tolerated toolchain-reporting drift in {', '.join(tolerated)}"
         )
     return _result(lane, resolved, PASS, detail)
+
+
+def _stage_failure(
+    lane: str,
+    resolved: ResolvedToolchain,
+    result: CommandResult,
+    classification: str,
+    detail: str,
+) -> CanaryResult:
+    """Classify one failed stage, naming a killed stage as killed.
+
+    A stage the probe stopped for outliving `STAGE_TIMEOUT_SECONDS` produced no
+    evidence, so whatever its failure ordinarily means cannot be claimed of it.
+    Three quarters of an hour of silence on an unwarmed cache is not "the
+    sources no longer compile", and a red whose detail string is the only thing
+    saying otherwise cannot be triaged from the issue body.
+
+    Args:
+        lane: The lane being probed.
+        resolved: The candidate, or `_UNKNOWN` before one was resolved.
+        result: The failed command.
+        classification: What this stage's failure means when it really failed.
+        detail: The evidence for that classification.
+
+    Returns:
+        The classification, or `STAGE_TIMEOUT` when the stage was killed.
+    """
+    if result.returncode == TIMEOUT_RETURNCODE:
+        return _result(lane, resolved, STAGE_TIMEOUT, command_failure(result))
+    return _result(lane, resolved, classification, detail)
 
 
 def _result(

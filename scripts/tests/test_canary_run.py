@@ -41,7 +41,9 @@ from scripts.canary.run import (
     NO_NEWER_CANDIDATE,
     PACKAGE_FAILED,
     SOURCE_INCOMPATIBLE,
+    STAGE_TIMEOUT,
     STAGE_TIMEOUT_SECONDS,
+    TIMEOUT_RETURNCODE,
     CanaryResult,
     CommandResult,
     classify,
@@ -93,8 +95,12 @@ NIGHTLY = "nightly"
 
 
 def _copy_repo(root: Path, fixture: str = "identical_newer") -> Path:
-    """Lay out the parts of this checkout the probe reads or rewrites."""
-    repo = root / "repo"
+    """Lay out the parts of this checkout the probe reads or rewrites.
+
+    Each call gets its own directory, so one test can probe several throwaway
+    checkouts without one probe's rewrites deciding the next one's outcome.
+    """
+    repo = Path(tempfile.mkdtemp(prefix="repo-", dir=root))
     (repo / "recipe").mkdir(parents=True)
     shutil.copy(REPO_ROOT / "pixi.toml", repo / "pixi.toml")
     shutil.copy(REPO_ROOT / "recipe" / "recipe.yaml", repo / "recipe" / "recipe.yaml")
@@ -915,25 +921,60 @@ class StageBudgetTests(CanaryTestCase):
         # Independently transcribed from the workflow.
         self.assertEqual(self._probe_job_timeout_minutes(), 60)
 
-    def test_a_wedged_stage_reports_before_the_job_is_cancelled(self) -> None:
-        # Equal budgets mean the job is cancelled at the exact moment a wedged
-        # stage would first report, so the timeout path never runs and the day
-        # produces a cancelled job with no artifact instead of a classification
-        # naming the stage that hung.
+    def test_the_stage_budget_leaves_headroom_inside_the_job(self) -> None:
+        """The arithmetic is necessary for a wedged stage to report; not sufficient.
+
+        A stage reaches its own timeout `STAGE_TIMEOUT_SECONDS` after IT
+        started, not after the job did, so this identity only guarantees a
+        reported classification when the wedged stage is the first thing the
+        job runs. Wedged after half an hour of cold-cache building, the stage
+        timeout falls past the job's cancellation and the day produces a
+        cancelled job with no artifact — which the notifier reports as a
+        missing result, loudly, which is why this stays a budget assertion
+        rather than a mechanism.
+        """
         job_budget = self._probe_job_timeout_minutes() * 60
         self.assertLessEqual(
             STAGE_TIMEOUT_SECONDS + JOB_TIMEOUT_HEADROOM_SECONDS, job_budget
         )
         self.assertGreaterEqual(JOB_TIMEOUT_HEADROOM_SECONDS, 600)
 
-    def test_a_wedged_stage_becomes_that_stages_classification(self) -> None:
+    def test_a_wedged_stage_is_named_a_timeout_not_a_verdict(self) -> None:
+        # 124 is the probe killing a stage that outlived its budget, not the
+        # stage answering. Mapped onto the stage's ordinary failure, three
+        # quarters of an hour of silence on an unwarmed cache was reported as
+        # "the sources no longer compile" with only the detail string saying
+        # otherwise.
+        for stage in ("build-bin", "test-unit", "contract-check-strict", "e2e"):
+            with self.subTest(stage=stage):
+                repo, runner = self.build()
+                runner.outcomes(
+                    stage,
+                    _Outcome(
+                        TIMEOUT_RETURNCODE,
+                        "",
+                        f"timed out after {STAGE_TIMEOUT_SECONDS:.0f}s",
+                    ),
+                )
+                result = self.classify(repo, runner)
+                self.assertEqual(result.classification, STAGE_TIMEOUT)
+                self.assertIn("timed out", result.detail)
+                self.assertIn(stage, result.detail)
+
+    def test_a_wedged_install_is_not_retried_into_a_second_budget(self) -> None:
+        repo, runner = self.build()
+        runner.outcomes("install", _Outcome(TIMEOUT_RETURNCODE, "", "timed out"))
+        result = self.classify(repo, runner)
+        self.assertEqual(result.classification, STAGE_TIMEOUT)
+        self.assertEqual(runner.stages.count("install"), 1)
+
+    def test_a_wedged_search_is_a_timeout(self) -> None:
         repo, runner = self.build()
         runner.outcomes(
-            "build-bin", _Outcome(124, "", f"timed out after {STAGE_TIMEOUT_SECONDS}")
+            "search-published", _Outcome(TIMEOUT_RETURNCODE, "", "timed out")
         )
         result = self.classify(repo, runner)
-        self.assertEqual(result.classification, SOURCE_INCOMPATIBLE)
-        self.assertIn("timed out", result.detail)
+        self.assertEqual(result.classification, STAGE_TIMEOUT)
 
 
 class PipelineOrderingTests(CanaryTestCase):

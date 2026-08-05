@@ -9,10 +9,17 @@ policy is deliberately narrow:
 |-----------------------------------------------------------|-------------------------|
 | `PASS`, `NO_NEWER_CANDIDATE`                              | close the issue, exit 0 |
 | `PROTOCOL_DRIFT`, `SOURCE_INCOMPATIBLE`, `PACKAGE_FAILED` | upsert, exit 1          |
+| `STAGE_TIMEOUT`                                           | upsert, exit 1          |
 | `INFRA_FAILURE`                                           | comment if open, exit 0 |
 | no artifact, or one this cannot read                      | upsert, exit 1          |
 
 Three of those rows are worth arguing for.
+
+`STAGE_TIMEOUT` is loud even though a stage that outlived its budget proved
+nothing about the candidate. A lane whose probe cannot finish has stopped
+answering the question it exists to answer, and a canary that reports the same
+quiet non-answer every day for a month is the failure mode this workflow was
+built to prevent.
 
 `INFRA_FAILURE` is quiet on purpose. The canary failing to reach a channel is
 news about the canary, not about the toolchain, and a scheduled job that opens
@@ -63,6 +70,7 @@ from scripts.canary.run import (
     NO_NEWER_CANDIDATE,
     PACKAGE_FAILED,
     SOURCE_INCOMPATIBLE,
+    STAGE_TIMEOUT,
     CanaryResult,
     CommandResult,
 )
@@ -87,7 +95,12 @@ TITLE_PREFIX = "canary: "
 QUIET_CLASSIFICATIONS = (PASS, NO_NEWER_CANDIDATE)
 # Classifications that are findings about the candidate toolchain, which is the
 # entire product of this workflow.
-LOUD_CLASSIFICATIONS = (PROTOCOL_DRIFT, SOURCE_INCOMPATIBLE, PACKAGE_FAILED)
+LOUD_CLASSIFICATIONS = (
+    PROTOCOL_DRIFT,
+    SOURCE_INCOMPATIBLE,
+    PACKAGE_FAILED,
+    STAGE_TIMEOUT,
+)
 
 # `gh` reaches the network; none of these calls should take anything like this
 # long, and a wedged one must not hold a scheduled job open.
