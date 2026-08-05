@@ -64,6 +64,14 @@ NIGHTLY_CHANNEL = "https://conda.modular.com/max-nightly/"
 # fail when the toolchain moves, and are the only failures the probe tolerates.
 DOCTOR_PREFIX = "doctor-"
 
+# How the probe asks which toolchain the install produced. Everything the probe
+# spawns goes through pixi, which is the only tool the runner provisions ahead
+# of it: the workspace environment is created by the probe's own install, after
+# the pin has been relaxed, so nothing from it is on PATH before that. The
+# manifest's `mojo-version` task is the repository's existing spelling of this
+# question and is reused rather than restated.
+RESOLVE_ARGV = ("pixi", "run", "mojo-version")
+
 # The workspace's mojo dependency, in both the committed spelling and the
 # relaxed one this module writes. One pattern reads both so the pin can be
 # looked up whether or not the relaxation has already happened.
@@ -336,21 +344,25 @@ def _prepend_nightly_channel(text: str) -> str:
 def resolved_toolchain() -> ResolvedToolchain:
     """Ask the installed toolchain which version it actually is.
 
-    Run this only AFTER the install, and only from inside the workspace
-    environment (`pixi run ...`), where `mojo` resolves to the binary the
-    install just placed in the environment prefix.
+    Run this only AFTER the install. The toolchain is reached *through* pixi
+    rather than as a bare `mojo`, because the probe deliberately runs on the
+    runner's own interpreter with nothing provisioned but the pixi binary: the
+    workspace environment must not exist until `relax_workspace_pin` has
+    rewritten the spec, so there is no prefix on PATH to find `mojo` in. Going
+    through the manifest's own `mojo-version` task also keeps one spelling of
+    "which toolchain is this" in the repository instead of two.
 
     Returns:
         The version and build commit the toolchain reports.
 
     Raises:
-        ToolchainError: `mojo --version` printed something this repository's
-            transcript generator could not parse either, which means no
-            toolchain identity can be recorded for the probe.
-        subprocess.CalledProcessError: `mojo --version` failed to run.
+        ToolchainError: The task printed something this repository's transcript
+            generator could not parse either, which means no toolchain identity
+            can be recorded for the probe.
+        subprocess.CalledProcessError: The task failed to run.
     """
     out = subprocess.run(
-        ["mojo", "--version"], check=True, capture_output=True, text=True
+        list(RESOLVE_ARGV), check=True, capture_output=True, text=True
     ).stdout.strip()
     match = MOJO_VERSION_RE.search(out)
     if match is None:

@@ -53,6 +53,7 @@ from scripts.canary.toolchain import (
     DOCTOR_PREFIX,
     FORCE_ENV_VAR,
     NIGHTLY_CHANNEL,
+    RESOLVE_ARGV,
     ResolvedToolchain,
     ToolchainError,
     candidate_channels,
@@ -412,6 +413,28 @@ class ResolvedToolchainTests(CanaryTestCase):
             banner.groups() if banner else (),
             (CANDIDATE.version, CANDIDATE.commit),
         )
+
+    def test_it_reaches_the_toolchain_through_pixi(self) -> None:
+        """A bare `mojo` would not be on PATH at the moment this is called.
+
+        The probe runs on the runner's own interpreter with nothing provisioned
+        but the pixi binary, and it must stay that way: an environment installed
+        before `relax_workspace_pin` rewrites the spec resolves the committed
+        pin, and the canary then reports "nothing newer" every day forever while
+        every job stays green.
+        """
+        completed = mock.Mock(stdout="Mojo 1.0.0b3 (cafef00d)\n")
+        with mock.patch("subprocess.run", return_value=completed) as spawned:
+            resolved_toolchain()
+        self.assertEqual(
+            list(spawned.call_args.args[0]), ["pixi", "run", "mojo-version"]
+        )
+        self.assertEqual(RESOLVE_ARGV, ("pixi", "run", "mojo-version"))
+
+    def test_the_manifest_owns_the_task_the_resolver_runs(self) -> None:
+        """Renaming the task would leave the canary asking for nothing."""
+        manifest = (REPO_ROOT / "pixi.toml").read_text(encoding="utf-8")
+        self.assertIn('mojo-version = "mojo --version"\n', manifest)
 
     def test_it_parses_a_version_banner(self) -> None:
         completed = mock.Mock(stdout="Mojo 1.0.0b3 (cafef00d)\n")
