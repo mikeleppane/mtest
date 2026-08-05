@@ -508,12 +508,22 @@ def check_compat_canary_workflow(repo_root: Path = REPO_ROOT) -> None:
     This is the only workflow in the repository that downloads a compiler from a
     package channel and executes it against the source tree, and the only reason
     that is acceptable is the split between its two jobs: `probe` runs the
-    downloaded compiler and holds nothing, `notify` holds `issues: write` and
-    runs one reviewed command over a JSON file. Neither half is safe alone, and
-    nothing in a workflow diff makes it obvious that a step moved from one job
-    to the other has crossed that line. So the split is pinned here, positively
-    (what each job runs, in which order, with which grants) and negatively (what
-    the privileged job may never contain).
+    downloaded compiler under no write scope at all, `notify` holds
+    `issues: write` and runs one reviewed command over a JSON file. Neither half
+    is safe alone, and nothing in a workflow diff makes it obvious that a step
+    moved from one job to the other has crossed that line. So the split is
+    pinned here, positively (what each job runs, in which order, with which
+    grants) and negatively (what the privileged job may never contain).
+
+    The probe job's property is stated as a scope rather than as an absence.
+    GitHub mints a `GITHUB_TOKEN` for every job whether the workflow asks for
+    one or not, so "the probe holds no token" is simply false, and a security
+    oracle whose stated property is false is one nobody can reason from. What
+    is true, and what is pinned below, is that the probe's grant is
+    `contents: read` — the least a job that checks this repository out can be
+    given — that its checkout sets `persist-credentials: false` so nothing
+    lands in `.git/config` beside the downloaded compiler, and that the only
+    environment binding in that job is the lane name.
 
     Beyond the security split, two functional properties are pinned because
     losing either leaves a workflow that runs, stays green, and reports nothing:
@@ -660,9 +670,9 @@ def check_compat_canary_workflow(repo_root: Path = REPO_ROOT) -> None:
         if grants != expected_permissions[name]:
             raise AssertionError(
                 f"compat canary job {name!r} permission mismatch: the job that "
-                "runs a downloaded compiler holds nothing and the job that holds "
-                f"the token runs nothing, expected={expected_permissions[name]}, "
-                f"actual={grants}"
+                "runs a downloaded compiler holds no write scope and the job "
+                "that holds issue-write authority runs nothing, expected="
+                f"{expected_permissions[name]}, actual={grants}"
             )
     # Counted over grant lines rather than over the whole text: the workflow's
     # own commentary names this grant while explaining why it is isolated.

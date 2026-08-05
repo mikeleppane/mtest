@@ -9,11 +9,12 @@ name: Compat Canary
 #
 # The two jobs are split by credential rather than by convenience. `probe`
 # downloads a compiler from a package channel and executes it against this
-# source tree, so it holds no write authority and no token at all; `notify`
-# holds `issues: write` and never runs pixi, Mojo, or anything else that came
-# off the network. `scripts/checks/workflow_security.py` pins that split, step
-# by step, because the whole security argument for scheduling this workflow is
-# that the two halves cannot be brought back together in a diff nobody reads.
+# source tree, so it holds no write scope anywhere and nothing it runs is
+# handed a credential; `notify` holds `issues: write` and never runs pixi,
+# Mojo, or anything else that came off the network.
+# `scripts/checks/workflow_security.py` pins that split, step by step, because
+# the whole security argument for scheduling this workflow is that the two
+# halves cannot be brought back together in a diff nobody reads.
 on:
   # Off the top of the hour deliberately. GitHub queues scheduled runs and
   # documents that the start of an hour is when the queue is deepest, so a
@@ -45,7 +46,12 @@ jobs:
     # A full source, packaging and end-to-end sweep on a compiler no cache has
     # ever been warmed for. Generous against that, never fitted to it.
     timeout-minutes: 60
-    # This job executes a compiler it just downloaded. It is given nothing.
+    # This job executes a compiler it just downloaded. GitHub mints a
+    # `GITHUB_TOKEN` for every job whether or not one is wanted, so the
+    # property worth stating is not "no token" but "no token worth reaching":
+    # `contents: read` is the least a job that checks this repository out can
+    # be granted, the checkout below refuses to write it into `.git/config`,
+    # and no step here binds it into the environment the compiler runs in.
     permissions:
       contents: read
     strategy:

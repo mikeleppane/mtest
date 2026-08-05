@@ -994,11 +994,11 @@ class CompatCanaryWorkflowTests(unittest.TestCase):
 
     This is the only workflow in the repository that downloads a compiler from a
     package channel and executes it against the source tree, and the only reason
-    that is acceptable is that the job doing it holds nothing: no token, no
-    write permission, and no way to reach the job that has one. Every mutation
-    below is a way that separation could be lost in a diff that reads like a
-    tidy-up — a permission line, a step moved between jobs, an install that
-    happens one step too early.
+    that is acceptable is what the job doing it is denied: any write scope, any
+    credential in its environment, any credential on disk, and any route to the
+    job that holds one. Every mutation below is a way that separation could be
+    lost in a diff that reads like a tidy-up — a permission line, a step moved
+    between jobs, an install that happens one step too early.
     """
 
     def _workflow(self) -> str:
@@ -1061,9 +1061,7 @@ class CompatCanaryWorkflowTests(unittest.TestCase):
             "top-of-the-hour": workflow.replace(
                 '    - cron: "41 1 * * 1-5"', '    - cron: "0 1 * * 1-5"', 1
             ),
-            "unscheduled": workflow.replace(
-                '    - cron: "41 1 * * 1-5"\n', "", 1
-            ),
+            "unscheduled": workflow.replace('    - cron: "41 1 * * 1-5"\n', "", 1),
         }.items():
             with self.subTest(schedule=label):
                 self._reject(mutated, "trigger mismatch")
@@ -1139,30 +1137,56 @@ class CompatCanaryWorkflowTests(unittest.TestCase):
         """The credential split, stated as the one thing that must never pass.
 
         The probe job executes a compiler downloaded from a package channel
-        against this source tree. Any grant beyond `contents: read` hands that
-        compiler the repository.
+        against this source tree. GitHub mints a `GITHUB_TOKEN` for it whatever
+        the workflow says, so `contents: read` is not "nothing" — it is the
+        least a job that checks this repository out can hold. Any grant beyond
+        it, and any missing grant block that lets the job inherit a wider one,
+        hands that compiler write authority over something.
         """
         workflow = self._workflow()
-        marker = (
-            "    # This job executes a compiler it just downloaded."
-            " It is given nothing.\n    permissions:\n      contents: read\n"
-        )
+        # Anchored on the block that follows the probe's grant rather than on
+        # the prose above it, so a reworded comment cannot quietly stop this
+        # mutation from applying.
+        marker = "    permissions:\n      contents: read\n    strategy:\n"
         self.assertIn(marker, workflow)
         for label, replacement in {
-            "contents-write": "    permissions:\n      contents: write\n",
+            "contents-write": "    permissions:\n"
+            "      contents: write\n"
+            "    strategy:\n",
             "issues-write": "    permissions:\n"
             "      contents: read\n"
-            "      issues: write\n",
+            "      issues: write\n"
+            "    strategy:\n",
             "id-token": "    permissions:\n"
             "      contents: read\n"
-            "      id-token: write\n",
-            "dropped": "",
+            "      id-token: write\n"
+            "    strategy:\n",
+            "dropped": "    strategy:\n",
         }.items():
             with self.subTest(grant=label):
                 self._reject(
                     workflow.replace(marker, replacement, 1),
                     "permission mismatch",
                 )
+
+    def test_the_probe_job_holds_no_credential_worth_reaching(self) -> None:
+        """The guarantee GitHub actually permits, stated positively.
+
+        A `GITHUB_TOKEN` is minted for every job whether the workflow asks for
+        one or not, so "the probe is given no token" is not a property anything
+        can pin, and an oracle that claimed it would be asserting something
+        false. Three things are true instead, and each is read off the live
+        probe job here: its grant carries no write scope, no step binds a
+        credential into the environment the downloaded compiler runs in, and
+        the checkout refuses to leave one in `.git/config` beside it.
+        """
+        jobs = self._workflow().split("\n  probe:\n", 1)[1]
+        probe, separator, _notify = jobs.partition("\n  notify:\n")
+        self.assertTrue(separator)
+        for forbidden in (": write", "github.token", "secrets.", "GH_TOKEN"):
+            self.assertNotIn(forbidden, probe)
+        self.assertIn("      contents: read\n", probe)
+        self.assertIn("          persist-credentials: false\n", probe)
 
     def test_the_notifier_permissions_are_exact(self) -> None:
         workflow = self._workflow()
