@@ -690,10 +690,8 @@ def read_contract_report(stdout: str) -> ContractReport | None:
     )
 
 
-def contract_failure_verdict(
-    result: CommandResult, *, toolchain_moved: bool
-) -> str | None:
-    """Decide whether a failing strict contract gate condemns the candidate.
+def contract_verdict(result: CommandResult, *, toolchain_moved: bool) -> str | None:
+    """Decide whether a strict contract run condemns the candidate.
 
     The gate runs `mtest doctor`, and `doctor` refuses any toolchain but the
     one mtest was built against. That refusal is correct — it is the product
@@ -704,19 +702,32 @@ def contract_failure_verdict(
     must be *exactly* `TOLERATED_CONTRACT_FAILURES`, check name and reported
     detail both. One extra failure condemns; one extra clause inside a
     tolerated check's detail condemns; a skip, which `--strict` fails the gate
-    for without printing a roll-call entry, condemns; a roll-call shorter than
-    the count above it condemns, because a reader that cannot see every failure
-    cannot say they were all tolerable. And a run where the identity checks did
-    *not* fail condemns too: on a moved toolchain they must, so a gate that
-    failed elsewhere while they passed is a gate whose guard has stopped
-    guarding, which is a finding rather than a licence.
+    for without printing a roll-call entry, condemns; a roll-call that does not
+    account for the count printed above it condemns, in either direction,
+    because a reader who cannot match the two cannot say every failure was
+    tolerable. And a run where the identity checks did *not* fail condemns too:
+    on a moved toolchain they must, so a gate whose other checks failed while
+    they passed is a gate whose guard has stopped guarding, which is a finding
+    rather than a licence.
+
+    This is asked of every run of that gate rather than of the failing ones
+    alone, and the difference is the whole point. An exit of 0 is not the
+    absence of a finding here; it is a gate that did not fail the three checks
+    a moved toolchain must fail, which is the identical finding to one that
+    failed elsewhere while they passed. Read on the nonzero branch only, a
+    candidate whose `mojo --version` output no longer matches the identity
+    `doctor` compiled in — so that `doctor` stops refusing it — made the gate
+    green, skipped this reading entirely, and was reported as `PASS`. The
+    empty-expected-set rule `e2e_failure_verdict` states for the end-to-end
+    roster is the same rule: an expected failure that did not happen is itself
+    the finding.
 
     Args:
-        result: The failed gate.
+        result: The completed gate, whatever it exited.
         toolchain_moved: Whether the resolved toolchain differs from the pin.
 
     Returns:
-        The reason this failure condemns the candidate, or None when the gate
+        The reason this run condemns the candidate, or None when the gate
         failed exactly the way a moved toolchain makes it fail.
     """
     report = read_contract_report(result.stdout)
@@ -986,17 +997,15 @@ def classify(
                 lane, resolved, result, SOURCE_INCOMPATIBLE, first_diagnostic(result)
             )
 
+    # Read whatever it exits, never merely waited on. A zero exit from this
+    # gate is not silence but a claim — that `mtest doctor` accepted a compiler
+    # it was not built against — and it is exactly the claim a candidate that
+    # broke the identity guard would make on the day this lane exists to catch
+    # it. `contract_verdict` says why that is the same finding as any other.
     contract = run(["pixi", "run", CONTRACT_TASK])
-    tolerated_contract = False
-    if contract.returncode != 0:
-        verdict = contract_failure_verdict(
-            contract, toolchain_moved=resolved.version != pin
-        )
-        if verdict is not None:
-            return _stage_failure(
-                lane, resolved, contract, SOURCE_INCOMPATIBLE, verdict
-            )
-        tolerated_contract = True
+    verdict = contract_verdict(contract, toolchain_moved=resolved.version != pin)
+    if verdict is not None:
+        return _stage_failure(lane, resolved, contract, SOURCE_INCOMPATIBLE, verdict)
 
     comparison = _regenerate_and_compare(repo, run)
     if comparison.classification != PASS:
@@ -1039,12 +1048,15 @@ def classify(
             )
 
     detail = f"every gate held on mojo {resolved.version} ({resolved.commit})"
-    notes: list[str] = []
-    if tolerated_contract:
-        notes.append(
+    # Unconditional: reaching this line means `contract_verdict` returned None,
+    # which it only does for a gate that failed exactly the three identity
+    # checks. There is no path here on which they were not tolerated.
+    notes: list[str] = [
+        (
             f"tolerated the {CONTRACT_TASK} failures `mtest doctor` reports for "
             "an unpinned toolchain"
         )
+    ]
     if tolerated:
         notes.append(f"tolerated toolchain-reporting drift in {', '.join(tolerated)}")
     for note in notes:
