@@ -1164,6 +1164,27 @@ class ChannelSearchTests(CanaryTestCase):
             ("pixi", "search", "--json", "-c", "one", "-c", "two", "mojo >1.0.0b2,<2"),
         )
 
+    def test_the_search_asks_for_no_limit_it_cannot_pass(self) -> None:
+        """`--limit` is not missing from the argv; it is refused by the tool.
+
+        pixi caps its table output at five versions per package, which would
+        drop the pin out of the answer and red both lanes every weekday — but
+        the pinned 0.72.0 rejects the flag beside `--json` ("the argument
+        '--json' cannot be used with '--limit'") and answers uncapped without
+        it. Passed anyway, every search would exit 2 and every day would end on
+        an infrastructure non-answer.
+        """
+        argv = search_argv(("one",), "mojo >1.0.0b2,<2")
+        self.assertIn("--json", argv)
+        for flag in ("--limit", "-l", "--limit-packages", "-n"):
+            self.assertNotIn(flag, argv)
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "compat-canary.yml"
+        ).read_text(encoding="utf-8")
+        # Independently transcribed: the version the measurement above was made
+        # against is the version the probe job provisions.
+        self.assertIn("pixi-version: v0.72.0\n", workflow)
+
     def test_this_repository_resolves_against_two_channels(self) -> None:
         # Independently transcribed from pixi.toml.
         self.assertEqual(
@@ -1445,13 +1466,15 @@ class IdleLaneTests(CanaryTestCase):
                 self.assertEqual(runner.stages, ["search-published"])
 
     def test_an_answer_this_cannot_read_is_loud(self) -> None:
-        """Pixi floats, so the day its `search --json` shape moves is permanent.
+        """The day pixi's `search --json` shape moves, it stays moved.
 
-        The workflow provisions pixi without a version, so a release that
-        changes the shape of this answer raises here on every run of both lanes
-        until someone notices. Quiet, nobody does: the probe has stopped
-        probing and every scheduled run still reports green. In `ci.yml` the
-        same pixi change would have turned a build red the day it landed.
+        The workflow pins the pixi it provisions, so this cannot arrive out of
+        nowhere — but a bump is a reviewed change that can still move the shape
+        of this answer, and from the day it lands the reading raises on every
+        run of both lanes until someone notices. Quiet, nobody does: the probe
+        has stopped probing and every scheduled run still reports green. In
+        `ci.yml` the same pixi change would have turned a build red the day it
+        landed.
         """
         for stage in ("search-published", "search-candidates"):
             with self.subTest(stage=stage):

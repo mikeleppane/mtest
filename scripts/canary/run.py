@@ -464,6 +464,18 @@ def search_argv(channels: Sequence[str], matchspec: str) -> tuple[str, ...]:
     anything newer has been published at all, and the install that follows
     remains the authority on whether it is installable on this runner.
 
+    No `--limit` is passed either, and that is a finding rather than an
+    omission. pixi 0.72.0, the version the workflow provisions, caps its
+    *table* output at five versions per package and REFUSES the flag beside
+    `--json` outright — "the argument '--json' cannot be used with '--limit'",
+    exit 2 — while the JSON answer it does give is uncapped, measured at 63
+    versions for a package publishing that many. A `--limit -1` added for
+    safety would therefore turn every search into a failed command and every
+    day into `INFRA_FAILURE`. Should a later pixi ever start capping the JSON,
+    the pinned version drops out of the answer and `classify` reports
+    `CANARY_BROKEN`, which is loud, rather than a truncated inventory read as
+    fact.
+
     Args:
         channels: The channels to consider, in preference order.
         matchspec: A conda matchspec, for example `mojo >1.0.0b2,<2`.
@@ -1040,10 +1052,12 @@ def classify(repo: Path, lane: str, *, run: Runner) -> CanaryResult:
         newer_than_pin = versions_newer_than(published, pin)
     except ValueError as error:
         # The search ran and answered; this module could not read the answer.
-        # pixi is not pinned by the workflow that provisions it, so it floats,
-        # and the day it changes the shape of `search --json` this raises on
-        # every run of both lanes forever. Quiet, that is a canary that has
-        # silently stopped probing while every scheduled run reports green.
+        # The workflow pins the pixi it provisions, so this cannot arrive
+        # unannounced — but a pin is only as durable as the next bump, and a
+        # release that changes the shape of `search --json` raises here on
+        # every run of both lanes from the day that bump lands. Quiet, that is
+        # a canary that has silently stopped probing while every scheduled run
+        # reports green.
         return _result(lane, _UNKNOWN, CANARY_BROKEN, str(error))
     # The same bar the control is held to, for the same reason. An unbounded
     # search that exits 0 with parseable JSON has proved that pixi ran, not
