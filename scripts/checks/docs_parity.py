@@ -79,6 +79,11 @@ import re
 import subprocess
 import sys
 
+# The probe owns the classification vocabulary this module holds one page
+# against. Imported rather than restated, because a list copied here would
+# agree with whatever the page said on the day it was copied.
+from scripts.canary.run import CLASSIFICATIONS
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 README_PATH = Path("README.md")
@@ -122,7 +127,19 @@ in its own right.
 Naming them is what lets the sweep below invert the question. Without an
 explicit list, "not a site page" and "not gated at all" would be the same
 answer, and a new page would be indistinguishable from a reference document.
+
+Exempt from parity is not the same as ungated. `check_canary_classifications`
+holds the compatibility page against the one thing on it that another module
+owns outright — the probe's classification names — because "this page copies
+nothing" is a reason to skip the mirror comparison, not a reason to let a
+documented outcome and a produced outcome be different sets.
 """
+
+CANARY_CLASSIFICATION_PAGE = Path("docs/compatibility.md")
+"""The reference page that documents what the compatibility canary can report."""
+
+CANARY_CLASSIFICATION_HEADING_RE = re.compile(r"(?m)^### `([A-Z_]+)`$")
+"""How that page gives one classification its own section."""
 
 EXCLUDED_DOC_DIRECTORIES = ("plans/", "superpowers/")
 """Directories under `docs/` the site configuration must refuse to publish.
@@ -928,17 +945,53 @@ def check_site_configuration(repo_root: Path = REPO_ROOT) -> None:
         )
 
 
+def check_canary_classifications(repo_root: Path = REPO_ROOT) -> None:
+    """Require the compatibility page to document exactly what the probe reports.
+
+    The names come from `scripts.canary.run`, which defines them, rather than
+    from a list restated here that would agree with whatever the page happened
+    to say.
+
+    Args:
+        repo_root: Repository root holding `docs/compatibility.md`.
+
+    Raises:
+        AssertionError: A classification the probe can produce has no section on
+            the page, a section names something the probe cannot produce, or the
+            page could not be read at all.
+    """
+    path = repo_root / CANARY_CLASSIFICATION_PAGE
+    try:
+        page = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise AssertionError(
+            f"{CANARY_CLASSIFICATION_PAGE} cannot read: {error}"
+        ) from error
+    documented = set(CANARY_CLASSIFICATION_HEADING_RE.findall(page))
+    produced = set(CLASSIFICATIONS)
+    if documented != produced:
+        raise AssertionError(
+            f"{CANARY_CLASSIFICATION_PAGE} classification mismatch: a probe "
+            "outcome nobody documented reaches a maintainer as a word with no "
+            "meaning, and a documented outcome the probe cannot produce is a "
+            "promise about a report that never arrives; undocumented="
+            f"{sorted(produced - documented)}, "
+            f"unproduced={sorted(documented - produced)}"
+        )
+
+
 def main() -> int:
     """Assert the site copies nothing it has not declared, and nothing stale.
 
     Returns:
         0 once every declaration is well formed, every declared mirror equals
         its README source byte for byte, no site page holds an undeclared or
-        unfenced block, every tracked page is declared, and the configuration
-        still excludes the internal directories; printing how many mirrors were
-        compared. 1 after printing the drift to stderr, so the policy run fails
-        instead of publishing a page whose commands no longer match the ones
-        this repository executes.
+        unfenced block, every tracked page is declared, the configuration still
+        excludes the internal directories, and the compatibility page documents
+        exactly the classifications the canary probe can report; printing how
+        many mirrors were compared. 1 after printing the drift to stderr, so the
+        policy run fails instead of publishing a page whose commands no longer
+        match the ones this repository executes.
     """
     try:
         check_declarations()
@@ -946,6 +999,7 @@ def main() -> int:
         check_site_blocks_are_all_declared()
         check_no_undeclared_pages()
         check_site_configuration()
+        check_canary_classifications()
     except AssertionError as exc:
         print(f"docs-parity-check: FAIL: {exc}", file=sys.stderr)
         return 1
