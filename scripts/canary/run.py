@@ -385,11 +385,19 @@ def e2e_failure_verdict(failed: Sequence[str], *, toolchain_moved: bool) -> str 
     `mtest doctor` reports the toolchain it found, so its scenarios genuinely
     fail once the toolchain moves. That tolerance is narrow on purpose, because
     "some failures are expected" degrades into "failures are ignored" the
-    moment it stops being checked: any other failing scenario condemns, a
-    failure that named no scenario condemns (the roll-call this reads has
-    changed shape and the guard has stopped guarding), and doctor scenarios
-    failing while the toolchain did NOT move condemns too, since then they
-    cannot be blamed on the thing being probed.
+    moment it stops being checked: any other failing scenario condemns, and so
+    does a failure that named no scenario at all, which means the roll-call
+    this reads has changed shape and the guard has stopped guarding.
+
+    `toolchain_moved` is a **precondition, not a live guard**. `classify` can
+    only reach this with a toolchain that differs from the pin, because an
+    equal one returned `NO_NEWER_CANDIDATE` several stages earlier, so the
+    False branch is unreachable from the pipeline as it stands today and is
+    covered by this module's tests alone. It is kept because the tolerance is
+    the dangerous part of this function and this is where it is stated: a
+    future caller that reaches the roster by some other route inherits the
+    refusal rather than the tolerance, and gets a named reason instead of a
+    silent pass.
 
     Args:
         failed: The scenario ids that failed.
@@ -598,6 +606,10 @@ def classify(
     e2e = run(["pixi", "run", "e2e"])
     if e2e.returncode != 0:
         tolerated = failed_scenarios(e2e.stdout)
+        # Always True here — the pin-equal case returned NO_NEWER_CANDIDATE
+        # long before this line. Computed rather than passed as a literal so
+        # that if that earlier return ever moves, the tolerance narrows with it
+        # instead of quietly outliving its precondition.
         verdict = e2e_failure_verdict(
             tolerated, toolchain_moved=resolved.version != pin
         )

@@ -5,12 +5,12 @@ The probe writes a classification down and exits 0 whatever it found, because a
 classification is data. This module is where that data becomes policy, and the
 policy is deliberately narrow:
 
-| Classification                                        | What happens here      |
-|-------------------------------------------------------|-----------------------|
-| `PASS`, `NO_NEWER_CANDIDATE`                            | close the issue, exit 0 |
-| `PROTOCOL_DRIFT`, `SOURCE_INCOMPATIBLE`, `PACKAGE_FAILED` | upsert, exit 1        |
-| `INFRA_FAILURE`                                         | comment if open, exit 0 |
-| no artifact, or one this cannot read                    | upsert, exit 1        |
+| Classification                                            | What happens here       |
+|-----------------------------------------------------------|-------------------------|
+| `PASS`, `NO_NEWER_CANDIDATE`                              | close the issue, exit 0 |
+| `PROTOCOL_DRIFT`, `SOURCE_INCOMPATIBLE`, `PACKAGE_FAILED` | upsert, exit 1          |
+| `INFRA_FAILURE`                                           | comment if open, exit 0 |
+| no artifact, or one this cannot read                      | upsert, exit 1          |
 
 Three of those rows are worth arguing for.
 
