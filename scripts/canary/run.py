@@ -1214,13 +1214,20 @@ def classify(repo: Path, lane: str, *, run: Runner) -> CanaryResult:
         # the direction is deliberate: a wrong red is read and corrected the
         # same day, a wrong green is the silence this workflow exists to end.
         #
-        # The detail says only that, and deliberately no more. `pixi install`
+        # What the detail may say is a separate question from which row this
+        # lands on, and the answer is: only what was observed. `pixi install`
         # solves, fetches AND links, so a 5xx on a `.conda` payload, a 429, a
-        # truncated transfer or a full prefix all land here with repodata
-        # search perfectly healthy. The wording used to call every one of them
-        # a spec that "cannot be satisfied beside this repository's own pinned
-        # dependencies on every platform the manifest declares" — a solver
-        # verdict this probe never observed, standing in a durable artifact.
+        # truncated transfer or a full prefix all arrive here with repodata
+        # search perfectly healthy, and this probe never learns which of the
+        # three stopped. So the detail records the two failed attempts, the
+        # control that answered between them, and the failure's own last line,
+        # and it asserts no cause at all — a maintainer reading the issue is
+        # told what the machine did rather than what somebody inferred.
+        # Earlier wordings called every one of these a spec that "cannot be
+        # satisfied beside this repository's own pinned dependencies on every
+        # platform the manifest declares", and then that it "did not install
+        # beside" them: solver verdicts, in a durable artifact, from a probe
+        # that had watched no solver.
         control = run(search_argv(channels, floor_matchspec(pin)))
         if timed_out(control):
             return _result(
@@ -1239,11 +1246,12 @@ def classify(repo: Path, lane: str, *, run: Runner) -> CanaryResult:
             lane,
             published_only,
             SOURCE_INCOMPATIBLE,
-            f"{command_failure(install)}; the channels still answered "
-            f"`{floor_matchspec(pin)}` afterwards, so the index was reachable "
-            f"both times and `{matchspec}` did not install beside this "
-            f"repository's own pinned dependencies. The failure above says "
-            f"which of solving, fetching and linking did not complete",
+            f"{command_failure(install)}; `{matchspec}` was installed twice, "
+            f"{INSTALL_RETRY_BACKOFF_SECONDS:.0f}s apart, and failed both "
+            f"times, and the control `{floor_matchspec(pin)}` answered the "
+            f"channels afterwards, so the index stayed readable throughout. "
+            f"`pixi install` solves, fetches and links; which of the three "
+            f"this stopped in was not observed",
         )
 
     identity = run(list(RESOLVE_ARGV))

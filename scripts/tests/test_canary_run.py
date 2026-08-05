@@ -1802,10 +1802,13 @@ class StageClassificationTests(CanaryTestCase):
         corrected the same day, a wrong green is the silence this workflow
         exists to end. But a CDN 5xx on a `.conda` payload, a 429, a truncated
         transfer or a full prefix all leave repodata search healthy and land
-        here, and every one of them was reported as a spec that "cannot be
-        satisfied beside this repository's own pinned dependencies on every
-        platform the manifest declares" — a solver verdict this probe never
-        observed, standing in a durable artifact.
+        here, and every one of them was reported first as a spec that "cannot
+        be satisfied beside this repository's own pinned dependencies on every
+        platform the manifest declares" and then as one that "did not install
+        beside" them — solver verdicts, standing in a durable artifact, from a
+        probe that watched no solver. What the detail may carry is what the
+        machine did: two attempts, the wait between them, the control that
+        answered, and the failure's own last line.
         """
         repo, runner = self.build()
         runner.fails(
@@ -1814,9 +1817,17 @@ class StageClassificationTests(CanaryTestCase):
         )
         result = self.classify(repo, runner)
         self.assertEqual(result.classification, SOURCE_INCOMPATIBLE)
-        self.assertNotIn("cannot be satisfied", result.detail)
-        self.assertIn("did not install", result.detail)
-        self.assertIn("solving, fetching and linking", result.detail)
+        self.assertIn("HTTP status 503", result.detail)
+        self.assertIn("failed both times", result.detail)
+        self.assertIn("the index stayed readable", result.detail)
+        self.assertIn("was not observed", result.detail)
+        for claim in (
+            "cannot be satisfied",
+            "did not install beside",
+            "incompatible",
+            "cannot coexist",
+        ):
+            self.assertNotIn(claim, result.detail)
         self.assertEqual(
             runner.stages,
             [
