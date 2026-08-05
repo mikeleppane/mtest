@@ -945,6 +945,11 @@ class ChannelSearchTests(CanaryTestCase):
         self.assertEqual(search_newest(answer), ("1.0.0b2", "1.0.0rc0"))
 
     def test_an_idle_lane_names_every_subdirs_newest(self) -> None:
+        # The subdirs have diverged: one carries the pin, the other stopped at
+        # the release before it. Nothing precedes the pin anywhere, which is
+        # what makes this an idle lane rather than a contradicted one — pixi
+        # lists records newest first WITHIN a subdir, so an older version
+        # cannot stand ahead of the pin in one.
         repo, runner = self.build()
         runner.outcomes(
             "search-published",
@@ -953,10 +958,7 @@ class ChannelSearchTests(CanaryTestCase):
                 json.dumps(
                     {
                         "linux-64": [{"name": "mojo", "version": PINNED_MOJO}],
-                        "osx-arm64": [
-                            {"name": "mojo", "version": "1.0.0b1"},
-                            {"name": "mojo", "version": PINNED_MOJO},
-                        ],
+                        "osx-arm64": [{"name": "mojo", "version": "1.0.0b1"}],
                     }
                 ),
                 "",
@@ -966,6 +968,45 @@ class ChannelSearchTests(CanaryTestCase):
         result = self.classify(repo, runner)
         self.assertEqual(result.classification, NO_NEWER_CANDIDATE)
         self.assertIn(f"published there is {PINNED_MOJO}, 1.0.0b1", result.detail)
+
+    def test_only_a_subdir_that_carries_the_pin_can_outrank_it(self) -> None:
+        """The one ordering claim that can be read straight off an answer.
+
+        pixi orders records newest first inside a subdir, so a version standing
+        ahead of the pin THERE is newer than the pin without anything here
+        comparing two version strings. A subdir that never names the pin
+        supports no such reading: its head may be older, and deciding which
+        would mean implementing conda's ordering in this module, which is the
+        one thing `search_newest` exists to refuse.
+        """
+        answer = CommandResult(
+            ("pixi", "search", "--json", "mojo"),
+            0,
+            json.dumps(
+                {
+                    "linux-64": [
+                        {"name": "mojo", "version": "1.0.0rc0"},
+                        {"name": "mojo", "version": PINNED_MOJO},
+                        {"name": "mojo", "version": "1.0.0b1"},
+                    ],
+                    "osx-arm64": [
+                        {"name": "mojo", "version": "1.0.0rc0"},
+                        {"name": "mojo", "version": "1.0.0b3"},
+                    ],
+                }
+            ),
+            "",
+        )
+        self.assertEqual(
+            canary_run.versions_newer_than(answer, PINNED_MOJO), ("1.0.0rc0",)
+        )
+        self.assertEqual(canary_run.versions_newer_than(answer, "1.0.0rc0"), ())
+        self.assertEqual(
+            canary_run.versions_newer_than(
+                CommandResult(("pixi", "search"), 0, _search_answer(), ""), PINNED_MOJO
+            ),
+            (),
+        )
 
     def test_an_empty_answer_offers_nothing(self) -> None:
         answer = CommandResult(("pixi", "search"), 0, json.dumps({"linux-64": []}), "")
@@ -1131,6 +1172,74 @@ class IdleLaneTests(CanaryTestCase):
                 runner.outcomes("search-control", _Outcome(0, stdout, ""))
                 result = self.classify(repo, runner)
                 self.assertEqual(result.classification, CANARY_BROKEN)
+
+    def test_a_failed_bounded_search_never_contradicts_the_inventory(self) -> None:
+        """The run already held the evidence that the quiet answer was wrong.
+
+        The unbounded search names what the channels publish, and it named
+        1.0.0b3 above the pin. The bounded search then failed for a reason of
+        its own — a transient 503, a connection reset — and the control, which
+        answers instantly out of cached repodata, confirmed the channels. That
+        was read as an empty match set, so the lane reported the quiet
+        `NO_NEWER_CANDIDATE` and closed yesterday's real issue, having observed
+        a newer release in its own first query minutes earlier.
+        """
+        repo, runner = self.build()
+        runner.fails("search-candidates", stderr="error sending request: HTTP 503\n")
+        result = self.classify(repo, runner)
+        self.assertNotEqual(result.classification, NO_NEWER_CANDIDATE, result.detail)
+        self.assertEqual(result.classification, INFRA_FAILURE, result.detail)
+        self.assertIn(CANDIDATE.version, result.detail)
+        self.assertIn("HTTP 503", result.detail)
+        self.assertEqual(
+            runner.stages,
+            ["search-published", "search-candidates", "search-control"],
+        )
+
+    def test_a_bounded_search_that_answers_against_the_inventory_is_loud(self) -> None:
+        """Two answers from one tool in one run that cannot both be true.
+
+        Here the bounded search succeeds and names nothing while the unbounded
+        one has just listed a version above the pin. Nothing transient explains
+        that: the matchspec this probe builds does not select what the channels
+        say they hold, so the screen is asking a question other than the one
+        the pipeline believes it asked, and it will ask it again tomorrow.
+        """
+        repo, runner = self.build()
+        runner.outcomes("search-candidates", _Outcome(0, _search_answer(), ""))
+        result = self.classify(repo, runner)
+        self.assertEqual(result.classification, CANARY_BROKEN, result.detail)
+        self.assertIn(CANDIDATE.version, result.detail)
+        self.assertIn(PINNED_MOJO, result.detail)
+
+    def test_a_subdir_that_lists_nothing_above_the_pin_stays_quiet(self) -> None:
+        """The comparison is pixi's own ordering, never one written here.
+
+        Only a version a subdir lists BEFORE the pin is newer than the pin, and
+        only in a subdir that carries the pin at all. A subdir whose newest is
+        older than the pin — a platform a release skipped — must not be read as
+        newer, or every idle day on a diverged channel set turns loud.
+        """
+        repo, runner = self.build()
+        runner.outcomes(
+            "search-published",
+            _Outcome(
+                0,
+                json.dumps(
+                    {
+                        "linux-64": [
+                            {"name": "mojo", "version": PINNED_MOJO},
+                            {"name": "mojo", "version": "1.0.0b1"},
+                        ],
+                        "osx-arm64": [{"name": "mojo", "version": "1.0.0b1"}],
+                    }
+                ),
+                "",
+            ),
+        )
+        runner.fails("search-candidates", stderr="No packages found matching\n")
+        result = self.classify(repo, runner)
+        self.assertEqual(result.classification, NO_NEWER_CANDIDATE, result.detail)
 
     def test_an_empty_match_set_needs_no_control(self) -> None:
         # A search that answered, with nothing in the answer, is already the

@@ -556,6 +556,43 @@ def search_newest(result: CommandResult) -> tuple[str, ...]:
     return tuple(newest)
 
 
+def versions_newer_than(result: CommandResult, pin: str) -> tuple[str, ...]:
+    """Name every version one search answer listed above the pin.
+
+    Within a single subdir pixi lists records newest first in conda's own
+    version ordering, so everything a subdir names before the pin is newer than
+    the pin. That is the whole of the ordering claim, and it is the only one
+    this module can make without reimplementing conda's comparison — which must
+    not happen here, because `1.0.0rc0` outranks `1.0.0b3.dev2026080406` and
+    every naive comparison gets it backwards.
+
+    A subdir that does not carry the pin is skipped rather than guessed at. Its
+    newest may be older than the pin — a platform a release skipped — and there
+    is no evidence in the answer that says which, so it supports no claim in
+    either direction.
+
+    Args:
+        result: A completed, successful search.
+        pin: The version the answer is read against.
+
+    Returns:
+        The distinct versions listed above the pin, in the order the answer
+        listed them. Empty when nothing the answer carries can be shown to be
+        newer, which is what an idle lane looks like.
+
+    Raises:
+        ValueError: The output is not the subdir-keyed object pixi documents.
+    """
+    newer: list[str] = []
+    for subdir in _search_subdirs(result):
+        if pin not in subdir:
+            continue
+        for version in subdir[: subdir.index(pin)]:
+            if version not in newer:
+                newer.append(version)
+    return tuple(newer)
+
+
 def control_confirms_channels(control: CommandResult, pin: str) -> bool:
     """Decide whether a control search proved the channels can be questioned.
 
@@ -923,6 +960,7 @@ def classify(repo: Path, lane: str, *, run: Runner) -> CanaryResult:
     try:
         available = search_versions(published)
         newest = search_newest(published)
+        newer_than_pin = versions_newer_than(published, pin)
     except ValueError as error:
         # The search ran and answered; this module could not read the answer.
         # pixi is not pinned by the workflow that provisions it, so it floats,
@@ -973,6 +1011,7 @@ def classify(repo: Path, lane: str, *, run: Runner) -> CanaryResult:
             candidates = search_versions(found)
         except ValueError as error:
             return _result(lane, _UNKNOWN, CANARY_BROKEN, str(error))
+        answered = True
     else:
         # pixi exits 1 BOTH when a spec matches nothing and when it cannot
         # answer the question at all, printing nothing to stdout either way, so
@@ -982,9 +1021,13 @@ def classify(repo: Path, lane: str, *, run: Runner) -> CanaryResult:
         # exhibit — a rejected matchspec spelling, a channel that went away
         # between the two calls. So the failure is corroborated instead: ask
         # the control, which differs by one operator and names the pinned
-        # version the channels must carry. Answered, and the failure above was
-        # an empty match set. Unanswered, and the probe cannot ask its own
-        # question, which is infrastructure rather than a verdict.
+        # version the channels must carry. Unanswered, and the probe cannot ask
+        # its own question, which is infrastructure rather than a verdict.
+        #
+        # Answered, and the channels can be questioned — which is all it shows.
+        # It is emphatically not evidence that THIS query's failure was an
+        # empty match set, and the guard below is where that is decided,
+        # against the inventory the unbounded search already returned.
         control = run(search_argv(channels, floor_matchspec(pin)))
         if timed_out(control):
             return _result(lane, _UNKNOWN, STAGE_TIMEOUT, command_failure(control))
@@ -998,7 +1041,44 @@ def classify(repo: Path, lane: str, *, run: Runner) -> CanaryResult:
                 f"answer that, so an empty match set cannot be inferred",
             )
         candidates = ()
+        answered = False
     if not candidates:
+        # An empty candidate set is a claim about what the channels hold, so it
+        # is checked against the inventory this run already obtained rather
+        # than accepted on the strength of the query that produced it. The
+        # unbounded search names what is published; if it listed anything above
+        # the pin, "nothing newer exists" was contradicted before it was said,
+        # and the contradiction is resolved by reporting the query that
+        # disagreed rather than by asking a fourth one.
+        #
+        # The two ways to arrive here need different names. A search that RAN
+        # and named nothing while the channels advertise something newer is two
+        # answers from one tool that cannot both be true — the matchspec does
+        # not select what the index says it holds — and it recurs every weekday
+        # until a person changes the spelling. A search that FAILED proves
+        # nothing about inventory whatever the control says, and it is a
+        # command that did not run to completion, which is the one thing this
+        # module reports as infrastructure.
+        if newer_than_pin:
+            observed = ", ".join(newer_than_pin)
+            if answered:
+                return _result(
+                    lane,
+                    _UNKNOWN,
+                    CANARY_BROKEN,
+                    f"`{matchspec}` matched nothing, yet "
+                    f"`{shlex.join(published.argv)}` listed mojo {observed} above "
+                    f"the pinned {pin} in the same run; the bounded search is not "
+                    f"asking what this probe means by a candidate",
+                )
+            return _result(
+                lane,
+                _UNKNOWN,
+                INFRA_FAILURE,
+                f"{command_failure(found)}; the channels had just listed mojo "
+                f"{observed} above the pinned {pin}, so that failure cannot be "
+                f"read as an empty match set and nothing newer cannot be claimed",
+            )
         # `_UNKNOWN` rather than the pin. The pin is what this repository
         # already ships; putting it under a heading that says "Candidate" told
         # a maintainer a compiler had been exercised on the commonest quiet day
