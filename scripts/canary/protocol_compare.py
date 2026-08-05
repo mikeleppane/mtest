@@ -66,7 +66,20 @@ class ToolchainIdentity:
 
 @dataclass(frozen=True)
 class CompareResult:
-    """A classification of one baseline-versus-candidate transcript pair."""
+    """A classification reached while trying to compare two transcript trees.
+
+    Usually that is `PASS` or `PROTOCOL_DRIFT` over a real pair. But
+    `scripts.canary.run.generator_failure` answers in this type too, for the
+    runs where there was no pair to compare: a generation the probe killed is
+    `STAGE_TIMEOUT`, and one that died for a reason the generator did not name
+    as its own is `SOURCE_INCOMPATIBLE`. So the classification here is any of
+    the probe's names, not only the two this module defines.
+
+    Attributes:
+        classification: One of `scripts.canary.run.CLASSIFICATIONS`.
+        detail: The evidence — a unified diff, a missing or unexpected
+            transcript, or the failed command that produced neither.
+    """
 
     classification: str
     detail: str
