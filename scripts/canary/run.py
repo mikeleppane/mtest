@@ -620,7 +620,9 @@ def read_contract_report(stdout: str) -> ContractReport | None:
     )
 
 
-def contract_failure_verdict(stdout: str, *, toolchain_moved: bool) -> str | None:
+def contract_failure_verdict(
+    result: CommandResult, *, toolchain_moved: bool
+) -> str | None:
     """Decide whether a failing strict contract gate condemns the candidate.
 
     The gate runs `mtest doctor`, and `doctor` refuses any toolchain but the
@@ -640,18 +642,19 @@ def contract_failure_verdict(stdout: str, *, toolchain_moved: bool) -> str | Non
     guarding, which is a finding rather than a licence.
 
     Args:
-        stdout: The gate's captured output.
+        result: The failed gate.
         toolchain_moved: Whether the resolved toolchain differs from the pin.
 
     Returns:
         The reason this failure condemns the candidate, or None when the gate
         failed exactly the way a moved toolchain makes it fail.
     """
-    report = read_contract_report(stdout)
+    report = read_contract_report(result.stdout)
     if report is None:
         return (
-            "the strict contract gate failed without printing its roster, so no "
-            "failure could be attributed to the toolchain identity check"
+            f"{command_failure(result)}; the strict contract gate printed no "
+            "roster, so no failure could be attributed to the toolchain identity "
+            "check"
         )
     if report.skipped:
         return (
@@ -917,7 +920,7 @@ def classify(
     tolerated_contract = False
     if contract.returncode != 0:
         verdict = contract_failure_verdict(
-            contract.stdout, toolchain_moved=resolved.version != pin
+            contract, toolchain_moved=resolved.version != pin
         )
         if verdict is not None:
             return _stage_failure(

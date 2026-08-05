@@ -673,6 +673,18 @@ def _contract_output(
     return "\n".join(lines) + "\n"
 
 
+def _contract_result(
+    *failures: tuple[str, str], passed: int = 124, skipped: int = 0
+) -> CommandResult:
+    """A failed `contract-check-strict` reporting exactly these failures."""
+    return CommandResult(
+        ("pixi", "run", "contract-check-strict"),
+        1,
+        _contract_output(*failures, passed=passed, skipped=skipped),
+        "",
+    )
+
+
 # What the gate prints on a candidate toolchain when nothing is wrong except
 # that the toolchain moved: `mtest doctor` reports `FAIL toolchain` and exits
 # 1, and the three checks that invoke it expecting a healthy 0 say so.
@@ -738,13 +750,13 @@ class ContractGuardTests(CanaryTestCase):
     def test_the_identity_failures_alone_are_tolerated(self) -> None:
         self.assertIsNone(
             contract_failure_verdict(
-                _contract_output(*_IDENTITY_FAILURES), toolchain_moved=True
+                _contract_result(*_IDENTITY_FAILURES), toolchain_moved=True
             )
         )
 
     def test_any_other_failing_check_condemns(self) -> None:
         verdict = contract_failure_verdict(
-            _contract_output(
+            _contract_result(
                 *_IDENTITY_FAILURES,
                 ("outcome: TIMEOUT -> 1", "exit 0, want 1"),
             ),
@@ -760,7 +772,7 @@ class ContractGuardTests(CanaryTestCase):
         # broke `run`'s EPIPE handling would have ridden along inside a
         # tolerated line.
         verdict = contract_failure_verdict(
-            _contract_output(
+            _contract_result(
                 (
                     "pipe: every direct-output command survives a closed stdout",
                     "doctor: exit 1, want 0; run: exit 141, want 0",
@@ -777,7 +789,7 @@ class ContractGuardTests(CanaryTestCase):
         # lane is probing. A gate that failed without it is a gate whose guard
         # has stopped guarding, which is a finding of its own.
         verdict = contract_failure_verdict(
-            _contract_output(*_IDENTITY_FAILURES[1:]), toolchain_moved=True
+            _contract_result(*_IDENTITY_FAILURES[1:]), toolchain_moved=True
         )
         self.assertIsNotNone(verdict)
         self.assertIn("pipe: every direct-output command", str(verdict))
@@ -786,7 +798,7 @@ class ContractGuardTests(CanaryTestCase):
         # Under --strict a skip fails the gate without ever reaching the
         # roll-call, so the count is the only place it shows.
         verdict = contract_failure_verdict(
-            _contract_output(*_IDENTITY_FAILURES, skipped=1), toolchain_moved=True
+            _contract_result(*_IDENTITY_FAILURES, skipped=1), toolchain_moved=True
         )
         self.assertIsNotNone(verdict)
         self.assertIn("skip", str(verdict))
@@ -794,21 +806,32 @@ class ContractGuardTests(CanaryTestCase):
     def test_a_gate_that_printed_no_roster_condemns(self) -> None:
         for stdout in ("", "error: no checks ran (filter matched nothing)\n"):
             with self.subTest(stdout=stdout):
-                verdict = contract_failure_verdict(stdout, toolchain_moved=True)
+                gate = CommandResult(("pixi", "run", "x"), 2, stdout, "died")
+                verdict = contract_failure_verdict(gate, toolchain_moved=True)
                 self.assertIsNotNone(verdict)
+                self.assertIn("died", str(verdict))
 
     def test_a_roll_call_shorter_than_its_own_count_condemns(self) -> None:
-        truncated = _contract_output(*_IDENTITY_FAILURES).replace(
-            "  - served: doctor --cache-clear accepted, inert (not exit 4)  "
-            "(§9/§27): exit 1, want 0\n",
-            "",
+        # A reader that cannot see every failure cannot say they were all
+        # tolerable, so the count above the roll-call has to account for it.
+        whole = _contract_result(*_IDENTITY_FAILURES)
+        truncated = CommandResult(
+            whole.argv,
+            whole.returncode,
+            whole.stdout.replace(
+                "  - served: doctor --cache-clear accepted, inert (not exit 4)  "
+                "(§9/§27): exit 1, want 0\n",
+                "",
+            ),
+            whole.stderr,
         )
+        self.assertNotEqual(truncated.stdout, whole.stdout)
         verdict = contract_failure_verdict(truncated, toolchain_moved=True)
         self.assertIsNotNone(verdict)
 
     def test_identity_failures_condemn_an_unmoved_toolchain(self) -> None:
         verdict = contract_failure_verdict(
-            _contract_output(*_IDENTITY_FAILURES), toolchain_moved=False
+            _contract_result(*_IDENTITY_FAILURES), toolchain_moved=False
         )
         self.assertIsNotNone(verdict)
 
