@@ -100,6 +100,17 @@ expectation from the code it governs would agree with any lane set the code
 happened to grow.
 """
 
+CANARY_PIXI_VERSION = "v0.72.0"
+"""The pixi release the compatibility canary provisions.
+
+Everything the probe learns about the channels arrives through
+`pixi search --json`, and `scripts/canary/run.py` reads that answer as the
+subdir-keyed object pixi documents. `prefix-dev/setup-pixi` installs the newest
+release when it is given no version, so an unpinned canary probes with a tool
+that changes under it: the day the answer's shape moves, both lanes stop
+probing at once. This is the release that shape was read against.
+"""
+
 CANARY_ARTIFACT_PREFIX = "canary-result-"
 CANARY_RESULTS_ROOT = "build/canary-results/"
 """Where one lane's uploaded classification is named, and where it lands.
@@ -1082,12 +1093,18 @@ def check_compat_canary_workflow(repo_root: Path = REPO_ROOT) -> None:
             )
 
     pixi_setups = _action_step_inputs(workflow, "prefix-dev/setup-pixi")
-    if [inputs for _line, inputs in pixi_setups] != [{"run-install": "false"}]:
+    expected_pixi_inputs = [
+        {"pixi-version": CANARY_PIXI_VERSION, "run-install": "false"}
+    ]
+    if [inputs for _line, inputs in pixi_setups] != expected_pixi_inputs:
         raise AssertionError(
-            "compat canary setup-pixi mismatch: the workflow provisions the pixi "
-            "binary and nothing else. An install here would solve the committed "
-            "`==` pin before the probe relaxes it, so the probe would resolve the "
-            "pinned toolchain and classify every day as having nothing newer, "
+            "compat canary setup-pixi mismatch: the workflow provisions one "
+            "reviewed pixi binary and nothing else. An install here would solve "
+            "the committed `==` pin before the probe relaxes it, so the probe "
+            "would resolve the pinned toolchain and classify every day as having "
+            "nothing newer; an unpinned pixi floats to whatever released most "
+            "recently, and the day `search --json` changes shape both lanes stop "
+            f"probing at once, expected={expected_pixi_inputs}, "
             f"actual={[inputs for _line, inputs in pixi_setups]}"
         )
 
@@ -1101,7 +1118,9 @@ def check_compat_canary_workflow(repo_root: Path = REPO_ROOT) -> None:
             ("persist-credentials: false",),
             ("persist-credentials: false",),
         ],
-        "prefix-dev/setup-pixi": [("run-install: false",)],
+        "prefix-dev/setup-pixi": [
+            (f"pixi-version: {CANARY_PIXI_VERSION}", "run-install: false"),
+        ],
         "actions/upload-artifact": [
             ("name: canary-result-${{ matrix.lane }}", "path: build/canary/"),
         ],

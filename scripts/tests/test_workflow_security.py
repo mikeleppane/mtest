@@ -1330,6 +1330,25 @@ class CompatCanaryWorkflowTests(unittest.TestCase):
             with self.subTest(setup=label):
                 self._reject(mutated, "setup-pixi")
 
+    def test_the_pixi_binary_cannot_float(self) -> None:
+        """The one tool the probe never installs itself, left to the day.
+
+        `setup-pixi` installs the newest pixi when it is given no version, so
+        the canary would run against a tool that changes under it on a morning
+        nobody chose. Everything the probe learns about the channels comes
+        through `pixi search --json`, whose answer shape both lanes parse, so a
+        pixi release that moves it stops the canary in both lanes at once.
+        """
+        workflow = self._workflow()
+        for label, mutated in {
+            "floating": workflow.replace("          pixi-version: v0.72.0\n", "", 1),
+            "another-version": workflow.replace(
+                "          pixi-version: v0.72.0", "          pixi-version: latest", 1
+            ),
+        }.items():
+            with self.subTest(pin=label):
+                self._reject(mutated, "setup-pixi|step input mismatch")
+
     def test_the_lane_matrix_is_pinned(self) -> None:
         workflow = self._workflow()
         marker = (

@@ -73,6 +73,13 @@ jobs:
       - name: Set up Pixi
         uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f # v0.10.0
         with:
+          # Pinned, because this is the one tool the probe does not install
+          # itself and everything it learns about the channels arrives through
+          # `pixi search --json`. Left to float, this action installs whatever
+          # pixi released most recently, so the day that answer changes shape
+          # both lanes stop probing at once, on a morning nobody chose. Moving
+          # this pin is a reviewed change like any other.
+          pixi-version: v0.72.0
           # The pixi binary alone. An install here would solve the committed
           # `==` pin before the probe ever relaxes it, and the canary would
           # report "nothing newer" every day for the rest of its life while
