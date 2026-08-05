@@ -27,12 +27,15 @@ import os
 from pathlib import Path
 import re
 import shutil
+import sys
 import tempfile
+import time
 from typing import TYPE_CHECKING, override
 import unittest
 from unittest import mock
 
 from scripts import gen_transcripts
+from scripts.canary import run as canary_run
 from scripts.canary import toolchain
 from scripts.canary.protocol_compare import PASS, PROTOCOL_DRIFT
 from scripts.canary.run import (
@@ -1203,6 +1206,37 @@ class StageBudgetTests(CanaryTestCase):
                 self.assertEqual(result.classification, STAGE_TIMEOUT)
                 self.assertIn("timed out", result.detail)
                 self.assertIn(stage, result.detail)
+
+    def test_the_real_runner_kills_a_stage_that_outlives_its_budget(self) -> None:
+        """The negative control the injected 124s cannot be.
+
+        Every other timeout test hands the pipeline a canned exit 124 through
+        the fake runner, so all of them stay green with `timeout=` removed from
+        the real `subprocess.run` call or with the `TimeoutExpired` handler
+        deleted — the two ways this can actually break. This one spawns a
+        process that genuinely outlives its budget, under a budget shortened to
+        make that affordable, and reads back what the runner turned it into.
+
+        The fast command underneath it is the other half of the control: a
+        runner that answered 124 unconditionally would satisfy the first
+        assertion on its own.
+        """
+        runner = canary_run.subprocess_runner(Path.cwd())
+        sleeper = [sys.executable, "-c", "import time; time.sleep(30)"]
+        with mock.patch.object(canary_run, "STAGE_TIMEOUT_SECONDS", 0.25):
+            started = time.monotonic()
+            with contextlib.redirect_stdout(io.StringIO()):
+                killed = runner(sleeper)
+            elapsed = time.monotonic() - started
+        self.assertEqual(killed.returncode, TIMEOUT_RETURNCODE)
+        self.assertIn("timed out after", killed.stderr)
+        self.assertEqual(killed.argv, tuple(sleeper))
+        self.assertLess(elapsed, 5.0, "the stage was not killed at its budget")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            finished = runner([sys.executable, "-c", "print('done')"])
+        self.assertEqual(finished.returncode, 0)
+        self.assertIn("done", finished.stdout)
 
     def test_a_wedged_install_is_not_retried_into_a_second_budget(self) -> None:
         repo, runner = self.build()
