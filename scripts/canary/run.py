@@ -50,6 +50,12 @@ retargeted before the packaging leg for the same reason. And the cheap,
 specific failures are asked before the expensive ones, so a toolchain that
 simply does not compile the sources is named that way rather than by whichever
 long gate happened to notice.
+
+Packaging is asked last, after every source leg, because `PACKAGE_FAILED`
+claims the sources are fine. Asked earlier it can be reported by a run that
+never tested that claim: a candidate that broke Darwin compilation and the
+end-to-end suite as well would be filed as a packaging finding, and the
+premise the name rests on would have gone unexamined.
 """
 
 from __future__ import annotations
@@ -940,14 +946,6 @@ def classify(
         return _result(lane, resolved, comparison.classification, comparison.detail)
 
     if lane == STABLE_LANE:
-        packaged = run(
-            ["pixi", "run", "package-check", "--expect-mojo-version", resolved.version]
-        )
-        if packaged.returncode != 0:
-            return _stage_failure(
-                lane, resolved, packaged, PACKAGE_FAILED, command_failure(packaged)
-            )
-
         cross = run(MACOS_CROSS_COMPILE)
         if cross.returncode != 0:
             return _stage_failure(
@@ -967,6 +965,21 @@ def classify(
         )
         if verdict is not None:
             return _stage_failure(lane, resolved, e2e, SOURCE_INCOMPATIBLE, verdict)
+
+    # Packaging is last because of what its name claims. `PACKAGE_FAILED` says
+    # the sources are fine and the shipped package is not, and that sentence is
+    # only true once every source leg has answered. Run before the Darwin
+    # cross-compile and the end-to-end suite, a candidate that broke both would
+    # still have been reported as a packaging finding, with the premise the
+    # classification rests on never tested at all.
+    if lane == STABLE_LANE:
+        packaged = run(
+            ["pixi", "run", "package-check", "--expect-mojo-version", resolved.version]
+        )
+        if packaged.returncode != 0:
+            return _stage_failure(
+                lane, resolved, packaged, PACKAGE_FAILED, command_failure(packaged)
+            )
 
     detail = f"every gate held on mojo {resolved.version} ({resolved.commit})"
     notes: list[str] = []

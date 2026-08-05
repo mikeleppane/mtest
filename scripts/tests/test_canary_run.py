@@ -1248,9 +1248,9 @@ class PipelineOrderingTests(CanaryTestCase):
                 "test",
                 "contract-check-strict",
                 "transcripts",
-                "package-check",
                 "cross-compile",
                 "e2e",
+                "package-check",
             ],
         )
 
@@ -1487,6 +1487,26 @@ class StageClassificationTests(CanaryTestCase):
         result = self.classify(repo, runner)
         self.assertEqual(result.classification, PACKAGE_FAILED)
         self.assertIn("install did NOT pull mojo-compiler", result.detail)
+
+    def test_a_broken_source_leg_outranks_the_package_it_would_ship(self) -> None:
+        """`PACKAGE_FAILED` claims the sources are fine, so it is asked last.
+
+        Both remaining source legs fail here as well as packaging. Asked before
+        them, the run reported a packaging finding while the premise that
+        finding rests on — that the sources compiled, cross-compiled and
+        behaved — had never been tested, and a candidate that broke Darwin
+        compilation outright was filed as a recipe problem.
+        """
+        repo, runner = self.build()
+        runner.fails(
+            "cross-compile",
+            stderr="/repo/src/mtest/session/exec.mojo:77:5: error: no matching call\n",
+        )
+        runner.fails("e2e")
+        runner.fails("package-check")
+        result = self.classify(repo, runner)
+        self.assertEqual(result.classification, SOURCE_INCOMPATIBLE, result.detail)
+        self.assertNotIn("package-check", runner.stages)
 
     def test_the_package_check_expects_the_candidate(self) -> None:
         repo, runner = self.build()

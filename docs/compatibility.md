@@ -64,21 +64,23 @@ this order, stopping at the first that fails.
    transcript's header — and the committed snapshots are never overwritten,
    because they are the pinned toolchain's testimony and the only thing a
    candidate can be compared against.
-5. **Packaging.** *Stable lane only.* The conda recipe's three compiler pins are
-   retargeted at the candidate, the package is built, and it is installed into a
-   scratch environment and run, with the candidate's version asserted as the
-   compiler the install actually consumed.
-6. **macOS cross-compile.** *Stable lane only.* The sources are compiled for
+5. **macOS cross-compile.** *Stable lane only.* The sources are compiled for
    `arm64-apple-macosx` as far as assembly, which catches a Darwin-only break
    from a Linux runner without a Mac.
-7. **End-to-end suite.** The committed known-outcome tree is driven through the
+6. **End-to-end suite.** The committed known-outcome tree is driven through the
    built binary. Failures are tolerated in exactly one place: the scenarios that
    assert which toolchain `mtest doctor` reports, which genuinely fail once the
    toolchain moves. Any other failing scenario condemns the candidate, as does a
    failure that named no scenario at all, and as does a `doctor` scenario
    failing when the toolchain did *not* move.
+7. **Packaging.** *Stable lane only.* The conda recipe's three compiler pins are
+   retargeted at the candidate, the package is built, and it is installed into a
+   scratch environment and run, with the candidate's version asserted as the
+   compiler the install actually consumed. It runs last on purpose: its finding
+   says the sources are fine and the package is not, and that is only something
+   a run can say once every source gate above it has answered.
 
-**The nightly lane runs the source legs only** — steps 1 to 4 and step 7. It
+**The nightly lane runs the source legs only** — steps 1 to 4 and step 6. It
 never packages and never cross-compiles. A prerelease compiler is not something
 this project would ship a package against, so those two legs belong to the
 stable lane alone.
