@@ -837,9 +837,15 @@ def check_compat_canary_workflow(repo_root: Path = REPO_ROOT) -> None:
       workflow solves the committed `==` pin before the probe relaxes it, so the
       install resolves the pinned toolchain and every day classifies as
       "nothing newer" while looking healthy;
-    - `if: always()` on the artifact upload and on the notify job. The
-      classification artifact is the only thing the notifier reads, and the days
-      worth reading it are the ones where the probe job failed.
+    - `if: always()` on the artifact upload, on the notify job, and on each
+      notifier step that reports a lane. The classification artifact is the only
+      thing the notifier reads, the days worth reading it are the ones where the
+      probe job failed, and an unconditioned step is `if: success()` — so one
+      download that threw would take the other lane's download and the upsert
+      down with it, and a lane that found real drift would write no issue.
+      Pinned by value rather than merely permitted: `always()` is the one
+      condition that cannot skip a step, which is what the ban it replaced was
+      protecting.
 
     Args:
         repo_root: Repository root holding `.github/workflows/compat-canary.yml`.
@@ -1225,10 +1231,35 @@ def check_compat_canary_workflow(repo_root: Path = REPO_ROOT) -> None:
             "the probe job failed, so the upload alone is conditioned, and it is "
             f"conditioned on always(), actual={probe_conditions}"
         )
-    if re.search(r"^        if:", notify, re.MULTILINE):
+    # `always()` by value, on every notifier step that has to survive the one
+    # before it, and no other condition anywhere. The ban this replaces was
+    # against a step being *skipped*, and `always()` is the one condition that
+    # cannot skip: an unconditioned step is `if: success()`, so a download that
+    # throws — `actions/download-artifact` defaults `digest-mismatch: error` —
+    # skipped the other lane's download and the upsert with it, and a run where
+    # the nightly lane found real drift wrote no issue. The issue is the durable
+    # artifact; the red run is not.
+    conditioned_notify_steps = (
+        "Download the stable lane's classification",
+        "Download the nightly lane's classification",
+        "Upsert the pinned issues",
+    )
+    notify_conditions = re.findall(r"^        if: (.+)$", notify, re.MULTILINE)
+    unconditioned = [
+        step
+        for step in conditioned_notify_steps
+        if "        if: always()"
+        not in _yaml_block(notify, f"      - name: {step}").splitlines()
+    ]
+    expected_notify_conditions = ["always()"] * len(conditioned_notify_steps)
+    if notify_conditions != expected_notify_conditions or unconditioned:
         raise AssertionError(
-            "compat canary notifier step condition mismatch: a skipped upsert "
-            "leaves a green run that told nobody anything"
+            "compat canary notifier step condition mismatch: each step that "
+            "reports a lane must run whatever the step before it did, and it "
+            "must do so under `always()` — anything else can skip an upsert and "
+            "leave a green run that told nobody anything, expected "
+            f"{list(conditioned_notify_steps)} conditioned on always(), "
+            f"actual={notify_conditions}, unconditioned={unconditioned}"
         )
 
     if (

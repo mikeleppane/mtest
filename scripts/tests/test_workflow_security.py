@@ -1247,14 +1247,47 @@ class CompatCanaryWorkflowTests(unittest.TestCase):
 
     def test_a_conditioned_notifier_step_is_rejected(self) -> None:
         """A skipped upsert leaves a green run that told nobody anything."""
-        self._reject(
-            self._workflow().replace(
+        workflow = self._workflow()
+        for label, mutated in {
+            "skipped": workflow.replace(
                 "      - name: Upsert the pinned issues\n",
                 "      - name: Upsert the pinned issues\n        if: false\n",
                 1,
             ),
-            "notifier step condition mismatch",
-        )
+            "narrowed": workflow.replace(
+                "      - name: Upsert the pinned issues\n        if: always()\n",
+                "      - name: Upsert the pinned issues\n"
+                "        if: github.event_name == 'schedule'\n",
+                1,
+            ),
+        }.items():
+            with self.subTest(condition=label):
+                self._reject(mutated, "notifier step condition mismatch")
+
+    def test_every_notifier_step_runs_whatever_the_one_before_it_did(self) -> None:
+        """The default condition is what makes one bad download hide a lane.
+
+        An unconditioned step is `if: success()`, so a download that throws —
+        `actions/download-artifact` defaults `digest-mismatch: error` — skips
+        the other lane's download and the upsert with it. A run where the
+        nightly lane found real drift would then write no issue at all, and the
+        issue is the durable artifact; the red run is not. `always()` cannot
+        skip anything, which is why it is the one condition allowed here and
+        why it is pinned by value rather than merely permitted.
+        """
+        workflow = self._workflow()
+        for step in (
+            "Download the stable lane's classification",
+            "Download the nightly lane's classification",
+            "Upsert the pinned issues",
+        ):
+            with self.subTest(step=step):
+                marker = f"      - name: {step}\n        if: always()\n"
+                self.assertIn(marker, workflow)
+                self._reject(
+                    workflow.replace(marker, f"      - name: {step}\n", 1),
+                    "notifier step condition mismatch",
+                )
 
     def test_the_concurrency_group_is_pinned(self) -> None:
         """Two groups are two canaries, each unaware of the other's issue."""
@@ -1608,6 +1641,7 @@ class CompatCanaryWorkflowTests(unittest.TestCase):
         workflow = self._workflow()
         lane_steps = "".join(
             f"      - name: Download the {lane} lane's classification\n"
+            "        if: always()\n"
             "        uses: actions/download-artifact@"
             f"{workflow_security.DOWNLOAD_ARTIFACT_ACTION_SHA} # v8.0.1\n"
             "        with:\n"
@@ -1620,6 +1654,7 @@ class CompatCanaryWorkflowTests(unittest.TestCase):
         self.assertIn(lane_steps, workflow)
         collapsed = (
             "      - name: Download the stable lane's classification\n"
+            "        if: always()\n"
             "        uses: actions/download-artifact@"
             f"{workflow_security.DOWNLOAD_ARTIFACT_ACTION_SHA} # v8.0.1\n"
             "        with:\n"
