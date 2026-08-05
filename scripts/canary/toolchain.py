@@ -62,9 +62,21 @@ LANES = (STABLE_LANE, NIGHTLY_LANE)
 # than the current pin are published today.
 NIGHTLY_CHANNEL = "https://conda.modular.com/max-nightly/"
 
-# The e2e scenarios that report the toolchain mtest found. They legitimately
-# fail when the toolchain moves, and are the only failures the probe tolerates.
-DOCTOR_PREFIX = "doctor-"
+# The e2e scenarios that require `mtest doctor` to report a HEALTHY toolchain.
+# They legitimately fail once the toolchain moves — `doctor` compiles the pinned
+# identity in and refuses anything else — and they are the only e2e failures the
+# probe tolerates.
+#
+# Named one by one rather than matched by a `doctor-` prefix. Five of the seven
+# doctor scenarios do not depend on the installed toolchain at all: two assert
+# `FAIL toolchain: dependency config unavailable`, reached before any toolchain
+# is probed; one points `MTEST_MOJO` at fake executables and asserts the
+# identity compiled into the sources; one asserts a state failure while
+# admitting any status on the toolchain line; and one asserts exit 2 from a
+# deliberately slow fake probe. Under the prefix, a candidate that miscompiled
+# the state probe failed `doctor-unwritable-state`, was tolerated, and closed
+# the lane's issue with `PASS`.
+TOLERATED_E2E_SCENARIOS = frozenset({"doctor-healthy", "doctor-config-free"})
 
 # How the probe asks which toolchain the install produced. Everything the probe
 # spawns goes through pixi, which is the only tool the runner provisions ahead

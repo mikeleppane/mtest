@@ -55,10 +55,10 @@ from scripts.canary.run import (
 )
 from scripts.canary.toolchain import (
     CI_ENV_VAR,
-    DOCTOR_PREFIX,
     FORCE_ENV_VAR,
     NIGHTLY_CHANNEL,
     RESOLVE_ARGV,
+    TOLERATED_E2E_SCENARIOS,
     ResolvedToolchain,
     ToolchainError,
     candidate_channels,
@@ -552,9 +552,23 @@ class DiagnosticTests(CanaryTestCase):
 class E2eGuardTests(CanaryTestCase):
     """Expected failures stay a named, non-empty set, or they are failures."""
 
-    def test_the_prefix_names_real_scenarios(self) -> None:
+    def test_the_tolerated_scenarios_are_registered_and_exhaustive(self) -> None:
+        """Only the two scenarios a moved toolchain really breaks are tolerated.
+
+        Each of the other five was read against `scripts/e2e/scenarios/doctor.py`
+        and fails for reasons a candidate toolchain cannot supply:
+        `doctor-malformed-config` and `doctor-missing-config` assert
+        `FAIL toolchain: dependency config unavailable`, which is reached
+        before any toolchain is probed; `doctor-missing-toolchain` points
+        `MTEST_MOJO` at fake executables and asserts the identity compiled into
+        the sources; `doctor-unwritable-state` asserts `FAIL state` and
+        `PASS temp` and admits any status on the toolchain line; and
+        `doctor-interrupt` asserts exit 2 from a deliberately slow fake probe.
+        Tolerating those by prefix meant a candidate that miscompiled the state
+        probe was reported as `PASS` and closed the lane's issue.
+        """
         self.assertEqual(
-            [name for name, _scenario in SCENARIOS if name.startswith(DOCTOR_PREFIX)],
+            [name for name, _scenario in SCENARIOS if name.startswith("doctor-")],
             [
                 "doctor-healthy",
                 "doctor-malformed-config",
@@ -565,6 +579,23 @@ class E2eGuardTests(CanaryTestCase):
                 "doctor-config-free",
             ],
         )
+        self.assertEqual(
+            sorted(TOLERATED_E2E_SCENARIOS),
+            ["doctor-config-free", "doctor-healthy"],
+        )
+
+    def test_the_untolerated_doctor_scenarios_condemn(self) -> None:
+        for name in (
+            "doctor-malformed-config",
+            "doctor-missing-config",
+            "doctor-missing-toolchain",
+            "doctor-unwritable-state",
+            "doctor-interrupt",
+        ):
+            with self.subTest(scenario=name):
+                verdict = e2e_failure_verdict((name,), toolchain_moved=True)
+                self.assertIsNotNone(verdict)
+                self.assertIn(name, str(verdict))
 
     def test_it_reads_the_gates_failure_lines(self) -> None:
         stdout = (

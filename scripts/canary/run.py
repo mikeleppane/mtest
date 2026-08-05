@@ -63,11 +63,11 @@ from scripts.canary.protocol_compare import (
     compare_transcript_dirs,
 )
 from scripts.canary.toolchain import (
-    DOCTOR_PREFIX,
     FORCE_ENV_VALUE,
     FORCE_ENV_VAR,
     LANES,
     STABLE_LANE,
+    TOLERATED_E2E_SCENARIOS,
     ResolvedToolchain,
     ToolchainError,
     candidate_channels,
@@ -383,10 +383,12 @@ def failed_scenarios(stdout: str) -> tuple[str, ...]:
 def e2e_failure_verdict(failed: Sequence[str], *, toolchain_moved: bool) -> str | None:
     """Decide whether a set of e2e failures condemns the candidate toolchain.
 
-    `mtest doctor` reports the toolchain it found, so its scenarios genuinely
-    fail once the toolchain moves. That tolerance is narrow on purpose, because
+    `mtest doctor` refuses any toolchain but the one it was built against, so
+    the scenarios that require it to report a healthy one genuinely fail as
+    soon as the toolchain moves. That tolerance is narrow on purpose, because
     "some failures are expected" degrades into "failures are ignored" the
-    moment it stops being checked: any other failing scenario condemns, and so
+    moment it stops being checked: the tolerated scenarios are named one by one
+    in `TOLERATED_E2E_SCENARIOS`, any other failing scenario condemns, and so
     does a failure that named no scenario at all, which means the roll-call
     this reads has changed shape and the guard has stopped guarding.
 
@@ -408,7 +410,7 @@ def e2e_failure_verdict(failed: Sequence[str], *, toolchain_moved: bool) -> str 
         The reason these failures condemn the toolchain, or None when they are
         exactly the expected toolchain-reporting drift.
     """
-    unexpected = tuple(name for name in failed if not name.startswith(DOCTOR_PREFIX))
+    unexpected = tuple(name for name in failed if name not in TOLERATED_E2E_SCENARIOS)
     if unexpected:
         return (
             "e2e scenarios failed outside the toolchain-reporting surface: "
