@@ -36,19 +36,12 @@ from mtest.session.effective_settings import (
     _compat_resolved_config,
     effective_file_settings,
 )
-from mtest.session.precompile import (
-    _run_precompile,
-    precompile_out_dir,
-    precompile_out_path,
-)
+from mtest.session.precompile import run_precompile_step
 from mtest.session.shard import partition
 from mtest.session.store import (
     CacheContext,
     collect_env_base,
     finalize_includes,
-    precompile_key,
-    precompile_probe,
-    precompile_publish,
 )
 
 
@@ -196,29 +189,25 @@ def run_collect(
     # Precompile steps first, widening the include set so a file importing a
     # precompiled package can build for its probe. A failed or unspawnable step
     # is a machinery-class abort (exit 3): collection cannot proceed honestly.
-    # The same stamp seam `run_session` has, around the same loop: an unchanged
-    # step is skipped and only widens the include set, and every earlier step's
-    # output is an input to the next one's key.
     var prior_outputs = List[String]()
     for pc in config.precompiles:
         if interrupt_requested():
             interrupted = True
             break
-        var out_path = precompile_out_path(pc.src, pc.out)
-        var key = precompile_key(
-            ctx, root, pc.src, includes, prior_outputs, out_path
-        )
-        var skip = False
-        if key:
-            skip = precompile_probe(root, key.value(), out_path)
-        if skip:
-            includes.append(precompile_out_dir(out_path))
-            prior_outputs.append(out_path)
-            continue
         try:
-            var pr = _run_precompile(
-                runtime, config, root, pc.src, pc.out, includes
+            var step = run_precompile_step(
+                runtime,
+                config,
+                root,
+                pc,
+                ctx,
+                includes,
+                prior_outputs,
+                use_cache=True,
             )
+            if not step:
+                continue
+            ref pr = step.value()
             if pr.interrupted:
                 interrupted = True
                 break
@@ -230,20 +219,15 @@ def run_collect(
                 )
                 internal = True
                 break
-            # First-attempt outputs only, exactly as in `run_session`.
-            if key and pr.attempts_used == 1:
-                precompile_publish(root, key.value(), out_path)
-            includes.append(pr.out_dir)
-            prior_outputs.append(out_path)
         except:
-            # `_run_precompile`'s own machinery (e.g. the output directory could
-            # not be created) raised rather than returning a result. Mirror
+            # The step's own machinery (e.g. the output directory could not be
+            # created) raised rather than returning a result. Mirror
             # `run_session`'s handling: an internal-abort diagnostic and exit 3,
             # not a `discover:`-style usage error. Not independently unit-tested
-            # here — `run_session`'s sibling except (session.mojo ~1580) has no
-            # dedicated raise-path test either; both are machinery-only
-            # defensive code exercised only by the `pr.internal_error`
-            # return-value path in `test_session_precompile.mojo`.
+            # here — `run_session`'s sibling except has no dedicated raise-path
+            # test either; both are machinery-only defensive code exercised only
+            # by the `pr.internal_error` return-value path in
+            # `test_session_precompile.mojo`.
             diags.append(
                 "collect: precompile step '"
                 + pc.src

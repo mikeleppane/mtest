@@ -42,11 +42,7 @@ from mtest.model import (
     is_slow,
 )
 from mtest.protocol import ParsedReport
-from mtest.session.build import (
-    _COMPILE_GRACE_MS,
-    _discard_staging,
-    _no_staging,
-)
+from mtest.session.build import _COMPILE_GRACE_MS, build_argv
 from mtest.session.clamp import clamp_stream
 from mtest.session.classify import (
     Classification,
@@ -67,15 +63,14 @@ from mtest.session.scratch import (
 )
 from mtest.session.store import (
     CacheContext,
-    FileKey,
-    PROBE_HIT,
-    PUB_FAILED,
     _rewrite_output,
     cache_rebuild_note,
-    file_key,
-    store_build_target,
-    store_probe,
-    store_publish,
+)
+from mtest.session.store_seam import (
+    seam_begin,
+    seam_discard,
+    seam_settle,
+    seam_stage,
 )
 from mtest.session.verdict import build_verdict
 
@@ -156,44 +151,44 @@ struct _AttemptResult(Copyable, Movable):
             The internal-error `_AttemptResult`.
         """
         return Self(
-            1,
-            e^,
-            False,
-            List[String](),
-            Termination.exited(0),
-            List[UInt8](),
-            0.0,
-            "",
-            Termination.exited(0),
-            List[UInt8](),
-            List[UInt8](),
-            0.0,
-            TrustedReport(ParsedReport.absent(), False),
-            _blank_classification(),
-            False,
-            False,
+            control=1,
+            internal_event=e^,
+            build_failed=False,
+            build_argv=List[String](),
+            bterm=Termination.exited(0),
+            build_stderr=List[UInt8](),
+            bdur=0.0,
+            out_bin="",
+            rterm=Termination.exited(0),
+            run_stdout=List[UInt8](),
+            run_stderr=List[UInt8](),
+            rdur=0.0,
+            trusted=TrustedReport(ParsedReport.absent(), False),
+            cls=_blank_classification(),
+            run_stdout_truncated=False,
+            run_stderr_truncated=False,
         )
 
     @staticmethod
     def _interrupt() -> Self:
         """An interrupt aborted the attempt: routes the file to exit 2."""
         return Self(
-            2,
-            Event.file_started(""),
-            False,
-            List[String](),
-            Termination.exited(0),
-            List[UInt8](),
-            0.0,
-            "",
-            Termination.exited(0),
-            List[UInt8](),
-            List[UInt8](),
-            0.0,
-            TrustedReport(ParsedReport.absent(), False),
-            _blank_classification(),
-            False,
-            False,
+            control=2,
+            internal_event=Event.file_started(""),
+            build_failed=False,
+            build_argv=List[String](),
+            bterm=Termination.exited(0),
+            build_stderr=List[UInt8](),
+            bdur=0.0,
+            out_bin="",
+            rterm=Termination.exited(0),
+            run_stdout=List[UInt8](),
+            run_stderr=List[UInt8](),
+            rdur=0.0,
+            trusted=TrustedReport(ParsedReport.absent(), False),
+            cls=_blank_classification(),
+            run_stdout_truncated=False,
+            run_stderr_truncated=False,
         )
 
     @staticmethod
@@ -219,22 +214,22 @@ struct _AttemptResult(Copyable, Movable):
             The build-failed `_AttemptResult`.
         """
         return Self(
-            0,
-            Event.file_started(""),
-            True,
-            build_argv^,
-            bterm,
-            build_stderr^,
-            bdur,
-            out_bin,
-            Termination.exited(0),
-            List[UInt8](),
-            List[UInt8](),
-            0.0,
-            TrustedReport(ParsedReport.absent(), False),
-            _blank_classification(),
-            False,
-            False,
+            control=0,
+            internal_event=Event.file_started(""),
+            build_failed=True,
+            build_argv=build_argv^,
+            bterm=bterm,
+            build_stderr=build_stderr^,
+            bdur=bdur,
+            out_bin=out_bin,
+            rterm=Termination.exited(0),
+            run_stdout=List[UInt8](),
+            run_stderr=List[UInt8](),
+            rdur=0.0,
+            trusted=TrustedReport(ParsedReport.absent(), False),
+            cls=_blank_classification(),
+            run_stdout_truncated=False,
+            run_stderr_truncated=False,
         )
 
     @staticmethod
@@ -265,22 +260,22 @@ struct _AttemptResult(Copyable, Movable):
             The built-but-unrun `_AttemptResult`.
         """
         return Self(
-            0,
-            Event.file_started(""),
-            False,
-            build_argv^,
-            bterm,
-            build_stderr^,
-            bdur,
-            out_bin,
-            Termination.exited(0),
-            List[UInt8](),
-            List[UInt8](),
-            0.0,
-            TrustedReport(ParsedReport.absent(), False),
-            _blank_classification(),
-            False,
-            False,
+            control=0,
+            internal_event=Event.file_started(""),
+            build_failed=False,
+            build_argv=build_argv^,
+            bterm=bterm,
+            build_stderr=build_stderr^,
+            bdur=bdur,
+            out_bin=out_bin,
+            rterm=Termination.exited(0),
+            run_stdout=List[UInt8](),
+            run_stderr=List[UInt8](),
+            rdur=0.0,
+            trusted=TrustedReport(ParsedReport.absent(), False),
+            cls=_blank_classification(),
+            run_stdout_truncated=False,
+            run_stderr_truncated=False,
         )
 
     @staticmethod
@@ -314,22 +309,22 @@ struct _AttemptResult(Copyable, Movable):
             The completed `_AttemptResult`.
         """
         return Self(
-            0,
-            Event.file_started(""),
-            False,
-            List[String](),
-            Termination.exited(0),
-            List[UInt8](),
-            0.0,
-            binary,
-            rterm,
-            run_stdout^,
-            run_stderr^,
-            rdur,
-            TrustedReport(ParsedReport.absent(), False),
-            _blank_classification(),
-            run_stdout_truncated,
-            run_stderr_truncated,
+            control=0,
+            internal_event=Event.file_started(""),
+            build_failed=False,
+            build_argv=List[String](),
+            bterm=Termination.exited(0),
+            build_stderr=List[UInt8](),
+            bdur=0.0,
+            out_bin=binary,
+            rterm=rterm,
+            run_stdout=run_stdout^,
+            run_stderr=run_stderr^,
+            rdur=rdur,
+            trusted=TrustedReport(ParsedReport.absent(), False),
+            cls=_blank_classification(),
+            run_stdout_truncated=run_stdout_truncated,
+            run_stderr_truncated=run_stderr_truncated,
         )
 
 
@@ -409,23 +404,20 @@ def _single_attempt(
             calls are caught here and converted into internal-error attempts
             instead. The caller catches what does escape and resolves exit 3.
     """
-    var build_argv = prior_build_argv.copy()
+    var argv = prior_build_argv.copy()
     var bterm = prior_bterm
     var build_stderr = prior_build_stderr.copy()
     var bdur = prior_bdur
 
     if do_build:
-        build_argv = List[String]()
-        build_argv.append(config.mojo_path)
-        build_argv.append("build")
-        build_argv.append(rel)
-        build_argv.append("-o")
-        build_argv.append(out_bin)
-        for p in include_paths:
-            build_argv.append("-I")
-            build_argv.append(p)
-        for a in config.build_args:
-            build_argv.append(a)
+        argv = build_argv(
+            config.mojo_path,
+            "build",
+            include_paths,
+            config.build_args,
+            out_bin,
+            rel,
+        )
 
         # NARROW quarantine: only a post-compile-kill rebuild redirects the
         # module cache. The spike observed NO cache corruption from a killed
@@ -445,7 +437,7 @@ def _single_attempt(
             bres = run_supervised(
                 runtime,
                 ProcessSpec.command_in(
-                    build_argv.copy(),
+                    argv.copy(),
                     root,
                     settings.compile_timeout_secs * 1000,
                     _COMPILE_GRACE_MS,
@@ -474,14 +466,14 @@ def _single_attempt(
             # the caller can BOTH finalize the build verdict AND classify a retry
             # (a signaled/timed-out/ICE compiler is crash-class).
             return _AttemptResult._build_failed(
-                build_argv^, bterm, build_stderr^, bdur, out_bin
+                argv^, bterm, build_stderr^, bdur, out_bin
             )
         if build_only:
             # The artifact exists and nothing has run it. Whatever the caller
             # does with it next decides which binary the run will name, so the
             # run cannot already have happened.
             return _AttemptResult._built_ok(
-                build_argv^, bterm, build_stderr^, bdur, out_bin
+                argv^, bterm, build_stderr^, bdur, out_bin
             )
 
     # Build OK (or reused from a prior successful build): run the binary. A
@@ -520,22 +512,22 @@ def _single_attempt(
     var cls = classify(rterm, trusted.report, trusted.is_overflow)
 
     return _AttemptResult(
-        0,
-        Event.file_started(""),
-        False,
-        build_argv^,
-        bterm,
-        build_stderr^,
-        bdur,
-        out_bin,
-        rterm,
-        rres.stdout_bytes.copy(),
-        rres.stderr_bytes.copy(),
-        rdur,
-        trusted^,
-        cls^,
-        rres.stdout_truncated,
-        rres.stderr_truncated,
+        control=0,
+        internal_event=Event.file_started(""),
+        build_failed=False,
+        build_argv=argv^,
+        bterm=bterm,
+        build_stderr=build_stderr^,
+        bdur=bdur,
+        out_bin=out_bin,
+        rterm=rterm,
+        run_stdout=rres.stdout_bytes.copy(),
+        run_stderr=rres.stderr_bytes.copy(),
+        rdur=rdur,
+        trusted=trusted^,
+        cls=cls^,
+        run_stdout_truncated=rres.stdout_truncated,
+        run_stderr_truncated=rres.stderr_truncated,
     )
 
 
@@ -891,8 +883,7 @@ def _run_one(
     # It has to be here and not inside the loop: `store_probe` MUTATES the store
     # (a generation that fails validation is deleted), so it may only ever be
     # asked about a key this call is genuinely about to build or run.
-    var key = Optional[FileKey](None)
-    var target = _no_staging()
+    var staging = seam_begin(ctx, root, rel)
     # Whether this file is about to run a binary the store served, whether it
     # just published or adopted one, and whether it has already fallen back.
     # Publishing deletes a source's older generations, so a second run over the
@@ -904,47 +895,23 @@ def _run_one(
     var store_hit = False
     var published_store_artifact = False
     var store_rebuilt = False
-    if ctx.enabled:
-        key = file_key(ctx, root, rel)
-        if not key:
-            # A source that will not read is about to fail its build anyway, and
-            # a key that cannot cover its own source must never be written.
-            ctx.disable("cannot read the test file '" + rel + "'")
-        else:
-            var hit = store_probe(root, key.value())
-            if hit.kind == PROBE_HIT:
-                # The loop enters as if a build had already succeeded: this is
-                # exactly the shape a run-side retry uses, which is why nothing
-                # downstream needs to know a compile was skipped. The stored
-                # build's OWN duration rides, not zero, so the SLOW token reads
-                # the same on a warm run as it did on the cold one.
-                do_build = False
-                out_bin = hit.bin_rel
-                prior_build_argv = hit.argv.copy()
-                prior_bterm = Termination.exited(0)
-                prior_bdur = hit.build_seconds
-                store_hit = True
-                ctx.cached_files += 1
-                # Nothing staged, so nothing to publish: the generation this
-                # binary came from is already the store's.
-                key = Optional[FileKey](None)
-            else:
-                target = store_build_target(root, mangled)
-                if target.ok():
-                    # Compile straight into the store, so publication is one
-                    # `rename(2)` and never a copy of a binary that could differ
-                    # from the one that was digested.
-                    out_bin = target.out_rel
-                else:
-                    # Cache off for the session: a store that cannot be staged
-                    # into once will not stage the next file either, and probing
-                    # on would spend a digest per file for a hit that can never
-                    # be published.
-                    ctx.disable(
-                        "the cache could not create its store directory under"
-                        " '.mtest-cache'"
-                    )
-                    key = Optional[FileKey](None)
+    if staging.hit:
+        # The loop enters as if a build had already succeeded: this is exactly
+        # the shape a run-side retry uses, which is why nothing downstream needs
+        # to know a compile was skipped. The stored build's OWN duration rides,
+        # not zero, so the SLOW token reads the same on a warm run as it did on
+        # the cold one.
+        do_build = False
+        out_bin = staging.bin_rel
+        prior_build_argv = staging.argv.copy()
+        prior_bterm = Termination.exited(0)
+        prior_bdur = staging.build_seconds
+        store_hit = True
+        ctx.cached_files += 1
+    else:
+        seam_stage(ctx, staging, root, mangled)
+        if staging.target.ok():
+            out_bin = staging.target.out_rel
 
     if do_build:
         # ADMISSION, and the only place either counter moves on this path: the
@@ -966,10 +933,13 @@ def _run_one(
         # `_retry_out_bin` under `build/bin`. That rebuild is invocation-private
         # — it exists to get past a compiler the shared module cache may have
         # torn — so publishing it would write a retry's binary into a store that
-        # other runs read. `target` is cleared once the block has run, so it
+        # other runs read. The staging is detached once the block has run, so it
         # cannot fire twice however the loop is later reshaped.
         var settling = (
-            target.ok() and Bool(key) and do_build and attempt_index == 1
+            staging.target.ok()
+            and Bool(staging.key)
+            and do_build
+            and attempt_index == 1
         )
         # That pass BUILDS ONLY, so publication happens before anything is
         # executed. The store's rule is record `pub.argv`, run `pub.bin_rel`,
@@ -996,12 +966,13 @@ def _run_one(
         )
 
         if settling:
+            var owed = staging.take()
             if att.control != 0:
                 # An internal error or an interrupt during the build: no binary
                 # came out of it, so the staged directory is pure debris. The
                 # BUILD step's diagnostic names the compiler rather than a path
                 # inside the store, so nothing here needs rewriting.
-                _discard_staging(root, target)
+                seam_discard(owed^, root)
             elif att.build_failed:
                 # The reproduce line names `build/bin`, never the staging
                 # directory the compile actually wrote to. A failed build
@@ -1011,26 +982,18 @@ def _run_one(
                 # this file's binary and is live either way.
                 var shown = _rewrite_output(att.build_argv, out_bin, plain_out)
                 att.build_argv = shown^
-                _discard_staging(root, target)
+                seam_discard(owed^, root)
             else:
-                var pub = store_publish(
-                    root, key.value(), target, att.bdur, att.build_argv
-                )
-                # The rule with no exceptions: run `bin_rel`, record `argv`. On
-                # PUB_OK the staging directory this build's own argv names is
-                # already gone; on PUB_ADOPTED the live binary belongs to a
-                # generation this run never built and whose command line it
-                # therefore cannot reconstruct; on PUB_FAILED both are this
-                # run's own staging path, which is still there.
-                #
-                # `out_bin` moves with it, so the run below — and any crash-class
-                # RUN retry after it — spawns exactly the path that was recorded.
-                # On PUB_ADOPTED that runs the winner's binary rather than the
-                # bytes this process compiled: they answer to the same key, so
-                # they are the same build, and this is the only ordering in which
-                # the verdict and the artifact describe each other.
+                var pub = seam_settle(owed^, root, att.bdur, att.build_argv)
+                # `out_bin` moves with the settled binary, so the run below —
+                # and any crash-class RUN retry after it — spawns exactly the
+                # path that was recorded. On an adoption that runs the winner's
+                # binary rather than the bytes this process compiled: they
+                # answer to the same key, so they are the same build, and this
+                # is the only ordering in which the verdict and the artifact
+                # describe each other.
                 out_bin = pub.bin_rel
-                if pub.kind == PUB_FAILED:
+                if not pub.owned:
                     # The build survived; only its publication did not. A
                     # publication failure is never a verdict, so it rides in
                     # front of this file's events as a warning.
@@ -1064,7 +1027,6 @@ def _run_one(
                     built_stderr,
                     built_dur,
                 )
-            target = _no_staging()
 
         if att.control == 1:
             var ie_step = String(

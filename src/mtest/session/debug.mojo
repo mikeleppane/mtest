@@ -47,7 +47,10 @@ from mtest.session.effective_settings import (
     _compat_resolved_config,
     effective_file_settings,
 )
-from mtest.session.precompile import PrecompileResult, _run_precompile
+from mtest.session.precompile import (
+    PrecompileResult,
+    run_precompile_step,
+)
 from mtest.session.store import CacheContext, finalize_includes
 
 
@@ -390,21 +393,36 @@ def prepare_debug(
 
     # The precompile steps first, exactly as the collect pipeline runs them,
     # because a step's output directory becomes an include root for the build
-    # below. The stamp seam is absent by construction: a disabled context keys
-    # no step, so every configured step runs.
+    # below. Debug runs them with the stamp seam switched OFF, so every
+    # configured step compiles and every path the printed lines name was
+    # produced by this invocation. Turning it on would be a product decision
+    # about what `--debug` hands over, not a refactoring, and it is not taken
+    # here.
+    #
+    # `prior_outputs` therefore records what each step produced for a key
+    # nothing computes; the shared step keeps it so the run and collect
+    # pipelines can key a step against every earlier step's output.
+    var prior_outputs = List[String]()
     for pc in config.precompiles:
         if interrupt_requested():
             return DebugOutcome.refused(
                 EXIT_INTERRUPTED, "debug: interrupted before the build"
             )
-        var pr: PrecompileResult
+        var step: Optional[PrecompileResult]
         try:
-            pr = _run_precompile(
-                runtime, config, root, pc.src, pc.out, includes
+            step = run_precompile_step(
+                runtime,
+                config,
+                root,
+                pc,
+                ctx,
+                includes,
+                prior_outputs,
+                use_cache=False,
             )
         except e:
             # The caught error is the only account of what went wrong here:
-            # `_run_precompile` raises for machinery faults that produced no
+            # the shared step raises for machinery faults that produced no
             # `PrecompileResult` to inspect, so discarding it leaves the step
             # named and the failure unexplained.
             return DebugOutcome.refused(
@@ -414,6 +432,9 @@ def prepare_debug(
                 + "' failed; nothing was handed over: "
                 + escape_one_line(String(e)),
             )
+        if not step:
+            continue
+        ref pr = step.value()
         if pr.interrupted:
             return DebugOutcome.refused(
                 EXIT_INTERRUPTED, "debug: interrupted during precompile"
@@ -438,7 +459,6 @@ def prepare_debug(
             )
             failed += _output_lines(pr.compiler_output)
             return DebugOutcome(EXIT_FAILURE, failed^, DebugPlan.none())
-        includes.append(pr.out_dir)
 
     finalize_includes(ctx, root, includes)
 

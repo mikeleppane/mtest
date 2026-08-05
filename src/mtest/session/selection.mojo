@@ -70,9 +70,8 @@ from mtest.session.effective_settings import (
 )
 from mtest.session.file_result import (
     FileResult,
-    _CrashFile,
-    _failing_count,
-    _prepend_events,
+    RunTally,
+    settle_file,
 )
 from mtest.select.failure_selection import (
     CollectedNames,
@@ -226,22 +225,22 @@ def _blank_collected(
         The file's initial payload. Allocates its empty lists.
     """
     return _Collected(
-        rel,
-        settings,
-        False,
-        _blank_file_result(),
-        List[String](),
-        List[String](),
-        List[String](),
-        List[String](),
-        FileIntent.whole_file(),
-        "",
-        "",
-        List[String](),
-        0.0,
-        List[Event](),
-        False,
-        False,
+        rel=rel,
+        settings=settings,
+        terminal=False,
+        terminal_result=_blank_file_result(),
+        universe=List[String](),
+        selected=List[String](),
+        orig_selected=List[String](),
+        deselected=List[String](),
+        intent=FileIntent.whole_file(),
+        binary="",
+        canonical="",
+        build_argv=List[String](),
+        bdur=0.0,
+        pre_stream=List[Event](),
+        had_crash_retry=False,
+        from_store=False,
     )
 
 
@@ -631,25 +630,11 @@ struct SelectionSummary(Copyable, Movable):
     Owns its lists; copies are explicit.
     """
 
-    var run_outcomes: List[Outcome]
-    """The exit-code multiset contribution of the run files."""
-    var test_totals: TestCounts
-    """The per-test totals (passed/failed/skipped/deselected) run-wide."""
-    var ran_files: Int
-    """How many run files produced a tallied verdict."""
-    var interrupted: Bool
-    """Whether an interrupt aborted the sub-session (exit 2)."""
-    var internal_error: Bool
-    """Whether a spawn/machinery failure occurred (exit 3)."""
-    var drift: Bool
-    """Whether any report drifted off the pinned grammar (exit 3).
+    var tally: RunTally
+    """Everything the sub-session accumulated as its run files settled.
 
-    Set both by a probe whose collection listing drifted and by an executed
-    selected run whose own report drifted."""
-    var crash_files: List[_CrashFile]
-    """The run files that ended CRASH, in discovery order, for the bounded
-    crash-attribution post-pass. Diagnostics only: this list feeds no count, no
-    outcome multiset, and no exit code."""
+    Its `drift` is set both by a probe whose collection listing drifted and by
+    an executed selected run whose own report drifted."""
 
 
 def _selection_run_argv(
@@ -823,11 +808,7 @@ def _run_selection[
     )
 
     var announced = False
-    var run_outcomes = List[Outcome]()
-    var test_totals = TestCounts.zeros()
-    var ran_files = 0
-    var drift = False
-    var crash_files = List[_CrashFile]()
+    var tally = RunTally.zeros()
 
     while True:
         var step = pipeline.next_step()
@@ -1012,26 +993,20 @@ def _run_selection[
                 if step.recovering:
                     # The file's verdict stream is already open: settle it now,
                     # carrying the recovery events that precede it.
-                    var rfr = _prepend_events(
-                        collected[i].pre_stream.copy(), bo.result.copy()
-                    )
                     collected[i].build_argv = bo.build_argv.copy()
                     collected[i].bdur = bo.bdur
-                    for pe in rfr.pre_events:
-                        reporter.handle(pe)
-                    reporter.handle(rfr.event)
-                    test_totals.deselected += rfr.test_counts.deselected
-                    if rfr.is_drift:
-                        drift = True
-                        pipeline.record_settled(i)
-                        continue
-                    summary.counts[rfr.outcome.code] += 1
-                    run_outcomes.extend(rfr.exit_outcomes.copy())
-                    ran_files += 1
-                    pipeline.record_verdict(
+                    _ = settle_file(
+                        tally,
+                        reporter,
+                        summary,
+                        pipeline,
                         i,
-                        rfr.outcome.is_failing(),
-                        _failing_count(run_outcomes),
+                        collected[i].rel,
+                        collected[i].settings,
+                        collected[i].binary,
+                        collected[i].orig_selected,
+                        collected[i].pre_stream.copy(),
+                        bo.result.copy(),
                     )
                     continue
                 # A compile-error terminal: replay it in the run pass with the
@@ -1096,40 +1071,24 @@ def _run_selection[
                 continue
             if po.terminal:
                 if step.recovering:
-                    var pfr = _prepend_events(
-                        collected[i].pre_stream.copy(), po.result.copy()
-                    )
-                    for pe in pfr.pre_events:
-                        reporter.handle(pe)
-                    reporter.handle(pfr.event)
-                    test_totals.deselected += pfr.test_counts.deselected
-                    if pfr.is_drift:
-                        drift = True
-                        pipeline.record_settled(i)
-                        continue
-                    summary.counts[pfr.outcome.code] += 1
-                    run_outcomes.extend(pfr.exit_outcomes.copy())
-                    ran_files += 1
-                    if pfr.outcome == Outcome.CRASH:
-                        # A recovery re-probe that dies by signal is a crash
-                        # like any other: it must reach the attribution pass,
-                        # or its banner count is short and its
-                        # `CrashAttribution` row never renders. The rebuild
-                        # rewrites the binary in place — `_mangle(rel)` is
-                        # injective in `rel` alone — so the path here is the
-                        # same string the pre-rebuild build produced.
-                        crash_files.append(
-                            _CrashFile(
-                                collected[i].rel,
-                                collected[i].settings,
-                                collected[i].binary,
-                                collected[i].orig_selected.copy(),
-                            )
-                        )
-                    pipeline.record_verdict(
+                    # A recovery re-probe that dies by signal is a crash like
+                    # any other: it must reach the attribution pass, or its
+                    # banner count is short and its `CrashAttribution` row never
+                    # renders. The rebuild rewrites the binary in place —
+                    # `_mangle(rel)` is injective in `rel` alone — so the path
+                    # settled here is the string the pre-rebuild build produced.
+                    _ = settle_file(
+                        tally,
+                        reporter,
+                        summary,
+                        pipeline,
                         i,
-                        pfr.outcome.is_failing(),
-                        _failing_count(run_outcomes),
+                        collected[i].rel,
+                        collected[i].settings,
+                        collected[i].binary,
+                        collected[i].orig_selected,
+                        collected[i].pre_stream.copy(),
+                        po.result.copy(),
                     )
                     continue
                 collected[i].terminal = True
@@ -1188,29 +1147,18 @@ def _run_selection[
             reporter.handle(Event.file_started(collected[i].rel))
 
         if step.kind == StepKind.REPLAY_TERMINAL:
-            var fr = collected[i].terminal_result.copy()
-            for pe in fr.pre_events:
-                reporter.handle(pe)
-            reporter.handle(fr.event)
-            test_totals.deselected += fr.test_counts.deselected
-            if fr.is_drift:
-                drift = True
-                pipeline.record_settled(i)
-                continue
-            summary.counts[fr.outcome.code] += 1
-            run_outcomes.extend(fr.exit_outcomes.copy())
-            ran_files += 1
-            if fr.outcome == Outcome.CRASH:
-                crash_files.append(
-                    _CrashFile(
-                        collected[i].rel,
-                        collected[i].settings,
-                        collected[i].binary,
-                        collected[i].orig_selected.copy(),
-                    )
-                )
-            pipeline.record_verdict(
-                i, fr.outcome.is_failing(), _failing_count(run_outcomes)
+            _ = settle_file(
+                tally,
+                reporter,
+                summary,
+                pipeline,
+                i,
+                collected[i].rel,
+                collected[i].settings,
+                collected[i].binary,
+                collected[i].orig_selected,
+                List[Event](),
+                collected[i].terminal_result.copy(),
             )
             continue
 
@@ -1230,7 +1178,7 @@ def _run_selection[
                     slow=is_slow(collected[i].bdur, 0.0),
                 )
             )
-            test_totals.deselected += len(collected[i].deselected)
+            tally.test_totals.deselected += len(collected[i].deselected)
             pipeline.record_settled(i)
             continue
 
@@ -1343,56 +1291,24 @@ def _run_selection[
                 flaky_if_pass=collected[i].had_crash_retry,
             )
 
-        var settled = _prepend_events(collected[i].pre_stream.copy(), fr^)
-        for pe in settled.pre_events:
-            reporter.handle(pe)
-        reporter.handle(settled.event)
-        test_totals.passed += settled.test_counts.passed
-        test_totals.failed += settled.test_counts.failed
-        test_totals.skipped += settled.test_counts.skipped
-        test_totals.deselected += settled.test_counts.deselected
-        if settled.is_drift:
-            drift = True
-            pipeline.record_settled(i)
-            continue
-        summary.counts[settled.outcome.code] += 1
-        run_outcomes.extend(settled.exit_outcomes.copy())
-        ran_files += 1
-        if settled.outcome == Outcome.CRASH:
-            crash_files.append(
-                _CrashFile(
-                    collected[i].rel,
-                    collected[i].settings,
-                    collected[i].binary,
-                    collected[i].orig_selected.copy(),
-                )
-            )
-        pipeline.record_verdict(
-            i, settled.outcome.is_failing(), _failing_count(run_outcomes)
+        _ = settle_file(
+            tally,
+            reporter,
+            summary,
+            pipeline,
+            i,
+            collected[i].rel,
+            collected[i].settings,
+            collected[i].binary,
+            collected[i].orig_selected,
+            collected[i].pre_stream.copy(),
+            fr^,
         )
-
-    var interrupted = pipeline.halt() == PipelineHalt.INTERRUPTED
-    var internal_error = pipeline.halt() == PipelineHalt.INTERNAL_ERROR
 
     # An abort before the collection barrier discards the front half's work:
     # nothing ran, so the sub-session folds back no outcomes and no totals.
     if not announced:
-        return SelectionSummary(
-            List[Outcome](),
-            TestCounts.zeros(),
-            0,
-            interrupted,
-            internal_error,
-            False,
-            List[_CrashFile](),
-        )
-
-    return SelectionSummary(
-        run_outcomes^,
-        test_totals,
-        ran_files,
-        interrupted,
-        internal_error,
-        drift,
-        crash_files^,
-    )
+        tally = RunTally.zeros()
+    tally.interrupted = pipeline.halt() == PipelineHalt.INTERRUPTED
+    tally.internal_error = pipeline.halt() == PipelineHalt.INTERNAL_ERROR
+    return SelectionSummary(tally^)

@@ -382,6 +382,22 @@ def test_pool_compile_deadline_is_effective_per_file() raises:
     )
     assert_true(payload.outcome == Outcome.COMPILE_TIMEOUT)
     assert_equal(payload.timeout_seconds, 1)
+    # THE pool-spawn representation of the build command, and the only verdict
+    # that shows it: a compile the pool's own deadline killed names the
+    # `--num-threads` the spawn really carried, appended to the canonical line
+    # every other verdict quotes. Everything ahead of it is that canonical line.
+    var argv = payload.build_argv.copy()
+    assert_true(len(argv) >= 7)
+    assert_equal(argv[len(argv) - 2], "--num-threads")
+    assert_true(Int(argv[len(argv) - 1]) >= 1)
+    assert_equal(argv[1], "build")
+    assert_equal(argv[2], "tests/test_override.mojo")
+    assert_equal(argv[3], "-o")
+    for i in range(len(argv) - 2):
+        assert_true(
+            argv[i] != "--num-threads",
+            "the canonical prefix must carry the token exactly once",
+        )
 
 
 def test_later_serial_union_runs_after_parallel_at_capacity_one() raises:
@@ -622,6 +638,16 @@ def test_selection_build_uses_its_effective_compile_deadline() raises:
     )
     assert_true(payload.outcome == Outcome.COMPILE_TIMEOUT)
     assert_equal(payload.timeout_seconds, 1)
+    # The canonical representation, from the sequential side of the same
+    # builder: `<mojo> build <source> -o <out>` and no scheduling token, because
+    # nothing outside the pool ever appends one.
+    var argv = payload.build_argv.copy()
+    assert_true(len(argv) >= 5)
+    assert_equal(argv[1], "build")
+    assert_equal(argv[2], "tests/test_selected.mojo")
+    assert_equal(argv[3], "-o")
+    for token in argv:
+        assert_true(token != "--num-threads")
 
 
 def test_selection_retry_uses_the_effective_budget() raises:

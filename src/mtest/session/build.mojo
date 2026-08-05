@@ -40,18 +40,13 @@ from mtest.session.classify import resolve_report
 from mtest.session.effective_settings import EffectiveFileSettings
 from mtest.session.file_result import FileResult
 from mtest.session.scratch import _ensure_dir, _mangle
-from mtest.session.store import (
-    CacheContext,
-    FileKey,
-    PROBE_HIT,
-    PUB_FAILED,
-    StoreBuildTarget,
-    _rewrite_output,
-    file_key,
-    remove_tree_no_follow,
-    store_build_target,
-    store_probe,
-    store_publish,
+from mtest.session.store import CacheContext, _rewrite_output
+from mtest.session.store_seam import (
+    SeamStaging,
+    seam_begin,
+    seam_discard,
+    seam_settle,
+    seam_stage,
 )
 from mtest.session.verdict import build_verdict
 
@@ -106,37 +101,53 @@ struct _BuildOutcome(Copyable, Movable):
     """
 
 
+def build_argv(
+    mojo_exe: String,
+    verb: String,
+    includes: List[String],
+    build_args: List[String],
+    out_path: String,
+    source: String,
+) -> List[String]:
+    """The compiler command line every build and precompile spawn runs.
+
+    One shape for all four spawn sites, because a verdict's reproduce line has
+    to be the command that actually ran: `<mojo> <verb> <source> -o <out>`, one
+    `-I` pair per include root, then the configured build arguments last, where
+    a user's flag can still override a default the runner supplied.
+
+    The pool's `--num-threads` is deliberately absent. It is a scheduling token
+    for one spawn rather than part of a command a user reruns, so the pool
+    appends it to its spawn argv AFTER recording the line produced here.
+
+    Args:
+        mojo_exe: The compiler to run.
+        verb: `build` for a test file, `precompile` for a package step.
+        includes: Directories passed to the compiler as `-I`.
+        build_args: The configured build arguments, appended verbatim.
+        out_path: The `-o` value, relative to the invocation root.
+        source: The source to compile, relative to the invocation root.
+
+    Returns:
+        The command line. Allocates.
+    """
+    var argv = List[String]()
+    argv.append(mojo_exe)
+    argv.append(verb)
+    argv.append(source)
+    argv.append("-o")
+    argv.append(out_path)
+    for p in includes:
+        argv.append("-I")
+        argv.append(p)
+    for a in build_args:
+        argv.append(a)
+    return argv^
+
+
 def _blank_file_result() -> FileResult:
     """A placeholder `FileResult` for the non-terminal `_BuildOutcome` path."""
     return FileResult.interrupt()
-
-
-def _no_staging() -> StoreBuildTarget:
-    """The staging target meaning "this build is not going into the store"."""
-    return StoreBuildTarget(String(""), String(""))
-
-
-def _discard_staging(root: String, target: StoreBuildTarget):
-    """Remove a staging directory whose build produced nothing worth keeping.
-
-    Called only where the compile did NOT yield a binary this session will run —
-    a compile error, a timeout kill, a spawn failure, an interrupt. A staged
-    directory left behind on those paths is pure debris: it is named after this
-    process, so no later run can ever adopt or reap it.
-
-    Args:
-        root: The invocation root.
-        target: The staging target; a target that was never staged is a no-op.
-    """
-    if not target.ok():
-        return
-    try:
-        remove_tree_no_follow(root + "/" + target.tmp_dir_rel)
-    except:
-        # A staging directory that will not die is litter under a directory
-        # mtest owns; failing the run over it is exactly the "cache condition
-        # breaks an otherwise green run" the design forbids.
-        pass
 
 
 def _build_for_selection(
@@ -208,63 +219,41 @@ def _build_for_selection(
     var plain_out = String("build/bin/") + mangled
     var out_bin = plain_out
     var first_attempt = not recovering
-    var target = _no_staging()
-    var key = Optional[FileKey](None)
+    var staging = SeamStaging.none()
     var cache_warning = String("")
     var from_store = False
 
-    if ctx.enabled and first_attempt:
-        key = file_key(ctx, root, rel)
-        if not key:
-            # A source that will not read is about to fail its build anyway, and
-            # a key that cannot cover its own source must never be written.
-            ctx.disable("cannot read the test file '" + rel + "'")
-        else:
-            var hit = store_probe(root, key.value())
-            if hit.kind == PROBE_HIT:
-                var stored = source_identity_key(root, rel)
-                reg.record_build(BuildProduct.built(rel, hit.bin_rel, stored))
-                ctx.cached_files += 1
-                # The stored build's own duration, not zero: the SLOW token must
-                # read the same on a warm run as it did on the cold one.
-                return _BuildOutcome(
-                    True,
-                    hit.bin_rel,
-                    stored,
-                    hit.argv.copy(),
-                    hit.build_seconds,
-                    False,
-                    _blank_file_result(),
-                    True,
-                    String(""),
-                )
-            target = store_build_target(root, mangled)
-            if target.ok():
-                # Compile straight into the store, so publication is one
-                # `rename(2)` and never a copy of a binary that could differ
-                # from the one that was digested.
-                out_bin = target.out_rel
-            else:
-                # Cache off for the session: a store that cannot be staged into
-                # once will not stage the next file either, and probing on would
-                # spend a digest per file for a hit that can never be published.
-                ctx.disable(
-                    "the cache could not create its store directory under"
-                    " '.mtest-cache'"
-                )
-                key = Optional[FileKey](None)
+    if first_attempt:
+        staging = seam_begin(ctx, root, rel)
+        if staging.hit:
+            var stored = source_identity_key(root, rel)
+            reg.record_build(BuildProduct.built(rel, staging.bin_rel, stored))
+            ctx.cached_files += 1
+            # The stored build's own duration, not zero: the SLOW token must
+            # read the same on a warm run as it did on the cold one.
+            return _BuildOutcome(
+                True,
+                staging.bin_rel,
+                stored,
+                staging.argv.copy(),
+                staging.build_seconds,
+                False,
+                _blank_file_result(),
+                True,
+                String(""),
+            )
+        seam_stage(ctx, staging, root, mangled)
+        if staging.target.ok():
+            out_bin = staging.target.out_rel
 
-    var build_argv = List[String]()
-    build_argv.append(config.mojo_path)
-    build_argv.append("build")
-    build_argv.append(rel)
-    build_argv.append("-o")
-    build_argv.append(out_bin)
-    for p in include_paths:
-        build_argv.append("-I")
-        build_argv.append(p)
-    for a in config.build_args:
-        build_argv.append(a)
+    var argv = build_argv(
+        config.mojo_path,
+        "build",
+        include_paths,
+        config.build_args,
+        out_bin,
+        rel,
+    )
 
     if first_attempt:
         # ADMISSION, and the only place either counter moves on this path: the
@@ -279,14 +268,14 @@ def _build_for_selection(
         bres = run_supervised(
             runtime,
             ProcessSpec.command_in(
-                build_argv.copy(),
+                argv.copy(),
                 root,
                 settings.compile_timeout_secs * 1000,
                 _COMPILE_GRACE_MS,
             ),
         )
     except:
-        _discard_staging(root, target)
+        seam_discard(staging^, root)
         return _BuildOutcome(
             False,
             "",
@@ -302,7 +291,7 @@ def _build_for_selection(
         )
     var bdur = Float64(bres.duration_ms) / 1000.0
     if interrupt_requested():
-        _discard_staging(root, target)
+        seam_discard(staging^, root)
         return _BuildOutcome(
             False,
             "",
@@ -316,7 +305,7 @@ def _build_for_selection(
         )
     var bterm = bres.termination
     if bterm.is_spawn_failed():
-        _discard_staging(root, target)
+        seam_discard(staging^, root)
         return _BuildOutcome(
             False,
             "",
@@ -345,8 +334,8 @@ def _build_for_selection(
         # uncached build puts this file's binary and is live either way. This is
         # the same liberty `store_publish` takes on success, for the same
         # reason: record the path the artifact can be reached at.
-        var shown_argv = _rewrite_output(build_argv, out_bin, plain_out)
-        _discard_staging(root, target)
+        var shown_argv = _rewrite_output(argv, out_bin, plain_out)
+        seam_discard(staging^, root)
         var ev = Event.file_finished(
             rel,
             bsignal,
@@ -372,23 +361,16 @@ def _build_for_selection(
         )
     var canonical = source_identity_key(root, rel)
     var final_bin = out_bin
-    var recorded_argv = build_argv.copy()
-    if target.ok() and key:
-        var pub = store_publish(root, key.value(), target, bdur, build_argv)
-        # The rule with no exceptions: run `bin_rel`, record `argv`. On PUB_OK
-        # the staging directory this build's own argv names is already gone; on
-        # PUB_ADOPTED the live binary belongs to a generation this run never
-        # built and whose command line it therefore cannot reconstruct; on
-        # PUB_FAILED both are this run's own staging path, which is still there.
+    var recorded_argv = argv.copy()
+    var pub = seam_settle(staging^, root, bdur, argv)
+    if pub.settled:
         final_bin = pub.bin_rel
         recorded_argv = pub.argv.copy()
-        if pub.kind == PUB_FAILED:
-            cache_warning = pub.warning
-        else:
-            # Publication or adoption puts the path this selection driver will
-            # probe under store ownership. The probe's bounded recovery must
-            # cover the same quarantine pathname gap as a warm hit.
-            from_store = True
+        cache_warning = pub.warning
+        # Publication or adoption puts the path this selection driver will
+        # probe under store ownership. The probe's bounded recovery must cover
+        # the same quarantine pathname gap as a warm hit.
+        from_store = pub.owned
     reg.record_build(BuildProduct.built(rel, final_bin, canonical))
     return _BuildOutcome(
         True,

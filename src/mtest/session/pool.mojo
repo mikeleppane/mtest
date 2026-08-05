@@ -48,7 +48,6 @@ from mtest.model import (
     Event,
     Outcome,
     Summary,
-    TestCounts,
 )
 from mtest.platform import direct_write_failed, write_all_bytes_fd_status
 from mtest.report import ReportCoordinator
@@ -59,17 +58,12 @@ from mtest.session.attempt import (
     _make_attempt_finished,
     flaky_eligible,
 )
-from mtest.session.build import (
-    _COMPILE_GRACE_MS,
-    _discard_staging,
-    _no_staging,
-)
+from mtest.session.build import _COMPILE_GRACE_MS, build_argv
 from mtest.session.classify import classify, resolve_report
 from mtest.session.file_result import (
     FileResult,
-    _CrashFile,
-    _failing_count,
-    _prepend_events,
+    RunTally,
+    settle_file,
 )
 from mtest.session.effective_settings import (
     EffectiveFileSettings,
@@ -87,16 +81,15 @@ from mtest.session.scratch import (
 )
 from mtest.session.store import (
     CacheContext,
-    FileKey,
-    PROBE_HIT,
-    PUB_FAILED,
-    StoreBuildTarget,
     _rewrite_output,
     cache_rebuild_note,
-    file_key,
-    store_build_target,
-    store_probe,
-    store_publish,
+)
+from mtest.session.store_seam import (
+    SeamStaging,
+    seam_begin,
+    seam_discard,
+    seam_settle,
+    seam_stage,
 )
 from mtest.session.verdict import build_verdict
 
@@ -162,38 +155,19 @@ struct PoolBatchResult(Movable):
     Owns its lists; copies are explicit.
     """
 
-    var run_outcomes: List[Outcome]
-    """The batch's exit-code multiset contribution."""
-    var test_totals: TestCounts
-    """The batch's per-test totals."""
-    var ran_files: Int
-    """How many files produced a tallied verdict."""
-    var interrupted: Bool
-    """Whether an interrupt aborted the batch (exit 2)."""
-    var internal_error: Bool
-    """Whether a spawn/machinery failure occurred (exit 3)."""
-    var drift: Bool
-    """Whether any verdict drifted off the pinned grammar (exit 3)."""
-    var aborted: Bool
-    """Whether a failing or drifting gate aborted the whole run."""
+    var tally: RunTally
+    """Everything the batch accumulated as its files settled."""
     var halted: Bool
     """Whether a run batch's `-x`/`--maxfail` limit latched, which leaves the
     rest of the batch NOT-RUN. A later batch (the serial pass) reads this to
     honor the same stop, and never starts serial work after the parallel batch
     already halted."""
-    var crash_files: List[_CrashFile]
-    """The files that ended CRASH, for the sequential attribution post-pass."""
     var built_files: Int
     """First-attempt compile admissions in this batch, compile FAILURES
     included. Retries never count. `run_session` folds it onto the session's one
     `CacheContext`, which both terminal artifacts read."""
     var cached_files: Int
     """Cache-hit admissions in this batch, folded the same way."""
-    var console_dead: Bool
-    """Whether a console flush in this batch could not deliver its bytes for a
-    reason other than a departed consumer. `run_session` folds it into the
-    delivery fact the exit-code model ranks, so a batch that printed nothing
-    cannot report the verdict it never showed anyone."""
 
 
 struct _PoolFile(Movable):
@@ -215,18 +189,12 @@ struct _PoolFile(Movable):
     this instead — the same substitution both other seams make, for the same
     reason.
     """
-    var key: Optional[FileKey]
-    """This file's store key while a publication is still owed, else nothing.
+    var staging: SeamStaging
+    """What this file still owes the artifact store.
 
-    Cleared the moment the file is settled into the store — published, adopted,
-    or discarded — so no later phase can publish a second time.
-    """
-    var target: StoreBuildTarget
-    """The staging directory this file's FIRST build is writing into.
-
-    Cleared whenever the directory stops being this batch's to remove: it was
-    renamed onto a generation, it was discarded, or publication failed and the
-    binary inside it is the one still being run.
+    Detached the moment the file is settled into the store — published,
+    adopted, or discarded — so no later phase can publish a second time or
+    remove a directory that stopped being this batch's to remove.
     """
     var quarantine_dir: String
     var build_argv: List[String]
@@ -290,8 +258,7 @@ struct _PoolFile(Movable):
         self.mangled = mangled
         self.plain_out = String("build/bin/") + mangled
         self.out_bin = self.plain_out
-        self.key = Optional[FileKey](None)
-        self.target = _no_staging()
+        self.staging = SeamStaging.none()
         self.quarantine_dir = String("")
         self.build_argv = List[String]()
         self.bterm = Termination.exited(0)
@@ -605,20 +572,7 @@ def _run_pool_batch[
         raise Error("session: the parallel pool requires an active ExecRuntime")
     var config = resolved.config.copy()
     var n = len(files)
-    var result = PoolBatchResult(
-        List[Outcome](),
-        TestCounts.zeros(),
-        0,
-        False,
-        False,
-        False,
-        False,
-        False,
-        List[_CrashFile](),
-        0,
-        0,
-        False,
-    )
+    var result = PoolBatchResult(RunTally.zeros(), False, 0, 0)
     if n == 0:
         return result^
 
@@ -634,45 +588,33 @@ def _run_pool_batch[
         var settings = effective_file_settings(resolved, files[i])
         retry_budgets.append(settings.retries)
         var pf = _PoolFile(files[i], _mangle(files[i]), settings)
-        if ctx.enabled:
-            var key = file_key(ctx, root, files[i])
-            if not key:
-                # A source that will not read is about to fail its build anyway,
-                # and a key that cannot cover its own source must never be
-                # written.
-                ctx.disable("cannot read the test file '" + files[i] + "'")
-            else:
-                var hit = store_probe(root, key.value())
-                if hit.kind == PROBE_HIT:
-                    # The slot enters the phase machine as if a build had
-                    # already completed, which is exactly the shape the
-                    # build-completion handler leaves behind — the same three
-                    # fields it writes, seeded from the store instead of from a
-                    # compiler. Nothing downstream needs to know a compile was
-                    # skipped, and nothing is owed to the store, so the key is
-                    # deliberately NOT carried.
-                    #
-                    # The ADMISSION is not here. This loop keys and probes the
-                    # whole batch before the scheduler runs, and `-x`,
-                    # `--maxfail`, a dead machine stream, or an interrupt can
-                    # tear the batch down with most of it still undispatched. A
-                    # file that never ran was admitted to nothing, so the charge
-                    # rides on the flag below and lands at the run dispatch —
-                    # the same point the build dispatch charges `built_files`.
-                    pf.phase = _PENDING_RUN
-                    pf.out_bin = hit.bin_rel
-                    pf.build_argv = hit.argv.copy()
-                    pf.bdur = hit.build_seconds
-                    pf.bterm = Termination.exited(0)
-                    pf.build_stderr = List[UInt8]()
-                    pf.hit_uncounted = True
-                    pf.store_hit = True
-                else:
-                    # Owed a publication, claimed at the first build dispatch.
-                    # The staging directory is NOT created here: a batch that
-                    # halts on `-x` or an interrupt would leave one orphaned per
-                    # undispatched file, and nothing in the tree sweeps them.
-                    pf.key = key^
+        # A miss leaves the file owing a publication, claimed at the first build
+        # dispatch. The staging directory is NOT created here: a batch that
+        # halts on `-x` or an interrupt would leave one orphaned per
+        # undispatched file, and nothing in the tree sweeps them.
+        pf.staging = seam_begin(ctx, root, files[i])
+        if pf.staging.hit:
+            # The slot enters the phase machine as if a build had already
+            # completed, which is exactly the shape the build-completion
+            # handler leaves behind — the same three fields it writes, seeded
+            # from the store instead of from a compiler. Nothing downstream
+            # needs to know a compile was skipped.
+            #
+            # The ADMISSION is not here. This loop keys and probes the whole
+            # batch before the scheduler runs, and `-x`, `--maxfail`, a dead
+            # machine stream, or an interrupt can tear the batch down with most
+            # of it still undispatched. A file that never ran was admitted to
+            # nothing, so the charge rides on the flag below and lands at the
+            # run dispatch — the same point the build dispatch charges
+            # `built_files`.
+            pf.phase = _PENDING_RUN
+            pf.out_bin = pf.staging.bin_rel
+            pf.build_argv = pf.staging.argv.copy()
+            pf.bdur = pf.staging.build_seconds
+            pf.bterm = Termination.exited(0)
+            pf.build_stderr = List[UInt8]()
+            pf.hit_uncounted = True
+            pf.store_hit = True
         state.append(pf^)
 
     # The kernel serves as the stop-policy oracle: gates are always exit-first,
@@ -721,8 +663,8 @@ def _run_pool_batch[
     while True:
         # Scheduling boundary: a pending interrupt tears the batch down at once,
         # abandoning every unfinished file.
-        if not result.interrupted and interrupt_requested():
-            result.interrupted = True
+        if not result.tally.interrupted and interrupt_requested():
+            result.tally.interrupted = True
             pipeline.halt_interrupted()
             try:
                 supervisor.kill_all()
@@ -833,42 +775,30 @@ def _run_pool_batch[
                         state[picked].attempt == 1
                         and not state[picked].store_rebuilt
                     )
-                    if first_build and state[picked].key:
-                        var target = store_build_target(
-                            root, state[picked].mangled
+                    if first_build:
+                        seam_stage(
+                            ctx,
+                            state[picked].staging,
+                            root,
+                            state[picked].mangled,
                         )
-                        if target.ok():
-                            # Compile straight into the store, so publication is
-                            # one `rename(2)` and never a copy of a binary that
-                            # could differ from the one that was digested.
-                            state[picked].out_bin = target.out_rel
-                            state[picked].target = target^
-                        else:
-                            # Cache off for the session: a store that cannot be
-                            # staged into once will not stage the next file
-                            # either, and probing on would spend a digest per
-                            # file for a hit that can never be published.
-                            ctx.disable(
-                                "the cache could not create its store directory"
-                                " under '.mtest-cache'"
-                            )
-                            state[picked].key = Optional[FileKey](None)
-                    var build_argv = List[String]()
-                    build_argv.append(config.mojo_path)
-                    build_argv.append("build")
-                    build_argv.append(state[picked].rel)
-                    build_argv.append("-o")
-                    build_argv.append(state[picked].out_bin)
-                    for p in include_paths:
-                        build_argv.append("-I")
-                        build_argv.append(p)
-                    for a in config.build_args:
-                        build_argv.append(a)
-                    state[picked].build_argv = build_argv.copy()
+                        if state[picked].staging.target.ok():
+                            state[picked].out_bin = state[
+                                picked
+                            ].staging.target.out_rel
+                    var argv = build_argv(
+                        config.mojo_path,
+                        "build",
+                        include_paths,
+                        config.build_args,
+                        state[picked].out_bin,
+                        state[picked].rel,
+                    )
+                    state[picked].build_argv = argv.copy()
                     # The token flag rides the SPAWN argv; the stored reproduce
                     # argv stays clean, so an ordinary verdict's reproduce line
                     # carries no `--num-threads`.
-                    var spawn_argv = build_argv^
+                    var spawn_argv = argv^
                     spawn_argv.append("--num-threads")
                     spawn_argv.append(String(k))
                     var env_extra = List[String]()
@@ -924,7 +854,7 @@ def _run_pool_batch[
                     machinery_fault_step, machinery_fault_program, 0
                 )
             )
-            result.internal_error = True
+            result.tally.internal_error = True
             pipeline.halt_internal_error()
             try:
                 supervisor.kill_all()
@@ -944,7 +874,7 @@ def _run_pool_batch[
         if faulted:
             # A machinery fault tore the Supervisor down. Resolve to exit 3 and
             # abandon the rest; the teardown already ran inside `wait_any`.
-            result.internal_error = True
+            result.tally.internal_error = True
             pipeline.halt_internal_error()
             break
         if not completion:
@@ -962,7 +892,7 @@ def _run_pool_batch[
 
         if interrupt_kill:
             # Its file is abandoned NOT-RUN; tear the rest down.
-            result.interrupted = True
+            result.tally.interrupted = True
             pipeline.halt_interrupted()
             state[i].phase = _DONE
             try:
@@ -982,20 +912,18 @@ def _run_pool_batch[
             if term.is_spawn_failed():
                 # No binary this batch will run came out of it, so the staged
                 # directory is pure debris.
-                _discard_staging(root, state[i].target)
-                state[i].target = _no_staging()
-                state[i].key = Optional[FileKey](None)
+                seam_discard(state[i].staging.take(), root)
                 reporter.handle(
                     Event.internal_error("build", config.mojo_path, term.value)
                 )
-                result.internal_error = True
+                result.tally.internal_error = True
                 stop_scheduling = True
                 pipeline.halt_internal_error()
                 state[i].phase = _DONE
             else:
                 var bv = build_verdict(term)
                 if bv.is_failing():
-                    if state[i].target.ok():
+                    if state[i].staging.target.ok():
                         # The reproduce line names `build/bin`, never the
                         # staging directory the compile actually wrote to. A
                         # failed build publishes nothing, so that directory is
@@ -1010,10 +938,8 @@ def _run_pool_batch[
                             state[i].out_bin,
                             state[i].plain_out,
                         )
-                        _discard_staging(root, state[i].target)
-                        state[i].target = _no_staging()
                         state[i].out_bin = state[i].plain_out
-                    state[i].key = Optional[FileKey](None)
+                    seam_discard(state[i].staging.take(), root)
                     var rc = retry_classify(
                         "build", term, False, state[i].build_stderr
                     )
@@ -1079,7 +1005,7 @@ def _run_pool_batch[
                             False,
                             serial,
                         )
-                        gate_kill = _settle(
+                        gate_kill = _settle_pool_file(
                             state,
                             i,
                             fr^,
@@ -1095,52 +1021,35 @@ def _run_pool_batch[
                         ):
                             stop_scheduling = True
                 else:
-                    if state[i].target.ok() and state[i].key:
-                        # PUBLISH HERE, in the seam between the build's
-                        # completion and the run's dispatch, which is a seam
-                        # only this driver has. Doing it now rather than after
-                        # the run means the bytes the store serves are the bytes
-                        # this batch runs (on PUB_ADOPTED, the winner's), the
-                        # run-step diagnostics below name a live generation
-                        # instead of a directory about to disappear, and a hard
-                        # kill can orphan a staging directory only for as long
-                        # as one build takes.
-                        var pub = store_publish(
-                            root,
-                            state[i].key.value(),
-                            state[i].target,
-                            state[i].bdur,
-                            state[i].build_argv,
-                        )
-                        # The rule with no exceptions: run `bin_rel`, record
-                        # `argv`. On PUB_OK the staging directory this build's
-                        # own argv names is already gone; on PUB_ADOPTED the
-                        # live binary belongs to a generation this run never
-                        # built and whose command line it therefore cannot
-                        # reconstruct; on PUB_FAILED both are this run's own
-                        # staging path, which is still there and is the only
-                        # copy of the binary about to run.
+                    # PUBLISH HERE, in the seam between the build's completion
+                    # and the run's dispatch, which is a seam only this driver
+                    # has. Doing it now rather than after the run means the
+                    # bytes the store serves are the bytes this batch runs (on
+                    # an adoption, the winner's), the run-step diagnostics below
+                    # name a live generation instead of a directory about to
+                    # disappear, and a hard kill can orphan a staging directory
+                    # only for as long as one build takes.
+                    var pub = seam_settle(
+                        state[i].staging.take(),
+                        root,
+                        state[i].bdur,
+                        state[i].build_argv,
+                    )
+                    if pub.settled:
                         state[i].out_bin = pub.bin_rel
                         state[i].build_argv = pub.argv.copy()
-                        if pub.kind == PUB_FAILED:
+                        if not pub.owned:
                             # The build survived; only its publication did not.
                             # A publication failure is never a verdict, so it
                             # rides in front of this file's events as a warning.
                             state[i].pre_events.append(
                                 Event.warning("cache-publish", pub.warning)
                             )
-                        else:
-                            # This session now executes a store generation of
-                            # its own. A concurrent unreadable-generation
-                            # quarantine can temporarily remove its pathname;
-                            # a completed SpawnFailed below rebuilds once.
-                            state[i].published_store_artifact = True
-                        # Settled either way: the directory is renamed, deleted,
-                        # or the live home of the binary this batch keeps
-                        # running. None of those is the batch's to sweep, and
-                        # the key is owed nothing further.
-                        state[i].target = _no_staging()
-                        state[i].key = Optional[FileKey](None)
+                        # This session now executes a store generation of its
+                        # own. A concurrent unreadable-generation quarantine can
+                        # temporarily remove its pathname; a completed
+                        # SpawnFailed below rebuilds once.
+                        state[i].published_store_artifact = pub.owned
                     state[i].phase = _PENDING_RUN
         else:
             # A completed run.
@@ -1162,7 +1071,7 @@ def _run_pool_batch[
                             "run", state[i].out_bin, term.value
                         )
                     )
-                    result.internal_error = True
+                    result.tally.internal_error = True
                     stop_scheduling = True
                     pipeline.halt_internal_error()
                     state[i].phase = _DONE
@@ -1183,22 +1092,22 @@ def _run_pool_batch[
                 if retry_admitted:
                     state[i].had_retry = True
                     var att = _AttemptResult(
-                        0,
-                        Event.file_started(""),
-                        False,
-                        state[i].build_argv.copy(),
-                        state[i].bterm,
-                        state[i].build_stderr.copy(),
-                        state[i].bdur,
-                        state[i].out_bin,
-                        term,
-                        res.stdout_bytes.copy(),
-                        res.stderr_bytes.copy(),
-                        rdur,
-                        trusted.copy(),
-                        cls.copy(),
-                        res.stdout_truncated,
-                        res.stderr_truncated,
+                        control=0,
+                        internal_event=Event.file_started(""),
+                        build_failed=False,
+                        build_argv=state[i].build_argv.copy(),
+                        bterm=state[i].bterm,
+                        build_stderr=state[i].build_stderr.copy(),
+                        bdur=state[i].bdur,
+                        out_bin=state[i].out_bin,
+                        rterm=term,
+                        run_stdout=res.stdout_bytes.copy(),
+                        run_stderr=res.stderr_bytes.copy(),
+                        rdur=rdur,
+                        trusted=trusted.copy(),
+                        cls=cls.copy(),
+                        run_stdout_truncated=res.stdout_truncated,
+                        run_stderr_truncated=res.stderr_truncated,
                     )
                     state[i].pre_events.append(
                         _make_attempt_finished(
@@ -1215,22 +1124,22 @@ def _run_pool_batch[
                 else:
                     var flaky = state[i].had_retry and attempt_passed
                     var att = _AttemptResult(
-                        0,
-                        Event.file_started(""),
-                        False,
-                        state[i].build_argv.copy(),
-                        state[i].bterm,
-                        state[i].build_stderr.copy(),
-                        state[i].bdur,
-                        state[i].out_bin,
-                        term,
-                        res.stdout_bytes.copy(),
-                        res.stderr_bytes.copy(),
-                        rdur,
-                        trusted.copy(),
-                        cls.copy(),
-                        res.stdout_truncated,
-                        res.stderr_truncated,
+                        control=0,
+                        internal_event=Event.file_started(""),
+                        build_failed=False,
+                        build_argv=state[i].build_argv.copy(),
+                        bterm=state[i].bterm,
+                        build_stderr=state[i].build_stderr.copy(),
+                        bdur=state[i].bdur,
+                        out_bin=state[i].out_bin,
+                        rterm=term,
+                        run_stdout=res.stdout_bytes.copy(),
+                        run_stderr=res.stderr_bytes.copy(),
+                        rdur=rdur,
+                        trusted=trusted.copy(),
+                        cls=cls.copy(),
+                        run_stdout_truncated=res.stdout_truncated,
+                        run_stderr_truncated=res.stderr_truncated,
                     )
                     var fr = _finalize_attempt(
                         state[i].settings,
@@ -1240,7 +1149,7 @@ def _run_pool_batch[
                         flaky,
                         serial,
                     )
-                    gate_kill = _settle(
+                    gate_kill = _settle_pool_file(
                         state,
                         i,
                         fr^,
@@ -1274,7 +1183,11 @@ def _run_pool_batch[
         ):
             _emit_progress(reporter, state, completed, n)
             counter_shown = _flush_console_with_progress(
-                reporter, console_fd, counter_shown, False, result.console_dead
+                reporter,
+                console_fd,
+                counter_shown,
+                False,
+                result.tally.console_dead,
             )
             last_completed = completed
             last_running_sig = running_sig^
@@ -1290,7 +1203,7 @@ def _run_pool_batch[
                 # exit 3 rather than let the gate's exit 1 mask it. (The
                 # interrupt paths above already resolve to exit 2, which
                 # dominates, so they need no escalation.)
-                result.internal_error = True
+                result.tally.internal_error = True
             break
 
     # Any staging directory still held is one whose build never reached its
@@ -1298,19 +1211,18 @@ def _run_pool_batch[
     # the batch down with the compiler in flight. Nothing in the tree sweeps
     # `.tmp-` directories, so the batch that created them is the last chance to
     # remove them, and every one still held here is by construction a directory
-    # no binary is being run out of: the publish branch clears `target` on all
-    # three outcomes, including the PUB_FAILED one whose staged binary IS live.
+    # no binary is being run out of: settling detaches the staging on all three
+    # outcomes, including the failed publication whose staged binary IS live.
     for i in range(n):
-        if state[i].target.ok():
-            _discard_staging(root, state[i].target)
-            state[i].target = _no_staging()
+        if state[i].staging.target.ok():
+            seam_discard(state[i].staging.take(), root)
 
     # Batch terminal: erase any counter still on the terminal and flush the last
     # committed bytes without redrawing it. The counter is ephemeral and must
     # not survive into the framed sections and summary band, which the session's
     # single closing flush emits after every batch has returned.
     _ = _flush_console_with_progress(
-        reporter, console_fd, counter_shown, True, result.console_dead
+        reporter, console_fd, counter_shown, True, result.tally.console_dead
     )
 
     # A run batch that latched its `-x`/`--maxfail` limit records it so a later
@@ -1322,7 +1234,7 @@ def _run_pool_batch[
     return result^
 
 
-def _settle[
+def _settle_pool_file[
     C: ReportCoordinator
 ](
     mut state: List[_PoolFile],
@@ -1334,13 +1246,7 @@ def _settle[
     mut result: PoolBatchResult,
     is_gate: Bool,
 ) raises -> Bool:
-    """Settle one file's verdict: emit it, account it, and apply the policy.
-
-    Prepends the file's accumulated attempt events, emits the verdict, and folds
-    the per-test totals. For a non-drift verdict it then tallies the outcome,
-    extends the run multiset, records the verdict against the stop policy, and
-    queues a crash for attribution. A drift verdict forces exit 3 and is
-    accounted NOT-RUN rather than tallied, exactly as the sequential path does.
+    """Retire one slot and settle its file through the shared verdict path.
 
     Args:
         state: The batch's file state, whose `i`th entry is being settled.
@@ -1357,39 +1263,19 @@ def _settle[
         True when a gate verdict aborts the whole run (the caller kills the
         batch); False otherwise.
     """
-    var settled = _prepend_events(state[i].pre_events.copy(), fr^)
-    for pe in settled.pre_events:
-        reporter.handle(pe)
-    reporter.handle(settled.event)
-    result.test_totals.passed += settled.test_counts.passed
-    result.test_totals.failed += settled.test_counts.failed
-    result.test_totals.skipped += settled.test_counts.skipped
-    result.test_totals.deselected += settled.test_counts.deselected
+    var binary = String(fr.binary_path)
     state[i].phase = _DONE
-
-    if settled.is_drift:
-        result.drift = True
-        if is_gate:
-            result.aborted = True
-            return True
-        return False
-
-    summary.counts[settled.outcome.code] += 1
-    result.run_outcomes.extend(settled.exit_outcomes.copy())
-    result.ran_files += 1
-    if (not is_gate) and settled.outcome == Outcome.CRASH:
-        result.crash_files.append(
-            _CrashFile(
-                state[i].rel,
-                state[i].settings,
-                settled.binary_path,
-                List[String](),
-            )
-        )
-    pipeline.record_verdict(
-        i, settled.outcome.is_failing(), _failing_count(result.run_outcomes)
+    return settle_file(
+        result.tally,
+        reporter,
+        summary,
+        pipeline,
+        i,
+        state[i].rel,
+        state[i].settings,
+        binary,
+        List[String](),
+        state[i].pre_events.copy(),
+        fr^,
+        is_gate,
     )
-    if is_gate and settled.outcome.is_failing():
-        result.aborted = True
-        return True
-    return False

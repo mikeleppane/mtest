@@ -9,12 +9,13 @@ the include set every later build sees.
 
 It reuses the attempt machinery's retry policy, event shapes, and residual
 warning, so a session-level step's attempt line carries the same identity a file
-build's does. It sits below `session` and `collect`, which both run the
-configured steps before their own work.
+build's does. `run_precompile_step` is the one pass over a configured step —
+key, probe, compile, stamp, widen — that the run, collect, and debug pipelines
+all drive; each keeps only its own loop and its own reading of a failure.
 """
 from std.os.path import basename, dirname
 
-from mtest.config import RunnerConfig, lossy_utf8
+from mtest.config import Precompile, RunnerConfig, lossy_utf8
 from mtest.exec import (
     ExecRuntime,
     ProcessResult,
@@ -30,8 +31,15 @@ from mtest.session.attempt import (
     _compile_crash_residual,
     _make_attempt_finished,
 )
-from mtest.session.build import _COMPILE_GRACE_MS
+from mtest.session.build import _COMPILE_GRACE_MS, build_argv
 from mtest.session.retry_class import retry_classify
+from mtest.session.store import (
+    CacheContext,
+    FileKey,
+    precompile_key,
+    precompile_probe,
+    precompile_publish,
+)
 from mtest.session.scratch import (
     _cleanup_quarantine,
     _discard_path,
@@ -367,17 +375,14 @@ def _run_precompile(
         )
         var tmp_dir = dirname(tmp_path)
         _ensure_dir(root + "/" + tmp_dir)
-        var argv = List[String]()
-        argv.append(config.mojo_path)
-        argv.append("precompile")
-        argv.append(src)
-        argv.append("-o")
-        argv.append(tmp_path)
-        for p in include_paths:
-            argv.append("-I")
-            argv.append(p)
-        for a in config.build_args:
-            argv.append(a)
+        var argv = build_argv(
+            config.mojo_path,
+            "precompile",
+            include_paths,
+            config.build_args,
+            tmp_path,
+            src,
+        )
 
         # NARROW quarantine: only a post-compile-kill retry redirects the module
         # cache, exactly as the file build path does. The override rides the
@@ -532,3 +537,79 @@ def _run_precompile(
             timeout_seconds,
             attempt_index,
         )
+
+
+def run_precompile_step(
+    mut runtime: ExecRuntime,
+    config: RunnerConfig,
+    root: String,
+    pc: Precompile,
+    mut ctx: CacheContext,
+    mut includes: List[String],
+    mut prior_outputs: List[String],
+    use_cache: Bool,
+) raises -> Optional[PrecompileResult]:
+    """Run one configured precompile step and widen the include set it earns.
+
+    The whole pass over a step, shared by the run, collect, and debug
+    pipelines: key it, ask the stamp whether the package on disk is already the
+    one that key names, compile it when it is not, stamp a first-attempt
+    success, and append its output directory to the include set. Only the
+    reading of a failure is left to the caller, because a run reports it as a
+    `precompile_failed` event, collect as a stderr diagnostic, and debug as a
+    refusal.
+
+    Neither `built_files` nor `cached_files` moves here. Those count
+    first-attempt TEST FILE compile admissions, and a precompile step sits
+    outside that invariant whether it runs or not.
+
+    Args:
+        runtime: The exec runtime supervising the compiler spawns.
+        config: The resolved runner configuration.
+        root: The invocation root the compiler runs in.
+        pc: The configured step: its source and its optional output name.
+        ctx: The session's cache state, keyed from `ctx.base` and never from
+            `ctx.prefix` — the include walks that make up `prefix` are exactly
+            what this step's output changes.
+        includes: The include set, widened by a step that ran or was skipped.
+        prior_outputs: The outputs of every earlier step, which are inputs to
+            this one's key. This step's output is appended once it exists.
+        use_cache: Whether the stamp seam is consulted at all. False keys
+            nothing, probes nothing, and stamps nothing, so every configured
+            step runs and the package lands where the caller's printed lines
+            say it does.
+
+    Returns:
+        The step's result, or nothing when the stamp skipped it. A step that
+        failed, was interrupted, or could not be spawned widens neither list.
+
+    Raises:
+        Error: If the `exec` machinery itself fails, or the output or temp
+            directory cannot be made.
+    """
+    var out_path = precompile_out_path(pc.src, pc.out)
+    var key = Optional[FileKey](None)
+    if use_cache:
+        key = precompile_key(
+            ctx, root, pc.src, includes, prior_outputs, out_path
+        )
+    if key and precompile_probe(root, key.value(), out_path):
+        # The package on disk is already the one this key names. The step
+        # contributes nothing but its include directory.
+        includes.append(precompile_out_dir(out_path))
+        prior_outputs.append(out_path)
+        return None
+
+    var pr = _run_precompile(runtime, config, root, pc.src, pc.out, includes)
+    if pr.interrupted or pr.internal_error or not pr.ok:
+        return pr^
+    # Only a FIRST-ATTEMPT output is stamped, exactly as only a first-attempt
+    # build is published: a step that succeeded on a retry emitted
+    # `precompile-succeeded-after-retry` because its package is suspect, and
+    # stamping it would let every later run skip straight past that suspicion
+    # instead of rebuilding it once.
+    if key and pr.attempts_used == 1:
+        precompile_publish(root, key.value(), out_path)
+    includes.append(pr.out_dir)
+    prior_outputs.append(out_path)
+    return pr^

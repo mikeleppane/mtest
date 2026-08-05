@@ -9,7 +9,8 @@ path, and the run argv, the printed run line, and the exec target are the same
 three tokens, so what a reader is told to rerun is what actually ran.
 """
 from std.os import getenv
-from std.testing import assert_equal, assert_true, TestSuite
+from std.os.path import exists
+from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.config import Precompile
 from mtest.session import prepare_debug
@@ -271,6 +272,33 @@ def test_unspawnable_precompile_compiler_stays_an_internal_error() raises:
     assert_true(
         "could not be spawned" in _joined(outcome.diagnostics),
         "the diagnostic names the machinery: " + _joined(outcome.diagnostics),
+    )
+
+
+def test_a_precompile_step_under_debug_writes_no_cache_record() raises:
+    """Debug runs its steps with the stamp seam OFF, and leaves no trace of it.
+
+    Every path debug prints has to have been produced by this invocation, so a
+    step is never skipped on the strength of a stamp an earlier run wrote, and
+    a successful step never writes one. Enabling the seam here would be a
+    product decision about what `--debug` hands over, not a refactoring.
+    """
+    var root = temp_root()
+    write_file(
+        root, "goodpkg/__init__.mojo", "def value() -> Int:\n    return 1\n"
+    )
+    write_file(root, "tests/test_pass.mojo", SRC_PASS)
+    var cfg = base_config()
+    cfg.precompiles.append(Precompile("goodpkg", None))
+
+    var outcome = prepare_debug(cfg, root, "tests/test_pass.mojo::test_pass")
+
+    assert_equal(outcome.code, 0, _joined(outcome.diagnostics))
+    # Not merely unstamped: keying a step creates the store and its ownership
+    # marker as a side effect, so the whole directory has to be absent.
+    assert_false(
+        exists(root + "/.mtest-cache"),
+        "debug must key, probe, and stamp nothing",
     )
 
 

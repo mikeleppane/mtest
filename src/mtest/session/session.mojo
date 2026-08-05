@@ -50,7 +50,6 @@ from mtest.model import (
     Outcome,
     Summary,
     TerminalFacts,
-    TestCounts,
     classify_not_run,
     exit_code_for,
     resolve_exit_code,
@@ -69,29 +68,30 @@ from mtest.session.effective_settings import (
     _compat_resolved_config,
     effective_file_settings,
 )
-from mtest.session.file_result import _CrashFile, _failing_count
+from mtest.session.file_result import (
+    RunTally,
+    _failing_count,
+    settle_file,
+)
 from mtest.select.failure_selection import (
     missing_file_identifiers,
     order_failed_first,
     remembered_file_matches,
 )
 from mtest.session.pipeline import PipelineHalt, RunPipeline
-from mtest.session.pool import _run_pool_batch, resolve_worker_plan
-from mtest.session.pool_plan import partition_effective_serial, stale_serials
-from mtest.session.precompile import (
-    _run_precompile,
-    precompile_out_dir,
-    precompile_out_path,
+from mtest.session.pool import (
+    PoolBatchResult,
+    _run_pool_batch,
+    resolve_worker_plan,
 )
+from mtest.session.pool_plan import partition_effective_serial, stale_serials
+from mtest.session.precompile import run_precompile_step
 from mtest.session.selection import _run_selection
 from mtest.session.shard import partition
 from mtest.session.store import (
     CacheContext,
     collect_env_base,
     finalize_includes,
-    precompile_key,
-    precompile_probe,
-    precompile_publish,
 )
 
 
@@ -169,6 +169,26 @@ def _warn_cache_off[
         return
     reporter.handle(Event.warning("cache-off", ctx.disable_reason))
     ctx.warned = True
+
+
+def _absorb_batch(
+    mut tally: RunTally, mut ctx: CacheContext, batch: PoolBatchResult
+):
+    """Fold one pooled batch's whole result into the session.
+
+    The batch's cache admissions land on the session's one context here rather
+    than being counted inside the batch: the gate, parallel, and serial batches
+    each account for themselves, and every fold happens long before the terminal
+    artifacts read the totals.
+
+    Args:
+        tally: The session accumulator every driver's work lands in.
+        ctx: The session's cache state, whose admission counters advance.
+        batch: The finished batch. Copied, not consumed.
+    """
+    tally.merge(batch.tally)
+    ctx.built_files += batch.built_files
+    ctx.cached_files += batch.cached_files
 
 
 def _is_gate_file(gate_files: List[String], path: String) -> Bool:
@@ -476,19 +496,17 @@ def run_session[
     for pat in stale_serials(reportable_run_files, config.serial_globs):
         reporter.handle(Event.warning("stale-serial", pat))
 
-    var run_outcomes = List[Outcome]()
-    var test_totals = TestCounts.zeros()
-    var ran_files = 0
+    # Everything the run accumulates as its files settle, wherever they ran:
+    # the gate loop and the plain run loop settle straight into it, and the
+    # selection sub-session and each pooled batch fold theirs back into it.
+    var tally = RunTally.zeros()
     # The console report is the run's primary output, so a destination
     # that would not take it is a delivery failure the model ranks —
     # latched across every drain, both drivers, and never cleared.
-    var console_dead = False
-    var interrupted = False
     # A descriptor-ceiling fault while resolving the worker plan is a machinery
     # fault: resolve it as an internal error (exit 3), the same as any other.
-    var internal_error = worker_env_error
+    tally.internal_error = worker_env_error
     var precompile_failed = False
-    var drift = False
     # A latched machine-stream write failure (a dead `--json -` pipe, a full or
     # unwritable destination) is a FATAL ABORT: the run's product is no longer
     # deliverable, so the session stops scheduling and resolves exit 3. It is
@@ -500,9 +518,6 @@ def run_session[
     # probes — so the attribution post-pass falls back to a fresh probe for its
     # files. Diagnostics read it; nothing else does.
     var reg = BuildRegistry()
-    # The CRASH files, in discovery order, for the bounded attribution post-pass.
-    # Collected as verdicts land; feeds no count, no multiset, no exit code.
-    var crash_files = List[_CrashFile]()
 
     # The build cache's session state, established BEFORE the first child that
     # could build anything. `--no-cache` is answered here and nowhere later:
@@ -532,33 +547,25 @@ def run_session[
     var prior_outputs = List[String]()
     for pc in config.precompiles:
         if interrupt_requested():
-            interrupted = True
+            tally.interrupted = True
             break
         if reporter.stream_failed():
             stream_dead = True
             break
-        var out_path = precompile_out_path(pc.src, pc.out)
-        # Keyed from `ctx.base`, never from `ctx.prefix`: the include walks that
-        # make up `prefix` are exactly what THIS step's output changes.
-        var key = precompile_key(
-            ctx, root, pc.src, includes, prior_outputs, out_path
-        )
-        var skip = False
-        if key:
-            skip = precompile_probe(root, key.value(), out_path)
-        if skip:
-            # The package on disk is already the one this key names. The step
-            # contributes nothing but its include directory — and no counter:
-            # `built_files` and `cached_files` count first-attempt TEST FILE
-            # compile admissions, and a precompile step sits outside that
-            # invariant whether it runs or not.
-            includes.append(precompile_out_dir(out_path))
-            prior_outputs.append(out_path)
-            continue
         try:
-            var pr = _run_precompile(
-                runtime, config, root, pc.src, pc.out, includes
+            var step = run_precompile_step(
+                runtime,
+                config,
+                root,
+                pc,
+                ctx,
+                includes,
+                prior_outputs,
+                use_cache=True,
             )
+            if not step:
+                continue
+            ref pr = step.value()
             # The step's own attempt record first, in order: each retried
             # attempt's TRY line, its residual warning, and a success-after-retry
             # warning — the session-level signal that stands in for the FLAKY
@@ -566,13 +573,13 @@ def run_session[
             for ev in pr.events:
                 reporter.handle(ev)
             if pr.interrupted:
-                interrupted = True
+                tally.interrupted = True
                 break
             if pr.internal_error:
                 reporter.handle(
                     Event.internal_error("precompile", pr.program, pr.errno)
                 )
-                internal_error = True
+                tally.internal_error = True
                 break
             if not pr.ok:
                 precompile_failed = True
@@ -591,20 +598,11 @@ def run_session[
                     )
                 )
                 break
-            # Only a FIRST-ATTEMPT output is stamped, exactly as only a
-            # first-attempt build is published: a step that succeeded on a retry
-            # emitted `precompile-succeeded-after-retry` because its package is
-            # suspect, and stamping it would let every later run skip straight
-            # past that suspicion instead of rebuilding it once.
-            if key and pr.attempts_used == 1:
-                precompile_publish(root, key.value(), out_path)
-            includes.append(pr.out_dir)
-            prior_outputs.append(out_path)
         except:
             reporter.handle(
                 Event.internal_error("precompile", config.mojo_path, 0)
             )
-            internal_error = True
+            tally.internal_error = True
             break
 
     # The include set is complete only now: every precompile step that succeeded
@@ -614,9 +612,11 @@ def run_session[
     finalize_includes(ctx, root, includes)
     _warn_cache_off(ctx, config, reporter)
 
-    var gate_abort = False
     var proceed = not (
-        interrupted or internal_error or precompile_failed or stream_dead
+        tally.interrupted
+        or tally.internal_error
+        or precompile_failed
+        or stream_dead
     )
 
     # Gates first: a failing gate aborts the whole session immediately. The stop
@@ -648,31 +648,11 @@ def run_session[
             console_fd,
             ctx,
         )
-        # The batch's cache admissions, folded onto the session's one context
-        # here rather than counted there: the gate, parallel, and serial batches
-        # each account for themselves, and every fold happens long before the
-        # terminal artifacts read the totals.
-        console_dead = console_dead or gb.console_dead
-        ctx.built_files += gb.built_files
-        ctx.cached_files += gb.cached_files
-        run_outcomes.extend(gb.run_outcomes.copy())
-        test_totals.passed += gb.test_totals.passed
-        test_totals.failed += gb.test_totals.failed
-        test_totals.skipped += gb.test_totals.skipped
-        test_totals.deselected += gb.test_totals.deselected
-        ran_files += gb.ran_files
-        if gb.interrupted:
-            interrupted = True
-        if gb.internal_error:
-            internal_error = True
-        if gb.drift:
-            drift = True
-        if gb.aborted:
-            gate_abort = True
+        _absorb_batch(tally, ctx, gb)
     if proceed and resolved_workers <= 1:
         for gi in range(len(disc.gate_files)):
             if interrupt_requested():
-                interrupted = True
+                tally.interrupted = True
                 break
             if reporter.stream_failed():
                 stream_dead = True
@@ -692,48 +672,43 @@ def run_session[
                     ctx,
                 )
                 if fr.interrupted:
-                    interrupted = True
+                    tally.interrupted = True
                     break
                 if fr.internal_error:
                     reporter.handle(fr.event)
-                    internal_error = True
+                    tally.internal_error = True
                     break
-                for pe in fr.pre_events:
-                    reporter.handle(pe)
-                reporter.handle(fr.event)
-                test_totals.passed += fr.test_counts.passed
-                test_totals.failed += fr.test_counts.failed
-                test_totals.skipped += fr.test_counts.skipped
-                if fr.is_drift:
-                    # A drifting gate is at least as serious as a failing one: a
-                    # gate exists to stop the run early, so a gate that drifts
-                    # aborts scheduling the same way, fanning the remaining files
-                    # out to NOT_RUN. Drift keeps exit-3 precedence over the
-                    # exit-1 a failing gate would resolve to.
-                    drift = True
-                    gate_abort = True
+                var gate_binary = String(fr.binary_path)
+                if settle_file(
+                    tally,
+                    reporter,
+                    summary,
+                    gate_pipeline,
+                    gi,
+                    disc.gate_files[gi],
+                    settings,
+                    gate_binary,
+                    List[String](),
+                    List[Event](),
+                    fr^,
+                    is_gate=True,
+                ):
                     break
-                summary.counts[fr.outcome.code] += 1
-                run_outcomes.extend(fr.exit_outcomes.copy())
-                ran_files += 1
-                gate_pipeline.record_verdict(
-                    gi, fr.outcome.is_failing(), _failing_count(run_outcomes)
-                )
                 if gate_pipeline.halt() != PipelineHalt.RUNNING:
-                    gate_abort = True
+                    tally.aborted = True
                     break
             except:
                 reporter.handle(
                     Event.internal_error("build", config.mojo_path, 0)
                 )
-                internal_error = True
+                tally.internal_error = True
                 break
 
     var proceed_runs = not (
-        interrupted
-        or internal_error
+        tally.interrupted
+        or tally.internal_error
         or precompile_failed
-        or gate_abort
+        or tally.aborted
         or stream_dead
     )
 
@@ -768,19 +743,7 @@ def run_session[
             reg,
             ctx,
         )
-        run_outcomes.extend(sel.run_outcomes.copy())
-        test_totals.passed += sel.test_totals.passed
-        test_totals.failed += sel.test_totals.failed
-        test_totals.skipped += sel.test_totals.skipped
-        test_totals.deselected += sel.test_totals.deselected
-        ran_files += sel.ran_files
-        if sel.interrupted:
-            interrupted = True
-        if sel.internal_error:
-            internal_error = True
-        if sel.drift:
-            drift = True
-        crash_files.extend(sel.crash_files.copy())
+        tally.merge(sel.tally)
     elif proceed_runs and resolved_workers > 1:
         # The parallel pool drives the run files at capacity `resolved_workers`,
         # honoring `-x`/`--maxfail` (in-flight files finish, the rest NOT-RUN)
@@ -817,22 +780,7 @@ def run_session[
             console_fd,
             ctx,
         )
-        console_dead = console_dead or rb.console_dead
-        ctx.built_files += rb.built_files
-        ctx.cached_files += rb.cached_files
-        run_outcomes.extend(rb.run_outcomes.copy())
-        test_totals.passed += rb.test_totals.passed
-        test_totals.failed += rb.test_totals.failed
-        test_totals.skipped += rb.test_totals.skipped
-        test_totals.deselected += rb.test_totals.deselected
-        ran_files += rb.ran_files
-        if rb.interrupted:
-            interrupted = True
-        if rb.internal_error:
-            internal_error = True
-        if rb.drift:
-            drift = True
-        crash_files.extend(rb.crash_files.copy())
+        _absorb_batch(tally, ctx, rb)
 
         # The serial pass runs at capacity one AFTER the parallel batch drains.
         # Capacity one is the whole-pipeline drain: a single Supervisor slot
@@ -846,7 +794,9 @@ def run_session[
         # run-wide `--maxfail` tally: it is seeded with the parallel batch's
         # failing count so the ceiling counts failures across both batches
         # instead of resetting to zero at the boundary.
-        var stop_serial = rb.interrupted or rb.internal_error or rb.halted
+        var stop_serial = (
+            rb.tally.interrupted or rb.tally.internal_error or rb.halted
+        )
         if len(split.serial) > 0 and not stop_serial:
             var sb = _run_pool_batch(
                 runtime,
@@ -862,24 +812,9 @@ def run_session[
                 console_fd,
                 ctx,
                 serial=True,
-                initial_failing=_failing_count(rb.run_outcomes),
+                initial_failing=_failing_count(rb.tally.run_outcomes),
             )
-            console_dead = console_dead or sb.console_dead
-            ctx.built_files += sb.built_files
-            ctx.cached_files += sb.cached_files
-            run_outcomes.extend(sb.run_outcomes.copy())
-            test_totals.passed += sb.test_totals.passed
-            test_totals.failed += sb.test_totals.failed
-            test_totals.skipped += sb.test_totals.skipped
-            test_totals.deselected += sb.test_totals.deselected
-            ran_files += sb.ran_files
-            if sb.interrupted:
-                interrupted = True
-            if sb.internal_error:
-                internal_error = True
-            if sb.drift:
-                drift = True
-            crash_files.extend(sb.crash_files.copy())
+            _absorb_batch(tally, ctx, sb)
     elif proceed_runs:
         if config.failed_first and ff_has_match:
             var ordered = order_failed_first(
@@ -905,7 +840,7 @@ def run_session[
         )
         for ri in range(len(disc.run_files)):
             if interrupt_requested():
-                interrupted = True
+                tally.interrupted = True
                 break
             if reporter.stream_failed():
                 stream_dead = True
@@ -925,52 +860,42 @@ def run_session[
                     ctx,
                 )
                 if fr.interrupted:
-                    interrupted = True
+                    tally.interrupted = True
                     break
                 if fr.internal_error:
                     reporter.handle(fr.event)
-                    internal_error = True
+                    tally.internal_error = True
                     break
-                for pe in fr.pre_events:
-                    reporter.handle(pe)
-                reporter.handle(fr.event)
+                # The plain run path runs no selection, so every test name is
+                # an attribution candidate: an empty selected set.
+                var run_binary = String(fr.binary_path)
+                _ = settle_file(
+                    tally,
+                    reporter,
+                    summary,
+                    run_pipeline,
+                    ri,
+                    disc.run_files[ri],
+                    settings,
+                    run_binary,
+                    List[String](),
+                    List[Event](),
+                    fr^,
+                )
                 # Flush this file's rendered verdict as soon as it lands. The
                 # plain-run branch runs only when selection is inactive, so no
                 # raise can follow before the run returns; a leaked partial
                 # flush ahead of a usage-error raise is therefore impossible on
                 # this path.
                 if _flush_console(reporter, console_fd, closing=False):
-                    console_dead = True
-                test_totals.passed += fr.test_counts.passed
-                test_totals.failed += fr.test_counts.failed
-                test_totals.skipped += fr.test_counts.skipped
-                if fr.is_drift:
-                    drift = True
-                    continue
-                summary.counts[fr.outcome.code] += 1
-                run_outcomes.extend(fr.exit_outcomes.copy())
-                ran_files += 1
-                if fr.outcome == Outcome.CRASH:
-                    # The plain run path runs no selection, so every test name is
-                    # an attribution candidate: an empty selected set.
-                    crash_files.append(
-                        _CrashFile(
-                            disc.run_files[ri],
-                            settings,
-                            fr.binary_path,
-                            List[String](),
-                        )
-                    )
-                run_pipeline.record_verdict(
-                    ri, fr.outcome.is_failing(), _failing_count(run_outcomes)
-                )
+                    tally.console_dead = True
                 if run_pipeline.halt() != PipelineHalt.RUNNING:
                     break
             except:
                 reporter.handle(
                     Event.internal_error("build", config.mojo_path, 0)
                 )
-                internal_error = True
+                tally.internal_error = True
                 break
 
     # Flush every header rendered so far that no incremental flush above
@@ -980,13 +905,13 @@ def run_session[
     # raise — matching the old terminal flush, which `main` performed only on a
     # normal return.
     if _flush_console(reporter, console_fd, closing=False):
-        console_dead = True
+        tally.console_dead = True
 
     # Every selected file that did not produce a tallied verdict is NOT_RUN — a
     # gate casualty, an -x/--maxfail/gate-abort/interrupt skip, a precompile
     # casualty, or a drift file (which forces exit 3 and is accounted here,
     # never tallied).
-    var not_run = selected - ran_files
+    var not_run = selected - tally.ran_files
     summary.counts[Outcome.NOT_RUN.code] += not_run
 
     # A stream failure that latched during the run loop (not caught at a
@@ -1000,7 +925,7 @@ def run_session[
     # (1/5/0), computed BEFORE the terminal protocol so `exit_code_for` stays the
     # sole authority for that tier and is never touched by the resolution around
     # it.
-    var outcome_code = exit_code_for(run_outcomes)
+    var outcome_code = exit_code_for(tally.run_outcomes)
 
     # The bounded crash-attribution post-pass. It runs HERE — after every file
     # has its verdict and the summary is tallied — precisely so it CANNOT
@@ -1012,9 +937,11 @@ def run_session[
     # fatal abort must not spend time on diagnostics whose consumer is gone). A
     # raise out of it is caught and dropped rather than allowed to disturb the
     # settled accounting.
-    if not interrupted and not stream_dead:
+    if not tally.interrupted and not stream_dead:
         try:
-            _run_crash_attribution(runtime, root, crash_files, reg, reporter)
+            _run_crash_attribution(
+                runtime, root, tally.crash_files, reg, reporter
+            )
         except:
             pass
 
@@ -1026,7 +953,7 @@ def run_session[
     # interrupt (one delivered after this point) does NOT change the resolved
     # code — a Ctrl-C during finalize truncates nothing already accounted, and
     # in-flight finalize steps complete.
-    var interrupt_latched = interrupted or interrupt_requested()
+    var interrupt_latched = tally.interrupted or interrupt_requested()
 
     # A latched machine-stream write failure that tripped on the final file's own
     # events (missed at the scheduling boundaries) is the JSON stream's "finalize"
@@ -1052,10 +979,10 @@ def run_session[
         var reason = classify_not_run(
             NotRunFacts(
                 interrupt_latched=interrupt_latched,
-                internal_error=internal_error,
-                drift=drift,
+                internal_error=tally.internal_error,
+                drift=tally.drift,
                 precompile_failed=precompile_failed,
-                gate_abort=gate_abort,
+                gate_abort=tally.aborted,
                 stream_dead=stream_dead,
                 is_gate_file=_is_gate_file(disc.gate_files, path),
             )
@@ -1124,15 +1051,15 @@ def run_session[
     # the terminal record, exactly as the JUnit finalization failure is.
     var report_ctx = ReportFinalizeContext(
         counts=summary.counts.copy(),
-        tests_passed=test_totals.passed,
-        tests_failed=test_totals.failed,
-        tests_skipped=test_totals.skipped,
+        tests_passed=tally.test_totals.passed,
+        tests_failed=tally.test_totals.failed,
+        tests_skipped=tally.test_totals.skipped,
         flaky_files=flaky_files,
         built_files=built_files,
         cached_files=cached_files,
         wall_seconds=wall,
         interrupted=interrupt_latched,
-        drift=drift,
+        drift=tally.drift,
         workers=resolved_workers,
         shuffle=config.shuffle,
         shuffle_seed=shuffle_seed,
@@ -1156,7 +1083,7 @@ def run_session[
     var delivery_failed = (
         stream_dead
         or finalize_failed
-        or console_dead
+        or tally.console_dead
         or report_fin.md_failed
         or report_fin.html_failed
     )
@@ -1164,8 +1091,8 @@ def run_session[
     var code = resolve_exit_code(
         TerminalFacts(
             interrupted=interrupt_latched,
-            internal_error=internal_error,
-            drift=drift,
+            internal_error=tally.internal_error,
+            drift=tally.drift,
             precompile_failed=precompile_failed,
             outcome_code=outcome_code,
             delivery_failed=delivery_failed,
@@ -1178,7 +1105,7 @@ def run_session[
             summary^,
             wall,
             code,
-            test_counts=test_totals,
+            test_counts=tally.test_totals,
             flaky_files=flaky_files,
             built_files=built_files,
             cached_files=cached_files,
@@ -1191,7 +1118,7 @@ def run_session[
     # annotation tail after this returns, so both still land AFTER the final
     # console bytes exactly as before.
     if _flush_console(reporter, console_fd, closing=True):
-        console_dead = True
+        tally.console_dead = True
 
     # Both of the last two writes can latch a NEW delivery failure the resolve
     # above could not have seen, because neither had happened yet: the dispatch
@@ -1209,12 +1136,12 @@ def run_session[
     # (torn or absent on the now-dead stream) is the consumer's truncation
     # signal; the EXIT CODE is the out-of-band signal and must not lie about
     # it by returning the code resolved before the stream died.
-    if not delivery_failed and (reporter.stream_failed() or console_dead):
+    if not delivery_failed and (reporter.stream_failed() or tally.console_dead):
         code = resolve_exit_code(
             TerminalFacts(
                 interrupted=interrupt_latched,
-                internal_error=internal_error,
-                drift=drift,
+                internal_error=tally.internal_error,
+                drift=tally.drift,
                 precompile_failed=precompile_failed,
                 outcome_code=outcome_code,
                 delivery_failed=True,
