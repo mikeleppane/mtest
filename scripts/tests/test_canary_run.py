@@ -559,9 +559,9 @@ class DiagnosticTests(CanaryTestCase):
         )
 
     def test_a_failure_without_a_diagnostic_names_the_command(self) -> None:
-        result = CommandResult(("pixi", "run", "test-unit"), 3, "", "killed\n")
+        result = CommandResult(("pixi", "run", "test"), 3, "", "killed\n")
         detail = first_diagnostic(result)
-        self.assertIn("pixi run test-unit", detail)
+        self.assertIn("pixi run test", detail)
         self.assertIn("3", detail)
         self.assertIn("killed", detail)
 
@@ -1188,7 +1188,7 @@ class StageBudgetTests(CanaryTestCase):
         # quarters of an hour of silence on an unwarmed cache was reported as
         # "the sources no longer compile" with only the detail string saying
         # otherwise.
-        for stage in ("build-bin", "test-unit", "contract-check-strict", "e2e"):
+        for stage in ("build-bin", "test", "contract-check-strict", "e2e"):
             with self.subTest(stage=stage):
                 repo, runner = self.build()
                 runner.outcomes(
@@ -1245,7 +1245,7 @@ class PipelineOrderingTests(CanaryTestCase):
                 "search-candidates",
                 "install",
                 "build-bin",
-                "test-unit",
+                "test",
                 "contract-check-strict",
                 "transcripts",
                 "package-check",
@@ -1347,9 +1347,9 @@ class StageClassificationTests(CanaryTestCase):
             ["search-published", "search-candidates", "install", "build-bin"],
         )
 
-    def test_a_failing_unit_lane_is_source_incompatible(self) -> None:
+    def test_a_failing_suite_is_source_incompatible(self) -> None:
         repo, runner = self.build()
-        runner.fails("test-unit")
+        runner.fails("test")
         result = self.classify(repo, runner)
         self.assertEqual(result.classification, SOURCE_INCOMPATIBLE)
         self.assertEqual(
@@ -1359,7 +1359,7 @@ class StageClassificationTests(CanaryTestCase):
                 "search-candidates",
                 "install",
                 "build-bin",
-                "test-unit",
+                "test",
             ],
         )
 
@@ -1581,7 +1581,7 @@ class NightlyLaneTests(CanaryTestCase):
                 "search-candidates",
                 "install",
                 "build-bin",
-                "test-unit",
+                "test",
                 "contract-check-strict",
                 "transcripts",
                 "e2e",

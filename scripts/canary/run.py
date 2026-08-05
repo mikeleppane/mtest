@@ -117,8 +117,15 @@ CLASSIFICATIONS = (
     INFRA_FAILURE,
 )
 
-# The gates run against the candidate, cheapest and most specific first.
-SOURCE_TASKS = ("build-bin", "test-unit")
+# The gates run against the candidate, cheapest and most specific first. The
+# suite is the whole classified one, unit and integration together, because the
+# breaks this lane exists to find are not all in the unit modules: subprocess
+# supervision, session scheduling and timeout handling are exercised by the
+# integration modules alone, and they are exactly the surface a compiler change
+# moves. The integration half costs on the order of a minute of wall time
+# beside a cold-cache build measured in tens, so the budget is not what decides
+# this.
+SOURCE_TASKS = ("build-bin", "test")
 
 # The strict black-box gate, run after those two and read rather than merely
 # waited on: it is the one source gate a moved toolchain is *expected* to fail,

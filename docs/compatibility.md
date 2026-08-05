@@ -51,7 +51,11 @@ channels publish beyond it, and then runs these gates against the candidate in
 this order, stopping at the first that fails.
 
 1. **Build.** The runnable binary links.
-2. **Unit tests.** The classified suite runs through that binary.
+2. **Tests.** The classified suite — unit and integration modules together —
+   runs through that binary. The integration half is not optional here: it is
+   the only place subprocess supervision, session scheduling and timeout
+   handling are exercised, and those are exactly the behaviours a compiler
+   change moves without touching a line of this repository's source.
 3. **Command-line contract.** The strict contract checks execute against the
    candidate build.
 4. **Protocol transcripts.** The `TestSuite` report snapshots are regenerated
