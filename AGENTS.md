@@ -425,9 +425,11 @@ Hosted CI runs the same logical floor as two platform-local chains:
   the only one that runs a compiler this repository does not pin. On weekday
   nights it relaxes the Mojo pin in its throwaway checkout, installs whatever
   the channels publish beyond it, and classifies what broke; `notify` then keeps
-  one pinned issue per lane. The two jobs are split by credential — the job that
-  executes the downloaded compiler holds no token, and the job holding
-  `issues: write` runs neither pixi nor Mojo — and `setup-pixi` runs with
+  one pinned issue per lane that has ever had a finding. The two jobs are split
+  by credential — the job that executes the downloaded compiler holds no write
+  scope, persists no credential to disk and binds none into its environment,
+  and the job holding `issues: write` runs neither pixi nor Mojo — and
+  `setup-pixi` runs with
   `run-install: false` so nothing solves the committed pin before the probe
   relaxes it. `scripts/checks/workflow_security.py` pins both properties.
   Neither of its jobs is among the 20 required contexts either.
