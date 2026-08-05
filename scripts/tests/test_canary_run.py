@@ -27,6 +27,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -1340,6 +1341,56 @@ class StageBudgetTests(CanaryTestCase):
         # Signal 0 checks for the process without touching it. Polled rather
         # than asserted once, because a SIGKILL is delivered asynchronously and
         # the pid stays visible until its reparented parent reaps it.
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            try:
+                os.kill(grandchild, 0)
+            except ProcessLookupError:
+                break
+        else:
+            os.kill(grandchild, 9)
+            raise AssertionError(f"pid {grandchild} outlived the stage that spawned it")
+
+    def test_a_group_outlives_the_launcher_that_led_it(self) -> None:
+        """The kill must not depend on the launcher still being reapable.
+
+        A stage is a pixi task, so the task can finish while the compiler it
+        started keeps the capture pipes open — and `communicate` then blocks on
+        those pipes until the budget runs out, with the launcher already
+        exited. Asking the kernel for the group at that point only answers
+        while that process is still on the process table; once anything has
+        reaped it, `os.getpgid` raises `ProcessLookupError`, the suppression
+        swallowed it, and the group still holding the compiler was never
+        signalled. Started in a session of its own, the launcher IS the group
+        leader, so its pid is the group id and remains a valid target for as
+        long as any member of the group is alive.
+        """
+        marker = self.root / "orphan.pid"
+        spawner = (
+            "import subprocess, sys\n"
+            "child = subprocess.Popen([sys.executable, '-c', "
+            "'import time; time.sleep(120)'])\n"
+            f"open({str(marker)!r}, 'w').write(str(child.pid))\n"
+        )
+        process = subprocess.Popen(
+            [sys.executable, "-c", spawner],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.communicate(timeout=2.0)
+            raise AssertionError("the grandchild did not hold the capture pipes open")
+        # The launcher is gone and reaped by here, which is the state the
+        # lookup cannot survive: everything the stage spawned is still running,
+        # and the only name left for its group is the pid it was started with.
+        self.assertEqual(process.poll(), 0)
+        with self.assertRaises(ProcessLookupError):
+            os.getpgid(process.pid)
+
+        canary_run.kill_process_group(process)
+        grandchild = int(marker.read_text(encoding="utf-8"))
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline:
             try:

@@ -322,6 +322,16 @@ def kill_process_group(process: subprocess.Popen[str]) -> None:
     `STAGE_TIMEOUT` — so what gets signalled is the process group the stage was
     started in.
 
+    The group is named by the stage's own pid rather than looked up. With
+    `start_new_session=True` the stage IS the leader of a new group, so its pid
+    is that group's id by construction — and it is the only name for the group
+    that survives the case this function is reached in. A pixi task can finish
+    while the compiler it started keeps the capture pipes open, so
+    `communicate` blocks on the pipes past the budget with the launcher already
+    exited; asked about a process that has since been reaped, `os.getpgid`
+    raises `ProcessLookupError`, which was suppressed here, and the group still
+    holding the compiler was never signalled at all.
+
     The pipes are closed rather than read to end-of-file. Anything that escaped
     the group by starting a session of its own still holds their write ends,
     and a reader waiting on that would hold the job open exactly as the stage
@@ -332,7 +342,7 @@ def kill_process_group(process: subprocess.Popen[str]) -> None:
             process group holds it and its descendants and nothing else.
     """
     with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        os.killpg(process.pid, signal.SIGKILL)
     with contextlib.suppress(ProcessLookupError):
         process.kill()
     # Safe to wait on: the direct child was sent an uncatchable signal, so this
