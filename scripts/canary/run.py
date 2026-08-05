@@ -12,7 +12,7 @@ what exactly would break". This module answers that with a classification:
 | `PASS`                | Every gate held on a newer toolchain.              |
 | `NO_NEWER_CANDIDATE`  | Nothing newer exists; there was nothing to probe.  |
 | `PROTOCOL_DRIFT`      | The runner's observable output moved.              |
-| `SOURCE_INCOMPATIBLE` | The sources no longer compile, test, or behave.    |
+| `SOURCE_INCOMPATIBLE` | The tree cannot solve, compile, test, or behave.  |
 | `PACKAGE_FAILED`      | The sources are fine; the shipped package is not.  |
 | `STAGE_TIMEOUT`       | A stage outlived its budget and answered nothing.  |
 | `INFRA_FAILURE`       | The probe never got a toolchain to ask about.      |
@@ -25,11 +25,21 @@ the only thing an exit code here can usefully mean. A nonzero exit therefore
 says exactly one thing: this module crashed, and the traceback it left behind is
 about itself rather than about Mojo.
 
+Only one row is quiet, and the line between it and `SOURCE_INCOMPATIBLE` is
+where this module has been wrong twice. `INFRA_FAILURE` means the probe could
+not ask its question — an unreachable channel, an answer it cannot read. It
+does NOT mean "the environment would not build", because a candidate whose
+dependencies cannot sit beside the python, clang and platform set this
+repository pins is a fact about that candidate, discovered exactly where this
+lane is meant to discover things. Every failure the probe cannot attribute to
+its own plumbing therefore lands on a loud row, and the ones it can are named
+one at a time with the evidence that named them.
+
 The ordering of the stages is not cosmetic. "Is there anything newer" is asked
 of the channels FIRST, as a question, before a single tracked file is touched:
 the relaxed spec can be unsatisfiable — it is on the stable channel today,
 where the pinned version is also the newest published — and a probe that only
-discovered that by watching the install fail would report `INFRA_FAILURE`
+discovered that by watching the install fail would report a candidate finding
 forever while a lane that is simply idle looks broken. Asking first also means
 an idle day leaves the checkout unmodified.
 
@@ -54,6 +64,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 import traceback
 from typing import TYPE_CHECKING
 
@@ -148,6 +159,13 @@ MACOS_CROSS_COMPILE = (
 # budget rather than a mechanism.
 STAGE_TIMEOUT_SECONDS = 2700.0
 JOB_TIMEOUT_HEADROOM_SECONDS = 900.0
+
+# How long to wait before repeating a failed `pixi install`. The retry exists
+# for transient network faults, and one issued microseconds later meets the
+# same outage — which is to say it bought nothing at all. Long enough for a
+# rate limit or a half-published index to clear, short enough that two solves
+# and this still sit inside the stage budget.
+INSTALL_RETRY_BACKOFF_SECONDS = 30.0
 
 # What `subprocess_runner` reports for a stage it killed. The value is the
 # shell's own convention for "terminated by `timeout`", chosen so a reader who
@@ -601,13 +619,51 @@ def classify(
     install = run(["pixi", "install"])
     if install.returncode not in (0, TIMEOUT_RETURNCODE):
         # One retry, because a conda solve reaches the network and a single
-        # transient failure is not evidence about a toolchain. A stage the
-        # probe killed is not retried: a second full budget would carry the job
-        # past its own deadline, and the day would end with no artifact at all.
+        # transient failure is not evidence about a toolchain — after a wait,
+        # because an outage is still there microseconds later. A stage the
+        # probe killed is not retried at all: a second full budget would carry
+        # the job past its own deadline and the day would end with no artifact.
+        time.sleep(INSTALL_RETRY_BACKOFF_SECONDS)
         install = run(["pixi", "install"])
+    if install.returncode == TIMEOUT_RETURNCODE:
+        return _result(lane, _UNKNOWN, STAGE_TIMEOUT, command_failure(install))
     if install.returncode != 0:
-        return _stage_failure(
-            lane, _UNKNOWN, install, INFRA_FAILURE, command_failure(install)
+        # A solve that failed twice is one of two opposite things, and the
+        # difference decides whether anyone hears about it. Either the probe
+        # lost its reach — which says nothing about the candidate — or the
+        # candidate cannot coexist with what this repository pins around it.
+        # The second is a real property of the candidate and exactly what this
+        # lane exists to learn: `pixi.toml` fixes python and clang and declares
+        # two platforms, while the search that waved this day through is
+        # satisfied by a candidate published for either one, so a relaxed spec
+        # that no environment can satisfy is a routine, reportable outcome.
+        # Filed as infrastructure it wrote no issue and exited 0, so a lane
+        # that had learned something reported a green day, every day.
+        #
+        # They are told apart by re-asking the control question. Answered, the
+        # index is still reachable from this runner and the solver failed on
+        # its own terms. That misreads a local fault which leaves the index
+        # readable — a full disk, a broken prefix — as a candidate finding, and
+        # the direction is deliberate: a wrong red is read and corrected the
+        # same day, a wrong green is the silence this workflow exists to end.
+        control = run(search_argv(channels, floor_matchspec(pin)))
+        if not control_confirms_channels(control, pin):
+            return _result(
+                lane,
+                _UNKNOWN,
+                INFRA_FAILURE,
+                f"{command_failure(install)}; the control "
+                f"`{floor_matchspec(pin)}` did not answer either, so the probe "
+                f"had lost its reach rather than learned anything",
+            )
+        return _result(
+            lane,
+            _UNKNOWN,
+            SOURCE_INCOMPATIBLE,
+            f"{command_failure(install)}; the channels still answer "
+            f"`{floor_matchspec(pin)}`, so `{matchspec}` cannot be satisfied "
+            f"beside this repository's own pinned dependencies on every "
+            f"platform the manifest declares",
         )
 
     resolved = resolve(repo)

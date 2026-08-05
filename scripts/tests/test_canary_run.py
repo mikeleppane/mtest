@@ -224,6 +224,9 @@ class CanaryTestCase(unittest.TestCase):
             mock.patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}, clear=False)
         )
         os.environ.pop(FORCE_ENV_VAR, None)
+        # The retry's backoff is real time the pipeline would spend asleep.
+        self.slept: list[float] = []
+        self.enterContext(mock.patch("scripts.canary.run.time.sleep", self.slept.append))
 
     def build(self, fixture: str = "identical_newer") -> tuple[Path, FakeRunner]:
         """Return a throwaway checkout and a runner primed for it."""
@@ -1015,23 +1018,64 @@ class PipelineOrderingTests(CanaryTestCase):
 class StageClassificationTests(CanaryTestCase):
     """Each stage's failure has exactly one name, and it stops the pipeline."""
 
-    def test_a_failing_install_is_retried_once_then_infra(self) -> None:
+    def test_an_unsatisfiable_solve_is_a_finding_about_the_candidate(self) -> None:
+        """A solve that reached the index and failed is news about the candidate.
+
+        `pixi.toml` declares two platforms and fixes python and clang, while
+        the search that waved this day through is satisfied by a candidate
+        published for either platform. A candidate whose dependencies cannot
+        sit beside those pins therefore fails here — every weekday, for as long
+        as it is the newest release. Called INFRA_FAILURE, that wrote no issue,
+        left no comment, and exited 0: a lane that had learned something real
+        about the candidate reported a green run instead, forever.
+        """
         repo, runner = self.build()
-        runner.fails("install", stderr="could not solve mojo >1.0.0b2,<2\n")
+        runner.fails(
+            "install",
+            stderr="× cannot solve the request: mojo 1.0.0rc0 needs python 3.13\n",
+        )
         result = self.classify(repo, runner)
-        self.assertEqual(result.classification, INFRA_FAILURE)
+        self.assertEqual(result.classification, SOURCE_INCOMPATIBLE)
+        self.assertIn("needs python 3.13", result.detail)
+        self.assertIn(floor_matchspec(PINNED_MOJO), result.detail)
         self.assertEqual(
             runner.stages,
-            ["search-published", "search-candidates", "install", "install"],
+            [
+                "search-published",
+                "search-candidates",
+                "install",
+                "install",
+                "search-control",
+            ],
         )
-        self.assertIn("could not solve", result.detail)
 
-    def test_a_retried_install_that_succeeds_continues(self) -> None:
+    def test_an_uncorroborated_install_failure_is_infra(self) -> None:
+        # The other side of that discrimination: a probe that has lost its
+        # reach cannot tell an unsatisfiable solve from an unreachable index,
+        # so it claims neither.
+        repo, runner = self.build()
+        runner.fails("install", stderr="failed to fetch repodata\n")
+        runner.fails("search-control", stderr="error sending request\n")
+        result = self.classify(repo, runner)
+        self.assertEqual(result.classification, INFRA_FAILURE)
+        self.assertIn("failed to fetch repodata", result.detail)
+
+    def test_the_retry_waits_before_asking_again(self) -> None:
+        # An immediate repeat meets the same outage microseconds later, so the
+        # retry bought nothing it was added for.
         repo, runner = self.build()
         runner.outcomes("install", _Outcome(1, "", "network"), _Outcome(0, "", ""))
         result = self.classify(repo, runner)
         self.assertEqual(result.classification, PASS, result.detail)
         self.assertEqual(runner.stages.count("install"), 2)
+        # Independently transcribed from the constant's documented value.
+        self.assertEqual(self.slept, [30.0])
+
+    def test_a_killed_install_is_not_slept_on(self) -> None:
+        repo, runner = self.build()
+        runner.outcomes("install", _Outcome(TIMEOUT_RETURNCODE, "", "timed out"))
+        self.classify(repo, runner)
+        self.assertEqual(self.slept, [])
 
     def test_the_pinned_toolchain_is_no_newer_candidate(self) -> None:
         repo, runner = self.build()
