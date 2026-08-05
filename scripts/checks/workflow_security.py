@@ -557,7 +557,7 @@ def check_compat_canary_workflow(repo_root: Path = REPO_ROOT) -> None:
             f"actual={triggers}"
         )
     schedule = _yaml_block(workflow, "  schedule:").strip()
-    if schedule != '- cron: "0 0 * * 1-5"':
+    if schedule != '- cron: "41 1 * * 1-5"':
         raise AssertionError(
             f"compat canary trigger mismatch: weekday schedule changed: {schedule!r}"
         )

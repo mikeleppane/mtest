@@ -30,7 +30,7 @@ therefore resolves it.
 
 ## The two lanes
 
-The canary runs on weekdays at 00:00 UTC and probes two lanes. Neither lane's
+The canary runs on weekdays at 01:41 UTC and probes two lanes. Neither lane's
 result is evidence about the other, and a lane that fails does not stop the
 other from reporting.
 

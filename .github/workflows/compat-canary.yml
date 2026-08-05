@@ -15,8 +15,12 @@ name: Compat Canary
 # by step, because the whole security argument for scheduling this workflow is
 # that the two halves cannot be brought back together in a diff nobody reads.
 on:
+  # Off the top of the hour deliberately. GitHub queues scheduled runs and
+  # documents that the start of an hour is when the queue is deepest, so a
+  # canary asking for minute zero is the one most likely to be delayed past the
+  # window it was scheduled for, or dropped entirely.
   schedule:
-    - cron: "0 0 * * 1-5"
+    - cron: "41 1 * * 1-5"
   workflow_dispatch:
     inputs:
       channel:

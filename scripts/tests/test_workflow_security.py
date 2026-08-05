@@ -1056,10 +1056,13 @@ class CompatCanaryWorkflowTests(unittest.TestCase):
         workflow = self._workflow()
         for label, mutated in {
             "rescheduled": workflow.replace(
-                '    - cron: "0 0 * * 1-5"', '    - cron: "0 0 * * 0"', 1
+                '    - cron: "41 1 * * 1-5"', '    - cron: "41 1 * * 0"', 1
+            ),
+            "top-of-the-hour": workflow.replace(
+                '    - cron: "41 1 * * 1-5"', '    - cron: "0 1 * * 1-5"', 1
             ),
             "unscheduled": workflow.replace(
-                '  schedule:\n    - cron: "0 0 * * 1-5"\n', "", 1
+                '    - cron: "41 1 * * 1-5"\n', "", 1
             ),
         }.items():
             with self.subTest(schedule=label):
