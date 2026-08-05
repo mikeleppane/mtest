@@ -39,6 +39,7 @@ WORKFLOW_PATHS = {
     Path(".github/workflows/codeql.yml"),
     Path(".github/workflows/community-publish.yml"),
     Path(".github/workflows/community-verify.yml"),
+    Path(".github/workflows/compat-canary.yml"),
     Path(".github/workflows/docs.yml"),
     Path(".github/workflows/release.yml"),
 }
@@ -252,13 +253,29 @@ def _action_step_inputs(text: str, action: str) -> list[tuple[int, dict[str, str
     return steps
 
 
+def _block_entries(block: str) -> tuple[str, ...]:
+    """Return the meaningful lines of one YAML body, stripped and in order.
+
+    `_yaml_block` carries blank and comment lines along with the body it
+    returns, because neither can end a YAML block. A body compared for equality
+    has to compare against its entries alone, so those are dropped here rather
+    than at each call site.
+
+    Args:
+        block: The indented body under a mapping header.
+
+    Returns:
+        Each entry, stripped, in the order written.
+    """
+    return tuple(
+        stripped
+        for line in block.splitlines()
+        if (stripped := line.strip()) and not stripped.startswith("#")
+    )
+
+
 def _permission_grants(block: str) -> tuple[str, ...]:
     """Return the grants in one `permissions:` body, in order.
-
-    `_yaml_block` carries trailing comment lines along with the body it
-    returns, because a comment cannot end a YAML block. A grant list has to
-    compare equal against the grants alone, so those are dropped here rather
-    than at each call site.
 
     Args:
         block: The indented body under a `permissions:` header.
@@ -266,11 +283,7 @@ def _permission_grants(block: str) -> tuple[str, ...]:
     Returns:
         Each `<scope>: <level>` grant, stripped, in the order written.
     """
-    return tuple(
-        stripped
-        for line in block.splitlines()
-        if (stripped := line.strip()) and not stripped.startswith("#")
-    )
+    return _block_entries(block)
 
 
 def check_workflow_inventory(repo_root: Path = REPO_ROOT) -> None:
@@ -486,6 +499,341 @@ def check_codeql_workflow(repo_root: Path = REPO_ROOT) -> None:
     if python_category != ['"/language:python"']:
         raise AssertionError(
             f"CodeQL Python analysis category mismatch: actual={python_category}"
+        )
+
+
+def check_compat_canary_workflow(repo_root: Path = REPO_ROOT) -> None:
+    """Pin the compatibility canary's credential split, schedule, and steps.
+
+    This is the only workflow in the repository that downloads a compiler from a
+    package channel and executes it against the source tree, and the only reason
+    that is acceptable is the split between its two jobs: `probe` runs the
+    downloaded compiler and holds nothing, `notify` holds `issues: write` and
+    runs one reviewed command over a JSON file. Neither half is safe alone, and
+    nothing in a workflow diff makes it obvious that a step moved from one job
+    to the other has crossed that line. So the split is pinned here, positively
+    (what each job runs, in which order, with which grants) and negatively (what
+    the privileged job may never contain).
+
+    Beyond the security split, two functional properties are pinned because
+    losing either leaves a workflow that runs, stays green, and reports nothing:
+
+    - `run-install: false` on the pixi setup. Installing the environment in the
+      workflow solves the committed `==` pin before the probe relaxes it, so the
+      install resolves the pinned toolchain and every day classifies as
+      "nothing newer" while looking healthy;
+    - `if: always()` on the artifact upload and on the notify job. The
+      classification artifact is the only thing the notifier reads, and the days
+      worth reading it are the ones where the probe job failed.
+
+    Args:
+        repo_root: Repository root holding `.github/workflows/compat-canary.yml`.
+
+    Raises:
+        AssertionError: The workflow violates one of the properties above.
+        OSError: The workflow could not be read.
+    """
+    workflow_path = repo_root / ".github" / "workflows" / "compat-canary.yml"
+    workflow = workflow_path.read_text(encoding="utf-8")
+    if not workflow.startswith("name: Compat Canary\n"):
+        raise AssertionError("compat canary workflow name mismatch")
+    if "continue-on-error:" in workflow:
+        raise AssertionError(
+            "compat canary must not contain continue-on-error: a probe that "
+            "reports green after failing says nothing about the toolchain"
+        )
+    if re.search(r"\bsecrets\s*(?:\.|\[)", workflow):
+        raise AssertionError(
+            "compat canary credential mismatch: the notifier uses the run's own "
+            "token, so no configured secret may be referenced here"
+        )
+
+    expected_triggers = ["schedule", "workflow_dispatch"]
+    triggers = _yaml_mapping_keys(_yaml_block(workflow, "on:"), 2)
+    if triggers != expected_triggers:
+        raise AssertionError(
+            "compat canary trigger mismatch: the probe is scheduled and manually "
+            f"dispatched, never event-driven, expected={expected_triggers}, "
+            f"actual={triggers}"
+        )
+    schedule = _yaml_block(workflow, "  schedule:").strip()
+    if schedule != '- cron: "0 0 * * 1-5"':
+        raise AssertionError(
+            f"compat canary trigger mismatch: weekday schedule changed: {schedule!r}"
+        )
+    expected_dispatch = (
+        "    inputs:\n"
+        "      channel:\n"
+        '        description: "stable or nightly"\n'
+        '        default: "stable"\n'
+        "        type: choice\n"
+        "        options: [stable, nightly]"
+    )
+    dispatch = _yaml_block(workflow, "  workflow_dispatch:").rstrip()
+    if dispatch != expected_dispatch:
+        raise AssertionError(
+            "compat canary dispatch input mismatch: a closed choice of the two "
+            "lanes is what makes a manual run reproducible and what stops an "
+            f"operator string reaching the probe, actual={dispatch!r}"
+        )
+
+    top_level_permissions = _permission_grants(_yaml_block(workflow, "permissions:"))
+    if top_level_permissions != ("contents: read",):
+        raise AssertionError(
+            "compat canary workflow permission mismatch: "
+            f"expected=('contents: read',), actual={top_level_permissions}"
+        )
+    expected_concurrency = ("group: compat-canary", "cancel-in-progress: false")
+    concurrency = _block_entries(_yaml_block(workflow, "concurrency:"))
+    if concurrency != expected_concurrency:
+        raise AssertionError(
+            "compat canary concurrency mismatch: overlapping runs must queue, "
+            "because two runs rewriting one pinned issue do not necessarily "
+            f"finish in the order they started, expected={expected_concurrency}, "
+            f"actual={concurrency}"
+        )
+
+    expected_jobs = ["probe", "notify"]
+    jobs = _yaml_mapping_keys(_yaml_block(workflow, "jobs:"), 2)
+    if jobs != expected_jobs:
+        raise AssertionError(
+            "compat canary job membership mismatch: the split into an "
+            "unprivileged probe and a privileged notifier is the whole security "
+            f"design, expected={expected_jobs}, actual={jobs}"
+        )
+    probe = _yaml_block(workflow, "  probe:")
+    notify = _yaml_block(workflow, "  notify:")
+
+    expected_job_names = {"probe": '"Probe / ${{ matrix.lane }}"', "notify": "Notify"}
+    for name, job in (("probe", probe), ("notify", notify)):
+        display = re.findall(r"^    name: (.+)$", job, re.MULTILINE)
+        if display != [expected_job_names[name]]:
+            raise AssertionError(
+                f"compat canary job {name!r} display mismatch: actual={display}"
+            )
+        runners = re.findall(r"^    runs-on: (.+)$", job, re.MULTILINE)
+        if runners != ["ubuntu-24.04"]:
+            raise AssertionError(
+                f"compat canary job {name!r} runner mismatch: actual={runners}"
+            )
+    expected_timeouts = {"probe": ["60"], "notify": ["10"]}
+    for name, job in (("probe", probe), ("notify", notify)):
+        timeouts = re.findall(r"^    timeout-minutes: (.+)$", job, re.MULTILINE)
+        if timeouts != expected_timeouts[name]:
+            raise AssertionError(
+                f"compat canary job {name!r} timeout mismatch: a wedged stage "
+                "must become a failed run rather than a job that never reports, "
+                f"expected={expected_timeouts[name]}, actual={timeouts}"
+            )
+
+    if re.findall(r"^    needs: (.+)$", probe, re.MULTILINE) or re.findall(
+        r"^    needs: (.+)$", notify, re.MULTILINE
+    ) != ["probe"]:
+        raise AssertionError(
+            "compat canary notifier must wait for the probe: it reports what the "
+            "probe wrote down"
+        )
+    if re.findall(r"^    if: (.+)$", probe, re.MULTILINE):
+        raise AssertionError(
+            "compat canary probe job condition mismatch: the probe runs on every "
+            "scheduled and dispatched run"
+        )
+    if re.findall(r"^    if: (.+)$", notify, re.MULTILINE) != ["always()"]:
+        raise AssertionError(
+            "compat canary notifier condition mismatch: a lane whose probe job "
+            "died is exactly the case a silent canary would hide, so the "
+            "notifier must run whatever happened"
+        )
+
+    job_permission_headers = re.findall(r"^    permissions:$", workflow, re.MULTILINE)
+    if len(job_permission_headers) != 2:
+        raise AssertionError(
+            "compat canary job permission mismatch: both jobs declare their own "
+            f"grants, found {len(job_permission_headers)} overrides"
+        )
+    expected_permissions = {
+        "probe": ("contents: read",),
+        "notify": ("contents: read", "issues: write"),
+    }
+    for name, job in (("probe", probe), ("notify", notify)):
+        grants = _permission_grants(_yaml_block(job, "    permissions:"))
+        if grants != expected_permissions[name]:
+            raise AssertionError(
+                f"compat canary job {name!r} permission mismatch: the job that "
+                "runs a downloaded compiler holds nothing and the job that holds "
+                f"the token runs nothing, expected={expected_permissions[name]}, "
+                f"actual={grants}"
+            )
+    # Counted over grant lines rather than over the whole text: the workflow's
+    # own commentary names this grant while explaining why it is isolated.
+    issue_grants = [
+        line for line in workflow.splitlines() if line.strip() == "issues: write"
+    ]
+    if len(issue_grants) != 1 or notify.count("      issues: write") != 1:
+        raise AssertionError(
+            "compat canary permission mismatch: issue-write authority escaped "
+            f"the notifier job, found {len(issue_grants)} grants"
+        )
+    if (
+        workflow.count("          persist-credentials: false") != 2
+        or probe.count("          persist-credentials: false") != 1
+        or notify.count("          persist-credentials: false") != 1
+    ):
+        raise AssertionError(
+            "compat canary checkout mismatch: both checkouts must set "
+            "persist-credentials: false, or a token sits in `.git/config` while "
+            "a downloaded compiler runs beside it"
+        )
+
+    expected_steps = {
+        "probe": [
+            "Check out sources",
+            "Set up Pixi",
+            "Probe the candidate toolchain",
+            "Upload the classification",
+        ],
+        "notify": [
+            "Check out sources",
+            "Download every lane's classification",
+            "Upsert the pinned issues",
+        ],
+    }
+    for name, job in (("probe", probe), ("notify", notify)):
+        steps = re.findall(r"^      - name: (.+)$", job, re.MULTILINE)
+        if steps != expected_steps[name]:
+            raise AssertionError(
+                f"compat canary job {name!r} step sequence mismatch: "
+                f"expected={expected_steps[name]}, actual={steps}"
+            )
+
+    expected_pin_lines = {
+        "probe": [
+            f"        uses: actions/checkout@{CHECKOUT_ACTION_SHA} # v7.0.1",
+            f"        uses: prefix-dev/setup-pixi@{SETUP_PIXI_ACTION_SHA} # v0.10.0",
+            (
+                "        uses: actions/upload-artifact@"
+                f"{UPLOAD_ARTIFACT_ACTION_SHA} # v7.0.1"
+            ),
+        ],
+        "notify": [
+            f"        uses: actions/checkout@{CHECKOUT_ACTION_SHA} # v7.0.1",
+            (
+                "        uses: actions/download-artifact@"
+                f"{DOWNLOAD_ARTIFACT_ACTION_SHA} # v8.0.1"
+            ),
+        ],
+    }
+    for name, job in (("probe", probe), ("notify", notify)):
+        pin_lines = [
+            line for line in job.splitlines() if line.lstrip().startswith("uses:")
+        ]
+        if pin_lines != expected_pin_lines[name]:
+            raise AssertionError(
+                f"compat canary action pin mismatch in {name!r}: "
+                f"expected={expected_pin_lines[name]}, actual={pin_lines}"
+            )
+
+    pixi_setups = _action_step_inputs(workflow, "prefix-dev/setup-pixi")
+    if [inputs for _line, inputs in pixi_setups] != [{"run-install": "false"}]:
+        raise AssertionError(
+            "compat canary setup-pixi mismatch: the workflow provisions the pixi "
+            "binary and nothing else. An install here would solve the committed "
+            "`==` pin before the probe relaxes it, so the probe would resolve the "
+            "pinned toolchain and classify every day as having nothing newer, "
+            f"actual={[inputs for _line, inputs in pixi_setups]}"
+        )
+
+    expected_matrix = (
+        "        lane: ${{ fromJSON(github.event_name == 'workflow_dispatch' && "
+        'format(\'["{0}"]\', inputs.channel) || \'["stable","nightly"]\') }}'
+    )
+    if expected_matrix not in probe or "      fail-fast: false" not in probe:
+        raise AssertionError(
+            "compat canary lane matrix mismatch: a scheduled run probes both "
+            "lanes and a dispatch probes the requested one, and neither lane's "
+            "failure may cancel the other"
+        )
+
+    if "                run:" in workflow or re.search(
+        r"^\s+run: .*\$\{\{", workflow, re.MULTILINE
+    ):
+        raise AssertionError(
+            "compat canary expression mismatch: a `${{ }}` expression is "
+            "substituted into the script text before bash parses it, so inputs "
+            "reach a command through the environment or not at all"
+        )
+    expected_runs = {
+        "probe": ['python3 -m scripts.canary.run --lane "$CANARY_LANE"'],
+        "notify": [
+            (
+                "python3 -m scripts.canary.notify --results "
+                'build/canary-results/ --lanes "$CANARY_LANES"'
+            )
+        ],
+    }
+    expected_env_keys = {
+        "probe": ["CANARY_LANE"],
+        "notify": ["GH_TOKEN", "CANARY_LANES"],
+    }
+    for name, job in (("probe", probe), ("notify", notify)):
+        # The notifier's negative space, checked before the positive form so a
+        # privileged job that grew a second command is diagnosed by what it
+        # gained rather than by the list it no longer equals.
+        if name == "notify":
+            for forbidden in ("setup-pixi", "pixi", "mojo", "scripts.canary.run"):
+                if forbidden in job.lower():
+                    raise AssertionError(
+                        "compat canary notifier mismatch: the job holding "
+                        "`issues: write` must never run a toolchain, an "
+                        f"environment, or the probe itself, found {forbidden!r}"
+                    )
+        runs = re.findall(r"^        run: (.+)$", job, re.MULTILINE)
+        if runs != expected_runs[name]:
+            raise AssertionError(
+                f"compat canary job {name!r} run command mismatch: "
+                f"expected={expected_runs[name]}, actual={runs}"
+            )
+        env_keys = _env_keys(job)
+        if env_keys != expected_env_keys[name]:
+            raise AssertionError(
+                f"compat canary job {name!r} environment key mismatch: a name "
+                "bash acts on before it reads the script, such as BASH_ENV, runs "
+                "code without substituting anything, so expected="
+                f"{expected_env_keys[name]}, actual={env_keys}"
+            )
+
+    probe_conditions = re.findall(r"^        if: (.+)$", probe, re.MULTILINE)
+    upload_step = _yaml_block(probe, "      - name: Upload the classification")
+    if probe_conditions != ["always()"] or "        if: always()" not in upload_step:
+        raise AssertionError(
+            "compat canary upload condition mismatch: the classification is the "
+            "only thing the notifier reads and the interesting days are the ones "
+            "the probe job failed, so the upload alone is conditioned, and it is "
+            f"conditioned on always(), actual={probe_conditions}"
+        )
+    if re.search(r"^        if:", notify, re.MULTILINE):
+        raise AssertionError(
+            "compat canary notifier step condition mismatch: a skipped upsert "
+            "leaves a green run that told nobody anything"
+        )
+
+    if (
+        "          name: canary-result-${{ matrix.lane }}" not in probe
+        or "          path: build/canary/" not in probe
+        or "          path: build/canary-results/" not in notify
+    ):
+        raise AssertionError(
+            "compat canary artifact mismatch: one artifact per lane, named for "
+            "its lane, holding the directory the probe writes, downloaded where "
+            "the notifier looks for it"
+        )
+    if (
+        workflow.count("${{ github.token }}") != 1
+        or notify.count("${{ github.token }}") != 1
+    ):
+        raise AssertionError(
+            "compat canary credential mismatch: the run token belongs to the "
+            "notifier job alone"
         )
 
 
@@ -993,6 +1341,7 @@ def main() -> int:
         check_workflow_inventory()
         check_action_pins()
         check_codeql_workflow()
+        check_compat_canary_workflow()
         check_docs_workflow()
         check_published_action()
         check_release_workflows()

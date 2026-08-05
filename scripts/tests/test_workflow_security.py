@@ -55,6 +55,7 @@ class WorkflowInventoryAndCodeQLTests(unittest.TestCase):
                 Path(".github/workflows/codeql.yml"),
                 Path(".github/workflows/community-publish.yml"),
                 Path(".github/workflows/community-verify.yml"),
+                Path(".github/workflows/compat-canary.yml"),
                 Path(".github/workflows/docs.yml"),
                 Path(".github/workflows/release.yml"),
             },
@@ -986,6 +987,495 @@ class ReleaseWorkflowTests(unittest.TestCase):
                 workflow.replace("runner: macos-26", "runner: macos-latest", 1),
                 "macos-26|platform matrix",
             )
+
+
+class CompatCanaryWorkflowTests(unittest.TestCase):
+    """Fail-closed policy for the scheduled compatibility canary.
+
+    This is the only workflow in the repository that downloads a compiler from a
+    package channel and executes it against the source tree, and the only reason
+    that is acceptable is that the job doing it holds nothing: no token, no
+    write permission, and no way to reach the job that has one. Every mutation
+    below is a way that separation could be lost in a diff that reads like a
+    tidy-up — a permission line, a step moved between jobs, an install that
+    happens one step too early.
+    """
+
+    def _workflow(self) -> str:
+        """Return the live compatibility-canary workflow text."""
+        return (
+            workflow_security.REPO_ROOT / ".github" / "workflows" / "compat-canary.yml"
+        ).read_text(encoding="utf-8")
+
+    def _reject(self, mutated: str, pattern: str) -> None:
+        """Require the canary oracle to reject one mutated workflow."""
+        self.assertNotEqual(mutated, self._workflow())
+        with tempfile.TemporaryDirectory(prefix="mtest-canary-security-") as raw_tmp:
+            repo = Path(raw_tmp)
+            workflow_path = repo / ".github" / "workflows" / "compat-canary.yml"
+            workflow_path.parent.mkdir(parents=True)
+            workflow_path.write_text(mutated, encoding="utf-8")
+            with self.assertRaisesRegex(AssertionError, pattern):
+                workflow_security.check_compat_canary_workflow(repo)
+
+    def test_live_canary_workflow_keeps_its_credential_split(self) -> None:
+        workflow_security.check_compat_canary_workflow()
+
+    def test_canary_workflow_is_in_the_governed_inventory(self) -> None:
+        self.assertIn(
+            Path(".github/workflows/compat-canary.yml"),
+            workflow_security.WORKFLOW_PATHS,
+        )
+
+    def test_the_oracle_runs_in_the_repository_policy_gate(self) -> None:
+        """An oracle nothing calls is an oracle that never rejects anything."""
+        source = (
+            workflow_security.REPO_ROOT / "scripts" / "checks" / "workflow_security.py"
+        ).read_text(encoding="utf-8")
+        main_body = source.split("def main() -> int:", 1)[1]
+        self.assertIn("check_compat_canary_workflow()", main_body)
+
+    def test_workflow_name_is_pinned(self) -> None:
+        self._reject(
+            self._workflow().replace("name: Compat Canary\n", "name: Canary\n", 1),
+            "name mismatch",
+        )
+
+    def test_continue_on_error_is_rejected(self) -> None:
+        self._reject(
+            self._workflow().replace(
+                '        run: python3 -m scripts.canary.run --lane "$CANARY_LANE"\n',
+                '        run: python3 -m scripts.canary.run --lane "$CANARY_LANE"\n'
+                "        continue-on-error: true\n",
+                1,
+            ),
+            "continue-on-error",
+        )
+
+    def test_the_weekday_schedule_cannot_drift(self) -> None:
+        workflow = self._workflow()
+        for label, mutated in {
+            "rescheduled": workflow.replace(
+                '    - cron: "0 0 * * 1-5"', '    - cron: "0 0 * * 0"', 1
+            ),
+            "unscheduled": workflow.replace(
+                '  schedule:\n    - cron: "0 0 * * 1-5"\n', "", 1
+            ),
+        }.items():
+            with self.subTest(schedule=label):
+                self._reject(mutated, "trigger mismatch")
+
+    def test_an_extra_trigger_is_rejected(self) -> None:
+        """A canary that runs on every push is a CI job, not a canary."""
+        self._reject(
+            self._workflow().replace(
+                "on:\n", "on:\n  push:\n    branches: [main]\n", 1
+            ),
+            "trigger mismatch",
+        )
+
+    def test_the_dispatch_input_is_pinned(self) -> None:
+        """The manual lane selector is the only way to exercise one lane."""
+        workflow = self._workflow()
+        for label, mutated in {
+            "dropped": workflow.replace(
+                "  workflow_dispatch:\n"
+                "    inputs:\n"
+                "      channel:\n"
+                '        description: "stable or nightly"\n'
+                '        default: "stable"\n'
+                "        type: choice\n"
+                "        options: [stable, nightly]\n",
+                "  workflow_dispatch:\n",
+                1,
+            ),
+            "unconstrained": workflow.replace(
+                "        type: choice\n        options: [stable, nightly]\n",
+                "        type: string\n",
+                1,
+            ),
+            "widened": workflow.replace(
+                "        options: [stable, nightly]",
+                "        options: [stable, nightly, experimental]",
+                1,
+            ),
+        }.items():
+            with self.subTest(input=label):
+                self._reject(mutated, "dispatch input mismatch")
+
+    def test_top_level_permissions_cannot_widen(self) -> None:
+        self._reject(
+            self._workflow().replace(
+                "permissions:\n  contents: read\n",
+                "permissions:\n  contents: write\n",
+                1,
+            ),
+            "workflow permission mismatch",
+        )
+
+    def test_overlapping_runs_must_queue(self) -> None:
+        self._reject(
+            self._workflow().replace(
+                "  cancel-in-progress: false", "  cancel-in-progress: true", 1
+            ),
+            "concurrency mismatch",
+        )
+
+    def test_the_job_roster_is_pinned(self) -> None:
+        workflow = self._workflow()
+        for label, mutated in {
+            "renamed": workflow.replace("\n  notify:\n", "\n  report:\n", 1),
+            "merged": workflow.replace(
+                "\n  notify:\n    name: Notify\n", "\n  notify:\n    name: Probe\n", 1
+            ),
+        }.items():
+            with self.subTest(roster=label):
+                self._reject(mutated, "job membership mismatch|display mismatch")
+
+    def test_the_probe_job_cannot_gain_write_authority(self) -> None:
+        """The credential split, stated as the one thing that must never pass.
+
+        The probe job executes a compiler downloaded from a package channel
+        against this source tree. Any grant beyond `contents: read` hands that
+        compiler the repository.
+        """
+        workflow = self._workflow()
+        marker = (
+            "    # This job executes a compiler it just downloaded."
+            " It is given nothing.\n    permissions:\n      contents: read\n"
+        )
+        self.assertIn(marker, workflow)
+        for label, replacement in {
+            "contents-write": "    permissions:\n      contents: write\n",
+            "issues-write": "    permissions:\n"
+            "      contents: read\n"
+            "      issues: write\n",
+            "id-token": "    permissions:\n"
+            "      contents: read\n"
+            "      id-token: write\n",
+            "dropped": "",
+        }.items():
+            with self.subTest(grant=label):
+                self._reject(
+                    workflow.replace(marker, replacement, 1),
+                    "permission mismatch",
+                )
+
+    def test_the_notifier_permissions_are_exact(self) -> None:
+        workflow = self._workflow()
+        for label, mutated in {
+            "narrowed": workflow.replace(
+                "      contents: read\n      issues: write\n",
+                "      contents: read\n",
+                1,
+            ),
+            "widened": workflow.replace(
+                "      contents: read\n      issues: write\n",
+                "      contents: read\n      issues: write\n      contents: write\n",
+                1,
+            ),
+        }.items():
+            with self.subTest(grant=label):
+                self._reject(mutated, "permission mismatch")
+
+    def test_both_checkouts_must_refuse_to_persist_a_credential(self) -> None:
+        workflow = self._workflow()
+        self.assertEqual(workflow.count("          persist-credentials: false\n"), 2)
+        for index in (1, 2):
+            with self.subTest(checkout=index):
+                head, sep, tail = workflow.partition(
+                    "          persist-credentials: false\n"
+                )
+                mutated = (
+                    head + tail if index == 1 else head + sep + tail.replace(sep, "", 1)
+                )
+                self._reject(mutated, "persist-credentials")
+
+    def test_the_runner_cannot_float(self) -> None:
+        self._reject(
+            self._workflow().replace("runs-on: ubuntu-24.04", "runs-on: ubuntu-latest"),
+            "runner mismatch",
+        )
+
+    def test_a_missing_timeout_is_rejected(self) -> None:
+        workflow = self._workflow()
+        for job, marker in {
+            "probe": "    timeout-minutes: 60\n",
+            "notify": "    timeout-minutes: 10\n",
+        }.items():
+            with self.subTest(job=job):
+                self._reject(workflow.replace(marker, "", 1), "timeout mismatch")
+
+    def test_the_probe_cannot_be_conditioned_away(self) -> None:
+        """A probe that skips itself is a green run that probed nothing."""
+        self._reject(
+            self._workflow().replace(
+                '    name: "Probe / ${{ matrix.lane }}"\n',
+                '    name: "Probe / ${{ matrix.lane }}"\n'
+                "    if: github.event_name == 'schedule'\n",
+                1,
+            ),
+            "probe job condition mismatch",
+        )
+
+    def test_a_conditioned_notifier_step_is_rejected(self) -> None:
+        """A skipped upsert leaves a green run that told nobody anything."""
+        self._reject(
+            self._workflow().replace(
+                "      - name: Upsert the pinned issues\n",
+                "      - name: Upsert the pinned issues\n        if: false\n",
+                1,
+            ),
+            "notifier step condition mismatch",
+        )
+
+    def test_the_concurrency_group_is_pinned(self) -> None:
+        """Two groups are two canaries, each unaware of the other's issue."""
+        self._reject(
+            self._workflow().replace(
+                "  group: compat-canary", "  group: compat-canary-${{ github.ref }}", 1
+            ),
+            "concurrency mismatch",
+        )
+
+    def test_the_notifier_must_wait_for_every_lane(self) -> None:
+        self._reject(
+            self._workflow().replace("    needs: probe\n", "", 1),
+            "must wait for the probe",
+        )
+
+    def test_the_notifier_must_run_after_a_failed_probe(self) -> None:
+        """Without `if: always()` a crashed lane is reported by nobody."""
+        self._reject(
+            self._workflow().replace(
+                "    if: always()\n    timeout-minutes: 10\n",
+                "    timeout-minutes: 10\n",
+                1,
+            ),
+            "condition mismatch",
+        )
+
+    def test_the_upload_must_survive_a_failing_probe(self) -> None:
+        self._reject(
+            self._workflow().replace("        if: always()\n", "", 1),
+            "upload",
+        )
+
+    def test_action_pins_carry_their_version_comments(self) -> None:
+        workflow = self._workflow()
+        for label, mutated in {
+            "comment": workflow.replace(
+                f"actions/checkout@{workflow_security.CHECKOUT_ACTION_SHA} # v7.0.1",
+                f"actions/checkout@{workflow_security.CHECKOUT_ACTION_SHA}",
+                1,
+            ),
+            "revision": workflow.replace(
+                workflow_security.UPLOAD_ARTIFACT_ACTION_SHA, "0" * 40, 1
+            ),
+            "tag": workflow.replace(
+                f"actions/download-artifact@"
+                f"{workflow_security.DOWNLOAD_ARTIFACT_ACTION_SHA} # v8.0.1",
+                "actions/download-artifact@v8",
+                1,
+            ),
+        }.items():
+            with self.subTest(pin=label):
+                self._reject(mutated, "action pin mismatch")
+
+    def test_the_environment_must_not_be_installed_before_the_probe(self) -> None:
+        """The permanently-green defect, reintroduced from the workflow side.
+
+        `run-install: true` solves the committed `==` pin before the probe
+        relaxes it, so the install resolves the pinned toolchain and every day
+        classifies as `NO_NEWER_CANDIDATE` while the run stays green.
+        """
+        workflow = self._workflow()
+        for label, mutated in {
+            "installed": workflow.replace(
+                "          run-install: false", "          run-install: true", 1
+            ),
+            "cached": workflow.replace(
+                "          run-install: false",
+                "          run-install: false\n          cache: true",
+                1,
+            ),
+        }.items():
+            with self.subTest(setup=label):
+                self._reject(mutated, "setup-pixi")
+
+    def test_the_lane_matrix_is_pinned(self) -> None:
+        workflow = self._workflow()
+        marker = (
+            "        lane: ${{ fromJSON(github.event_name == 'workflow_dispatch' "
+            '&& format(\'["{0}"]\', inputs.channel) || \'["stable","nightly"]\') }}'
+        )
+        self.assertIn(marker, workflow)
+        for label, mutated in {
+            "one-lane": workflow.replace(marker, '        lane: ["stable"]', 1),
+            "fail-fast": workflow.replace(
+                "      fail-fast: false", "      fail-fast: true", 1
+            ),
+        }.items():
+            with self.subTest(matrix=label):
+                self._reject(mutated, "matrix mismatch")
+
+    def test_the_probe_step_sequence_is_pinned(self) -> None:
+        workflow = self._workflow()
+        for label, mutated in {
+            "dropped": workflow.replace(
+                "      - name: Probe the candidate toolchain\n",
+                "      - name: Probe nothing at all\n",
+                1,
+            ),
+            "reordered": workflow.replace(
+                "      - name: Probe the candidate toolchain\n",
+                "      - name: ${PLACEHOLDER}\n",
+                1,
+            )
+            .replace(
+                "      - name: Upload the classification\n",
+                "      - name: Probe the candidate toolchain\n",
+                1,
+            )
+            .replace(
+                "      - name: ${PLACEHOLDER}\n",
+                "      - name: Upload the classification\n",
+                1,
+            ),
+        }.items():
+            with self.subTest(steps=label):
+                self._reject(mutated, "step sequence mismatch")
+
+    def test_the_probe_invocation_is_pinned(self) -> None:
+        workflow = self._workflow()
+        for label, mutated in {
+            "another-command": workflow.replace(
+                'python3 -m scripts.canary.run --lane "$CANARY_LANE"',
+                "python3 -m scripts.canary.run --lane stable",
+                1,
+            ),
+            "another-module": workflow.replace(
+                "python3 -m scripts.canary.run --lane",
+                "python3 -m scripts.canary.notify --lane",
+                1,
+            ),
+        }.items():
+            with self.subTest(command=label):
+                self._reject(mutated, "run command mismatch")
+
+    def test_an_expression_on_a_run_line_is_rejected(self) -> None:
+        """An expression is substituted into the script before bash parses it."""
+        self._reject(
+            self._workflow().replace(
+                "        env:\n"
+                "          # Through the environment rather than into the script"
+                " text: an\n"
+                "          # expression is substituted before bash parses the"
+                " line.\n"
+                "          CANARY_LANE: ${{ matrix.lane }}\n"
+                '        run: python3 -m scripts.canary.run --lane "$CANARY_LANE"',
+                "        run: python3 -m scripts.canary.run --lane ${{ matrix.lane }}",
+                1,
+            ),
+            "expression",
+        )
+
+    def test_the_bound_environment_keys_are_exact(self) -> None:
+        """A key can run code without substituting anything into the script."""
+        workflow = self._workflow()
+        for label, mutated in {
+            "probe": workflow.replace(
+                "          CANARY_LANE: ${{ matrix.lane }}\n",
+                "          CANARY_LANE: ${{ matrix.lane }}\n"
+                "          BASH_ENV: ./hook.sh\n",
+                1,
+            ),
+            "notify": workflow.replace(
+                "          GH_TOKEN: ${{ github.token }}\n",
+                "          GH_TOKEN: ${{ github.token }}\n"
+                "          LD_PRELOAD: ./evil.so\n",
+                1,
+            ),
+        }.items():
+            with self.subTest(job=label):
+                self._reject(mutated, "environment key mismatch")
+
+    def test_the_artifact_names_and_paths_are_pinned(self) -> None:
+        workflow = self._workflow()
+        for label, mutated in {
+            "upload-name": workflow.replace(
+                "          name: canary-result-${{ matrix.lane }}",
+                "          name: canary-result",
+                1,
+            ),
+            "upload-path": workflow.replace(
+                "          path: build/canary/", "          path: .", 1
+            ),
+            "download-path": workflow.replace(
+                "          path: build/canary-results/", "          path: build/", 1
+            ),
+        }.items():
+            with self.subTest(artifact=label):
+                self._reject(mutated, "artifact")
+
+    def test_the_notifier_may_not_run_downloaded_content(self) -> None:
+        """The negative space: the privileged job runs one reviewed command.
+
+        Every mutation here leaves the permissions untouched and still hands the
+        `issues: write` token to something that came off the network — a pixi
+        environment, the probe itself, or a shell pipeline.
+        """
+        workflow = self._workflow()
+        marker = (
+            "        run: python3 -m scripts.canary.notify"
+            ' --results build/canary-results/ --lanes "$CANARY_LANES"\n'
+        )
+        self.assertIn(marker, workflow)
+        for label, mutated in {
+            "setup-pixi": workflow.replace(
+                "      - name: Upsert the pinned issues\n",
+                "      - name: Set up Pixi\n"
+                "        uses: prefix-dev/setup-pixi@"
+                f"{workflow_security.SETUP_PIXI_ACTION_SHA} # v0.10.0\n\n"
+                "      - name: Upsert the pinned issues\n",
+                1,
+            ),
+            "pixi-run": workflow.replace(marker, "        run: pixi run e2e\n", 1),
+            "probe": workflow.replace(
+                marker,
+                "        run: python3 -m scripts.canary.run --lane stable\n",
+                1,
+            ),
+            "downloaded-shell": workflow.replace(
+                marker,
+                "        run: bash build/canary-results/hook.sh\n",
+                1,
+            ),
+        }.items():
+            with self.subTest(notifier=label):
+                self._reject(mutated, "notifier|run command mismatch|step sequence")
+
+    def test_a_secret_reference_is_rejected(self) -> None:
+        """The canary needs the run's own token and nothing a human configured."""
+        self._reject(
+            self._workflow().replace(
+                "          GH_TOKEN: ${{ github.token }}",
+                "          GH_TOKEN: ${{ secrets.CANARY_TOKEN }}",
+                1,
+            ),
+            "credential",
+        )
+
+    def test_the_run_token_cannot_reach_the_probe_job(self) -> None:
+        self._reject(
+            self._workflow().replace(
+                "          CANARY_LANE: ${{ matrix.lane }}",
+                "          CANARY_LANE: ${{ matrix.lane }}\n"
+                "          GH_TOKEN: ${{ github.token }}",
+                1,
+            ),
+            "environment key mismatch|credential",
+        )
 
 
 if __name__ == "__main__":

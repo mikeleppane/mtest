@@ -421,6 +421,16 @@ Hosted CI runs the same logical floor as two platform-local chains:
   environment does not pin, so the job that supplies the tool is the job that
   may run the task. Neither of its jobs is among the 20 required contexts named
   above.
+- `.github/workflows/compat-canary.yml` is the other lane of its own, and it is
+  the only one that runs a compiler this repository does not pin. On weekday
+  nights it relaxes the Mojo pin in its throwaway checkout, installs whatever
+  the channels publish beyond it, and classifies what broke; `notify` then keeps
+  one pinned issue per lane. The two jobs are split by credential — the job that
+  executes the downloaded compiler holds no token, and the job holding
+  `issues: write` runs neither pixi nor Mojo — and `setup-pixi` runs with
+  `run-install: false` so nothing solves the committed pin before the probe
+  relaxes it. `scripts/checks/workflow_security.py` pins both properties.
+  Neither of its jobs is among the 20 required contexts either.
 
 ### Cross-compiling before commit
 

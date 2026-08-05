@@ -1,0 +1,118 @@
+name: Compat Canary
+
+# Every other gate here asks "does mtest work on the pinned toolchain". This one
+# asks the opposite question -- "would it still work if the pin moved" -- by
+# relaxing the committed Mojo pin in a throwaway checkout, installing whatever
+# the channels publish beyond it, and naming what broke. Weekdays only: the
+# answer only changes when Modular publishes, and a weekend issue is read on
+# Monday anyway.
+#
+# The two jobs are split by credential rather than by convenience. `probe`
+# downloads a compiler from a package channel and executes it against this
+# source tree, so it holds no write authority and no token at all; `notify`
+# holds `issues: write` and never runs pixi, Mojo, or anything else that came
+# off the network. `scripts/checks/workflow_security.py` pins that split, step
+# by step, because the whole security argument for scheduling this workflow is
+# that the two halves cannot be brought back together in a diff nobody reads.
+on:
+  schedule:
+    - cron: "0 0 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "stable or nightly"
+        default: "stable"
+        type: choice
+        options: [stable, nightly]
+
+permissions:
+  contents: read
+
+# Two probes of the same lane at once would rewrite one issue from two runs, and
+# the answer that lands last is not always the newer one. Runs queue instead.
+concurrency:
+  group: compat-canary
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: "Probe / ${{ matrix.lane }}"
+    runs-on: ubuntu-24.04
+    # A full source, packaging and end-to-end sweep on a compiler no cache has
+    # ever been warmed for. Generous against that, never fitted to it.
+    timeout-minutes: 60
+    # This job executes a compiler it just downloaded. It is given nothing.
+    permissions:
+      contents: read
+    strategy:
+      # One lane's verdict is not evidence about the other: the stable lane is
+      # idle most days while the nightly lane is where a candidate first
+      # appears, and cancelling the second because the first failed would throw
+      # away the answer the canary exists to collect.
+      fail-fast: false
+      matrix:
+        lane: ${{ fromJSON(github.event_name == 'workflow_dispatch' && format('["{0}"]', inputs.channel) || '["stable","nightly"]') }}
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing in this job writes, and a persisted token would sit in
+          # `.git/config` while a downloaded compiler runs beside it.
+          persist-credentials: false
+
+      - name: Set up Pixi
+        uses: prefix-dev/setup-pixi@a09b6247153796b190642a2b53fac4241043cf6f # v0.10.0
+        with:
+          # The pixi binary alone. An install here would solve the committed
+          # `==` pin before the probe ever relaxes it, and the canary would
+          # report "nothing newer" every day for the rest of its life while
+          # looking perfectly healthy. The probe performs the only install, and
+          # it performs it against the relaxed spec.
+          run-install: false
+
+      - name: Probe the candidate toolchain
+        env:
+          # Through the environment rather than into the script text: an
+          # expression is substituted before bash parses the line.
+          CANARY_LANE: ${{ matrix.lane }}
+        run: python3 -m scripts.canary.run --lane "$CANARY_LANE"
+
+      - name: Upload the classification
+        # The red days are the interesting ones, and this artifact is the only
+        # thing the notifier ever reads.
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: canary-result-${{ matrix.lane }}
+          path: build/canary/
+
+  notify:
+    name: Notify
+    runs-on: ubuntu-24.04
+    needs: probe
+    # A lane that died still has to be reported. Silence is the failure mode a
+    # canary exists to make impossible, so this job runs whatever happened.
+    if: always()
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download every lane's classification
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: build/canary-results/
+
+      - name: Upsert the pinned issues
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # The lane set the matrix above expands to, restated so a lane whose
+          # artifact never arrived is a missing report rather than an absence
+          # nobody notices.
+          CANARY_LANES: ${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'stable nightly' }}
+        run: python3 -m scripts.canary.notify --results build/canary-results/ --lanes "$CANARY_LANES"
