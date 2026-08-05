@@ -889,7 +889,9 @@ def classify(repo: Path, lane: str, *, run: Runner) -> CanaryResult:
             the installed toolchain printed no identity this repository can
             read. Both are faults in the canary or its checkout, never facts
             about the candidate, so neither is a classification.
-        OSError: A tracked file or the committed baseline cannot be read.
+        OSError: A tracked file or the committed baseline cannot be read, or a
+            probe command cannot be spawned at all — pixi missing from PATH is
+            a broken runner rather than a fact about a compiler.
         ValueError: The committed transcript baseline is unreadable or names
             two toolchains, which is a broken repository rather than a verdict.
     """
@@ -1021,8 +1023,8 @@ def classify(repo: Path, lane: str, *, run: Runner) -> CanaryResult:
         # two platforms, while the search that waved this day through is
         # satisfied by a candidate published for either one, so a relaxed spec
         # that no environment can satisfy is a routine, reportable outcome.
-        # Filed as infrastructure it wrote no issue and exited 0, so a lane
-        # that had learned something reported a green day, every day.
+        # Filed as infrastructure it exited 0, so a lane that had learned
+        # something real about a candidate reported a green day for it.
         #
         # They are told apart by re-asking the control question. Answered, the
         # index is still reachable from this runner and the install failed on
@@ -1067,7 +1069,7 @@ def classify(repo: Path, lane: str, *, run: Runner) -> CanaryResult:
     if identity.returncode != 0:
         return _stage_failure(
             lane,
-            _UNKNOWN,
+            published_only,
             identity,
             CANARY_BROKEN,
             f"{command_failure(identity)}; the installed environment could not "
