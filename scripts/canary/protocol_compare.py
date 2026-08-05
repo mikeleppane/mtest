@@ -11,7 +11,11 @@ the protocol drift this exists to catch.
 
 So the tolerance is deliberately narrow: exactly the `mojo <ver> (<commit>)`
 span of the header is rewritten from the baseline's toolchain to the
-candidate's before comparing, and the comparison itself is delegated whole to
+candidate's before comparing — once, on line one, which is the only line that
+carries provenance. The same text further down is report content. `TestSuite`
+or a fixture printing the toolchain it was built by is a body byte like any
+other, and a tolerance that reached it would erase a real behavioural change
+as permitted header drift. The comparison itself is delegated whole to
 `scripts.checks.transcript_compare`, which already owns file-set equality,
 byte equality and per-file diffs for this repository's snapshot trees. There
 is no second implementation of directory diffing here to drift from that one.
@@ -186,7 +190,7 @@ def compare_transcript_dirs(pinned: Path, candidate: Path) -> CompareResult:
         _identity_text(pinned_identity).encode("utf-8"),
         _identity_text(candidate_identity).encode("utf-8"),
     )
-    comparison = compare_directories(pinned, candidate, replacement=replacement)
+    comparison = compare_directories(pinned, candidate, header_replacement=replacement)
     if comparison.errors:
         return CompareResult(PROTOCOL_DRIFT, comparison.errors[0])
     return CompareResult(
