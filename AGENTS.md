@@ -429,9 +429,10 @@ Hosted CI runs the same logical floor as two platform-local chains:
   by credential — the job that executes the downloaded compiler holds no write
   scope, persists no credential to disk and binds none into its environment,
   and the job holding `issues: write` runs neither pixi nor Mojo — and
-  `setup-pixi` runs with
-  `run-install: false` so nothing solves the committed pin before the probe
-  relaxes it. `scripts/checks/workflow_security.py` pins both properties.
+  `setup-pixi` runs with a pinned `pixi-version:` and
+  `run-install: false`, so the tool the probe reads the channels through cannot
+  change under it and nothing solves the committed pin before the probe relaxes
+  it. `scripts/checks/workflow_security.py` pins all three properties.
   Neither of its jobs is among the 20 required contexts either.
 
 ### Cross-compiling before commit
