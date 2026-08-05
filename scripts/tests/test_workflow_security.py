@@ -1228,7 +1228,7 @@ class CompatCanaryWorkflowTests(unittest.TestCase):
         workflow = self._workflow()
         for job, marker in {
             "probe": "    timeout-minutes: 60\n",
-            "notify": "    timeout-minutes: 10\n",
+            "notify": "    timeout-minutes: 20\n",
         }.items():
             with self.subTest(job=job):
                 self._reject(workflow.replace(marker, "", 1), "timeout mismatch")
@@ -1308,8 +1308,8 @@ class CompatCanaryWorkflowTests(unittest.TestCase):
         """Without `if: always()` a crashed lane is reported by nobody."""
         self._reject(
             self._workflow().replace(
-                "    if: always()\n    timeout-minutes: 10\n",
-                "    timeout-minutes: 10\n",
+                "\n    if: always()\n    # Sized against",
+                "\n    # Sized against",
                 1,
             ),
             "condition mismatch",
@@ -1514,8 +1514,8 @@ class CompatCanaryWorkflowTests(unittest.TestCase):
                 "jobs:\n", "env:\n  BASH_ENV: ./hook.sh\njobs:\n", 1
             ),
             "job-level": workflow.replace(
-                "    timeout-minutes: 10\n",
-                "    timeout-minutes: 10\n    env:\n      BASH_ENV: ./hook.sh\n",
+                "    timeout-minutes: 20\n",
+                "    timeout-minutes: 20\n    env:\n      BASH_ENV: ./hook.sh\n",
                 1,
             ),
         }.items():
@@ -1575,8 +1575,8 @@ class CompatCanaryWorkflowTests(unittest.TestCase):
         hook = "bash -c 'source build/canary-results/hook.sh; eval \"$0\"'"
         for label, mutated in {
             "job-defaults": workflow.replace(
-                "    timeout-minutes: 10\n",
-                "    timeout-minutes: 10\n"
+                "    timeout-minutes: 20\n",
+                "    timeout-minutes: 20\n"
                 "    defaults:\n      run:\n"
                 f"        shell: {hook}\n",
                 1,
@@ -1590,13 +1590,13 @@ class CompatCanaryWorkflowTests(unittest.TestCase):
                 1,
             ),
             "container": workflow.replace(
-                "    timeout-minutes: 10\n",
-                "    timeout-minutes: 10\n    container: ghcr.io/nobody/image:latest\n",
+                "    timeout-minutes: 20\n",
+                "    timeout-minutes: 20\n    container: ghcr.io/nobody/image:latest\n",
                 1,
             ),
             "services": workflow.replace(
-                "    timeout-minutes: 10\n",
-                "    timeout-minutes: 10\n"
+                "    timeout-minutes: 20\n",
+                "    timeout-minutes: 20\n"
                 "    services:\n"
                 "      sidecar:\n"
                 "        image: ghcr.io/nobody/image:latest\n",
@@ -1899,7 +1899,7 @@ class CompatCanaryNonCanonicalYamlTests(unittest.TestCase):
                 1,
             ),
             "padded-key": workflow.replace(
-                "    timeout-minutes: 10\n", "    timeout-minutes : 10\n", 1
+                "    timeout-minutes: 20\n", "    timeout-minutes : 20\n", 1
             ),
         }.items():
             with self.subTest(key=label):
@@ -1920,7 +1920,7 @@ class CompatCanaryNonCanonicalYamlTests(unittest.TestCase):
             "    name: Audit\n"
             "    runs-on: ubuntu-24.04\n"
             "    needs: probe\n"
-            "    timeout-minutes: 10\n"
+            "    timeout-minutes: 20\n"
             "    permissions: {contents: read, issues: write}\n"
             "    steps:\n"
             "      - uses: actions/download-artifact@"
@@ -2032,7 +2032,7 @@ class CompatCanaryNonCanonicalYamlTests(unittest.TestCase):
         workflow = self._workflow()
         for label, mutated in {
             "tab": workflow.replace(
-                "    timeout-minutes: 10\n", "\ttimeout-minutes: 10\n", 1
+                "    timeout-minutes: 20\n", "\ttimeout-minutes: 20\n", 1
             ),
             "trailing-space": workflow.replace(
                 "    needs: probe\n", "    needs: probe \n", 1

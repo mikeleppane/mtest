@@ -110,7 +110,14 @@ jobs:
     # A lane that died still has to be reported. Silence is the failure mode a
     # canary exists to make impossible, so this job runs whatever happened.
     if: always()
-    timeout-minutes: 10
+    # Sized against the worst run this job can have, not against the usual one.
+    # Each lane can cost three `gh` calls -- a comment, a close, and the upsert
+    # that preceded them -- and `scripts/canary/notify.py` gives every one of
+    # them 120 s before it gives up, so two lanes can spend twelve minutes
+    # inside the notifier alone, on top of a checkout, two artifact downloads
+    # and an interpreter start. A budget that cannot cover that kills the job
+    # in the middle of writing the findings it exists to write.
+    timeout-minutes: 20
     permissions:
       contents: read
       issues: write

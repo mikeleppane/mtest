@@ -22,6 +22,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 from typing import TYPE_CHECKING, override
 import unittest
@@ -853,6 +854,55 @@ class RunReferenceTests(NotifyTestCase):
     def test_it_says_so_when_there_is_no_run(self) -> None:
         with mock.patch.dict(os.environ, {}, clear=True):
             self.assertIn("not recorded", run_reference())
+
+
+class NotifyBudgetTests(unittest.TestCase):
+    """The job hosting this module has to outlast the slowest run it can have.
+
+    Every `gh` call here is abandoned after `GH_TIMEOUT_SECONDS`, and each lane
+    can cost three of them: the search that locates the issue, and then either a
+    reopen and an edit or a comment and a close. A job budget below that total
+    is killed partway through reporting — after one lane's issue has been
+    rewritten and before the other's — which is the half-told story a canary is
+    least able to afford, because the reader cannot tell it from a lane that
+    had nothing to say.
+    """
+
+    MAX_GH_CALLS_PER_LANE = 3
+    """Independently transcribed from `notify.py`: a search and two writes."""
+
+    @staticmethod
+    def _notify_job_timeout_minutes() -> int:
+        """Read the notifier job's own budget out of the workflow.
+
+        Returns:
+            The minutes the hosted `notify` job is allowed to run for.
+
+        Raises:
+            AssertionError: The job does not name exactly one timeout, so there
+                is no single number to bound the reporting cost against.
+        """
+        workflow = (
+            REPO_ROOT / ".github" / "workflows" / "compat-canary.yml"
+        ).read_text(encoding="utf-8")
+        notify = workflow.split("\n  notify:", 1)[1]
+        found = re.findall(r"^    timeout-minutes: (\d+)$", notify, re.MULTILINE)
+        if len(found) != 1:
+            raise AssertionError(
+                f"the notify job names {len(found)} timeouts; exactly one is "
+                "required to bound the reporting budget against"
+            )
+        return int(found[0])
+
+    def test_the_workflow_still_bounds_the_notifier(self) -> None:
+        # Independently transcribed from the workflow.
+        self.assertEqual(self._notify_job_timeout_minutes(), 20)
+
+    def test_the_budget_covers_every_call_the_notifier_can_make(self) -> None:
+        """Checkout, two downloads and an interpreter start come out of the rest."""
+        worst_case = len(LANES) * self.MAX_GH_CALLS_PER_LANE * GH_TIMEOUT_SECONDS
+        self.assertEqual(worst_case, 720.0)
+        self.assertGreater(self._notify_job_timeout_minutes() * 60, worst_case)
 
 
 if __name__ == "__main__":

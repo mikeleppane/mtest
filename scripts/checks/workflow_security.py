@@ -976,7 +976,7 @@ def check_compat_canary_workflow(repo_root: Path = REPO_ROOT) -> None:
             raise AssertionError(
                 f"compat canary job {name!r} runner mismatch: actual={runners}"
             )
-    expected_timeouts = {"probe": ["60"], "notify": ["10"]}
+    expected_timeouts = {"probe": ["60"], "notify": ["20"]}
     for name, job in (("probe", probe), ("notify", notify)):
         timeouts = re.findall(r"^    timeout-minutes: (.+)$", job, re.MULTILINE)
         if timeouts != expected_timeouts[name]:
