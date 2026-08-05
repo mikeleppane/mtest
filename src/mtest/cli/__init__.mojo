@@ -18,10 +18,16 @@ accept it. It parses the full v1 grammar, and the grouped help output is
 generated from that same table; `subcommand_specs()` is the matching table for
 the `Subcommands` block.
 
-`destinations.mojo` answers which report destinations one configuration would
-open, whether two of them name one file, and how each refusal is phrased. It
-is not re-exported: `main` and the doctor runner are its only callers, and both
-sit inside this package for the import rules.
+Three modules here serve the composition root rather than a caller outside this
+package, and none of them is re-exported: `main` sits inside `cli` for the
+import rules, so it reaches them directly. `destinations.mojo` answers which
+report destinations one configuration would open, whether two of them name one
+file, and how each refusal is phrased — the doctor runner asks the same three
+questions. `config_io.mojo` reads the project configuration file and the
+last-run state, and publishes the next state atomically. `run_resources.mojo`
+holds what a configured run owns and releases it in the one order every exit
+path shares. All three return typed results; none prints, and none ends the
+process.
 
 The layer also owns `build_flags_string`, which renders a `RunnerConfig` back
 into the shell-ready flag string the console echoes in a run-failure

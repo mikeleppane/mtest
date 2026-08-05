@@ -27,15 +27,27 @@ destination that cannot take the bytes at all — a closed descriptor, a full
 filesystem — costs the command its success code and exits 3.
 
 The parser owns argv syntax; config owns typed conversion, layering, and state
-bytes; the console resolves color from the inputs main supplies; the session
-states the run's facts and `resolve_exit_code` in the model layer ranks them.
-`main` owns only process-level discovery, file I/O, resource ordering, and the
-dedicated pre-run usage refusal. All FFI stays below in `exec`.
-`stdout_isatty()` and `stderr_isatty()` are the terminal probes, while argv,
-cwd, getenv, file operations, and exit are ordinary program-level operations
-via `std`.
+bytes; `cli.config_io` reads the project configuration file and the last-run
+state and publishes the next one; `cli.destinations` answers which report
+destinations this run will open and refuses the unusable ones;
+`cli.run_resources` holds what the run owns and releases it in one order; the
+console resolves color from the inputs main supplies; the session states the
+run's facts and `resolve_exit_code` in the model layer ranks them.
+
+What is left to `main` is argv, the environment, the invocation root, the order
+it composes those pieces in, the dedicated pre-run usage refusal, and every
+`exit`. It still touches the filesystem itself, at the points where opening a
+resource IS the composition: it opens the `--json` destination, creates the
+JUnit spool and its target temp, creates the run-report spool and one temp per
+active format — creating each temp in its destination's own directory is what
+proves that directory writable before any build or run — and asks whether a
+state file exists. Everything it takes there is recorded in `RunResources` at
+the moment ownership passes, and released by the one ladder. All FFI stays
+below in `exec`. `stdout_isatty()` and `stderr_isatty()` are the terminal
+probes, while argv, cwd, getenv, file operations, and exit are ordinary
+program-level operations via `std`.
 """
-from std.os import getenv, listdir, remove, rmdir
+from std.os import getenv
 from std.os.path import basename, dirname, exists
 from std.pathlib import cwd
 from std.sys import argv, exit
@@ -53,11 +65,18 @@ from mtest.cli import (
     run_new,
     version_text,
 )
+from mtest.cli.config_io import (
+    load_config,
+    load_state,
+    persist_state,
+    state_path,
+)
 from mtest.cli.destinations import (
     active_destinations,
     destination_collision,
     destination_parent_error,
 )
+from mtest.cli.run_resources import RunResources
 from mtest.exec import (
     ExecRuntime,
     interrupt_requested,
@@ -67,19 +86,15 @@ from mtest.exec import (
 from mtest.config import (
     ActiveConfigKeys,
     ConfigEnvironment,
-    FileConfig,
     LastRunState,
     ReportStyle,
     ResolvedConfig,
     RunnerConfig,
     StateDelta,
-    TOML_SOURCE_MAX_BYTES,
     annotations_resolved_on,
     cli_only_resolution_defaults,
     encode_last_run_state,
     merge_last_run_state,
-    parse_toml,
-    parse_last_run_state,
     render_config_show,
     resolve_config,
     safe_path_label,
@@ -94,8 +109,6 @@ from mtest.model import (
     split_rendered_node_id,
 )
 from mtest.platform import (
-    BoundedRegularFileRead,
-    close_checked_fd,
     create_unique_temp,
     apply_permissions,
     default_file_mode,
@@ -103,10 +116,7 @@ from mtest.platform import (
     exec_replace,
     ignore_broken_pipe,
     process_id,
-    read_bounded_regular_file,
-    rename_path,
     write_all_bytes_fd_status,
-    write_all_fd,
     write_errno_name,
 )
 from mtest.report import (
@@ -120,7 +130,6 @@ from mtest.report import (
     ReportHeaderFacts,
     ReportWriter,
     StandardReportCoordinator,
-    close_json_fd,
     collect_finished_line,
     collect_node_line,
     collect_stream_header,
@@ -135,20 +144,11 @@ from mtest.session import (
     DebugOutcome,
     DebugPlan,
     SessionResult,
+    clear_cache_root,
     prepare_debug,
     run_collect,
     run_session_with_state,
 )
-from mtest.session.store import clear_cache_root, ensure_cache_root
-
-
-comptime _STATE_MAX_BYTES = 1024 * 1024
-"""The accepted `.mtest-cache/lastrun` payload ceiling.
-
-Matches the doctor check's ceiling so the two agree on what a usable state
-file is. State is an accelerator, never a verdict input, so an oversized or
-non-regular file is ignored loudly rather than treated as a failure.
-"""
 
 
 def _argv_tail() -> List[String]:
@@ -194,7 +194,7 @@ def _write_direct(text: String, fd: Int) -> Bool:
     resources are still owned. `_eprintln` discards the answer, so a usage
     error keeps its frozen 4 whatever stderr does with the prose; a command
     whose output IS its text escalates to 3; and a caller past
-    `RunResources` routes that 3 through `close_into` so no owned scratch
+    `RunResources` routes that 3 through `_close_resources` so no owned scratch
     survives.
 
     The one place this must NOT be used is between the exec runtime's release
@@ -244,7 +244,7 @@ def _eprintln(text: String):
     4 says "you typed it wrong" whether or not the prose arrived — so a stderr
     that will not take the words costs the words and nothing else. Escalation
     to 3 belongs to undelivered PRIMARY output, which goes through
-    `_exit_with_output` or an explicit `close_into` instead.
+    `_exit_with_output` or an explicit `_close_resources` instead.
     """
     _ = _write_direct(text + "\n", 2)
 
@@ -267,39 +267,6 @@ def _exit_with_output(text: String, fd: Int, code: Int):
     if not _write_direct(text, fd):
         exit(EXIT_INTERNAL_ERROR)
     exit(code)
-
-
-def _normalize_absolute(path: String) -> String:
-    var components = List[String]()
-    for slice in path.split("/"):
-        var component = String(slice)
-        if component == "" or component == ".":
-            continue
-        if component == "..":
-            if len(components) > 0:
-                _ = components.pop()
-            continue
-        components.append(component^)
-    var normalized = String("/")
-    for i in range(len(components)):
-        if i > 0:
-            normalized += "/"
-        normalized += components[i]
-    return normalized
-
-
-def _absolute_from_root(root: String, path: String) -> String:
-    if path.startswith("/"):
-        return _normalize_absolute(path)
-    return _normalize_absolute(root + "/" + path)
-
-
-def _config_file_representation(root: String, absolute: String) -> String:
-    var normalized_root = _normalize_absolute(root)
-    var prefix = "/" if normalized_root == "/" else normalized_root + "/"
-    if absolute.startswith(prefix):
-        return String(absolute[byte = prefix.byte_length() :])
-    return absolute
 
 
 def _report_temp_template(destination: String) -> String:
@@ -389,356 +356,29 @@ def _report_style_code(style: ReportStyle) -> Int:
     return REPORT_STYLE_CONCISE
 
 
-@fieldwise_init
-struct ConfigLoad(Copyable, Movable):
-    """One root-time configuration discovery and parse result."""
+def _close_resources(
+    mut resources: RunResources, code: Int, rank_delivery: Bool
+) -> Int:
+    """Run the release ladder, report a failed release, and rank the code.
 
-    var file: FileConfig
-    """The typed file layer, empty when no file was selected or parsing failed."""
+    The ladder itself neither prints nor exits, so the one diagnostic it can
+    produce — the exec runtime refusing to restore — is put on stderr here,
+    beside every other thing `main` says about a code it is about to leave on.
 
-    var config_file: String
-    """The stream representation of the selected file, or empty when absent."""
+    Args:
+        resources: The run's owned resources. Every one is released.
+        code: The code the caller reached this exit path carrying.
+        rank_delivery: Whether `code` is a run code the model ranks, so a
+            deferred machine-stream write error may escalate it.
 
-    var error: String
-    """The contained diagnostic, or empty on success."""
-
-    var error_code: Int
-    """The diagnostic exit code, or zero on success."""
-
-
-def _load_config(
-    root: String, explicit_path: String, no_config: Bool
-) -> ConfigLoad:
-    if no_config:
-        return ConfigLoad(FileConfig.empty(), "", "", 0)
-
-    var explicit = explicit_path != ""
-    var requested = explicit_path if explicit else "mtest.toml"
-    var absolute = _absolute_from_root(root, requested)
-    var representation = _config_file_representation(root, absolute)
-    var diagnostic_representation = safe_path_label(representation)
-    var selected_exists = exists(absolute)
-    if not selected_exists:
-        if explicit:
-            return ConfigLoad(
-                FileConfig.empty(),
-                representation,
-                "config: "
-                + diagnostic_representation
-                + ": configuration file does not exist",
-                EXIT_USAGE_ERROR,
-            )
-        return ConfigLoad(FileConfig.empty(), "", "", 0)
-
-    var opened: BoundedRegularFileRead
-    try:
-        opened = read_bounded_regular_file(absolute, TOML_SOURCE_MAX_BYTES)
-    except:
-        return ConfigLoad(
-            FileConfig.empty(),
-            representation,
-            "config: "
-            + diagnostic_representation
-            + ": could not read configuration file",
-            EXIT_USAGE_ERROR,
-        )
-    if not opened.is_regular:
-        return ConfigLoad(
-            FileConfig.empty(),
-            representation,
-            "config: "
-            + diagnostic_representation
-            + ": configuration path is not a regular file",
-            EXIT_USAGE_ERROR,
-        )
-    var text = opened.text.copy()
-    if text.byte_length() > TOML_SOURCE_MAX_BYTES:
-        return ConfigLoad(
-            FileConfig.empty(),
-            representation,
-            "config: "
-            + diagnostic_representation
-            + ": configuration file exceeds "
-            + String(TOML_SOURCE_MAX_BYTES)
-            + "-byte limit",
-            EXIT_USAGE_ERROR,
-        )
-
-    var parsed = parse_toml(text, diagnostic_representation)
-    if not parsed.is_ok:
-        return ConfigLoad(
-            FileConfig.empty(),
-            representation,
-            parsed.failure.render(),
-            parsed.failure.exit_code(),
-        )
-    return ConfigLoad(parsed.config.copy(), representation, "", 0)
-
-
-@fieldwise_init
-struct StateLoad(Copyable, Movable):
-    """The previous last-run records plus contained nonfatal read diagnostics.
+    Returns:
+        The process exit code. Meaningful once, since the resources are gone
+        after it.
     """
-
-    var state: LastRunState
-    """The accepted previous records, empty when absent or wholly malformed."""
-
-    var warnings: List[String]
-    """One physical-line diagnostic per malformed or unreadable input fact."""
-
-
-def _state_path(root: String) -> String:
-    return root + "/.mtest-cache/lastrun"
-
-
-def _load_state(root: String) -> StateLoad:
-    var path = _state_path(root)
-    var state_exists = exists(path)
-    if not state_exists:
-        return StateLoad(LastRunState.empty(), [])
-    var opened: BoundedRegularFileRead
-    try:
-        opened = read_bounded_regular_file(path, _STATE_MAX_BYTES)
-    except:
-        return StateLoad(
-            LastRunState.empty(),
-            ["state: .mtest-cache/lastrun: could not read state file"],
-        )
-    if not opened.is_regular:
-        return StateLoad(
-            LastRunState.empty(),
-            ["state: .mtest-cache/lastrun: not a regular file — ignored"],
-        )
-    var text = opened.text.copy()
-    if text.byte_length() > _STATE_MAX_BYTES:
-        return StateLoad(
-            LastRunState.empty(),
-            ["state: .mtest-cache/lastrun: exceeds the size limit — ignored"],
-        )
-    var parsed = parse_last_run_state(text, ".mtest-cache/lastrun")
-    var warnings = List[String]()
-    for diagnostic in parsed.diagnostics:
-        warnings.append(diagnostic.render())
-    return StateLoad(parsed.state.copy(), warnings^)
-
-
-def _persist_state(root: String, text: String) -> Optional[String]:
-    var target = _state_path(root)
-    var template = target + ".tmp." + String(process_id()) + ".XXXXXX"
-    var temp = String("")
-    var owned_fd = -1
-    try:
-        # Not a bare `makedirs`: `.mtest-cache` is the directory `--cache-clear`
-        # deletes, and it will only delete one carrying mtest's ownership
-        # marker. State is written whether or not the cache is enabled, so this
-        # is a path that can create the directory on its own — and a directory
-        # created without the marker is one mtest could not later prove is its.
-        ensure_cache_root(root)
-        var created = create_unique_temp(template)
-        temp = created.path.copy()
-        owned_fd = created.fd
-        write_all_fd(owned_fd, text)
-        # `close(2)` may release the descriptor even when it reports an error;
-        # transfer it out of cleanup ownership before the one checked close.
-        var closing_fd = owned_fd
-        owned_fd = -1
-        close_checked_fd(closing_fd)
-        rename_path(temp, target)
-        return Optional[String](None)
-    except:
-        if owned_fd >= 0:
-            var closing_fd = owned_fd
-            try:
-                close_checked_fd(closing_fd)
-            except:
-                pass
-        if temp != "":
-            try:
-                remove(temp)
-            except:
-                pass
-        return Optional[String](
-            "mtest: state: could not persist .mtest-cache/lastrun"
-        )
-
-
-@fieldwise_init
-struct RunResources:
-    """Everything a configured run owns, and the one ladder that releases it.
-
-    `main` takes these resources at four different points: the exec runtime
-    first, then the machine-stream descriptor, then the JUnit scratch, then the
-    run-report scratch. Every
-    exit path from there on has to release all of them, in one order, under one
-    precedence. Holding them together is what lets `close_into` state that
-    ladder once instead of once per exit path.
-
-    A resource is recorded here at the moment ownership is actually taken, so
-    an empty path or a false ownership flag means there is nothing to release.
-    """
-
-    var runtime: ExecRuntime
-    """The process-global exec and signal state, owned from a successful open."""
-
-    var json_fd: Int
-    """The machine-stream descriptor; meaningful only when `json_owns_fd`."""
-
-    var json_owns_fd: Bool
-    """Whether `main` opened `json_fd` and so must close it.
-
-    False under `--json -`, where the stream writes to the inherited stdout
-    that `main` never opened and must not close.
-    """
-
-    var junit_spool: String
-    """The JUnit spool directory `main` created, or "" when it owns none."""
-
-    var junit_temp: String
-    """The JUnit target temp file `main` created, or "" when it owns none."""
-
-    var report_spool: String
-    """The run-report spool directory `main` created, or "" when it owns none.
-    """
-
-    var report_md_temp: String
-    """The Markdown report's target temp file, or "" when it owns none."""
-
-    var report_md_fd: Int
-    """The Markdown report temp's open descriptor, `-1` when the sink is off.
-
-    Recorded for the record's sake, never closed here. The descriptor is LENT
-    to `ReportWriter`, whose `finalize_reports` performs the one close; an abort
-    path that skips finalize therefore leaks it into `exit()`, exactly as the
-    JUnit scratch path does today. Closing it here would be the second close of
-    a descriptor number the kernel may already have handed to something else.
-    """
-
-    var report_html_temp: String
-    """The HTML report's target temp file, or "" when it owns none."""
-
-    var report_html_fd: Int
-    """The HTML report temp's open descriptor, `-1` when the sink is off.
-
-    Borrowed on exactly the terms `report_md_fd` documents.
-    """
-
-    def _discard_report_scratch(self):
-        """Remove the run-report spool, its fragments, and any leftover temps.
-
-        `main` owns this scratch: it created the spool with `open_report_spool`
-        and one temp per active format with `create_unique_temp`, so it frees
-        them once the session has finished with them. On success a temp has
-        already been renamed onto its report target, so its removal is a no-op
-        that never touches the published report; on failure the writer left it
-        behind deliberately, and the prior report at the target is what survives.
-
-        The descriptors are NOT closed here — see `report_md_fd`.
-
-        Best-effort and non-raising, so it is safe on every error path and with
-        empty or missing paths.
-        """
-        if self.report_md_temp != "":
-            try:
-                remove(self.report_md_temp)
-            except:
-                pass
-        if self.report_html_temp != "":
-            try:
-                remove(self.report_html_temp)
-            except:
-                pass
-        if self.report_spool != "":
-            try:
-                for name in listdir(self.report_spool):
-                    try:
-                        remove(self.report_spool + "/" + name)
-                    except:
-                        pass
-                rmdir(self.report_spool)
-            except:
-                pass
-
-    def _discard_junit_scratch(self):
-        """Remove the JUnit spool directory, its fragments, and any leftover temp.
-
-        `main` owns this scratch: it created the spool with `open_junit_spool`
-        and the temp with `open_junit_artifact`, so it frees them once the
-        session has finished with them. On success the temp has already been
-        renamed onto the report target, so its removal is a no-op that never
-        touches the published report; on failure the reporter discarded it.
-        Either way the fragments and the spool directory are what is left.
-
-        Best-effort and non-raising, so it is safe on every error path and with
-        empty or missing paths.
-        """
-        if self.junit_temp != "":
-            try:
-                remove(self.junit_temp)
-            except:
-                pass
-        if self.junit_spool != "":
-            try:
-                for name in listdir(self.junit_spool):
-                    try:
-                        remove(self.junit_spool + "/" + name)
-                    except:
-                        pass
-                rmdir(self.junit_spool)
-            except:
-                pass
-
-    def close_into(mut self, code: Int, rank_delivery: Bool) -> Int:
-        """Release every owned resource and return the code to exit with.
-
-        The ladder, stated once: discard the JUnit scratch, discard the
-        run-report scratch, close the machine-stream descriptor when `main`
-        owns it, then restore the exec runtime. The precedence over `code` follows from what each release can
-        observe. A descriptor close can surface a deferred write error (a quota
-        or network filesystem that reports ENOSPC/EIO only at close), which is
-        a delivery fact this presents to `resolve_exit_code` rather than a code
-        it transforms itself. A runtime close failure is the runner's own
-        machinery failing, reported to stderr, and it yields the internal-error
-        code over anything else.
-
-        Args:
-            code: The code the caller reached this exit path carrying.
-            rank_delivery: Whether `code` is a run code the model ranks, so a
-                deferred write error may escalate it. False for a usage
-                refusal, which was decided before any run existed and so has
-                no run facts to rank against.
-
-        Returns:
-            The process exit code. Mutates: every owned resource is released,
-            so the result is meaningful once. Never raises.
-        """
-        self._discard_junit_scratch()
-        self._discard_report_scratch()
-        var resolved = code
-        # `flaky_failed` is False here on purpose: the session already applied
-        # it, so a flaky-forced failure arrives as `outcome_code=1` and survives
-        # this re-resolution. Re-stating the fact could only demote a 0 that the
-        # session had already decided was not one.
-        if self.json_owns_fd:
-            var delivery_failed = close_json_fd(self.json_fd)
-            self.json_owns_fd = False
-            if rank_delivery:
-                resolved = resolve_exit_code(
-                    TerminalFacts(
-                        interrupted=False,
-                        internal_error=False,
-                        drift=False,
-                        precompile_failed=False,
-                        outcome_code=code,
-                        delivery_failed=delivery_failed,
-                        flaky_failed=False,
-                    )
-                )
-        try:
-            self.runtime.close()
-        except e:
-            _eprintln("mtest: internal error: " + String(e))
-            return EXIT_INTERNAL_ERROR
-        return resolved
+    var outcome = resources.close_into(code, rank_delivery)
+    if outcome.diagnostic != "":
+        _eprintln(outcome.diagnostic)
+    return outcome.code
 
 
 def main():
@@ -841,7 +481,7 @@ def main():
         _ = _write_direct(rendered, 2)
         exit(bootstrapped.code)
 
-    var loaded = _load_config(root, result.config_path, result.no_config)
+    var loaded = load_config(root, result.config_path, result.no_config)
     if loaded.error_code != 0:
         _eprintln(loaded.error)
         exit(loaded.error_code)
@@ -876,7 +516,7 @@ def main():
     # unusable report destination there would add an unsanctioned exit cause
     # and make a resolution-only command probe the filesystem.
     if result.is_config_show():
-        var state_present = exists(_state_path(root))
+        var state_present = exists(state_path(root))
         _exit_with_output(render_config_show(resolved, state_present), 1, 0)
 
     var destinations = active_destinations(resolved)
@@ -907,7 +547,7 @@ def main():
         # `--lf`/`--ff` claims only what actually happened: with no state file
         # there was nothing to clear, and the session's own `lf-empty` warning
         # already says the selection fell back.
-        var had_state = exists(_state_path(root))
+        var had_state = exists(state_path(root))
         var clear_failure = clear_cache_root(root)
         if clear_failure:
             _eprintln(clear_failure.value())
@@ -918,7 +558,7 @@ def main():
     var state_enabled = resolved.active_keys.state and resolved.state
     var previous_state = LastRunState.empty()
     if state_enabled:
-        var state_load = _load_state(root)
+        var state_load = load_state(root)
         previous_state = state_load.state.copy()
         resolved.state_warnings = state_load.warnings.copy()
         resolved.last_run_state = previous_state.copy()
@@ -975,11 +615,15 @@ def main():
             # escape: an uncaught raise exits 1, which is exactly the code that
             # would read as "your test failed".
             _eprintln("mtest: internal error: " + String(e))
-            exit(resources.close_into(EXIT_INTERNAL_ERROR, rank_delivery=False))
+            exit(
+                _close_resources(
+                    resources, EXIT_INTERNAL_ERROR, rank_delivery=False
+                )
+            )
         if outcome.code != 0:
             for line in outcome.diagnostics:
                 _eprintln(line)
-            exit(resources.close_into(outcome.code, rank_delivery=False))
+            exit(_close_resources(resources, outcome.code, rank_delivery=False))
         # The unbuffered write is load-bearing here: `execv` does not flush
         # stdio, so an unflushed pair would vanish with this process image.
         # These two lines are the whole point of `debug` before the handoff —
@@ -994,7 +638,11 @@ def main():
             + "\n",
             1,
         ):
-            exit(resources.close_into(EXIT_INTERNAL_ERROR, rank_delivery=False))
+            exit(
+                _close_resources(
+                    resources, EXIT_INTERNAL_ERROR, rank_delivery=False
+                )
+            )
         # An interrupt that arrived during the preparation — or while the
         # marker write above was blocked on a reader that had stopped reading —
         # is an interrupt of MTEST, and mtest is the only process that can
@@ -1004,8 +652,12 @@ def main():
         # latched interrupt would hand the terminal over anyway and return the
         # debuggee's own status, which reads as though nothing was interrupted.
         if interrupt_requested():
-            exit(resources.close_into(EXIT_INTERRUPTED, rank_delivery=False))
-        var handoff_code = resources.close_into(0, rank_delivery=False)
+            exit(
+                _close_resources(
+                    resources, EXIT_INTERRUPTED, rank_delivery=False
+                )
+            )
+        var handoff_code = _close_resources(resources, 0, rank_delivery=False)
         if handoff_code != 0:
             # A failed restoration is exactly the state in which the debuggee
             # would inherit `SIGPIPE=SIG_IGN` from the runtime and a genuine
@@ -1046,7 +698,11 @@ def main():
             collected = run_collect(resources.runtime, resolved, root)
         except e:
             _eprintln(String(e))
-            exit(resources.close_into(EXIT_USAGE_ERROR, rank_delivery=False))
+            exit(
+                _close_resources(
+                    resources, EXIT_USAGE_ERROR, rank_delivery=False
+                )
+            )
         for line in collected.diagnostics:
             _eprintln(line)
         if config.collect_json:
@@ -1055,8 +711,8 @@ def main():
             # runtime can still escalate a collection to 3. Rendering first and
             # resolving after would let the record and `$?` disagree, which is
             # the one thing `collect_finished` promises cannot happen.
-            var final_code = resources.close_into(
-                collected.code, rank_delivery=True
+            var final_code = _close_resources(
+                resources, collected.code, rank_delivery=True
             )
             var stream = collect_stream_header(MTEST_VERSION) + "\n"
             for nid in collected.listing:
@@ -1092,8 +748,12 @@ def main():
         # take it leaves the caller with nothing to consume. The runtime is
         # still up here, so the 3 goes through the ladder.
         if not _write_direct(listing, 1):
-            exit(resources.close_into(EXIT_INTERNAL_ERROR, rank_delivery=True))
-        exit(resources.close_into(collected.code, rank_delivery=True))
+            exit(
+                _close_resources(
+                    resources, EXIT_INTERNAL_ERROR, rank_delivery=True
+                )
+            )
+        exit(_close_resources(resources, collected.code, rank_delivery=True))
 
     # Resolve the machine-stream destination and, with it, the console's own
     # destination. Under `--json -` the stream OWNS stdout (byte-pure), so the
@@ -1116,7 +776,11 @@ def main():
             json_fd = open_json_fd(config.json_dest)
         except open_error:
             _eprintln("mtest: internal error: " + String(open_error))
-            exit(resources.close_into(EXIT_INTERNAL_ERROR, rank_delivery=True))
+            exit(
+                _close_resources(
+                    resources, EXIT_INTERNAL_ERROR, rank_delivery=True
+                )
+            )
         json_active = True
         resources.json_fd = json_fd
         resources.json_owns_fd = True
@@ -1170,7 +834,11 @@ def main():
             junit_target = artifact.target_path
         except junit_error:
             _eprintln("mtest: internal error: " + String(junit_error))
-            exit(resources.close_into(EXIT_INTERNAL_ERROR, rank_delivery=True))
+            exit(
+                _close_resources(
+                    resources, EXIT_INTERNAL_ERROR, rank_delivery=True
+                )
+            )
 
     # Resolve the run-report destinations, on exactly the terms `--junit-xml`
     # uses: nothing at PATH is touched until the final atomic rename, and the
@@ -1223,7 +891,11 @@ def main():
                 )
         except report_error:
             _eprintln("mtest: internal error: " + String(report_error))
-            exit(resources.close_into(EXIT_INTERNAL_ERROR, rank_delivery=True))
+            exit(
+                _close_resources(
+                    resources, EXIT_INTERNAL_ERROR, rank_delivery=True
+                )
+            )
 
     # Each reporter is independently inert when its feature is off: no `--json`,
     # no `--junit-xml`, annotations resolved off, no `--report`. The coordinator
@@ -1262,7 +934,7 @@ def main():
         # publish. A usage error dominates any close-failure escalation, so the
         # descriptor's close status is not ranked against it.
         _eprintln(String(e))
-        exit(resources.close_into(EXIT_USAGE_ERROR, rank_delivery=False))
+        exit(_close_resources(resources, EXIT_USAGE_ERROR, rank_delivery=False))
     var code = session_result.code
 
     # The session has already flushed the console's fully rendered buffer to its
@@ -1337,7 +1009,7 @@ def main():
         for diagnostic in encoded.diagnostics:
             state_drops.append(diagnostic.render())
 
-    var final_code = resources.close_into(code, rank_delivery=True)
+    var final_code = _close_resources(resources, code, rank_delivery=True)
     if (
         state_enabled
         and config.shard_n == 0
@@ -1345,7 +1017,7 @@ def main():
     ):
         for drop in state_drops:
             _eprintln(drop)
-        var state_error = _persist_state(root, state_text)
+        var state_error = persist_state(root, state_text)
         if state_error:
             _eprintln(state_error.value())
     exit(final_code)

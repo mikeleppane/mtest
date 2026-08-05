@@ -7,9 +7,16 @@ closed `Event` set to the reporter, and resolves the process exit code. It emits
 events and nothing else: the reporter formats, and pre-session usage errors
 belong to main.
 
+The build-artifact store is a subpackage with its own facade, and only the two
+cache-root operations reach past this one: `--cache-clear` deletes that root,
+and the last-run state file lives inside it whether or not the cache is
+enabled, so the composition root has to be able to create and delete it without
+knowing anything else about the store.
+
 The public surface is re-exported here, so callers write
 `from mtest.session import run_session, run_verdict, build_verdict`.
 """
+from mtest.session.store import clear_cache_root, ensure_cache_root
 from mtest.session.session import (
     SessionResult,
     run_session,
