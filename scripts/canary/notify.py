@@ -491,7 +491,10 @@ def find_issue(gh: Gh, title: str) -> tuple[int, str] | None:
         number = entry.get("number")
         state = entry.get("state")
         if not isinstance(number, int) or not isinstance(state, str):
-            raise NotifyError("`gh issue list` printed an issue with no number")
+            raise NotifyError(
+                "`gh issue list` printed an issue without both a number and a "
+                "state, so it cannot be found, reopened or closed"
+            )
         if entry.get("title") == title:
             matches.append((number, state))
     if not matches:
@@ -606,8 +609,10 @@ def main(argv: Sequence[str] | None = None, *, gh: Gh | None = None) -> int:
 
     Returns:
         0 when every lane is quiet, 1 when any lane has a finding or failed to
-        report at all, and 2 when this module could not do its job — the lanes
-        were not named, or GitHub could not be reached.
+        report at all, and 2 when this module could not do its job for at least
+        one lane — the lanes were not named, or GitHub could not be reached.
+        A lane whose reporting failed does not stop the lanes after it from
+        being reported.
     """
     args = parse_args(argv)
     lanes = str(args.lanes).split()
@@ -621,10 +626,22 @@ def main(argv: Sequence[str] | None = None, *, gh: Gh | None = None) -> int:
 
     runner = gh_runner() if gh is None else gh
     results = Path(args.results)
-    try:
-        failed = [lane for lane in lanes if notify_lane(runner, results, lane)]
-    except NotifyError as error:
-        print(f"canary-notify: {error}", file=sys.stderr)
+    # Every lane is attempted, whatever the ones before it did. A `NotifyError`
+    # that ended the loop meant a `gh` outage while reporting the first lane
+    # left the second lane's finding unwritten — and the issue, not the exit
+    # code, is the artifact a maintainer eventually reads. The first lane's
+    # failure still decides the exit code, so nothing is swallowed.
+    failed: list[str] = []
+    errors: list[str] = []
+    for lane in lanes:
+        try:
+            if notify_lane(runner, results, lane):
+                failed.append(lane)
+        except NotifyError as error:
+            errors.append(f"{lane}: {error}")
+    for reported in errors:
+        print(f"canary-notify: {reported}", file=sys.stderr)
+    if errors:
         return 2
     if failed:
         print(f"canary-notify: lanes needing attention: {', '.join(failed)}")

@@ -28,8 +28,10 @@ from unittest import mock
 
 from scripts.canary.notify import (
     ARTIFACT_PREFIX,
+    GH_TIMEOUT_SECONDS,
     LOUD_CLASSIFICATIONS,
     QUIET_CLASSIFICATIONS,
+    SEARCH_LIMIT,
     find_issue,
     issue_title,
     main,
@@ -77,6 +79,33 @@ PINNED_VERSION = "1.0.0b2"
 UNKNOWN_VERSION = "unknown"
 
 
+def _search_argv(title: str) -> tuple[str, ...]:
+    """The exact argv `find_issue` has to spawn, transcribed from the contract.
+
+    Independently written out rather than imported, and pinned as a whole
+    tuple rather than dispatched on by subcommand. Every one of these mutations
+    was verified to leave the suite green while the fake matched on `argv[2]`
+    alone: `issue` to `pr`, `--state all` to `--state open`, the `in:title`
+    qualifier dropped, and the limit reduced to 1. `--state open` is the one
+    that matters — `find_issue` would stop seeing closed issues, `upsert_issue`
+    would take the create branch every time, and the one pinned issue per lane
+    that this whole design rests on would become a new issue per regression.
+    """
+    return (
+        "gh",
+        "issue",
+        "list",
+        "--state",
+        "all",
+        "--search",
+        f"{title} in:title",
+        "--json",
+        "number,title,state",
+        "--limit",
+        "100",
+    )
+
+
 class FakeGh:
     """Answer every `gh` call from a canned issue list and record the calls."""
 
@@ -85,13 +114,22 @@ class FakeGh:
         self.calls: list[tuple[str, ...]] = []
         self.list_output: str | None = None
         self.failing: str | None = None
+        self.failing_lane: str | None = None
 
     def __call__(self, argv: Sequence[str]) -> CommandResult:
-        """Answer one `gh` command."""
+        """Answer one `gh` command, refusing any search it does not recognise."""
         recorded = tuple(argv)
         self.calls.append(recorded)
         subcommand = recorded[2] if len(recorded) > 2 else ""
+        if subcommand == "list" and recorded not in {
+            _search_argv(issue_title(lane)) for lane in LANES
+        }:
+            raise AssertionError(f"unpinned issue search: {recorded}")
         if self.failing is not None and subcommand == self.failing:
+            return CommandResult(recorded, 1, "", "gh: HTTP 503")
+        if self.failing_lane is not None and issue_title(self.failing_lane) in " ".join(
+            recorded
+        ):
             return CommandResult(recorded, 1, "", "gh: HTTP 503")
         if subcommand == "list":
             payload = (
@@ -272,6 +310,22 @@ class IssueIdentityTests(NotifyTestCase):
     def test_an_open_issue_wins_over_a_closed_duplicate(self) -> None:
         gh = FakeGh([_issue(4, STABLE, "OPEN"), _issue(9, STABLE, "CLOSED")])
         self.assertEqual(find_issue(gh, "canary: stable"), (4, "OPEN"))
+
+    def test_the_search_argv_is_pinned_whole(self) -> None:
+        """Closed issues have to be searched, or the identity design collapses.
+
+        Matching on the subcommand alone, `--state all` could become `--state
+        open` with the suite still green: `find_issue` would stop seeing the
+        closed issue a lane's last regression left behind, `upsert_issue` would
+        create instead of reopen, and the one issue per lane a maintainer can
+        watch or mute would become one issue per regression.
+        """
+        gh = FakeGh()
+        find_issue(gh, issue_title(STABLE))
+        self.assertEqual(gh.calls, [_search_argv("canary: stable")])
+        # Independently transcribed from the constants' documented values.
+        self.assertEqual(SEARCH_LIMIT, 100)
+        self.assertEqual(GH_TIMEOUT_SECONDS, 120.0)
 
 
 class QuietDayTests(NotifyTestCase):
@@ -609,6 +663,25 @@ class OperatorErrorTests(NotifyTestCase):
         code, log = self.notify(gh)
         self.assertEqual(code, 2)
         self.assertIn("HTTP 503", log)
+
+    def test_one_lanes_failure_does_not_suppress_the_other_lane(self) -> None:
+        """The issue is the durable artifact, and it has to get written.
+
+        Raising out of the loop meant a `gh` outage while reporting the first
+        lane left the second lane's finding nowhere at all — no issue, no
+        comment, nothing but a line in a job log nobody reads. The exit code
+        still reports the failure; the lane that could be reported is reported
+        anyway.
+        """
+        gh = FakeGh()
+        gh.failing_lane = STABLE
+        self.write_result(STABLE, SOURCE_INCOMPATIBLE)
+        self.write_result(NIGHTLY, PROTOCOL_DRIFT, detail="transcripts moved")
+        code, log = self.notify(gh, lanes="stable nightly")
+        self.assertEqual(code, 2)
+        self.assertIn("stable", log)
+        self.assertEqual(gh.argument("create", "--title"), "canary: nightly")
+        self.assertIn("transcripts moved", gh.argument("create", "--body"))
 
     def test_an_unreadable_search_answer_exits_two(self) -> None:
         gh = FakeGh()

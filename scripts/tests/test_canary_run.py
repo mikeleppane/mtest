@@ -83,6 +83,7 @@ from scripts.canary.toolchain import (
     workspace_pin,
 )
 from scripts.e2e.__main__ import SCENARIOS
+from scripts.e2e.__main__ import main as e2e_main
 from scripts.gen_transcripts import MOJO_VERSION_RE as GENERATOR_VERSION_RE
 from scripts.qa.contract import EXPECTED_CHECK_NAMES, Runner, build_matrix
 from scripts.qa.contract import main as contract_main
@@ -673,6 +674,17 @@ class E2eGuardTests(CanaryTestCase):
                 verdict = e2e_failure_verdict((name,), toolchain_moved=True)
                 self.assertIsNotNone(verdict)
                 self.assertIn(name, str(verdict))
+
+    def test_the_gate_still_reports_the_way_this_reads_it(self) -> None:
+        """The last read-back format that was not pinned against its emitter.
+
+        The contract roster and the generator's marker both are. This one was
+        not, and it is read by a guard that condemns on an e2e failure naming
+        no scenario at all — so a duration appended to the roll-call line,
+        `FAILED: doctor-healthy (3.1s)`, would leave every candidate
+        permanently SOURCE_INCOMPATIBLE, indistinguishable from a real finding.
+        """
+        self.assertIn('f"FAILED: {name}\\n  {detail}"', inspect.getsource(e2e_main))
 
     def test_it_reads_the_gates_failure_lines(self) -> None:
         stdout = (
