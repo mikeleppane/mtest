@@ -59,9 +59,11 @@ forever while a lane that is simply idle looks broken. Asking first also means
 an idle day leaves the checkout unmodified.
 
 The pin is then relaxed before anything is installed, because installing under
-the committed spec resolves the pinned version and would classify every day as
-`NO_NEWER_CANDIDATE` — the mirror-image permanent silence. The recipe is
-retargeted before the packaging leg for the same reason. And the cheap,
+the committed spec resolves the pinned version — which the bounded search never
+offered, so every day would end on `CANARY_BROKEN` with no candidate ever
+probed. The recipe is retargeted before the packaging leg for the same reason,
+so that its build is evidence about the candidate rather than about the pin.
+And the cheap,
 specific failures are asked before the expensive ones, so a toolchain that
 simply does not compile the sources is named that way rather than by whichever
 long gate happened to notice.
@@ -620,10 +622,11 @@ def e2e_failure_verdict(failed: Sequence[str], *, toolchain_moved: bool) -> str 
     this reads has changed shape and the guard has stopped guarding.
 
     `toolchain_moved` is a **precondition, not a live guard**. `classify` can
-    only reach this with a toolchain that differs from the pin, because an
-    equal one returned `NO_NEWER_CANDIDATE` several stages earlier, so the
-    False branch is unreachable from the pipeline as it stands today and is
-    covered by this module's tests alone. It is kept because the tolerance is
+    only reach this with a toolchain that differs from the pin, because a solve
+    that produced the pin is not in the searched candidate set and stopped the
+    pipeline several stages earlier, so the False branch is unreachable from
+    the pipeline as it stands today and is covered by this module's tests
+    alone. It is kept because the tolerance is
     the dangerous part of this function and this is where it is stated: a
     future caller that reaches the roster by some other route inherits the
     refusal rather than the tolerance, and gets a named reason instead of a
@@ -1048,12 +1051,26 @@ def classify(repo: Path, lane: str, *, run: Runner) -> CanaryResult:
             f"could be attributed to a candidate",
         )
     resolved = parse_toolchain(identity.stdout)
-    if resolved.version == pin:
+    if resolved.version not in candidates:
+        # Everything below this line reports about `resolved`, so `resolved`
+        # has to be the thing the search screened. By here the bounded search
+        # has already proved that something newer is published and the manifest
+        # has been rewritten to admit exactly that set, so a solve that
+        # produced anything else did not answer the question this probe asked.
+        # The pin itself is the loudest case and used to be the quietest: read
+        # as `NO_NEWER_CANDIDATE` it closed the lane's issue, when what it
+        # actually shows is a prefix left over from before the rewrite, a
+        # `--repo` pointing at a checkout the search never described, or a
+        # solver that ignored the spec. Any other version is worse, because it
+        # was accepted silently and every gate below would have reported about
+        # a toolchain nobody screened.
         return _result(
             lane,
             resolved,
-            NO_NEWER_CANDIDATE,
-            f"the relaxed solve still resolved the pinned toolchain mojo {pin}",
+            CANARY_BROKEN,
+            f"the relaxed solve installed mojo {resolved.version}, which "
+            f"`{matchspec}` never offered ({', '.join(candidates)}); the probe "
+            f"is not holding the candidate it screened",
         )
 
     if lane == STABLE_LANE:
@@ -1091,10 +1108,11 @@ def classify(repo: Path, lane: str, *, run: Runner) -> CanaryResult:
     e2e = run(["pixi", "run", "e2e"])
     if e2e.returncode != 0:
         tolerated = failed_scenarios(e2e.stdout)
-        # Always True here — the pin-equal case returned NO_NEWER_CANDIDATE
-        # long before this line. Computed rather than passed as a literal so
-        # that if that earlier return ever moves, the tolerance narrows with it
-        # instead of quietly outliving its precondition.
+        # Always True here — a solve that produced the pin is not in the
+        # searched candidate set and stopped the pipeline long before this
+        # line. Computed rather than passed as a literal so that if that
+        # earlier return ever moves, the tolerance narrows with it instead of
+        # quietly outliving its precondition.
         verdict = e2e_failure_verdict(
             tolerated, toolchain_moved=resolved.version != pin
         )

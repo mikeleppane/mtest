@@ -1489,21 +1489,42 @@ class StageClassificationTests(CanaryTestCase):
         self.classify(repo, runner)
         self.assertEqual(self.slept, [])
 
-    def test_the_pinned_toolchain_is_no_newer_candidate(self) -> None:
-        repo, runner = self.build()
-        result = self.classify(
-            repo, runner, resolved=ResolvedToolchain(PINNED_MOJO, "2cf4d08a")
-        )
-        self.assertEqual(result.classification, NO_NEWER_CANDIDATE)
-        self.assertEqual(result.version, PINNED_MOJO)
-        self.assertEqual(
-            runner.stages,
-            ["search-published", "search-candidates", "install", "mojo-version"],
-        )
-        self.assertIn(
-            f"    - mojo =={PINNED_MOJO}\n",
-            (repo / "recipe" / "recipe.yaml").read_text(encoding="utf-8"),
-        )
+    def test_an_install_outside_the_searched_set_is_loud(self) -> None:
+        """Every gate below reports about the toolchain this line names.
+
+        By here the bounded search has already proved something newer is
+        published and the manifest has been rewritten to admit exactly that
+        set, so a solve that produced anything else did not answer the question
+        the probe asked — a prefix left over from before the rewrite, a
+        `--repo` pointing at a checkout the search never described, a solver
+        that ignored the spec. Resolving the pin was read as
+        `NO_NEWER_CANDIDATE`, which is quiet and closed the lane's issue; any
+        other unsearched version was waved through as though it were the
+        candidate, and every gate below then reported about a toolchain nobody
+        had screened.
+        """
+        for version in (PINNED_MOJO, "1.0.0b9"):
+            with self.subTest(version=version):
+                repo, runner = self.build()
+                result = self.classify(
+                    repo, runner, resolved=ResolvedToolchain(version, "2cf4d08a")
+                )
+                self.assertEqual(result.classification, CANARY_BROKEN, result.detail)
+                self.assertIn(version, result.detail)
+                self.assertIn(CANDIDATE.version, result.detail)
+                self.assertEqual(
+                    runner.stages,
+                    [
+                        "search-published",
+                        "search-candidates",
+                        "install",
+                        "mojo-version",
+                    ],
+                )
+                self.assertIn(
+                    f"    - mojo =={PINNED_MOJO}\n",
+                    (repo / "recipe" / "recipe.yaml").read_text(encoding="utf-8"),
+                )
 
     def test_a_failing_build_is_source_incompatible(self) -> None:
         repo, runner = self.build()
