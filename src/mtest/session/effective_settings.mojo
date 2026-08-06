@@ -14,12 +14,12 @@ from mtest.config import (
     ActiveConfigKeys,
     ConfigProvenance,
     LastRunState,
+    OverrideRule,
     Provenance,
     ResolvedConfig,
     RunnerConfig,
 )
-from mtest.config.file_config import OverrideRule
-from mtest.discover.fnmatch import fnmatch
+from mtest.discover import fnmatch
 
 
 @fieldwise_init

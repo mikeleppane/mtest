@@ -13,7 +13,7 @@ from std.testing import assert_equal, assert_false, assert_true, TestSuite
 from mtest.exec import Termination
 from mtest.model import Outcome, ParseDisposition
 from mtest.protocol import ParsedReport, ParsedRow, ReportVerdict
-from mtest.session import classify, resolve_report
+from mtest.session.classify import classify, resolve_report
 
 
 def _row(name: String, oc: Outcome) -> ParsedRow:

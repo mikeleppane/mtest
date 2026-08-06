@@ -33,18 +33,32 @@ from mtest.platform.broken_pipe import (
 from mtest.platform.exec_replace import exec_replace
 from mtest.platform.executable import is_executable_file, resolve_executable
 from mtest.platform.fs import (
+    S_IFDIR,
+    S_IFLNK,
+    S_IFMT,
+    S_IFREG,
     apply_permissions,
     case_folded_identity,
     default_file_mode,
     destination_identity,
     directory_ignores_case,
+    path_kind,
     prepare_directory_for_rename,
     publish_new_file,
     rename_path,
     set_permissions,
 )
 from mtest.platform.process import process_id
-from mtest.platform.stream import write_errno_name
+from mtest.platform.stream import (
+    EINTR,
+    CreatResult,
+    close_fd,
+    create_truncate_fd_guarded,
+    errno_now,
+    read_fd,
+    write_errno_name,
+    write_fd,
+)
 from mtest.platform.regular_file import (
     BoundedRegularFileRead,
     PathFacts,

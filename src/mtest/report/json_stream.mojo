@@ -32,10 +32,10 @@ every value that originates as raw child-process bytes is first decoded through
 the shared `lossy_utf8` so it is valid UTF-8 before escaping. There is no
 second escaper and no second lossy path here.
 """
-from mtest.config.lossy_utf8 import lossy_utf8
-from mtest.model.attribution import AttributionDisposition
-from mtest.model.events import (
+from mtest.config import lossy_utf8
+from mtest.model import (
     AttemptFinishedPayload,
+    AttributionDisposition,
     CollectionKnownPayload,
     CrashAttributionPayload,
     Event,
@@ -43,6 +43,8 @@ from mtest.model.events import (
     FileFinishedPayload,
     FileStartedPayload,
     InternalErrorPayload,
+    Outcome,
+    ParseDisposition,
     PrecompileFailedPayload,
     SessionFinishedPayload,
     SessionStartedPayload,
@@ -50,8 +52,6 @@ from mtest.model.events import (
     TestReportedPayload,
     WarningPayload,
 )
-from mtest.model.outcome import Outcome
-from mtest.model.parse_disposition import ParseDisposition
 from mtest.report.escape import json_escape_string
 
 # --- Serialization bounds ---------------------------------------------------
@@ -426,7 +426,7 @@ def _precompile_failed(p: PrecompileFailedPayload) -> String:
     s += ',"casualties_omitted":' + String(cas.omitted)
     s += ',"casualties_omitted_bytes":' + String(cas.omitted_bytes)
     s += ',"ending_known":' + _b(p.ending_known)
-    s += ',"term_kind":' + String(p.term_kind)
+    s += ',"term_kind":' + String(p.term_kind.code)
     s += ',"term_value":' + String(p.term_value)
     s += ',"escalated":' + _b(p.escalated)
     s += ',"timeout_us":' + String(_timeout_us(p.timeout_seconds))
@@ -500,9 +500,9 @@ def _attempt_finished(p: AttemptFinishedPayload) -> String:
     s += ',"step":"' + _cap_runner_string(p.step) + '"'
     s += ',"attempt_index":' + String(p.attempt_index)
     s += ',"attempts_planned":' + String(p.attempts_planned)
-    s += ',"term_kind":' + String(p.term_kind)
+    s += ',"term_kind":' + String(p.term_kind.code)
     s += ',"term_value":' + String(p.term_value)
-    s += ',"term_final_kind":' + String(p.term_final_kind)
+    s += ',"term_final_kind":' + String(p.term_final_kind.code)
     s += ',"term_final_value":' + String(p.term_final_value)
     s += ',"escalated":' + _b(p.escalated)
     s += ',"retry_eligible":' + _b(p.retry_eligible)

@@ -13,7 +13,7 @@ from pathlib import Path
 import unittest
 from xml.etree import ElementTree as ET
 
-from scripts.checks.reports import junit as junit_check
+from scripts.formats import junit as junit_check
 
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "junit"

@@ -88,7 +88,7 @@ def retry_classify(
 
     ```mojo
     from mtest.exec import Termination
-    from mtest.session import retry_classify
+    from mtest.session.retry_class import retry_classify
 
     var empty = List[UInt8]()
     var rc = retry_classify("run", Termination.signaled(11), False, empty)
@@ -253,7 +253,7 @@ def has_crash_signature(stderr: List[UInt8]) -> Bool:
     Examples:
 
     ```mojo
-    from mtest.session import has_crash_signature
+    from mtest.session.retry_class import has_crash_signature
 
     var text = String("Stack dump:")
     var raw = List[UInt8]()

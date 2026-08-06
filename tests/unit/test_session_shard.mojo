@@ -22,7 +22,7 @@ from std.testing import (
 
 from mtest.cli.parser import _parse_shard
 from mtest.config import ShardMode
-from mtest.session import fnv1a64, partition, shard_owns
+from mtest.session.shard import fnv1a64, partition, shard_owns
 
 
 # --- FNV-1a-64 reference vectors (the algorithm's oracle) ---

@@ -8,7 +8,7 @@ from toml import TomlValue, parse
 
 from mtest.config.file_config import FileConfig, OverrideRule
 from mtest.config.precompile import Precompile
-from mtest.model.control_chars import is_interpreted_control
+from mtest.model import is_interpreted_control
 from mtest.config.value_validation import (
     build_arg_rejection,
     parse_annotations_value,

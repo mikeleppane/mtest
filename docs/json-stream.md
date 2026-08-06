@@ -345,8 +345,9 @@ These tokens are frozen at v1.
 ## 6. The termination discriminants (`term_*`)
 
 `term_kind`, `term_value`, `term_final_kind`, and `term_final_value` are plain
-**integers**, not tokens: the model carries a child's termination as a decomposed
-integer pair, and the stream mirrors it so the record stays self-describing.
+**integers**, not tokens: the model carries a child's termination as a named kind
+paired with a value, and the stream encodes the kind's stable discriminant so the
+record stays self-describing.
 
 `term_kind` (and `term_final_kind`) vocabulary:
 

@@ -27,6 +27,7 @@ from mtest.model import (
     EXIT_INTERNAL_ERROR,
     EXIT_INTERRUPTED,
     EXIT_FAILURE,
+    EXIT_USAGE_ERROR,
     EventKind,
     FileFinishedPayload,
     Outcome,
@@ -41,20 +42,16 @@ from mtest.session.build import (
     _build_for_selection,
     _probe_file,
 )
-from mtest.session.file_result import FileResult
+from mtest.session.file_result import CacheAdmissions, FileResult
 from mtest.session.effective_settings import (
     _compat_resolved_config,
     effective_file_settings,
 )
-from mtest.session.precompile import PrecompileResult, _run_precompile
+from mtest.session.precompile import (
+    PrecompileResult,
+    run_precompile_step,
+)
 from mtest.session.store import CacheContext, finalize_includes
-
-comptime _EXIT_USAGE_ERROR = 4
-"""The pre-handoff usage refusal, decided before any test could have run.
-
-Stated here rather than imported because it is not the model's to resolve: like
-`main`'s own copy, it is decided before there are any run facts to rank.
-"""
 
 
 @fieldwise_init
@@ -349,7 +346,7 @@ def prepare_debug(
     var split = split_node_token(node)
     if split.sep_count != 1 or split.file_part == "" or split.name_part == "":
         return DebugOutcome.refused(
-            _EXIT_USAGE_ERROR,
+            EXIT_USAGE_ERROR,
             "debug: malformed node id '"
             + escape_one_line(node)
             + "': a node id is PATH::TEST with a single '::' (see mtest"
@@ -378,10 +375,10 @@ def prepare_debug(
         # Every `discover:` raise is the exit-4 class: a nonexistent path, an
         # operand escaping the root, a node id naming a directory, or a file
         # type mtest cannot run.
-        return DebugOutcome.refused(_EXIT_USAGE_ERROR, String(e))
+        return DebugOutcome.refused(EXIT_USAGE_ERROR, String(e))
     if len(disc.run_files) != 1:
         return DebugOutcome.refused(
-            _EXIT_USAGE_ERROR,
+            EXIT_USAGE_ERROR,
             "debug: '"
             + escape_one_line(node)
             + "' did not resolve to exactly one test file",
@@ -396,21 +393,36 @@ def prepare_debug(
 
     # The precompile steps first, exactly as the collect pipeline runs them,
     # because a step's output directory becomes an include root for the build
-    # below. The stamp seam is absent by construction: a disabled context keys
-    # no step, so every configured step runs.
+    # below. Debug runs them with the stamp seam switched OFF, so every
+    # configured step compiles and every path the printed lines name was
+    # produced by this invocation. Turning it on would be a product decision
+    # about what `--debug` hands over, not a refactoring, and it is not taken
+    # here.
+    #
+    # `prior_outputs` therefore records what each step produced for a key
+    # nothing computes; the shared step keeps it so the run and collect
+    # pipelines can key a step against every earlier step's output.
+    var prior_outputs = List[String]()
     for pc in config.precompiles:
         if interrupt_requested():
             return DebugOutcome.refused(
                 EXIT_INTERRUPTED, "debug: interrupted before the build"
             )
-        var pr: PrecompileResult
+        var step: Optional[PrecompileResult]
         try:
-            pr = _run_precompile(
-                runtime, config, root, pc.src, pc.out, includes
+            step = run_precompile_step(
+                runtime,
+                config,
+                root,
+                pc,
+                ctx,
+                includes,
+                prior_outputs,
+                use_cache=False,
             )
         except e:
             # The caught error is the only account of what went wrong here:
-            # `_run_precompile` raises for machinery faults that produced no
+            # the shared step raises for machinery faults that produced no
             # `PrecompileResult` to inspect, so discarding it leaves the step
             # named and the failure unexplained.
             return DebugOutcome.refused(
@@ -420,6 +432,9 @@ def prepare_debug(
                 + "' failed; nothing was handed over: "
                 + escape_one_line(String(e)),
             )
+        if not step:
+            continue
+        ref pr = step.value()
         if pr.interrupted:
             return DebugOutcome.refused(
                 EXIT_INTERRUPTED, "debug: interrupted during precompile"
@@ -444,7 +459,6 @@ def prepare_debug(
             )
             failed += _output_lines(pr.compiler_output)
             return DebugOutcome(EXIT_FAILURE, failed^, DebugPlan.none())
-        includes.append(pr.out_dir)
 
     finalize_includes(ctx, root, includes)
 
@@ -454,8 +468,11 @@ def prepare_debug(
     settings.retries = 0
 
     var reg = BuildRegistry()
+    # Collecting a debug plan builds one file, and nothing downstream of here
+    # reports a run's admissions: the accumulator is local and discarded.
+    var admissions = CacheAdmissions.zeros()
     var bo = _build_for_selection(
-        runtime, config, settings, root, rel, includes, reg, ctx
+        runtime, config, settings, root, rel, includes, reg, ctx, admissions
     )
     if bo.terminal:
         return _from_build(rel, bo)
@@ -481,7 +498,7 @@ def prepare_debug(
     try:
         _ = select_from(po.universe, rel, FileIntent.named(names^), String(""))
     except e:
-        return DebugOutcome.refused(_EXIT_USAGE_ERROR, String(e))
+        return DebugOutcome.refused(EXIT_USAGE_ERROR, String(e))
 
     var run_argv = List[String]()
     run_argv.append(bo.binary)

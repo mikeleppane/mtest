@@ -77,7 +77,7 @@ def isolation_timeout_secs(timeout_secs: Int) -> Int:
     Examples:
 
     ```mojo
-    from mtest.session import isolation_timeout_secs
+    from mtest.session.attribution import isolation_timeout_secs
 
     var capped = isolation_timeout_secs(90)  # 60: the cap wins
     var disabled = isolation_timeout_secs(0)  # 60: `--timeout 0` falls back
@@ -137,7 +137,7 @@ def attribution_step(
     Examples:
 
     ```mojo
-    from mtest.session import attribution_step
+    from mtest.session.attribution import attribution_step
 
     var go = attribution_step(3, 0, 0.0, 0.0)
     # go.should_stop is False: three names left and no budget spent.

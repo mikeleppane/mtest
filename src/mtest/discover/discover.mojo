@@ -40,18 +40,7 @@ from mtest.discover.fnmatch import fnmatch
 from mtest.discover.normalize import normalize_operand, normalize_root
 from mtest.discover.result import DiscoveryResult, ExcludedEntry
 from mtest.discover.walk import path_is_addressable, walk_dir
-
-comptime _S_IFMT = 0xF000
-"""File-type mask over `st_mode`; POSIX fixes it on Linux and Darwin alike."""
-
-comptime _S_IFDIR = 0x4000
-"""`S_IFDIR`: the `st_mode` file-type value for a directory."""
-
-comptime _S_IFLNK = 0xA000
-"""`S_IFLNK`: the `st_mode` file-type value for a symbolic link."""
-
-comptime _S_IFREG = 0x8000
-"""`S_IFREG`: the `st_mode` file-type value for a regular file."""
+from mtest.platform import S_IFDIR, S_IFLNK, S_IFMT, S_IFREG
 
 
 def _abs_of(nroot: String, rel: String) -> String:
@@ -187,15 +176,15 @@ def _classify(
         raise Error("discover: no such path '" + escape_one_line(file_op) + "'")
     var kind: Int
     try:
-        kind = Int(lstat(fpath).st_mode) & _S_IFMT
+        kind = Int(lstat(fpath).st_mode) & S_IFMT
     except:
         raise Error(
             "discover: cannot inspect '" + escape_one_line(file_op) + "'"
         )
     # For a symlink operand the target's type decides, as before: naming a link
     # is a direct selection, and `exists` already followed it.
-    var names_dir = kind == _S_IFDIR or (kind == _S_IFLNK and isdir(fpath))
-    var names_file = kind == _S_IFREG or (kind == _S_IFLNK and isfile(fpath))
+    var names_dir = kind == S_IFDIR or (kind == S_IFLNK and isdir(fpath))
+    var names_file = kind == S_IFREG or (kind == S_IFLNK and isfile(fpath))
     if names_dir:
         if is_node_id:
             raise _node_id_names_directory_error(op, file_op)

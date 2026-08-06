@@ -19,6 +19,7 @@ from mtest.model import (
     TestResult,
     ParseDisposition,
     AttributionDisposition,
+    TerminationKind,
     TestCounts,
     SessionStartedPayload,
     WarningPayload,
@@ -346,9 +347,9 @@ def test_attempt_finished_payload_carries_full_record() raises:
         "run",
         attempt_index=1,
         attempts_planned=3,
-        term_kind=2,
+        term_kind=TerminationKind.TIMED_OUT,
         term_value=11,
-        term_final_kind=2,
+        term_final_kind=TerminationKind.TIMED_OUT,
         term_final_value=9,
         escalated=True,
         retry_eligible=True,
@@ -366,9 +367,9 @@ def test_attempt_finished_payload_carries_full_record() raises:
     assert_equal(p.step, "run")
     assert_equal(p.attempt_index, 1)
     assert_equal(p.attempts_planned, 3)
-    assert_equal(p.term_kind, 2)
+    assert_equal(p.term_kind.code, TerminationKind.TIMED_OUT.code)
     assert_equal(p.term_value, 11)
-    assert_equal(p.term_final_kind, 2)
+    assert_equal(p.term_final_kind.code, TerminationKind.TIMED_OUT.code)
     assert_equal(p.term_final_value, 9)
     assert_true(p.escalated)
     assert_true(p.retry_eligible)

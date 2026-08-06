@@ -1972,13 +1972,16 @@ Arrows show the layering: each module may import only from layers below it.
   header count, row count, and summary totals all reconcile.
 - `session` drives each file through a small pipeline kernel, a pure state
   machine that answers one question: which step does this file need next
-  (build, probe, run, retry, stop)? A driver executes that step against
-  `exec` and folds the completion back. Retry policy, `--maxfail`
-  accounting, and stale-state recovery all live in the kernel, where they
-  are unit-tested without spawning a process. The parallel scheduler
-  dispatches that same kernel across the worker pool, gate files first, then
-  the parallel batch, then any `--serial` pass, while the kernel itself stays
-  process-free.
+  (build, probe, run, retry, stop)? The sequential driver is the kernel's
+  only caller for that question: it walks `next_step` one step at a time and
+  folds each completion back. Retry policy, `--maxfail` accounting, and
+  stale-state recovery live in the kernel's policy methods —
+  `admit_crash_retry`, `record_verdict`, `record_settled`, and the halt state
+  (`halt()`, `halt_interrupted()`, `halt_internal_error()`) — and are
+  unit-tested without spawning a process. The parallel scheduler runs its own
+  build-then-run phase machine over the worker pool, gate files first, then
+  the parallel batch, then any `--serial` pass, and reaches into the kernel
+  only for those same policy methods; it never walks `next_step`.
 - Reporters consume the typed event stream behind a coordinator seam;
   `session` never imports a concrete reporter. The JUnit and annotation
   reporters are fed by the same events the console renders.

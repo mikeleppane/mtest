@@ -51,18 +51,19 @@ line only when the invocation root is the repository root, which is `mtest` run
 from the repo root, the ordinary case. Run from a subdirectory the path still
 renders, but GitHub anchors it under that subdirectory.
 """
-from mtest.model.events import (
+from mtest.model import (
     AttemptFinishedPayload,
     Event,
     EventKind,
     FileFinishedPayload,
+    Outcome,
+    ParseDisposition,
     PrecompileFailedPayload,
     SessionFinishedPayload,
+    TerminationKind,
     TestReportedPayload,
+    TestResult,
 )
-from mtest.model.outcome import Outcome
-from mtest.model.parse_disposition import ParseDisposition
-from mtest.model.test_result import TestResult
 from mtest.report.escape import gh_escape_message, gh_escape_property
 from mtest.report.signals import signal_name_for_target
 
@@ -78,7 +79,7 @@ from mtest.report.signals import signal_name_for_target
 comptime _MAX_ERRORS = 10
 comptime _MAX_WARNINGS = 10
 
-# STABLE-INTENT: measured on the ESCAPED message text (after `gh_escape_message`
+# ADJUSTABLE (§20): measured on the ESCAPED message text (after `gh_escape_message`
 # has run), not the raw input — a message that escapes to exactly this many
 # bytes or fewer rides whole; anything longer is cut to fit, with the marker
 # below appended so a reader can always tell a message was shortened.
@@ -313,25 +314,23 @@ def _flaky_row(
 def _precompile_ending_words(e: PrecompileFailedPayload) -> String:
     """How the step's final attempt ended, in words, or `""` if unknown.
 
-    Reads the decomposed exec-layer termination kinds the event carries: 0
-    EXITED, 1 SIGNALED, 2 TIMED_OUT, 3 SPAWN_FAILED. Mirrors `console.mojo`'s
-    `_precompile_ending_phrase` in spirit, kept as its own small copy rather
-    than a cross-reporter import.
+    Mirrors `console.mojo`'s `_precompile_ending_phrase` in spirit, kept as its
+    own small copy rather than a cross-reporter import.
     """
     if not e.ending_known:
         return String("")
-    if e.term_kind == 1:
+    if e.term_kind == TerminationKind.SIGNALED:
         var name = signal_name_for_target(e.term_value)
         var base = "died by signal " + String(e.term_value)
         if name != "":
             base += " (" + name + ")"
         return base
-    if e.term_kind == 2:
+    if e.term_kind == TerminationKind.TIMED_OUT:
         var s = "timed out after " + String(e.timeout_seconds) + "s"
         if e.escalated:
             s += ", escalated to SIGKILL"
         return s
-    if e.term_kind == 3:
+    if e.term_kind == TerminationKind.SPAWN_FAILED:
         return "could not be spawned (errno " + String(e.term_value) + ")"
     return "exited " + String(e.term_value)
 

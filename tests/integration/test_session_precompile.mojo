@@ -7,6 +7,7 @@ successful step adds its output directory to the include set of every
 subsequent build, which the faithful build command records.
 """
 from std.os import listdir, makedirs
+from std.os.path import isdir
 from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.config import (
@@ -30,7 +31,15 @@ from mtest.report import (
     RecordingCoordinator,
     RecordingReporter,
 )
+from mtest.exec import ExecRuntime
 from mtest.session import run_session
+from mtest.session.precompile import run_precompile_step
+from mtest.session.store import (
+    PRECOMPILE_SUBDIR,
+    STORE_DIR,
+    CacheContext,
+    collect_env_base,
+)
 
 from session_fixtures import (
     SRC_COMPILE_ERROR,
@@ -39,6 +48,105 @@ from session_fixtures import (
     temp_root,
     write_file,
 )
+
+
+comptime _GOOD_PKG = "def value() -> Int:\n    return 1\n"
+
+
+def _stamp_dir(root: String) -> String:
+    """Where a stamped precompile step records that it ran."""
+    return root + "/" + STORE_DIR + "/" + PRECOMPILE_SUBDIR
+
+
+def test_a_stamped_step_is_skipped_on_the_next_pass() raises:
+    var root = temp_root()
+    write_file(root, "goodpkg/__init__.mojo", _GOOD_PKG)
+    var config = base_config()
+    var pc = Precompile("goodpkg", None)
+    var runtime = ExecRuntime()
+    runtime.open()
+    var ctx = collect_env_base(runtime, config, root)
+
+    var first_includes = config.include_paths.copy()
+    var first_priors = List[String]()
+    var first = run_precompile_step(
+        runtime,
+        config,
+        root,
+        pc,
+        ctx,
+        first_includes,
+        first_priors,
+        use_cache=True,
+    )
+    assert_true(Bool(first), "a cold step has no stamp to skip on")
+    assert_true(first.value().ok, "the step compiled")
+    assert_true(isdir(_stamp_dir(root)), "a first-attempt success is stamped")
+
+    var second_includes = config.include_paths.copy()
+    var second_priors = List[String]()
+    var second = run_precompile_step(
+        runtime,
+        config,
+        root,
+        pc,
+        ctx,
+        second_includes,
+        second_priors,
+        use_cache=True,
+    )
+    # Skipped, and still widening: the package on disk is the one the key
+    # names, so every later build must still see its directory.
+    assert_false(Bool(second), "an unchanged step is skipped")
+    assert_equal(len(second_includes), len(first_includes))
+    assert_equal(len(second_priors), 1)
+    runtime.close()
+
+
+def test_the_cache_switch_makes_a_step_ignore_its_own_stamp() raises:
+    """`use_cache=False` keys nothing, so a stamped step still runs.
+
+    This is the switch `debug` runs under: every path it prints has to have
+    been produced by that invocation, so it never skips a step on the strength
+    of a stamp an earlier run wrote.
+    """
+    var root = temp_root()
+    write_file(root, "goodpkg/__init__.mojo", _GOOD_PKG)
+    var config = base_config()
+    var pc = Precompile("goodpkg", None)
+    var runtime = ExecRuntime()
+    runtime.open()
+    var ctx = collect_env_base(runtime, config, root)
+
+    var warm_includes = config.include_paths.copy()
+    var warm_priors = List[String]()
+    _ = run_precompile_step(
+        runtime,
+        config,
+        root,
+        pc,
+        ctx,
+        warm_includes,
+        warm_priors,
+        use_cache=True,
+    )
+    assert_true(isdir(_stamp_dir(root)), "the stamp this case needs is there")
+
+    var off_includes = config.include_paths.copy()
+    var off_priors = List[String]()
+    var off = run_precompile_step(
+        runtime,
+        config,
+        root,
+        pc,
+        ctx,
+        off_includes,
+        off_priors,
+        use_cache=False,
+    )
+    assert_true(Bool(off), "a step with the cache off is never skipped")
+    assert_true(off.value().ok, "and it really compiled")
+    runtime.close()
 
 
 def test_failed_precompile_fans_out_all_as_not_run() raises:

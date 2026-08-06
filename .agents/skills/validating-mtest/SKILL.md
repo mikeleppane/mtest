@@ -16,7 +16,7 @@ code "runs".
 is the single source of truth; §24 states what *this build* serves vs. refuses.
 Assert what the contract **promises**, never what the implementation happens to
 render — console text and error wording are **informal** (§20). Lean on the
-FROZEN surfaces: exit codes (§9), the `collect` listing (§16), stream routing
+STABLE surfaces: exit codes (§9), the `collect` listing (§16), stream routing
 (§16/§19), and outcome *distinctions* (§10). When behavior and contract
 disagree, that gap is the finding — decide which side is wrong (Triage).
 

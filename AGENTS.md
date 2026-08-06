@@ -72,6 +72,21 @@ and exit and nothing else. `exec` is the deepest module, a narrow
 process-control interface hiding pipes, concurrent draining, FFI, platform
 differences, and cleanup invariants.
 
+`scripts/checks/layering.py` enforces all of this: the rank order, the Layer 2
+siblings, deep imports that go around a facade export, the `exit()` and
+`external_call` confinements. Every directory under `src/mtest` that carries
+an `__init__.mojo` is a facade, subpackages included, and an import is checked
+against the deepest facade that owns it, so a subpackage such as
+`session/store/` has its own enforced surface. A cross-package import is judged
+by the name it imports, not the alias it binds locally, and an `exit` or
+`external_call` import is refused outside its permitted boundary the same way,
+so `from std.sys import exit as terminate` cannot launder a call past the
+rule. It reports a deep import of a name the owning facade does not export as
+information rather than a failure, because there is no facade path to have
+taken. Docstrings and comments are stripped before matching, so the
+`Examples:` blocks and the prose that names `exit()` and `external_call` are
+not read as code.
+
 Three named seams:
 
 - Reporter composition is comptime. The plugin seam is a closed, typed event
@@ -92,12 +107,18 @@ Three named seams:
   which step does the run want next. It spawns nothing, emits no event, and
   owns no captured bytes.
 
-Drivers execute what the kernel decides. A sequential driver services one step
-at a time through `run_supervised`, and `session/selection.mojo` is the one that
-takes the node-id and `-k` path. `session/pool.mojo` is the parallel scheduler
-behind `-n`/`--workers`, driving up to `workers` children at once under a single
-`Supervisor` over native ABI v2; `--serial` pins its matching files to a final
-one-at-a-time pass that runs after the parallel batch drains. Concurrency is
+Only the sequential driver executes what the kernel's `next_step` decides:
+`session/selection.mojo` services one step at a time through `run_supervised`,
+and it is the one that takes the node-id and `-k` path. `session/pool.mojo`,
+the parallel scheduler behind `-n`/`--workers`, does not call `next_step` at
+all — it runs its own `_PENDING_BUILD` → `_BUILDING` → `_PENDING_RUN` →
+`_RUNNING` → `_DONE` phase machine, driving up to `workers` children at once
+under a single `Supervisor` over native ABI v2, and reaches into the kernel
+only for `admit_crash_retry`, `record_verdict`, `record_settled`, and the halt
+state (`halt()`, `halt_interrupted()`, `halt_internal_error()`);
+`--serial` pins its matching files to a final one-at-a-time pass that runs
+after the parallel batch drains. A scheduling feature meant for both drivers
+belongs in those kernel policy methods, never in `next_step`. Concurrency is
 only ever across files: one file's steps stay strictly ordered, and `-n 1` is
 byte-identical to the sequential path (one child per step, and no
 `--num-threads` on the build argv). Admission, retry, maxfail, serial, and
@@ -224,8 +245,8 @@ pixi run version-check     # manifest, CLI, and shipped-version identity; every
                            #   pin, swept over reader-facing documentation
 pixi run harness-unit-check     # harness self-tests: runner, watchdog, comparators,
                                 #   and the two memory-lane oracles (no tools needed)
-pixi run repo-policy-check      # layout, documentation-site parity, workflow and
-                                #   published-action security, tool pins, annotations
+pixi run repo-policy-check      # layout, layering, documentation-site parity, workflow
+                                #   and published-action security, tool pins, annotations
 pixi run release-tooling-check  # attestations, release, publication, public verify
 pixi run harness-check     # the aggregate of the three groups above
 pixi run coverage-capability  # tripwire: the pinned toolchain must have no coverage
@@ -555,6 +576,8 @@ Scope vocabulary (authoritative; keep in sync as modules emerge):
 | `assertions` | source-only companion under `companions/assertions/src/mtest/assertions` |
 | `cli` | `src/mtest/cli` (arg parsing, main) |
 | `cache` | in-session build/collection reuse |
+| `checks` | `scripts/checks/` policy gates |
+| `formats` | `scripts/formats/` report-format library and the outcome vocabulary |
 | `test` | test infrastructure (`scripts/harness/{selfhost,dogfood}.py`, `scripts/build/mojo_package.sh`, shared helpers) |
 | `e2e` | end-to-end harness (`scripts/e2e/`) and its `e2e/` manifest and scenarios |
 | `qa` | the contract gate (`scripts/qa/`) and its own tests |

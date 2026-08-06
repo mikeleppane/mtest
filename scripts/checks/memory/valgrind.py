@@ -20,8 +20,8 @@ import sys
 from typing import NoReturn
 
 from scripts.checks import native_abi as native_abi_check
-from scripts.checks.reports import json_stream as json_stream_oracle
-from scripts.checks.reports import junit as junit_oracle
+from scripts.formats import json_stream as json_stream_oracle
+from scripts.formats import junit as junit_oracle
 
 
 ROOT = Path(__file__).resolve().parents[3]

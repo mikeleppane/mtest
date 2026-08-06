@@ -13,7 +13,7 @@ escaped away.
 from std.sys.info import CompilationTarget
 from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
-from mtest.model.events import Event
+from mtest.model.events import Event, TerminationKind
 from mtest.model.node_id import NodeId
 from mtest.model.outcome import Outcome
 from mtest.model.parse_disposition import ParseDisposition
@@ -63,9 +63,9 @@ def _attempt(path: String, attempts_planned: Int) -> Event:
         "run",
         1,
         attempts_planned,
-        1,
+        TerminationKind.SIGNALED,
         11,
-        1,
+        TerminationKind.SIGNALED,
         11,
         False,
         True,
@@ -478,7 +478,7 @@ def test_precompile_error_carries_no_file_property() raises:
             "compiler said things",
             3,
             ending_known=True,
-            term_kind=1,
+            term_kind=TerminationKind.SIGNALED,
             term_value=11,
         )
     )
@@ -502,7 +502,7 @@ def test_precompile_error_names_retry_count_when_retried() raises:
             "",
             1,
             ending_known=True,
-            term_kind=2,
+            term_kind=TerminationKind.TIMED_OUT,
             term_value=0,
             timeout_seconds=600,
             attempts_used=2,

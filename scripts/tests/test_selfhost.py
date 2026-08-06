@@ -364,6 +364,57 @@ def run_oracle(
     return code, out.getvalue(), err.getvalue()
 
 
+FILE_ROW_TOKENS = (
+    "PASS",
+    "FAIL",
+    "CRASH",
+    "TIMEOUT",
+    "COMPILE-ERROR",
+    "COMPILE-TIMEOUT",
+    "MALFORMED-SUITE",
+    "PRECOMPILE-ERROR",
+    "FLAKY",
+    "NO-TESTS",
+)
+"""Every token that starts a per-file verdict row in `console.mojo`.
+
+Not `_verdict_token`'s output set, which is wider: EXCLUDED and NOT-RUN come
+out of it too, and EXCLUDED begins a row of its own shape that must not read as
+a bad verdict. `DRIFT` is a banner, also column zero, also deliberately absent.
+`selfhost._reconcile_paths` catches both through path membership.
+
+Written out rather than imported, so it can disagree with the regex it checks.
+`scripts/tests/test_vocabulary.py` reconciles it against
+`scripts/formats/vocabulary.txt` and against the copy in
+`scripts/tests/test_package_consumption.py`.
+"""
+
+
+class VerdictRowTokenCoverageTests(unittest.TestCase):
+    """`VERDICT_ROW_RE` must see every token a real console row can carry."""
+
+    def test_verdict_row_re_sees_every_file_row_token(self) -> None:
+        for token in FILE_ROW_TOKENS:
+            line = f"{token} tests/unit/test_example.mojo"
+            with self.subTest(token=token):
+                match = selfhost.VERDICT_ROW_RE.search(line)
+                if match is None:
+                    raise AssertionError(f"VERDICT_ROW_RE is blind to {token}")
+                self.assertEqual(match.group("verdict"), token)
+
+    def test_verdict_row_re_rejects_a_token_outside_the_real_vocabulary(self) -> None:
+        # The catch-all `[A-Z][A-Z-]{2,}` this test replaces would happily match
+        # nonsense here; the tightened alternation must not.
+        line = "NONSENSE-TOKEN tests/unit/test_example.mojo"
+
+        match = selfhost.VERDICT_ROW_RE.search(line)
+
+        if match is not None:
+            raise AssertionError(
+                f"VERDICT_ROW_RE matched a token outside the real vocabulary: {match}"
+            )
+
+
 class IndependentParserTests(unittest.TestCase):
     def test_reads_top_level_test_declarations_in_order(self) -> None:
         source = (

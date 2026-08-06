@@ -8,8 +8,10 @@ from std.testing import (
     TestSuite,
 )
 
-from mtest.cli import parse_args
+from mtest.cli import ParseResult, parse_args
 from mtest.cli.doctor import (
+    _DoctorContext,
+    _check_report_destinations,
     _doctor_cleanup_failure_probe,
     _doctor_close_failure_probe,
     _doctor_containment_probe,
@@ -17,10 +19,16 @@ from mtest.cli.doctor import (
     _doctor_platform_probe,
     _doctor_root_dependency_probe,
     _has_control,
-    _safe_text,
     _toolchain_identity_is_pinned,
 )
-from mtest.config import ColorWhen, Verbosity
+from mtest.config import (
+    CliOverlay,
+    ColorWhen,
+    RunnerConfig,
+    ShardMode,
+    Verbosity,
+    safe_path_label,
+)
 
 
 def test_doctor_kind_and_accepted_controls() raises:
@@ -222,17 +230,17 @@ def test_doctor_detail_over_the_bound_is_truncated_not_dropped() raises:
     arm64. Exercising it keeps that shape under test instead of latent.
     """
     var under = _repeated("a", 240)
-    assert_equal(_safe_text(under), under)
-    assert_false("..." in _safe_text(under))
+    assert_equal(safe_path_label(under), under)
+    assert_false("..." in safe_path_label(under))
 
-    var bounded = _safe_text(_repeated("b", 241))
+    var bounded = safe_path_label(_repeated("b", 241))
     assert_equal(bounded.count_codepoints(), 240)
     assert_true(bounded.endswith("..."))
     assert_equal(bounded, _repeated("b", 237) + "...")
 
     # An escape expands one input codepoint into several, so the bound counts
     # escaped codepoints rather than source ones.
-    var escaped = _safe_text(_repeated("\n", 200))
+    var escaped = safe_path_label(_repeated("\n", 200))
     assert_equal(escaped.count_codepoints(), 240)
     assert_true(escaped.endswith("..."))
 
@@ -245,13 +253,13 @@ def test_doctor_escaper_neutralizes_c1_controls() raises:
     interpolates could repaint the screen or set the title through an escaper
     that only ever looked for ESC and the rest of C0.
     """
-    assert_equal(_safe_text(chr(0x9B) + "2J"), "\\x9b2J")
+    assert_equal(safe_path_label(chr(0x9B) + "2J"), "\\x9b2J")
     assert_equal(
-        _safe_text(chr(0x9D) + "0;pwned" + chr(0x9C)), "\\x9d0;pwned\\x9c"
+        safe_path_label(chr(0x9D) + "0;pwned" + chr(0x9C)), "\\x9d0;pwned\\x9c"
     )
-    assert_equal(_safe_text(chr(0x80) + chr(0x9F)), "\\x80\\x9f")
+    assert_equal(safe_path_label(chr(0x80) + chr(0x9F)), "\\x80\\x9f")
     # Either side of the C1 block is ordinary text and rides through verbatim.
-    assert_equal(_safe_text("~" + chr(0xA0) + "e"), "~" + chr(0xA0) + "e")
+    assert_equal(safe_path_label("~" + chr(0xA0) + "e"), "~" + chr(0xA0) + "e")
 
 
 def test_doctor_control_probe_rejects_a_c1_only_identity() raises:
@@ -259,13 +267,124 @@ def test_doctor_control_probe_rejects_a_c1_only_identity() raises:
 
     `_has_control` is the guard that stops such an identity being echoed back
     in the mismatch diagnostic at all, so it must cover exactly the range
-    `_safe_text` escapes.
+    `safe_path_label` escapes.
     """
     assert_true(_has_control(chr(0x9B)))
     assert_true(_has_control("mojo " + chr(0x9D) + "0;x"))
     assert_true(_has_control("mojo\x1b[31m"))
     assert_false(_has_control("mojo 1.0.0b2 (release)"))
     assert_false(_has_control("caf" + chr(0xE9) + chr(0xA0)))
+
+
+def _destination_context(format: String, path: String) raises -> _DoctorContext:
+    """A context whose config layer is settled and carries one destination.
+
+    Marking the config loaded is what keeps `_check_report_destinations` from
+    reading a real `mtest.toml` off disk and replacing the destination under
+    test.
+
+    Args:
+        format: The `[report]` key the destination is configured under.
+        path: The destination value that key carries.
+
+    Returns:
+        A context rooted at the working directory, with no config file
+        selected and exactly one active destination.
+    """
+    var argv: List[String] = ["doctor", "--no-config"]
+    var context = _DoctorContext(parse_args(argv))
+    context.root = String(cwd())
+    context.root_ok = True
+    context.config_loaded = True
+    if format == "json":
+        context.resolved.config.json_dest = path.copy()
+    elif format == "junit-xml":
+        context.resolved.config.junit_dest = path.copy()
+    elif format == "md":
+        context.resolved.config.report_md_dest = path.copy()
+    else:
+        context.resolved.config.report_html_dest = path.copy()
+    return context^
+
+
+def test_doctor_checks_every_configured_report_destination() raises:
+    """Doctor must diagnose all four `[report]` destinations, not two.
+
+    A `[report] md` or `html` parent that does not exist is a usage error the
+    run path refuses before it builds anything; a doctor that answers `none`
+    for the same project reports the environment healthy for a command that
+    cannot start.
+    """
+    for format in ["md", "html", "json", "junit-xml"]:
+        var missing = _destination_context(
+            format, "no-such-mtest-doctor-directory/report.out"
+        )
+        assert_equal(
+            _check_report_destinations(missing),
+            (
+                "FAIL report-destinations: "
+                + format
+                + " parent does not exist: 'no-such-mtest-doctor-directory'"
+            ),
+        )
+        var usable = _destination_context(format, "report.out")
+        assert_equal(
+            _check_report_destinations(usable),
+            "PASS report-destinations: 1 parent(s) usable",
+        )
+
+
+def test_doctor_escapes_a_c1_control_in_a_report_destination() raises:
+    """Every doctor line escapes the same code points, destinations included.
+
+    The parent of a `[report]` destination is `mtest.toml` text quoted back at
+    a terminal, so a raw `U+009B` there is CSI reaching the reader with no ESC
+    byte in the line — exactly what the other doctor checks already refuse.
+    """
+    var hostile = _destination_context("md", chr(0x9B) + "31mnope/report.out")
+    assert_equal(
+        _check_report_destinations(hostile),
+        "FAIL report-destinations: md parent does not exist: '\\x9b31mnope'",
+    )
+
+
+def test_doctor_seeds_resolution_with_every_cli_only_field() raises:
+    """Doctor seeds resolution from the same projection the run path uses.
+
+    A CLI-only field the seed drops comes back at its contract default, so
+    doctor diagnoses a configuration the run would never see. The values below
+    are all non-default on purpose: a dropped field is indistinguishable from
+    an absent one otherwise.
+    """
+    var parsed = RunnerConfig.default()
+    parsed.exitfirst = True
+    parsed.keyword = "needle"
+    parsed.collect = True
+    parsed.collect_json = True
+    parsed.last_failed = True
+    parsed.failed_first = True
+    parsed.shard_mode = ShardMode.SLICE
+    parsed.shard_m = 2
+    parsed.shard_n = 5
+    parsed.shuffle = True
+    parsed.shuffle_seed = 4242
+    parsed.no_cache = True
+    parsed.cache_clear = True
+    var request = ParseResult.doctor(parsed^, CliOverlay.default(), "", True)
+    var seeded = _DoctorContext(request).resolved.config.copy()
+    assert_true(seeded.exitfirst, "exitfirst dropped")
+    assert_equal(seeded.keyword, "needle", "keyword dropped")
+    assert_true(seeded.collect, "collect dropped")
+    assert_true(seeded.collect_json, "collect_json dropped")
+    assert_true(seeded.last_failed, "last_failed dropped")
+    assert_true(seeded.failed_first, "failed_first dropped")
+    assert_true(seeded.shard_mode == ShardMode.SLICE, "shard_mode dropped")
+    assert_equal(seeded.shard_m, 2, "shard_m dropped")
+    assert_equal(seeded.shard_n, 5, "shard_n dropped")
+    assert_true(seeded.shuffle, "shuffle dropped")
+    assert_equal(seeded.shuffle_seed, 4242, "shuffle_seed dropped")
+    assert_true(seeded.no_cache, "no_cache dropped")
+    assert_true(seeded.cache_clear, "cache_clear dropped")
 
 
 def test_doctor_platform_lines_cover_both_supported_targets() raises:

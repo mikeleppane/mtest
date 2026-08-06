@@ -234,5 +234,5 @@ enforces a unique terminal that is genuinely last, treats a missing terminal as
 a truncated listing, and still ignores unknown kinds and unknown fields. A
 production consumer adds the two rejections the format forbids — non-finite
 tokens and duplicate keys — and verifies each `node`'s triple, exactly as
-`scripts/checks/reports/collect_stream.py` in this repository does; that module
+`scripts/formats/collect_stream.py` in this repository does; that module
 is the reference reader this specification is checked against.

@@ -18,10 +18,7 @@ from std.ffi import external_call
 from std.memory import Span
 
 from mtest.platform.cstring import c_string_bytes
-from mtest.platform.stream import close_fd, errno_now, write_fd
-
-
-comptime _EINTR = 4
+from mtest.platform.stream import EINTR, close_fd, errno_now, write_fd
 
 
 @fieldwise_init
@@ -181,7 +178,7 @@ def write_all_bytes_fd_status(fd: Int, data: Span[UInt8, _]) -> Int:
         var count = write_fd(fd, data.unsafe_ptr() + offset, total - offset)
         if count < 0:
             var err = errno_now()
-            if err == _EINTR:
+            if err == EINTR:
                 continue
             _ = data
             # A negative `write` always sets `errno`; a zero slot would read

@@ -18,7 +18,7 @@ pair.
 from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.model import AttributionDisposition
-from mtest.session import (
+from mtest.session.attribution import (
     ATTRIBUTION_FILE_BUDGET_SECONDS,
     ATTRIBUTION_SESSION_BUDGET_SECONDS,
     ISOLATION_RUN_CAP,

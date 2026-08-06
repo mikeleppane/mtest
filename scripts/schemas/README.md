@@ -12,7 +12,7 @@ its exact upstream commit below.
   in the `jenkinsci/xunit-plugin` repository).
 - License: **MIT License (MIT)**, Copyright (c) 2014, Gregory Boissinot — read
   from the file's header comment.
-- Role: this is the schema `scripts/checks/reports/junit.py` validates against
+- Role: this is the schema `scripts/formats/junit.py` validates against
   (`xmllint --schema junit-10.xsd --noout`). Its `<testsuites>` root defines no
   `skipped` attribute, so an aggregate `skipped` there is a schema violation;
   the root-level skipped total is instead an arithmetic invariant the checker

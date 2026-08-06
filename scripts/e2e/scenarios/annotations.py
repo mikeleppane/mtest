@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from scripts.checks.reports import annotations as annotations_check
-from scripts.checks.reports import json_stream as json_stream_check
 from scripts.e2e.assertions import expect, expect_exit
+from scripts.formats import annotations as annotations_check
+from scripts.formats import json_stream as json_stream_check
 
 
 if TYPE_CHECKING:

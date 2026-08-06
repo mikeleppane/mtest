@@ -23,6 +23,7 @@ from mtest.config.precompile import Precompile
 from mtest.config.report_style import ReportStyle
 from mtest.config.show_output import ShowOutput
 from mtest.config.verbosity import Verbosity
+from mtest.model import is_interpreted_control
 
 
 def parse_nonnegative_decimal(value: String) -> Optional[Int]:
@@ -412,12 +413,12 @@ def build_arg_rejection(token: String) -> Optional[String]:
 def escape_control_characters(path: String) -> String:
     """Render a user-supplied path as one line, escaping nothing else.
 
-    Control characters become their printable escapes so a crafted path cannot
-    emit a terminal escape sequence or split one line into two. Nothing is
-    truncated, which is what separates this from `safe_path_label`: output
-    whose format is frozen — a path a caller is meant to read back — must
-    survive whole, while a diagnostic may be shortened so the path cannot bury
-    the message.
+    Every code point `mtest.model.control_chars` classifies as a terminal
+    instruction becomes a printable escape, so a crafted path cannot emit a
+    terminal escape sequence or split one line into two. Nothing is truncated,
+    which is what separates this from `safe_path_label`: output whose format is
+    frozen — a path a caller is meant to read back — must survive whole, while
+    a diagnostic may be shortened so the path cannot bury the message.
 
     Args:
         path: The user-supplied path to render.
@@ -435,7 +436,7 @@ def escape_control_characters(path: String) -> String:
             escaped += "\\r"
         elif value == 9:
             escaped += "\\t"
-        elif (value >= 0 and value < 32) or value == 127:
+        elif is_interpreted_control(value, preserve_lf_tab=False):
             escaped += "\\x"
             escaped += String(HEX[byte=value // 16])
             escaped += String(HEX[byte=value % 16])

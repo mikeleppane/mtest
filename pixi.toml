@@ -264,7 +264,7 @@ valgrind-check = "python -m scripts.tests.test_valgrind && python -m scripts.che
 # tests first prove the checker rejects a broken artifact, then the checker runs
 # xmllint against the vendored junit-10.xsd plus the arithmetic and structural
 # invariants the schema cannot express.
-junit-check = "python -m scripts.tests.test_junit && python -m scripts.checks.reports.junit"
+junit-check = "python -m scripts.tests.test_junit && python -m scripts.formats.junit"
 
 # Gate mtest's OWN rendered JUnit document through the same junit-10 oracle:
 # build and run tests/fixtures/junit/junit_emit.mojo, which drives the real
@@ -273,7 +273,7 @@ junit-check = "python -m scripts.tests.test_junit && python -m scripts.checks.re
 # rejected. This validates the shipped renderer's bytes, where junit-check
 # validates a mock. Depends on the precompiled package so the emitter can
 # import mtest.report.
-junit-render-check = { cmd = "python -m scripts.checks.reports.junit_render", depends-on = [
+junit-render-check = { cmd = "python -m scripts.formats.junit_render", depends-on = [
     "build",
 ] }
 
@@ -375,7 +375,7 @@ recipe-check = "python -m scripts.tests.test_community_recipe && python -m scrip
 # only check that the probe oracle duplicated into both lanes has not diverged.
 # Left solely in `valgrind-check` that check is unreachable on macOS and costs a
 # full instrumented lane on Linux to learn a docstring was reworded in one copy.
-harness-unit-check = "python -m scripts.tests.test_process_watchdog && python -m scripts.tests.test_dogfood && python -m scripts.tests.test_package_consumption && python -m scripts.tests.test_selfhost && python -m scripts.tests.test_e2e && python -m scripts.tests.test_e2e_json && python -m scripts.tests.test_collect_stream && python -m scripts.tests.test_contract && python -m scripts.tests.test_transcript_compare && python -m scripts.tests.test_readme_help && python -m scripts.tests.test_completion_shells && python -m scripts.tests.test_coverage_capability && python -m scripts.tests.test_abi_probe && python -m scripts.tests.test_asan && python -m scripts.tests.test_valgrind && python -m scripts.tests.test_native_format && python -m scripts.tests.test_build_profiles && python -m scripts.tests.test_protocol_compare && python -m scripts.tests.test_canary_run && python -m scripts.tests.test_canary_notify"
+harness-unit-check = "python -m scripts.tests.test_process_watchdog && python -m scripts.tests.test_vocabulary && python -m scripts.tests.test_dogfood && python -m scripts.tests.test_package_consumption && python -m scripts.tests.test_selfhost && python -m scripts.tests.test_e2e && python -m scripts.tests.test_e2e_json && python -m scripts.tests.test_collect_stream && python -m scripts.tests.test_contract && python -m scripts.tests.test_transcript_compare && python -m scripts.tests.test_readme_help && python -m scripts.tests.test_completion_shells && python -m scripts.tests.test_coverage_capability && python -m scripts.tests.test_abi_probe && python -m scripts.tests.test_asan && python -m scripts.tests.test_valgrind && python -m scripts.tests.test_native_format && python -m scripts.tests.test_build_profiles && python -m scripts.tests.test_protocol_compare && python -m scripts.tests.test_canary_run && python -m scripts.tests.test_canary_notify"
 
 # Repository policy: does this tree still obey its own rules? The public-version
 # oracle, the documentation-site parity oracle, the layout and invocation-policy
@@ -399,7 +399,7 @@ harness-unit-check = "python -m scripts.tests.test_process_watchdog && python -m
 # binary, and the drift it catches — a documentation-site page whose command no
 # longer matches the README block it mirrors — is a policy violation of exactly
 # the kind this group exists to name.
-repo-policy-check = "python -m scripts.tests.test_version && python -m scripts.tests.test_docs_parity && python -m scripts.checks.docs_parity && python -m scripts.tests.test_layout && python -m scripts.checks.layout && python -m scripts.tests.test_workflow_security && python -m scripts.checks.workflow_security && python -m scripts.tests.test_python_quality && python -m scripts.tests.test_build_site && python -m scripts.tests.test_annotations_oracle"
+repo-policy-check = "python -m scripts.tests.test_version && python -m scripts.tests.test_docs_parity && python -m scripts.checks.docs_parity && python -m scripts.tests.test_layout && python -m scripts.checks.layout && python -m scripts.tests.test_layering && python -m scripts.checks.layering && python -m scripts.tests.test_workflow_security && python -m scripts.checks.workflow_security && python -m scripts.tests.test_python_quality && python -m scripts.tests.test_build_site && python -m scripts.tests.test_annotations_oracle"
 
 # Release tooling: the community recipe (through the `recipe-check` edge, which
 # Pixi runs first), then the attestation schema, the GitHub release-state and

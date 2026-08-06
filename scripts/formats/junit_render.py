@@ -26,10 +26,10 @@ import subprocess
 import sys
 import tempfile
 
-from scripts.checks.reports import junit as junit_check
+from scripts.formats import junit as junit_check
 
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 EMITTER_SRC = REPO_ROOT / "tests" / "fixtures" / "junit" / "junit_emit.mojo"
 PACKAGE_DIR = REPO_ROOT / "build"
 

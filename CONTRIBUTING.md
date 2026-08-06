@@ -45,7 +45,7 @@ Keep each pull request focused. Use atomic Conventional Commits with a scope,
 explain in the body why the change is needed, and include tests for observable
 behavior. Keep Linux and macOS behavior aligned.
 
-Ask before changing the Mojo pin, the frozen command-line contract, any
+Ask before changing the Mojo pin, the command-line contract, any
 dependency, a blocking gate, or committed TestSuite transcript fixtures.
 Regenerate transcript snapshots only when their fixture or pinned toolchain
 oracle changes.

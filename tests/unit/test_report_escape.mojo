@@ -1,11 +1,12 @@
 """Tests for the machine-text escaping primitives (Layer 2).
 
-These are pure, table-driven tests over the escapers three future reporters
-(JSON/NDJSON, JUnit XML, GitHub annotations) will share: every control byte
-0x00-0x1F in every context, the quote/backslash/angle/percent storms, the
-NCR triple in XML attributes, U+FFFD passthrough and replacement, and the
-collision-proof stop-commands fencing helper (forced collision + regeneration,
-and the always-emitted resume delimiter).
+Table-driven tests over the escapers three reporters (JSON/NDJSON, JUnit XML,
+GitHub annotations) share: every control byte 0x00-0x1F in every context, the
+quote/backslash/angle/percent storms, the NCR triple in XML attributes, U+FFFD
+passthrough and replacement, and the collision-proof stop-commands fencing
+helper (forced collision + regeneration, and the always-emitted resume
+delimiter). Everything here is pure but the token minting, which draws from
+`/dev/urandom`.
 """
 from std.testing import (
     TestSuite,
@@ -25,8 +26,10 @@ from mtest.report.escape import (
     xml_escape_text,
 )
 from mtest.report.fencing import (
+    FENCE_TOKEN_POOL,
     contains_resume_delimiter,
     fence_region,
+    mint_fence_tokens,
     resume_delimiter,
     select_collision_free_token,
     stop_commands_opener,
@@ -434,6 +437,28 @@ def test_fence_region_epilogue_present_even_with_hostile_region() raises:
     var out = fence_region("realtoken", hostile)
     assert_true(out.endswith("::realtoken::"))
     assert_true(hostile in out)
+
+
+def test_minted_fence_tokens_are_full_width_hex_and_all_distinct() raises:
+    # A token short of its full width, or repeated across the pool, would make
+    # the collision fallthrough that `select_collision_free_token` performs
+    # useless: every candidate would collide with the same region.
+    var tokens = mint_fence_tokens(FENCE_TOKEN_POOL)
+    assert_equal(len(tokens), FENCE_TOKEN_POOL)
+    for i in range(len(tokens)):
+        assert_equal(tokens[i].byte_length(), 32)
+        for b in tokens[i].as_bytes():
+            var lowercase_hex = (
+                b >= UInt8(ord("0")) and b <= UInt8(ord("9"))
+            ) or (b >= UInt8(ord("a")) and b <= UInt8(ord("f")))
+            assert_true(
+                lowercase_hex,
+                "a minted token carries a non-hex byte: " + tokens[i],
+            )
+        for j in range(i + 1, len(tokens)):
+            assert_true(
+                tokens[i] != tokens[j], "two minted tokens are identical"
+            )
 
 
 def main() raises:

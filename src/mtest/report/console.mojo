@@ -51,6 +51,7 @@ from mtest.model import (
     SessionFinishedPayload,
     SessionStartedPayload,
     Summary,
+    TerminationKind,
     TestCounts,
     TestReportedPayload,
     TestResult,
@@ -63,22 +64,15 @@ from mtest.report.console_text import (
     escape_scalar,
     prefix_lines,
 )
-from mtest.report.fencing import fence_region, select_collision_free_token
+from mtest.report.fencing import (
+    FENCE_TOKEN_POOL,
+    fence_region,
+    mint_fence_tokens,
+    select_collision_free_token,
+)
 from mtest.report.report_text import normalize_detail
 from mtest.report.reporter import Reporter
 from mtest.report.signals import signal_name_for_target
-
-comptime _HEX: StaticString = "0123456789abcdef"
-"""Lowercase hex alphabet for rendering a fence token's random bytes."""
-
-comptime _FENCE_TOKEN_BYTES = 16
-"""Random bytes per fence token candidate; 16 bytes is 128 bits of entropy."""
-
-comptime _FENCE_TOKEN_POOL = 4
-"""How many independent candidate tokens to mint per run. A region that already
-contains the primary token's resume delimiter falls through to the next
-candidate; four independent 128-bit tokens make an all-collision draw
-impossible in practice."""
 
 comptime _FENCE_WITHHELD: StaticString = (
     "[mtest: captured output withheld — no fence entropy available]"
@@ -86,43 +80,6 @@ comptime _FENCE_WITHHELD: StaticString = (
 """Placeholder emitted when no fence token could be minted. Unfenced child bytes
 are never echoed under Actions, where they could forge a workflow command.
 """
-
-
-def _mint_fence_tokens(count: Int) raises -> List[String]:
-    """Mint `count` independent high-entropy fence tokens from `/dev/urandom`.
-
-    Each token is `_FENCE_TOKEN_BYTES` random bytes rendered as lowercase hex,
-    giving 128 bits of entropy apiece, unique per run. The entropy comes from
-    ordinary std file I/O over `/dev/urandom`; the exec and native layers are
-    never touched.
-
-    Args:
-        count: How many tokens to mint.
-
-    Returns:
-        `count` hex token strings, in draw order.
-
-    Raises:
-        Error: When `/dev/urandom` could not be read or returned a short read.
-            The caller withholds the echoed region rather than emit it
-            unfenced.
-    """
-    var need = count * _FENCE_TOKEN_BYTES
-    var raw: List[UInt8]
-    with open("/dev/urandom", "r") as f:
-        raw = f.read_bytes(need)
-    if len(raw) < need:
-        raise Error("console: short read from /dev/urandom for fence tokens")
-    var out = List[String]()
-    for t in range(count):
-        var token = String("")
-        for b in range(_FENCE_TOKEN_BYTES):
-            var v = Int(raw[t * _FENCE_TOKEN_BYTES + b])
-            token += String(_HEX[byte=v >> 4])
-            token += String(_HEX[byte=v & 0xF])
-        out.append(token^)
-    return out^
-
 
 # ANSI escape codes. Green for PASS, red for FAIL, red-bold for the crash class
 # (CRASH/TIMEOUT/COMPILE-ERROR and their kin), yellow for exclusions/warnings.
@@ -283,54 +240,53 @@ def _ensure_trailing_newline(s: String) -> String:
     return s + "\n"
 
 
-def _term_phrase(kind: Int, value: Int, escalated: Bool) -> String:
+def _term_phrase(kind: TerminationKind, value: Int, escalated: Bool) -> String:
     """A short human phrase for an attempt's decomposed termination.
 
-    The `AttemptFinished` event carries the termination as plain integers, the
-    exec-layer `Termination` kinds 0 EXITED, 1 SIGNALED, 2 TIMED_OUT and 3
-    SPAWN_FAILED, so this layer imports nothing above it. A signal is named in
-    words when recognized, a deadline notes any SIGKILL escalation, and a
-    nonzero EXITED is a compiler ICE that exited under its own control.
+    A signal is named in words when recognized, a deadline notes any SIGKILL
+    escalation, and a nonzero EXITED is a compiler ICE that exited under its
+    own control.
     """
-    if kind == 1:
+    if kind == TerminationKind.SIGNALED:
         var name = signal_name_for_target(value)
         if name != "":
             return String("signal ") + String(value) + " — " + name
         return String("signal ") + String(value)
-    if kind == 2:
+    if kind == TerminationKind.TIMED_OUT:
         var s = String("timed out")
         if escalated:
             s += ", escalated to SIGKILL"
         return s
-    if kind == 3:
+    if kind == TerminationKind.SPAWN_FAILED:
         return String("spawn failed (errno ") + String(value) + ")"
     return String("exit ") + String(value)
 
 
 def _precompile_ending_phrase(
-    term_kind: Int, term_value: Int, escalated: Bool, timeout_seconds: Int
+    term_kind: TerminationKind,
+    term_value: Int,
+    escalated: Bool,
+    timeout_seconds: Int,
 ) -> String:
     """How a precompile step's final attempt ended, in words.
 
     A step that never produced its package exits 1 either way, so what the
     banner owes a reader is which ending it was: a deadline mtest enforced, a
     compiler that died by a signal, a compiler that rejected the code, or a
-    compiler that could not be spawned. Reads the decomposed exec-layer
-    termination kinds the event carries (0 EXITED, 1 SIGNALED, 2 TIMED_OUT,
-    3 SPAWN_FAILED), so this layer imports nothing above it.
+    compiler that could not be spawned.
     """
-    if term_kind == 1:
+    if term_kind == TerminationKind.SIGNALED:
         var name = signal_name_for_target(term_value)
         var base = String("died by signal ") + String(term_value)
         if name != "":
             return base + " (" + name + ")"
         return base
-    if term_kind == 2:
+    if term_kind == TerminationKind.TIMED_OUT:
         var s = String("timed out after ") + String(timeout_seconds) + "s"
         if escalated:
             s += ", escalated to SIGKILL"
         return s
-    if term_kind == 3:
+    if term_kind == TerminationKind.SPAWN_FAILED:
         return String("could not be spawned (errno ") + String(term_value) + ")"
     return String("exited ") + String(term_value)
 
@@ -795,7 +751,7 @@ struct ConsoleReporter(Reporter):
             return
         self._fence_tokens_tried = True
         try:
-            self._fence_tokens = _mint_fence_tokens(_FENCE_TOKEN_POOL)
+            self._fence_tokens = mint_fence_tokens(FENCE_TOKEN_POOL)
         except:
             self._fence_tokens = List[String]()
 

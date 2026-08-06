@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Mutation tests for the GitHub-annotation tail oracle.
 
-`scripts/checks/reports/annotations.py` is what decides whether mtest's emitted
+`scripts/formats/annotations.py` is what decides whether mtest's emitted
 `::error`/`::warning`/`::notice` tail is well formed. It was reached only through
 the e2e scenarios, so nothing proved its individual rules actually reject a
 broken tail. Each test here breaks exactly one property and requires the oracle
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import unittest
 
-from scripts.checks.reports import annotations as oracle
+from scripts.formats import annotations as oracle
 
 
 ROW_A = "::error file=a.mojo::a.mojo::test_one: failed"

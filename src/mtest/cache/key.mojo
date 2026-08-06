@@ -7,12 +7,13 @@ the session layer.
 
 Two properties carry the whole persistent build cache.
 
-`KeyBuilder` frames every contribution as tag bytes, one `0x00`, the payload
-length as eight little-endian bytes, then the payload. `Sha256.update` is raw
-concatenation with no framing of its own, so without the length prefix the
-contributions `("ab", "c")` and `("a", "bc")` would hash alike — and a key
-collision here silently serves a stale binary. Because the length delimits,
-a payload full of newlines or `tag:` lookalikes cannot forge a boundary.
+`KeyBuilder` frames every contribution as the tag length, the tag bytes, the
+payload length, then the payload, each length eight little-endian bytes.
+`Sha256.update` is raw concatenation with no framing of its own, so without
+those lengths the contributions `("ab", "c")` and `("a", "bc")` would hash
+alike — and a key collision here silently serves a stale binary. Because both
+lengths lead, neither a payload full of newlines nor a tag holding any byte at
+all can forge a boundary: the frame is injective over the pair.
 
 `MetaFile.parse` is total. It reads text that came off disk, where a truncated
 write, an interrupted rename, a hand edit, or a stale format version are all
@@ -232,13 +233,81 @@ def _parse_seconds(text: String) -> Optional[Float64]:
     )
 
 
+def unsafe_tag_reason(tags: List[String]) -> String:
+    """Why `tags` cannot frame a cache key safely, or empty when they can.
+
+    The frame `feed` writes is injective over `(tag, payload)`, so no payload
+    and no tag byte can forge a boundary. What framing cannot rule out is two
+    call sites choosing the SAME tag spelling, and that is what these rules
+    cover.
+
+    `feed_file` feeds `tag`, `tag + ".size"` and `tag + ".sha"`, so a BASE tag
+    already spelled `something.size` produces exactly the frame another tag's
+    file contribution derives, and two different builds key alike — which
+    serves a stale binary and reports a green run that never happened. Those
+    two derived spellings are exactly what `feed` must keep accepting: the rule
+    applies to the base tags a namespace declares, never to the frames
+    `feed_file` builds out of them.
+
+    An empty tag names nothing, and a tag carrying a `0x00` cannot be quoted
+    into a diagnostic. Tags are source-level constants, so either one is a
+    mistake in mtest's own source rather than anything a tree being keyed can
+    cause.
+
+    Neither method can refuse on its own: both are total by contract, as is
+    every caller of theirs in the store's key path. The refusal therefore
+    belongs to whoever owns the namespace, which reads this before feeding
+    anything and switches its cache off.
+
+    Args:
+        tags: The base contribution names a namespace declares, in declaration
+            order. Not mutated.
+
+    Returns:
+        A reason naming the offending tag, or an empty string when every tag is
+        safe. The NUL and empty cases name the POSITION rather than the tag,
+        because neither can be quoted into a diagnostic. Total; allocates only
+        the returned string. Says nothing about uniqueness, which is a property
+        of the set rather than of any tag and has no counterpart rule here.
+    """
+    for i in range(len(tags)):
+        var tag = tags[i]
+        if tag.byte_length() == 0:
+            return "cache key tag " + String(i) + " is empty"
+        for b in tag.as_bytes():
+            if b == 0:
+                return "cache key tag " + String(i) + " contains a NUL byte"
+    for tag in tags:
+        for suffix in [String(".size"), String(".sha")]:
+            if tag.endswith(suffix):
+                return (
+                    "cache key tag '"
+                    + tag
+                    + "' ends in the reserved '"
+                    + suffix
+                    + "' suffix"
+                )
+    return String("")
+
+
+def _append_u64le(mut frame: List[UInt8], value: UInt64):
+    """Append `value` as eight little-endian bytes.
+
+    Args:
+        frame: The frame under construction; eight bytes are appended.
+        value: The length being written.
+    """
+    for i in range(8):
+        frame.append(UInt8((value >> UInt64(i * 8)) & 0xFF))
+
+
 struct KeyBuilder(Copyable, Movable):
     """Accumulates unambiguously framed contributions into one cache key.
 
-    Every `feed` writes tag bytes, one `0x00`, the payload length as eight
-    little-endian bytes, then the payload, so two different contribution
-    sequences can never hash alike no matter what the payloads contain. Tags
-    come from call sites, not from data, and must not contain a `0x00` byte.
+    Every `feed` writes the tag length, the tag bytes, the payload length, then
+    the payload, each length as eight little-endian bytes. Both parts are
+    delimited by a length that precedes them, so two different contribution
+    sequences can never hash alike whatever the tags and payloads contain.
 
     Copies fork the running state, which is what lets a caller absorb a shared
     prefix once and then branch per file. Finalizing consumes the builder.
@@ -274,17 +343,19 @@ struct KeyBuilder(Copyable, Movable):
         """Absorb one framed contribution.
 
         Args:
-            tag: The contribution's name; must not contain a `0x00` byte.
+            tag: The contribution's name; any byte sequence frames
+                unambiguously. Tags come from call sites, never from data, and
+                the namespace that declares them keeps them distinct through
+                `unsafe_tag_reason`.
             payload: The contribution's bytes; may be empty and may contain
                 any byte value, including `0x00` and newlines.
         """
         var frame = List[UInt8]()
-        for b in tag.as_bytes():
+        var tag_bytes = tag.as_bytes()
+        _append_u64le(frame, UInt64(len(tag_bytes)))
+        for b in tag_bytes:
             frame.append(b)
-        frame.append(0)
-        var n = UInt64(len(payload))
-        for i in range(8):
-            frame.append(UInt8((n >> UInt64(i * 8)) & 0xFF))
+        _append_u64le(frame, UInt64(len(payload)))
         for b in payload:
             frame.append(b)
         self._hasher.update(frame)
@@ -293,7 +364,7 @@ struct KeyBuilder(Copyable, Movable):
         """Absorb one framed contribution whose payload is text.
 
         Args:
-            tag: The contribution's name; must not contain a `0x00` byte.
+            tag: The contribution's name; see `feed`.
             payload: The contribution's text, absorbed as its UTF-8 bytes.
         """
         var bytes = List[UInt8]()
@@ -310,8 +381,10 @@ struct KeyBuilder(Copyable, Movable):
         it costs nothing and makes a truncated read visible in the key.
 
         Args:
-            tag: The base contribution name; the size and digest frames use
-                `tag + ".size"` and `tag + ".sha"`.
+            tag: The base contribution name; the size and digest frames are
+                `tag + ".size"` and `tag + ".sha"`, so a base tag already
+                wearing either suffix collides with another tag's. See
+                `unsafe_tag_reason`.
             path: The file's path as the caller names it.
             size: The file's length in bytes.
             sha_hex: The file's content digest as hex.

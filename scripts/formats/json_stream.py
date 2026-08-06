@@ -25,7 +25,7 @@ LENIENT (the forward-compatibility obligation)
     truncation signal for a writer that died mid-line, never as corruption. Its
     missing terminal record is how a consumer learns the run was cut short.
 
-Run directly (`python -m scripts.checks.reports.json_stream`) to self-test against the
+Run directly (`python -m scripts.formats.json_stream`) to self-test against the
 forward-compatibility and truncation fixtures under `scripts/fixtures/`.
 """
 
@@ -40,7 +40,7 @@ import sys
 STREAM_VERSION = 1
 """The frozen v1 stream version carried on the header line."""
 
-FIXTURE_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "json_stream"
+FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "json_stream"
 
 
 class StreamError(Exception):

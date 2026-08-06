@@ -17,7 +17,7 @@ The public surface is re-exported so callers write
 `from mtest.cache import ARG_FLAG, ARG_FILE_CANDIDATE, ARG_INCLUDE_DIR,
 ARG_UNKNOWN, ArgClass, BuildProduct, BuildRegistry, ImportScan, KeyBuilder,
 MetaFile, Sha256, classify_build_args, generation_name, scan_imports,
-sha256_hex`.
+sha256_hex, unsafe_tag_reason`.
 """
 from mtest.cache.build_products import BuildProduct, BuildRegistry
 from mtest.cache.imports import ImportScan, scan_imports
@@ -33,5 +33,6 @@ from mtest.cache.key import (
     MetaFile,
     classify_build_args,
     generation_name,
+    unsafe_tag_reason,
 )
 from mtest.cache.sha256 import Sha256, sha256_hex

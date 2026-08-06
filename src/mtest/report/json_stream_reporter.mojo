@@ -32,15 +32,13 @@ The reporter only borrows the descriptor, which keeps the type trivially
 `Copyable, Movable` (an fd is an integer) with no double-close hazard.
 
 The write and create/close syscalls, and the `errno` reading that classifies
-their failures, are raw platform operations from `mtest.platform.stream`. They
-are imported from that submodule directly rather than through the platform
-package's public surface, so the raw libc `write` declaration reaches only this
-one report module, the layer that already carried it, and not every module that
-merely wants a process id. This module keeps only the policy: the retrying
-write-all loop, the failure latch, the error messages, and the `EINTR` rules.
+their failures, are raw platform operations the `mtest.platform` facade
+exports. This module keeps only the policy: the retrying write-all loop, the
+failure latch, the error messages, and the `EINTR` rules.
 """
 from mtest.model import Event, EventKind
-from mtest.platform.stream import (
+from mtest.platform import (
+    EINTR,
     close_fd,
     create_truncate_fd_guarded,
     errno_now,
@@ -48,9 +46,6 @@ from mtest.platform.stream import (
 )
 from mtest.report.json_stream import serialize_event, stream_header
 from mtest.report.reporter import Reporter
-
-comptime _EINTR = 4
-"""`errno` for an interrupted syscall: a `write` to retry, not a failure."""
 
 
 def open_json_fd(path: String) raises -> Int:
@@ -127,7 +122,7 @@ def close_json_fd(fd: Int) -> Bool:
     """
     if close_fd(fd) == 0:
         return False
-    return errno_now() != _EINTR
+    return errno_now() != EINTR
 
 
 @fieldwise_init
@@ -276,7 +271,7 @@ struct JsonStreamReporter(Reporter):
             var n = write_fd(self._fd, b.unsafe_ptr() + offset, total - offset)
             if n < 0:
                 var err = errno_now()
-                if err == _EINTR:
+                if err == EINTR:
                     continue
                 self._latch(err, context)
                 return False

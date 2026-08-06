@@ -12,7 +12,11 @@ This module pins EVERY cell of the frozen policy table with synthesized
 from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.exec import Termination
-from mtest.session import RetryClass, has_crash_signature, retry_classify
+from mtest.session.retry_class import (
+    RetryClass,
+    has_crash_signature,
+    retry_classify,
+)
 
 
 def _bytes(s: String) -> List[UInt8]:

@@ -9,7 +9,6 @@ import subprocess
 import sys
 import tempfile
 
-from scripts.checks.reports import json_stream as json_stream_check
 from scripts.e2e.assertions import (
     ELISION,
     INTERRUPT_TIMEOUT,
@@ -33,6 +32,7 @@ from scripts.e2e.runner import (
     ScenarioError,
     expect_group_gone,
 )
+from scripts.formats import json_stream as json_stream_check
 
 
 def _looks_like_stream_line(line: str) -> bool:

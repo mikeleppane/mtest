@@ -6,10 +6,11 @@ or reporter code. Filesystem probes are removed unless the filesystem itself
 refuses cleanup, which is reported as a failed check.
 """
 from std.os import getenv, makedirs, remove, rmdir
-from std.os.path import dirname, exists, isdir
+from std.os.path import exists, isdir
 from std.pathlib import cwd
 from std.sys.info import CompilationTarget, is_triple
 
+from mtest.cli.destinations import active_destinations
 from mtest.cli.parse_result import ParseResult
 from mtest.config import (
     CliOverlay,
@@ -19,10 +20,12 @@ from mtest.config import (
     ResolvedConfig,
     RunnerConfig,
     TOML_SOURCE_MAX_BYTES,
+    cli_only_resolution_defaults,
     lossy_utf8,
     parse_last_run_state,
     parse_toml,
     resolve_config,
+    safe_path_label,
     validate_resolved_config,
 )
 from mtest.exec import (
@@ -31,7 +34,7 @@ from mtest.exec import (
     interrupt_requested,
     run_supervised,
 )
-from mtest.model.control_chars import is_interpreted_control
+from mtest.model import is_interpreted_control
 from mtest.platform import (
     BoundedRegularFileRead,
     close_checked_fd,
@@ -86,87 +89,23 @@ struct _DoctorContext(Movable):
         self.config_loaded = False
         self.config_load = _ConfigLoad(FileConfig.empty(), "", "")
         self.resolved = resolve_config(
-            _resolution_defaults(request.config),
+            cli_only_resolution_defaults(request.config),
             FileConfig.empty(),
             _environment(),
             request.overlay,
         )
 
 
-def _hex_escape(value: Int) -> String:
-    """Render one interpreted control as `\\xHH` in lowercase hex.
-
-    The single place doctor's escape text is assembled, so the C0/DEL and C1
-    forms cannot drift apart in width or letter case. Doctor keeps one spelling
-    for both classes (the console reporter distinguishes them) because a
-    diagnostic line is read, not parsed, and one form is the shorter thing to
-    recognize.
-
-    Args:
-        value: The code point being escaped. Only its low byte is rendered,
-            which is exact for every code point doctor escapes: they all lie in
-            `U+0000..U+009F`.
-
-    Returns:
-        A `\\x` introducer followed by exactly two lowercase hex digits.
-    """
-    comptime HEX = "0123456789abcdef"
-    return "\\x" + String(HEX[byte=value // 16]) + String(HEX[byte=value % 16])
-
-
-def _safe_text(text: String) -> String:
-    """Neutralize child-controlled text for one diagnostic line.
-
-    Escapes every code point `mtest.model.control_chars` classifies as a
-    terminal instruction: the C0 controls `U+0000..U+001F`, DEL `U+007F`, and
-    the C1 controls `U+0080..U+009F`. C1 is not optional: `U+009B` is CSI,
-    `U+009D` is OSC and `U+009C` is ST in their single-code-point form, so a
-    `--version` probe doctor interpolates could drive a terminal with no ESC
-    byte anywhere in its output. LF, CR and Tab get named short forms because
-    they are the ones a reader recognizes; the effect is the same.
-
-    Args:
-        text: Untrusted display text, already valid UTF-8.
-
-    Returns:
-        A single-line, control-free rendering of `text`, bounded to 240
-        code points with a trailing ellipsis when it would run longer.
-    """
-    var escaped = String("")
-    for cp in text.codepoints():
-        var value = Int(cp)
-        if value == 10:
-            escaped += "\\n"
-        elif value == 13:
-            escaped += "\\r"
-        elif value == 9:
-            escaped += "\\t"
-        elif is_interpreted_control(value, preserve_lf_tab=False):
-            escaped += _hex_escape(value)
-        else:
-            escaped += String(cp)
-    if escaped.count_codepoints() <= 240:
-        return escaped^
-    var shortened = String("")
-    var count = 0
-    for cp in escaped.codepoint_slices():
-        if count == 237:
-            break
-        shortened += String(cp)
-        count += 1
-    return shortened + "..."
-
-
 def _line(status: String, name: String, detail: String) -> String:
-    return status + " " + name + ": " + _safe_text(detail)
+    return status + " " + name + ": " + safe_path_label(detail)
 
 
 def _has_control(text: String) -> Bool:
     """Whether `text` carries any code point a terminal would interpret.
 
-    Covers the same three ranges `_safe_text` escapes, so a toolchain identity
-    made only of C1 controls is rejected as unusable rather than compared,
-    printed, and trusted.
+    Covers the same code points `safe_path_label` escapes, so a toolchain
+    identity made only of C1 controls is rejected as unusable rather than
+    compared, printed, and trusted.
 
     Args:
         text: Untrusted display text, already valid UTF-8.
@@ -251,19 +190,6 @@ def _relative_to_root(root: String, absolute: String) -> String:
     return absolute
 
 
-def _resolution_defaults(parsed: RunnerConfig) -> RunnerConfig:
-    var defaults = RunnerConfig.default()
-    defaults.exitfirst = parsed.exitfirst
-    defaults.keyword = parsed.keyword.copy()
-    defaults.collect = parsed.collect
-    defaults.last_failed = parsed.last_failed
-    defaults.failed_first = parsed.failed_first
-    defaults.shard_mode = parsed.shard_mode
-    defaults.shard_m = parsed.shard_m
-    defaults.shard_n = parsed.shard_n
-    return defaults^
-
-
 def _environment() -> ConfigEnvironment:
     return ConfigEnvironment(
         mtest_mojo=getenv("MTEST_MOJO", ""),
@@ -292,7 +218,7 @@ def _load_config(
     else:
         absolute = _absolute_from_root(root, requested)
         selected = _relative_to_root(root, absolute)
-    var label = _safe_text(selected)
+    var label = safe_path_label(selected)
     if not exists(absolute):
         if explicit:
             return _ConfigLoad(
@@ -341,7 +267,7 @@ def _ensure_config(mut context: _DoctorContext):
         context.root, context.root_ok, context.request
     )
     context.resolved = resolve_config(
-        _resolution_defaults(context.request.config),
+        cli_only_resolution_defaults(context.request.config),
         context.config_load.file,
         _environment(),
         context.request.overlay,
@@ -606,6 +532,12 @@ def _check_state(mut context: _DoctorContext) raises -> String:
 def _check_report_destinations(
     mut context: _DoctorContext,
 ) raises -> String:
+    """Probe the parent directory of every destination this config would open.
+
+    The destination set is the run path's own, so a project file the runner
+    would refuse cannot pass here: doctor and the run agree on which keys are
+    active and which values name a real file.
+    """
     _ensure_config(context)
     if context.config_load.error != "":
         return _line(
@@ -613,10 +545,9 @@ def _check_report_destinations(
             "report-destinations",
             "dependency config unavailable",
         )
-    var checked = 0
-    var json_dest = context.resolved.config.json_dest.copy()
-    if json_dest != "" and json_dest != "-":
-        var parent = String(dirname(json_dest))
+    var destinations = active_destinations(context.resolved)
+    for i in range(len(destinations)):
+        var parent = destinations[i].parent
         if not context.root_ok and not parent.startswith("/"):
             return _line(
                 "FAIL", "report-destinations", "dependency root unavailable"
@@ -628,32 +559,18 @@ def _check_report_destinations(
             return _line(
                 "FAIL",
                 "report-destinations",
-                "JSON parent does not exist: '" + parent + "'",
+                destinations[i].format
+                + " parent does not exist: '"
+                + safe_path_label(parent)
+                + "'",
             )
-        _probe_directory(absolute, "mtest-doctor-json")
-        checked += 1
-    var junit_dest = context.resolved.config.junit_dest.copy()
-    if junit_dest != "":
-        var parent = String(dirname(junit_dest))
-        if not context.root_ok and not parent.startswith("/"):
-            return _line(
-                "FAIL", "report-destinations", "dependency root unavailable"
-            )
-        var absolute = context.root if parent == "" else _absolute_from_root(
-            context.root, parent
-        )
-        if not isdir(absolute):
-            return _line(
-                "FAIL",
-                "report-destinations",
-                "JUnit parent does not exist: '" + parent + "'",
-            )
-        _probe_directory(absolute, "mtest-doctor-junit")
-        checked += 1
-    if checked == 0:
+        _probe_directory(absolute, "mtest-doctor-" + destinations[i].format)
+    if len(destinations) == 0:
         return _line("PASS", "report-destinations", "none")
     return _line(
-        "PASS", "report-destinations", String(checked) + " parent(s) usable"
+        "PASS",
+        "report-destinations",
+        String(len(destinations)) + " parent(s) usable",
     )
 
 

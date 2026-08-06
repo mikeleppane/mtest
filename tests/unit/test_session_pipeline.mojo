@@ -11,7 +11,7 @@ by some case below, because the sequential driver reaches all of them today.
 """
 from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
-from mtest.session import (
+from mtest.session.pipeline import (
     FileStage,
     PipelineHalt,
     RunPipeline,
@@ -404,38 +404,6 @@ def test_next_step_is_pure() raises:
     assert_equal(first.kind.code, second.kind.code)
     assert_equal(first.file_index, second.file_index)
     assert_equal(first.attempt, second.attempt)
-
-
-# --- dispatch reservation (the pool's double-dispatch guard) -----------------
-
-
-def test_a_dispatched_file_is_not_handed_out_again() raises:
-    """Marking a file in flight makes the scheduler skip it, so a driver that
-    fills more than one slot receives the next file rather than the same one."""
-    var p = _plain(2)
-    _collect_one(p, 0)
-    _collect_one(p, 1)
-    p.record_collection_announced()
-    _expect(p.next_step(), StepKind.RUN_SELECTION, 0, attempt=1)
-    p.mark_in_flight(0)
-    # File 0 is in flight; the scheduler moves on to file 1 rather than
-    # re-offering file 0.
-    _expect(p.next_step(), StepKind.RUN_SELECTION, 1, attempt=1)
-    p.mark_in_flight(1)
-    _expect(p.next_step(), StepKind.NOTHING, -1)
-
-
-def test_folding_a_completion_releases_the_dispatch_reservation() raises:
-    """A dispatched file that is folded back — here a crash-class retry — is no
-    longer in flight, so the scheduler offers its next attempt."""
-    var p = RunPipeline(1, 1, False, 0)
-    _collect_one(p, 0)
-    p.record_collection_announced()
-    _expect(p.next_step(), StepKind.RUN_SELECTION, 0, attempt=1)
-    p.mark_in_flight(0)
-    _expect(p.next_step(), StepKind.NOTHING, -1)
-    assert_true(p.admit_crash_retry(0))
-    _expect(p.next_step(), StepKind.RUN_SELECTION, 0, attempt=2)
 
 
 def test_a_latched_interrupt_survives_a_straggling_limit_verdict() raises:

@@ -4,7 +4,7 @@
 The reference reader for the newline-delimited JSON listing mtest writes under
 `mtest collect --format json`; the normative shape lives in
 `docs/collect-stream.md`. It mirrors the run stream's consumer
-(`scripts/checks/reports/json_stream.py`) rule for rule, because the two
+(`scripts/formats/json_stream.py`) rule for rule, because the two
 formats make the same promises and a consumer of one should not have to learn
 a second discipline:
 
@@ -28,7 +28,7 @@ LENIENT (the forward-compatibility obligation)
   * a single trailing UNTERMINATED fragment is classified as a TORN tail, the
     truncation signal for a writer that died mid-line, never as corruption.
 
-Run directly (`python -m scripts.checks.reports.collect_stream`) to self-test
+Run directly (`python -m scripts.formats.collect_stream`) to self-test
 against the forward-compatibility and corruption fixtures under
 `scripts/fixtures/collect_stream/`.
 """
@@ -44,7 +44,7 @@ import sys
 COLLECT_STREAM_VERSION = 1
 """The frozen collect-stream version carried on the header line."""
 
-FIXTURE_DIR = Path(__file__).resolve().parents[2] / "fixtures" / "collect_stream"
+FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "collect_stream"
 
 
 class CollectStreamError(Exception):

@@ -7,7 +7,7 @@ from mtest.config.report_style import ReportStyle
 from mtest.config.resolve import ResolvedConfig
 from mtest.config.show_output import ShowOutput
 from mtest.config.verbosity import Verbosity
-from mtest.model.control_chars import is_interpreted_control
+from mtest.model import is_interpreted_control
 
 
 def _source(source: Provenance) -> String:

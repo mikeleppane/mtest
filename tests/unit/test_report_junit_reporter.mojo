@@ -7,7 +7,7 @@ outcome / per-test rows, the Surefire chronology of a rerun-exhausted failure,
 flaky attempt order, the precompile suite plus per-casualty not-run rows and the
 empty-list degenerate case, deselected/excluded absence, the suite-level
 capture, and the non-raising write latch. The junit-10 oracle is run over the
-real assembled output by the `scripts/checks/reports/junit_render.py` CI gate; here the
+real assembled output by the `scripts/formats/junit_render.py` CI gate; here the
 event->fragment mapping and the spool mechanism are pinned directly, including
 `open_junit_spool` — the spool-directory primitive the reporter is handed.
 """
@@ -21,7 +21,7 @@ from std.testing import (
     assert_true,
 )
 
-from mtest.model.events import Event
+from mtest.model.events import Event, TerminationKind
 from mtest.model.node_id import NodeId
 from mtest.model.outcome import Outcome
 from mtest.model.test_result import TestResult
@@ -63,9 +63,9 @@ def _attempt(path: String, idx: Int) -> Event:
         "run",
         idx,
         3,
-        1,  # term_kind = SIGNALED
+        TerminationKind.SIGNALED,
         11,
-        1,
+        TerminationKind.SIGNALED,
         11,
         False,
         True,

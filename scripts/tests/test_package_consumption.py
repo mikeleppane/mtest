@@ -762,6 +762,50 @@ class ArtifactIdentityTests(unittest.TestCase):
             verify_installed_artifact_identity(self.prefix, self.artifact)
 
 
+FILE_ROW_TOKENS = (
+    "PASS",
+    "FAIL",
+    "CRASH",
+    "TIMEOUT",
+    "COMPILE-ERROR",
+    "COMPILE-TIMEOUT",
+    "MALFORMED-SUITE",
+    "PRECOMPILE-ERROR",
+    "FLAKY",
+    "NO-TESTS",
+)
+"""Every token that starts a per-file verdict row in `console.mojo`.
+
+Derived by reading the row-emission sites, not `_verdict_token`'s output set,
+which is wider: PASS through FLAKY fall through `_on_file_finished`'s generic
+branch for any outcome not specially handled, COMPILE-TIMEOUT and
+MALFORMED-SUITE among them; PRECOMPILE-ERROR is the literal banner token
+`_on_precompile_failed` prints; NO-TESTS is substituted for PASS ahead of
+`_verdict_token`. SKIP and DESELECTED never label a file row (per-test only, or
+never assigned). EXCLUDED is `_verdict_token` output but starts a row of its
+own shape, carrying the pattern that excluded the file, and NOT-RUN is a
+summary count with no row at all; neither belongs in a verdict alternation,
+where a legitimate exclusion would read as a bad verdict.
+
+Written out rather than imported, so it can disagree with the regex it checks.
+`scripts/tests/test_vocabulary.py` reconciles it against
+`scripts/formats/vocabulary.txt`.
+"""
+
+
+class VerdictRowTokenCoverageTests(unittest.TestCase):
+    """`VERDICT_ROW_RE` must see every token a real console row can carry."""
+
+    def test_verdict_row_re_sees_every_file_row_token(self) -> None:
+        for token in FILE_ROW_TOKENS:
+            line = f"{token} e2e/cases/example.mojo"
+            with self.subTest(token=token):
+                match = package_consumption.VERDICT_ROW_RE.search(line)
+                if match is None:
+                    raise AssertionError(f"VERDICT_ROW_RE is blind to {token}")
+                self.assertEqual(match.group("token"), token)
+
+
 class FailingFixtureConsumptionTests(unittest.TestCase):
     """The installed binary must be seen failing the known-failing fixture."""
 

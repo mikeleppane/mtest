@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Tests for the strict collect-stream consumer.
 
-`scripts/checks/reports/collect_stream.py` is the oracle the contract gate and
+`scripts/formats/collect_stream.py` is the oracle the contract gate and
 the end-to-end gate read `mtest collect --format json` through, so its own
 rejections need proving: an oracle that quietly accepts a broken stream turns
 every check built on it green. Each test here breaks exactly one property, or
@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 import unittest
 
-from scripts.checks.reports import collect_stream as oracle
+from scripts.formats import collect_stream as oracle
 
 
 HEADER = '{"event":"collect","version":1,"generator":"mtest x.y.z"}'

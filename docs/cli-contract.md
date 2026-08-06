@@ -1,89 +1,56 @@
 # mtest command-line contract
 
-**Status: FROZEN for the 1.x series.** This document specifies the v1
+**Status: stable, and deliberately conservative.** This document specifies the
 command-line interface of `mtest`. It is the public API of the tool. A surface
-freezes on the release that first **serves** it, not on 1.0.0: the inventory
-1.0.0 shipped froze there, and a surface added by a later 1.x minor freezes
-when that minor ships it. Nothing is retroactively frozen and nothing is
-retroactively promised — a surface that was never served carried no promise to
-break.
+carries a promise once it is **served**; nothing is retroactively promised — a
+surface that was never served carried no promise to break.
 
-The amendment rule, so the freeze means something concrete. Within 1.x the
-surface inventory may grow: a minor release may add subcommands, flags, and
-machine-format fields, additively. What FROZEN means is that nothing served
-ever changes meaning, is removed, or has its exit domain, grammar, or format
-altered within 1.x — those changes are what a major version is for.
+The amendment rule, so the promise means something concrete. The surface
+inventory may grow: a release may add subcommands, flags, and machine-format
+fields, additively. What the promise rules out is the quiet change — a served
+surface that changes meaning, is removed, or has its exit domain, grammar, or
+format altered without that being a deliberate, announced compatibility break.
 
 **The one compatibility exception, stated rather than buried.** Additive growth
 is not free, and the place it costs something is the leading token. `run` is the
 default subcommand, so a first argument that is not a known subcommand is a path
-(§3). Serving a *new* subcommand therefore reserves that word: `mtest init` ran
-a directory named `init` before 1.1 and bootstraps a project after it, and
-`mtest new` and `mtest debug` changed from running a path to refusing an
-argument list. This is a real change of meaning for those invocations and is
-permitted only because the alternative — never adding a subcommand within 1.x —
-was judged the worse trade. **The bare subcommand vocabulary is therefore not
-frozen; every other served surface is.** A path whose name collides is still
-reachable, spelled `./name`, and that spelling is stable: it can never be read
-as a subcommand. Scripts that pass a path as the first operand should spell it
-`./name` for exactly this reason.
+(§3). Serving a *new* subcommand therefore reserves that word: `mtest init` used
+to run a directory named `init` and now bootstraps a project, and `mtest new`
+and `mtest debug` changed from running a path to refusing an argument list. This
+is a real change of meaning for those invocations and is permitted only because
+the alternative — never adding a subcommand — was judged the worse trade. **The
+bare subcommand vocabulary is therefore not promised; every other served surface
+is.** A path whose name collides is still reachable, spelled `./name`, and that
+spelling is stable: it can never be read as a subcommand. Scripts that pass a
+path as the first operand should spell it `./name` for exactly this reason.
 
 §20 sorts every surface into three tiers and they carry different promises:
 
-- **FROZEN** surfaces — the subcommands, flag names and semantics, exit codes,
+- **STABLE** surfaces — the subcommands, flag names and semantics, exit codes,
   the node-id grammar, `mtest.toml` key names and semantics, the JUnit mapping,
   the annotation shapes, the `--json` event stream, the `collect` formats, and
-  the test-module contract — never change meaning and are never removed or
-  narrowed within 1.x. The inventory grows only by addition, and a machine
-  format grows only at its stated schema `version`: the `--json` event stream
-  and the `collect --format json` stream both gain event kinds and fields at
+  the test-module contract. These are what a consumer may build on: they are not
+  changed or narrowed casually, the inventory grows by addition, and a machine
+  format grows at its stated schema `version` — the `--json` event stream and
+  the `collect --format json` stream both gain event kinds and fields at
   `version` 1, while a removal or a meaning change bumps the header version.
-- **STABLE-INTENT** surfaces carry a weaker promise on purpose. Default values —
-  timeouts, `auto` worker sizing — may be tuned in a minor release, and the
-  `.mtest-cache/lastrun` format changes only by taking a new format version.
-  Tuning a default is not a semantics change to the flag that reads it.
+- **ADJUSTABLE** surfaces carry a weaker promise on purpose. Default values —
+  timeouts, `auto` worker sizing — may be tuned, and the `.mtest-cache/lastrun`
+  format changes only by taking a new format version. Tuning a default is not a
+  semantics change to the flag that reads it.
 - **INFORMAL** surfaces — console text layout and colors, and the human-facing
   `config show` output — carry no compatibility promise at all. Read the
   `--json` event stream rather than the console rendering if you need stability.
 
-New grammar for a surface that is already served is a major version: changing
-how an existing flag parses, what it means, or which codes it can exit with.
-§21 lists what is planned and not served; the additive entries there may land
-in a future minor, and anything that would move a served surface waits for a
-major.
-
-**What 1.1 adds.** Six served command-line surfaces:
-
-- `--fail-on-flaky` demotes a would-be exit `0` to `1` when at least one file
-  passed only after a crash-class retry (§13).
-- `--shuffle` and `--seed N` randomize the order run files execute in and print
-  the seed that reproduces the order (§18).
-- `collect --format json` renders the listing as a versioned stream beside the
-  plain one, at collect-stream `version` 1 (§16, `docs/collect-stream.md`).
-- `mtest debug PATH::TEST` prepares one test and hands it the terminal, exiting
-  only before the handoff (§28).
-- `mtest new PATH` writes one runnable test file and never overwrites (§29.1).
-- `mtest init [--ci github]` bootstraps a project in the invocation root and
-  replaces nothing that already exists (§29.2).
-
-Two additions are not command-line surfaces and are easy to miss, so they are
-named too:
-
-- the `[run] fail-on-flaky` project-configuration key, which resolves through
-  the ordinary layer precedence like every other key (§25);
-- the `session_started.shuffle_seed` field on the `--json` event stream, which
-  is present only under `--shuffle`. Its absence on an unshuffled run is what
-  keeps that record byte-identical to a stream written before the flag existed
-  (§15.4, `docs/json-stream.md`).
-
-No previously served surface changed meaning. The one exception is deliberate,
-declared above, and confined to the leading token: `new`, `init`, and `debug`
-are now subcommands where a bare path of that name used to be an operand.
+Changing how an existing flag parses, what it means, or which codes it can exit
+with is a break of a served surface, not an amendment. §21 lists what is planned
+and not served; the additive entries there may land in a later release, while
+anything that would move a served surface waits for a deliberate break.
 
 The rule binds the interface, not the prose: sharpening this document's
 description of a surface that does not itself move is not an amendment.
 
-Each subcommand's exit domain and precedence are frozen. The enumerated
+Each subcommand's exit domain and precedence are stable. The enumerated
 usage-error triggers grow only when a newly served surface adds an argv syntax
 or applicability error. For what the *current build* implements today, see
 [§24, Availability status (this build)](#24-availability-status-this-build).
@@ -129,7 +96,7 @@ subcommand inventory (§30).
 
 Every relative path the runner reports or matches — node ids, `--exclude`
 patterns, cache keys, annotation locations, `collect` output — is relative to a
-single **invocation root**. In v1 the root is the **current working directory**.
+single **invocation root**. The root is the **current working directory**.
 
 - Path normalization is **lexical only**: `.` and `..` segments are folded
   textually; symlinks are **not** resolved (documented limitation — resolving
@@ -154,7 +121,7 @@ single **invocation root**. In v1 the root is the **current working directory**.
   `mtest run new` and `mtest collect new` need no prefix at all.
 - Flags may be written `--flag value` or `--flag=value`. Both spellings are
   accepted everywhere a flag takes a value.
-- Short flags that take no value may not be bundled in v1 (`-x -q`, not `-xq`).
+- Short flags that take no value may not be bundled (`-x -q`, not `-xq`).
 - Flags and positional paths may **interleave** freely:
   `mtest tests/a.mojo -x tests/b.mojo` is valid.
 - Parsing stops at a bare `--`. Everything after it is forwarded verbatim as
@@ -382,7 +349,7 @@ unknown node id is an exit-4 error raised post-probe, before any test body
 runs.
 
 **`-k STR`** is a case-insensitive substring filter over node ids. At most one
-`-k` is accepted in v1 (boolean expressions are reserved). A `-k` that matches
+`-k` is accepted (boolean expressions are reserved). A `-k` that matches
 nothing is not an error by itself, but if it leaves the session with nothing to
 run the exit code is 5 (§9).
 
@@ -823,7 +790,7 @@ Exit domains are per subcommand. This table and precedence govern `run` and
 §29 defines the `{0, 3, 4}` domains of `new` and `init`, and §28 defines
 `debug`'s pre-handoff domain — past the handoff the exit status is the test
 binary's own and mtest has no code left to define.
-The meanings and precedence within each command domain are **FROZEN**.
+The meanings and precedence within each command domain are **STABLE**.
 Exit-4's enumerated run/collect triggers grow only as served pre-run surfaces
 grow:
 
@@ -1176,7 +1143,7 @@ quiet mode. `N=0` (the default) disables the list. `--durations` is a
 
 `--junit-xml` is **served**: it writes a JUnit XML report — the settled
 junit-10 dialect (`scripts/schemas/junit-10.xsd`), the same the committed
-`scripts/checks/reports/junit.py` oracle blesses — assembled from the runner's own typed
+`scripts/formats/junit.py` oracle blesses — assembled from the runner's own typed
 events, never from a parse of the console text.
 
 - **Document shape.** One `<testsuites>` root carrying `name`, `tests`,
@@ -1256,7 +1223,7 @@ summary band. `MODE` is `off|on|auto`; **`auto` (the default) is on iff
 `GITHUB_ACTIONS=true`**, `on` always renders, `off` never does. The tail renders
 only when resolved-on.
 
-**The frozen annotation shapes**, one clear entry per kind:
+**The annotation shapes**, one clear entry per kind:
 
 - **Per-test FAIL** → `::error file=<f>,line=<l>::<node id>: <first assertion
   line>`. `line=` is present **only** when that first line itself carries a
@@ -1340,7 +1307,7 @@ this section summarizes it.
 
 - **Framing and header.** NDJSON: one complete JSON object per `\n`-terminated
   line, valid escaped UTF-8, no floats (`Infinity`/`-Infinity`/`NaN` never
-  appear). Line 1 is the frozen header `{"event":"stream","version":1,
+  appear). Line 1 is the fixed header `{"event":"stream","version":1,
   "generator":"mtest <version>"}`.
 - **Events.** The stream mirrors every session event the console reporter sees,
   with the `progress` kind **excluded** by design: it is ephemeral,
@@ -1349,7 +1316,7 @@ this section summarizes it.
 - **`*_us` durations.** The sole naming exception: every `*_seconds` duration is
   emitted as an integer-microsecond `*_us` field, so the stream carries no
   floating-point value.
-- **Ordering.** An informal timeline with frozen split invariants: per session,
+- **Ordering.** An informal timeline with fixed split invariants: per session,
   header → `session_started` → precompile records → per-file events →
   `crash_attribution` → `session_finished` last; per file, contiguous
   `test_reported` rows and monotonic `attempt_finished` records precede that
@@ -1384,7 +1351,7 @@ this section summarizes it.
   consumers **must ignore** unknown fields and kinds. A removal or
   meaning-change bumps the header version; the version lives only on the header.
 
-`--json` is a **run-only** flag in v1 (§4).
+`--json` is a **run-only** flag (§4).
 
 ---
 
@@ -1457,7 +1424,7 @@ as the JUnit report is, never from a parse of the console text.
   mode it allowed. That is announced on stderr and changes no exit code: the
   requested artifact was delivered, and an exit 3 would say it was not.
 
-`--report` and `--report-style` are **run-only** flags in v1 (§4).
+`--report` and `--report-style` are **run-only** flags (§4).
 
 ---
 
@@ -1467,7 +1434,7 @@ as the JUnit report is, never from a parse of the console text.
 sorted **lexicographically**, in one of two formats: `--format lines`, the
 default, prints one node id per line, and `--format json` prints the versioned
 NDJSON collect stream described below. The runner imposes its own order so the
-frozen output format never couples to TestSuite's discovery order (execution
+output format never couples to TestSuite's discovery order (execution
 still uses discovery order internally). `collect` accepts the selection and
 build flags because it compiles files to enumerate them.
 
@@ -1521,7 +1488,7 @@ That shared ordering does not mean every surface is byte-identical across runs;
 each below states its actual promise, scoped precisely:
 
 - **`collect`** output stays **byte-identical** across runs of the same inputs:
-  the frozen listing (§16, §20) carries no wall-clock or captured-text content
+  the listing (§16, §20) carries no wall-clock or captured-text content
   to vary.
 - **`--junit-xml`** (§15.2) is deterministic in **structure, identity,
   classification, and counts** — the `<testsuite>`/`<testcase>` shape, node-id
@@ -1574,7 +1541,7 @@ fields.
 pool while each file's own steps (build → run → retries) stay strictly ordered.
 **The default is one worker** — with no flag, files run sequentially and the
 build argv is byte-identical to a single-worker build. `auto` sizing is
-runner-chosen and may tune across minor versions: it is a stable *intent*
+runner-chosen and may tune across releases: it is a stable *intent*
 (benchmark-informed — half the logical cores — taking half rather than the whole
 machine to leave headroom for other work and bound capture memory, not because
 extra workers starve each other on build threads), not a stable number. Concurrent builds share a
@@ -1598,7 +1565,7 @@ bounds that at `cores // 2 × 16 MiB`. It is a worst case, reached only when
 children actually emit that much output; the capture is bounded and keeps the
 head and tail while dropping the middle (§14), never growing without limit. A
 memory-constrained environment should lower `-n` accordingly. `auto` remains an
-*intent*, not a promised number (it may tune across minor versions).
+*intent*, not a promised number (it may tune across releases).
 
 `--timeout SECS` (default 300, `0` disables) bounds a single file's **run**;
 exceeding it yields TIMEOUT. `--compile-timeout SECS` (default 600, `0`
@@ -1619,7 +1586,7 @@ The partition is applied to the **post-exclusion** run-file universe **before
 any build**, so a sharded-out file is never compiled. Two modes:
 
 - **`hash:` (the default).** A file is owned by shard `M` iff
-  `fnv1a64(path) % N == M-1`, where `fnv1a64` is canonical FNV-1a 64-bit (frozen
+  `fnv1a64(path) % N == M-1`, where `fnv1a64` is canonical FNV-1a 64-bit (the standard
   offset basis `0xcbf29ce484222325`, prime `0x100000001b3`) over the **lexical
   root-relative** NodeId path exactly as discovery produced it — never a
   realpath. Assignment depends only on the path bytes, so it is stable across
@@ -1641,8 +1608,8 @@ Gate files are never shuffled: they keep their listed order and still run
 first. `--seed N` fixes that order to a reproducible draw and requires
 `--shuffle` (exit 4 otherwise, as is `--seed` with a value that is not an
 integer `>= 0`). Without `--seed` the runner draws a seed itself and reports
-it, so any randomized run can be replayed. The seed-to-order mapping is frozen
-for 1.x: one seed names one order over one file list, on every platform.
+it, so any randomized run can be replayed. The seed-to-order mapping is stable:
+one seed names one order over one file list, on every platform.
 `--shuffle` is refused beside `--lf`/`--ff` (exit 4), because those choose an
 order too. It composes with `--shard`: the partition is applied first, over the
 sorted list, so shard membership is unchanged and only the order within a
@@ -1686,50 +1653,45 @@ file's result line carries an informal `SERIAL` marker (§15.1).
 
 ## 20. Stability tiers
 
-- **FROZEN, each from the release that first served it** — the bulk of this
-  list shipped in 1.0.0 and froze there; the entries marked below as 1.1's are
-  frozen from 1.1. The bare subcommand *vocabulary* is the one declared
-  exception (see the header): reserving a new leading token is permitted, while
-  every subcommand already served keeps its name, grammar, and meaning. The
-  list: subcommands; flag names and semantics;
+- **STABLE** — the surfaces a consumer may build on. The bare subcommand
+  *vocabulary* is the one declared exception (see the header): reserving a new
+  leading token is permitted, while every subcommand already served keeps its
+  name, grammar, and meaning. The list: subcommands; flag names and semantics;
   exit codes; the node-id grammar; `mtest.toml` key names and semantics (§25);
   `--lf`/`--last-failed` and `--ff`/`--failed-first` semantics (§26);
-  *(from 1.1)* `--shuffle`/`--seed` semantics, including what shuffling
-  reorders and what it leaves node-id sorted, and the **seed-to-order
-  mapping**: one seed names one permutation of one file list, byte-identically
-  on every platform, so a printed seed reproduces the order that produced a
-  failure (§18); *(from 1.1)* `--fail-on-flaky` semantics and its position in
-  the exit precedence (§13, §9); *(from 1.1)* the `--format` value set and
-  which subcommand it belongs to (§4, §16); *(from 1.1)* the `--report` value
+  `--shuffle`/`--seed` semantics, including what shuffling reorders and what it
+  leaves node-id sorted, and the **seed-to-order mapping**: one seed names one
+  permutation of one file list, byte-identically on every platform, so a printed
+  seed reproduces the order that produced a failure (§18); `--fail-on-flaky`
+  semantics and its position in the exit precedence (§13, §9); the `--format`
+  value set and which subcommand it belongs to (§4, §16); the `--report` value
   grammar, its once-per-format repetition, the `--report-style` value set, and
-  the destination-collision refusal (§15.5);
-  the JUnit mapping; the annotation shapes; the `--json` event stream schema
-  (§15.4; normatively `docs/json-stream.md`) — its framing, header, event and
-  field names, and token vocabularies, frozen at stream `version` 1 and
-  growing only additively (new fields and kinds; a removal or a meaning-change
-  bumps the header version); the `collect` format — the plain listing, and
-  *(from 1.1)* the `--format json` collect stream (§16; normatively
-  `docs/collect-stream.md`), whose framing, header, event names and field names
-  are frozen at collect-stream `version` 1 and grow only additively under that
-  same rule; *(from 1.1)* `debug`'s preparation semantics and refusal set, and
-  the presence and order of its two `build:`/`run:` lines (§28); *(from 1.1)*
-  the refusal rules and exit domains of `new` and `init` (§29); the
-  test-module contract.
-- **STABLE-INTENT** — default values (timeouts, `auto` worker sizing) may be
-  tuned in minor versions; the self-versioned `.mtest-cache/lastrun` format
-  (§26), whose incompatible changes require a new format version; the contents
-  of every file `new` and `init` scaffold (§29). Those templates may improve in
-  a minor release: what is promised is the §29 refusal rules — the no-replace
-  publication and the exit domains above — and, for the workflow, byte-parity
-  with the first YAML block of [the continuous-integration page](ci.md). That
-  parity includes pinning each third-party action to the same commit the
-  documentation pins, so a pin that moves in the documentation moves in the
-  scaffold — which is what makes those commits a deliberate choice rather than
-  a copy that quietly went stale.
+  the destination-collision refusal (§15.5); the JUnit mapping; the annotation
+  shapes; the `--json` event stream schema (§15.4; normatively
+  `docs/json-stream.md`) — its framing, header, event and field names, and
+  token vocabularies, held at stream `version` 1 and growing only additively
+  (new fields and kinds; a removal or a meaning-change bumps the header
+  version); the `collect` format — the plain listing and the `--format json`
+  collect stream (§16; normatively `docs/collect-stream.md`), whose framing,
+  header, event names and field names are held at collect-stream `version` 1
+  and grow only additively under that same rule; `debug`'s preparation
+  semantics and refusal set, and the presence and order of its two
+  `build:`/`run:` lines (§28); the refusal rules and exit domains of `new` and
+  `init` (§29); the test-module contract.
+- **ADJUSTABLE** — default values (timeouts, `auto` worker sizing) may be
+  tuned; the self-versioned `.mtest-cache/lastrun` format (§26), whose
+  incompatible changes require a new format version; the contents of every file
+  `new` and `init` scaffold (§29). Those templates may improve: what is
+  promised is the §29 refusal rules — the no-replace publication and the exit
+  domains above — and, for the workflow, byte-parity with the first YAML block
+  of [the continuous-integration page](ci.md). That parity includes pinning
+  each third-party action to the same commit the documentation pins, so a pin
+  that moves in the documentation moves in the scaffold — which is what makes
+  those commits a deliberate choice rather than a copy that quietly went stale.
 - **INFORMAL** — console text layout and colors; the human-facing
   `config show` TOML output (§27.1); the wording of the per-artifact and
   next-step status lines `new` and `init` print (§29); the exact quoting style
-  of `debug`'s two lines, whose presence and order are frozen above while the
+  of `debug`'s two lines, whose presence and order are promised above while the
   shell-quoting that makes them pasteable is not (§28).
 - TestSuite invocation details are an internal seam, never public API.
 
@@ -1737,13 +1699,13 @@ file's result line carries an informal `SERIAL` marker (§15.1).
 
 ## 21. Planned, not served
 
-The following are not served by any build in the 1.x line so far. Nothing here
-is a commitment to a release, and each is either unrecognized by the parser or
+The following are not served by any build so far. Nothing here is a commitment
+to a release, and each is either unrecognized by the parser or
 recognized-but-refused as noted. They do **not** share one release rule, so the
 list is split by which one applies: whether serving the item would only add to
 the inventory, or would change what something already served means.
 
-**Additive — may land in a future minor.** `--root`; `--pattern`; markers /
+**Additive — may land in a later release.** `--root`; `--pattern`; markers /
 `xfail`; `--asan`; watch mode; and a **relocatable** build-cache directory
 (`--cache-dir`). Each of these is a new flag whose absence today means "off",
 so serving one leaves every existing invocation reading exactly as it does now.
@@ -1753,8 +1715,8 @@ between checkouts or machines, and saving and restoring it in CI are separate
 deliverables, each of which needs a key that survives leaving the machine it
 was computed on.
 
-**Not additive — these wait for a major**, because serving them would move a
-surface that is already frozen:
+**Not additive — these wait for a deliberate compatibility break**, because
+serving them would move a surface that is already served:
 
 - **Boolean `-k` expressions.** `-k` is served as a case-insensitive substring
   filter (§5), so today `-k "a and b"` matches node ids containing that literal
@@ -1766,17 +1728,17 @@ surface that is already frozen:
   a redefinition of what `N` counts rather than a new surface. It is
   additionally blocked on the same upstream per-test timing gap that blocks
   per-test attribution elsewhere.
-- **A machine-readable `config show` format.** §20 freezes the `--format` value
+- **A machine-readable `config show` format.** §20 holds the `--format` value
   set *and which subcommand it belongs to*: `--format` is `collect`'s alone,
   and supplying it anywhere else is a usage error (§4). Serving
-  `config show --format json` would change that frozen applicability. The
+  `config show --format json` would change that applicability. The
   served TOML display stays informal human output in the meantime (§27.1).
 
 ---
 
 ## 22. Platforms
 
-Linux and macOS are the v1 targets. Linux carries the native lifecycle,
+Linux and macOS are the supported targets. Linux carries the native lifecycle,
 process-supervision, transcript, dynamic memory-analysis, and packaged-artifact
 gates. The unified workflow requires the macOS arm64 preflight to run the native
 post-fork/lifecycle audit; on success it dispatches the full direct and
@@ -2099,9 +2061,8 @@ $ echo $?
 
 ## 24. Availability status (this build)
 
-Everything above is the full frozen-intent v1 contract. This section is
-different in kind: it states what the *current build* actually implements,
-today, so a reader can tell shipped behavior from target behavior without the
+Everything above is the full intended contract. This section is different in
+kind: it states what the *current build* actually implements, today, so a reader can tell shipped behavior from target behavior without the
 contract above changing at all. Nothing in this section alters any flag
 semantic, exit-code meaning, node-id grammar, or outcome vocabulary defined
 above — it only reports which of those surfaces are wired up yet.
@@ -2132,9 +2093,9 @@ else (§4), with `lines` the default.
 `--no-cache`/`--cache-clear` act on the persistent build-artifact
 store described in §8.5, which this build reads and writes by default.
 
-Every flag and subcommand in the frozen contract above is now served: nothing is
+Every flag and subcommand in the contract above is now served: nothing is
 refused for being unavailable. For `run` and `collect`, exit 4 therefore covers
-exactly the frozen §9 causes. `Config show` and `doctor` use the applicability
+exactly the §9 causes. `Config show` and `doctor` use the applicability
 rules and command-specific exit domains in §27; `debug` uses §28's, `new`
 and `init` use §29's, and `completions` uses §30's.
 
@@ -2275,7 +2236,7 @@ whichever one the collection resolves.
 ### 24.3 Selection and parsing deviations in this build
 
 Two surfaces behave more permissively, or cover less ground, today than the
-frozen contract above describes. They are stated here so shipped behavior can
+contract above describes. They are stated here so shipped behavior can
 be told from target behavior; neither changes a flag semantic, exit code, or
 the node-id grammar, and both converge to the contract as the runner matures.
 
@@ -2292,8 +2253,8 @@ the node-id grammar, and both converge to the contract as the runner matures.
   workflow — arrives with the same selection plumbing.)
 - **A repeated single-valued flag takes the last occurrence.** §3 enumerates the
   repeatable flags (`--exclude`, `--gate`, `--build-arg`, `-I`, `--precompile`,
-  `--serial`); every other flag is single-valued. The frozen intent is
-  at-most-one — e.g. §5 says "at most one `-k` is accepted in v1". This build
+  `--serial`); every other flag is single-valued. The intent is
+  at-most-one — e.g. §5 says "at most one `-k` is accepted". This build
   does not yet reject a repeated single-valued option (`-k`, `--shard`,
   `--maxfail`, `--timeout`, `--retries`, `-n`/`--workers`, `--mojo`,
   `--compile-timeout`, `-s`/`--show-output`, `--durations`, `--color`,
@@ -2409,7 +2370,7 @@ failure records. Collection never reads or writes it. Sharded runs may read the
 state but never write it, because one shard cannot authoritatively replace the
 whole suite's result.
 
-The internal v1 text format is deterministic:
+The internal `lastrun` text format is deterministic:
 
 ```text
 mtest-lastrun v1
@@ -2517,10 +2478,10 @@ configuration key carries one trailing source label: `default`, `mtest.toml`,
 `env MTEST_MOJO`, or `cli`.
 
 **The rendering grows with the configuration schema, and that is not a
-compatibility event.** A minor that adds a configuration key adds its line
-here — 1.1 added `fail-on-flaky = false  # (default)` under `[run]`, so the
-same project renders one more line than it did under 1.0. This output is
-INFORMAL (§20) precisely so the display can track the schema without every new
+compatibility event.** A release that adds a configuration key adds its line
+here — adding `fail-on-flaky = false  # (default)` under `[run]` made the same
+project render one more line than it did before. This output is INFORMAL (§20)
+precisely so the display can track the schema without every new
 key becoming a breaking change; a tool that needs a stable answer should read
 the `--json` event stream rather than parse this.
 
@@ -2577,10 +2538,12 @@ fixed order:
 8. `state` — `.mtest-cache/` usability and an absent or parseable v1 `lastrun`,
    including removal of any directory doctor created.
 9. `temp` — invocation-root and system-temp writability.
-10. `report-destinations` — usability of configured JUnit/JSON parent
-    directories without opening, creating, or truncating the configured files.
-    No configured destination is root-independent, as is an absolute parent;
-    relative parents require the root.
+10. `report-destinations` — usability of the parent directory of every report
+    destination the same configuration would open on the run path (`[report]`
+    `json`, `junit-xml`, `md`, and `html`), without opening, creating, or
+    truncating the configured files. `--json -` names a stream rather than a
+    file and is not checked. No configured destination is root-independent, as
+    is an absolute parent; relative parents require the root.
 
 Every check body is guarded independently. An unexpected error becomes that
 check's contained `FAIL` line, with control characters escaped; later checks
@@ -2800,7 +2763,7 @@ subcommand opens, truncates, appends to, or renames onto an existing file.
 
 Nothing else is reachable. Every diagnostic goes to stderr and the success line
 goes to stdout (§19), and the diagnostics themselves are informal text (§20) —
-the exit code and the file's presence are what this section freezes. The 3 an
+the exit code and the file's presence are what this section promises. The 3 an
 undeliverable report line produces is the one code that does not describe the
 file: the artifact may already exist and still be intact, and the exit says
 only that the caller was never told so.
@@ -2930,7 +2893,7 @@ Nothing else is reachable. A successful run writes to stdout; a failed one
 writes what it did and what stopped it to stderr, because the record of a
 partial bootstrap belongs with the diagnostic rather than split across two
 streams. As in §29.1, the diagnostics are informal text (§20) — the exit code
-and the artifacts' presence are what this section freezes.
+and the artifacts' presence are what this section promises.
 
 ---
 
@@ -3000,7 +2963,7 @@ inserted text carries the prefix instead.
 
 The completions themselves are a convenience, not a contract: which candidates
 a shell shows for a given prefix is INFORMAL (§20), and the same reasoning
-applies to the script's internal structure. What is frozen is the grammar
+applies to the script's internal structure. What is promised is the grammar
 above, the exit codes below, and the property that the script never offers a
 flag, subcommand, or value this build refuses.
 

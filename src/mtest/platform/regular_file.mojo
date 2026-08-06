@@ -25,18 +25,16 @@ from std.os import lstat
 from std.sys.info import CompilationTarget, is_triple
 
 from mtest.platform.cstring import c_string_bytes
-from mtest.platform.stream import close_fd, errno_now, read_fd
+from mtest.platform.fs import S_IFMT, S_IFREG
+from mtest.platform.stream import EINTR, close_fd, errno_now, read_fd
 
 
-comptime _EINTR = 4
 comptime _ENOENT = 2
 comptime _ENOTDIR = 20
 """The two errnos that mean a name is genuinely free rather than unreadable.
 Both carry these values on Linux and on Darwin, so no per-target branch is
 needed to read them."""
 comptime _STAT_BYTES = 144
-comptime _S_IFMT = 0o170000
-comptime _S_IFREG = 0o100000
 comptime _READ_CHUNK = 1 << 16
 """The staging buffer's size, in bytes. Bounds resident memory independently of
 the caller's ceiling: a 512 MiB cap and a 4 KiB file must not cost a gigabyte."""
@@ -109,7 +107,7 @@ def observe_path(path: String) -> PathFacts:
     """
     try:
         var raw = Int(lstat(path).st_mode)
-        return PathFacts(True, raw & _S_IFMT == _S_IFREG, raw & 0o777, 0)
+        return PathFacts(True, raw & S_IFMT == S_IFREG, raw & 0o777, 0)
     except:
         var failed = errno_now()
         if failed == _ENOENT or failed == _ENOTDIR:
@@ -296,7 +294,7 @@ def _read_opened_regular_file_bytes(
         if raw_fd >= 0:
             break
         open_errno = errno_now()
-        if open_errno != _EINTR:
+        if open_errno != EINTR:
             break
     _ = path_bytes^
     if raw_fd < 0:
@@ -331,7 +329,7 @@ def _read_opened_regular_file_bytes(
         if stat_rc == 0:
             break
         stat_errno = errno_now()
-        if stat_errno != _EINTR:
+        if stat_errno != EINTR:
             break
     if stat_rc != 0:
         # SAFETY: this is the sole owner of the 144-byte allocation; `fstat`
@@ -355,7 +353,7 @@ def _read_opened_regular_file_bytes(
     # bounded read and retained no pointer. This is the allocation's sole owner
     # and frees it exactly once; only the copied scalars remain live afterward.
     stat_storage.free()
-    if mode & _S_IFMT != _S_IFREG:
+    if mode & S_IFMT != S_IFREG:
         if close_fd(fd) != 0:
             raise Error("platform: close failed after regular-file validation")
         return _OpenedRegularFileBytes(False, List[UInt8]())
@@ -398,7 +396,7 @@ def _read_opened_regular_file_bytes(
         var count = read_fd(fd, buffer, room)
         if count < 0:
             var read_errno = errno_now()
-            if read_errno == _EINTR:
+            if read_errno == EINTR:
                 continue
             # SAFETY: this is the buffer's sole owner; the failed synchronous
             # read retained no pointer, no byte view exists, and this raising
@@ -502,7 +500,7 @@ def fsync_path(path: String) raises:
         if raw_fd >= 0:
             break
         open_errno = errno_now()
-        if open_errno != _EINTR:
+        if open_errno != EINTR:
             break
     _ = path_bytes^
     if raw_fd < 0:
@@ -531,7 +529,7 @@ def fsync_path(path: String) raises:
         if sync_rc == 0:
             break
         sync_errno = errno_now()
-        if sync_errno != _EINTR:
+        if sync_errno != EINTR:
             break
     if sync_rc != 0:
         # Inspect close to discharge ownership, but preserve fsync's primary

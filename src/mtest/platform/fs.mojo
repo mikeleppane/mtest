@@ -21,18 +21,17 @@ centralized here instead of being redeclared in session or tests.
 """
 from std.ffi import external_call
 from std.memory import alloc, memset_zero
-from std.os import remove
+from std.os import lstat, remove
 from std.os.path import basename, dirname, realpath
 from std.sys.info import CompilationTarget
 
 from mtest.platform.cstring import c_string_bytes
 from mtest.platform.process import process_id
 from mtest.platform.regular_file import observe_path
-from mtest.platform.stream import close_fd, errno_now
+from mtest.platform.stream import EINTR, close_fd, errno_now
 from mtest.platform.temp_file import close_checked_fd, create_unique_temp
 
 
-comptime _EINTR = 4
 comptime _EEXIST = 17
 """`EEXIST`, identical on Linux and Darwin: the destination name is taken."""
 comptime _EPERM = 1
@@ -42,8 +41,14 @@ comptime _EOPNOTSUPP = 45 if CompilationTarget.is_macos() else 95
 comptime _CREATE_MODE = 0o666
 """The mode `open(2)` is given for a new ordinary file, before the umask."""
 comptime _STAT_BYTES = 144
-comptime _S_IFMT = 0o170000
-comptime _S_IFDIR = 0o40000
+comptime S_IFMT = 0o170000
+"""File-type mask over `st_mode`; POSIX fixes it on Linux and Darwin alike."""
+comptime S_IFDIR = 0o40000
+"""`st_mode` file-type value for a directory."""
+comptime S_IFREG = 0o100000
+"""`st_mode` file-type value for a regular file."""
+comptime S_IFLNK = 0o120000
+"""`st_mode` file-type value for a symbolic link."""
 comptime _DARWIN_AT_SYMLINK_NOFOLLOW_ANY = 0x0800
 comptime _DARWIN_ANCHOR_OPEN_FLAGS = (
     0x40000000  # O_EXEC, making O_SEARCH with O_DIRECTORY
@@ -53,16 +58,51 @@ comptime _DARWIN_ANCHOR_OPEN_FLAGS = (
 )
 
 
+def path_kind(path: String) raises -> Int:
+    """The file-type bits of `path` itself, never of what a symlink points at.
+
+    `lstat`, never `isdir`/`isfile`/`islink`: those follow a link and fold an
+    unreadable path into False, so a symlink planted where a directory belongs
+    would be recursed into and an entry nobody may stat would read as "not a
+    directory". Both answers are the ones a caller deleting, executing, or
+    trusting the path must never be handed.
+
+    Args:
+        path: The path to characterize.
+
+    Returns:
+        One of `S_IFDIR`, `S_IFREG`, `S_IFLNK`, or another POSIX type value,
+        already masked with `S_IFMT`.
+
+    Raises:
+        Error: `"platform: lstat failed: '<path>'"` if `path` cannot be
+            characterized — absent, or inside a directory this process may not
+            search. The two are indistinguishable through a Mojo `Error`, and a
+            caller that treats either as a kind would be reading an answer the
+            filesystem never gave. The stdlib error is replaced rather than
+            forwarded, because it names neither the call nor the path.
+    """
+    try:
+        return Int(lstat(path).st_mode) & S_IFMT
+    except:
+        raise Error("platform: lstat failed: '" + path + "'")
+
+
 def destination_identity(path: String) -> String:
     """The key two not-yet-created output destinations compare equal on.
 
     Canonicalizing `path` itself is not available: `realpath(3)` resolves every
     component and fails on a final one that does not exist, which is the normal
-    state of a destination about to be written. The parent does exist (a
-    missing one is refused earlier, as a usage error), so the parent is
-    resolved and the basename appended verbatim. Two spellings of one file —
-    `out.md` and `./out.md`, a `..` segment, or a symlinked parent directory —
-    therefore produce one key, while two different names never do.
+    state of a destination about to be written. The parent is resolved instead
+    and the basename appended verbatim. Two spellings of one file — `out.md`
+    and `./out.md`, a `..` segment, or a symlinked parent directory — therefore
+    produce one key, while two different names never do.
+
+    A caller need not have established that the parent exists: the key is
+    computed for every configured destination, and one check asks precisely
+    about the missing ones. A key whose parent could not be resolved is
+    comparable but not canonical, which is why it is never the check that
+    reports the missing directory.
 
     An empty `dirname` is normalized to `.` first, so a bare filename resolves
     against the working directory instead of joining onto the filesystem root.
@@ -423,7 +463,7 @@ def prepare_directory_for_rename(
             if raw_fd >= 0:
                 break
             open_errno = errno_now()
-            if open_errno != _EINTR:
+            if open_errno != EINTR:
                 break
         _ = anchor_c^
         if raw_fd < 0:
@@ -462,7 +502,7 @@ def prepare_directory_for_rename(
             if stat_rc == 0:
                 break
             stat_errno = errno_now()
-            if stat_errno != _EINTR:
+            if stat_errno != EINTR:
                 break
         if stat_rc != 0:
             # SAFETY: no view of the allocation exists and `fstatat` retained
@@ -491,7 +531,7 @@ def prepare_directory_for_rename(
         # this is the allocation's sole owner and frees it exactly once.
         stat_storage.free()
         if (
-            opened_mode & _S_IFMT != _S_IFDIR
+            opened_mode & S_IFMT != S_IFDIR
             or opened_dev != expected_dev
             or opened_ino != expected_ino
         ):
@@ -521,7 +561,7 @@ def prepare_directory_for_rename(
             if chmod_rc == 0:
                 break
             chmod_errno = errno_now()
-            if chmod_errno != _EINTR:
+            if chmod_errno != EINTR:
                 break
         _ = c^
         var close_rc = close_fd(fd)

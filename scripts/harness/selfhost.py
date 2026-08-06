@@ -105,7 +105,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from typing import IO
 
-from scripts.checks.reports import json_stream
+from scripts.formats import json_stream
 from scripts.harness import watchdog
 
 
@@ -220,10 +220,25 @@ segment is stripped before the abnormal check rather than asserted.
 """
 
 VERDICT_ROW_RE = re.compile(
-    r"^(?P<verdict>[A-Z][A-Z-]{2,})\s+(?P<path>\S+\.mojo)(?=\s|$)",
+    r"^(?P<verdict>PASS|FAIL|CRASH|TIMEOUT|COMPILE-ERROR|COMPILE-TIMEOUT"
+    r"|MALFORMED-SUITE|PRECOMPILE-ERROR|FLAKY|NO-TESTS)\s+(?P<path>\S+\.mojo)(?=\s|$)",
     re.MULTILINE,
 )
 """One per-file verdict row: the verdict token and the file it names.
+
+The alternation is every token that starts a per-file verdict row, and nothing
+else: any looser pattern matches a line that only looks like one. It is not
+`_verdict_token`'s output set, which is wider. EXCLUDED and DRIFT begin real
+column-zero rows and are left out deliberately — each is its own row shape, and
+a legitimate exclusion matched here would be reported as a bad verdict.
+`_reconcile_paths` catches both through path membership instead: a file that
+produced one of those rows never reported PASS, so it is named as missing.
+
+Written out rather than derived from `scripts/formats/vocabulary.txt`, because
+this parser is one of two independent readers of the same run and a shared
+source would make them agree by construction.
+`scripts/tests/test_vocabulary.py` reconciles the two spellings instead, so
+drift is a loud failure rather than a hand-sync obligation.
 
 Not scoped to a fixed root prefix the way `dogfood.py`'s row regex is. This
 harness gets its roots at runtime and compares every row against the
@@ -846,7 +861,12 @@ def _reconcile_header(
 
 
 def _reconcile_paths(output: str, inventory: Inventory, failures: list[str]) -> None:
-    """Check the exact set of PASS-reporting paths against the derived set."""
+    """Check the exact set of PASS-reporting paths against the derived set.
+
+    The membership half is what covers the rows `VERDICT_ROW_RE` does not match:
+    an EXCLUDED row or a DRIFT banner leaves its file absent from `passed`, so
+    it is reported here as never reported rather than as a bad verdict.
+    """
     rows = VERDICT_ROW_RE.findall(output)
     passed = {path for verdict, path in rows if verdict == "PASS"}
     other = sorted({(verdict, path) for verdict, path in rows if verdict != "PASS"})
