@@ -37,7 +37,7 @@ append here as later phases teach more.
 - The report colorizes only on a TTY, and mtest and the generator capture
   through pipes, so the parser sees plain text.
 - `mojo package` does not exist in 1.0.0b2; `mojo precompile` produces the
-  `.mojopkg`.
+  precompiled package (this repo's `build/*.mojoc` files).
 - The module cache is redirectable via `MODULAR_CACHE_DIR`. `mojo build` is
   multi-threaded by default (`--num-threads`), so parallel worker sizing must
   not oversubscribe compiler threads.
@@ -262,8 +262,10 @@ append here as later phases teach more.
   e2e binaries died with SIGILL. This is the same hazard the Valgrind
   `--target-cpu` ceiling above exists for, reached from the other direction.
   "A stale entry is a miss, never a wrong pass" holds only for the inputs the
-  key actually frames, and a digest check cannot notice that a byte-perfect
-  binary is illegal on this host.
+  key actually frames; `store_probe` re-verifies the digest and refuses a
+  binary that will not start, and neither check can notice that a byte-perfect
+  binary is illegal on this host. Anything that moves a compiled artifact
+  between machines has to frame the machine.
 - Capture a gate's real exit as its own statement (`cmd; echo "x=$?"`); a
   trailing pipe silently reports 0.
 - An E2E oracle that reads compiler-wrapper side effects (invocation counts,
@@ -305,7 +307,7 @@ append here as later phases teach more.
   `statement indentation must match the rest of the block` errors in files
   that parse fine; resolve the module, never the indentation.
 - Never run two builds against the shared `build/` tree at once. A racing build
-  corrupted `build/mtest.mojopkg` mid-write and looked exactly like a real
+  corrupted `build/mtest.mojoc` mid-write and looked exactly like a real
   regression. Builds run one at a time.
 - Two mtest processes over one checkout is ORDINARY — `--shard` splits a suite
   across exactly that, and so does a second terminal. Any directory creation on

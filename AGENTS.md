@@ -39,16 +39,15 @@ test-only subprocess actors under `tests/fixtures/exec/`.
 - Toolchain flakiness is expected. Plan for it with build-not-run, cache
   quarantine, and crash-class retries.
 - The README is the front door. Two parts of it are executed against the built
-  binary: its command-line listing, which `readme-help-check` compares with
-  `--help` output, and its assertion example, which is run and matched against
-  its documented outcome. Everything else — the install sequence, the captured
-  run transcripts, the workflows to paste — is reviewed rather than executed,
-  so write it as something a reader can follow and verify it by following it.
-  The architecture section carries a mermaid layering diagram.
-  State limits as plain facts, never as roadmap, progress, or planning
-  narrative, and never let something the build cannot do appear as if it can.
-  Its feature and limitation bullets lead with a bolded label on purpose, for
-  scanning; that formatting is local to the README.
+  binary: the command-line listing (`readme-help-check` versus `--help`) and
+  the assertion example, run and matched against its documented outcome.
+  Everything else — the install sequence, the captured transcripts, the
+  workflows to paste — is reviewed rather than executed, so write it as
+  something a reader can follow and verify it by following it. State limits as
+  plain facts, never as roadmap, progress, or planning narrative, and never
+  let something the build cannot do appear as if it can. The architecture
+  section carries a mermaid layering diagram; the feature and limitation
+  bullets lead with a bolded label for scanning (README-local formatting).
 
 ## Layering: imports go one direction
 
@@ -73,19 +72,13 @@ process-control interface hiding pipes, concurrent draining, FFI, platform
 differences, and cleanup invariants.
 
 `scripts/checks/layering.py` enforces all of this: the rank order, the Layer 2
-siblings, deep imports that go around a facade export, the `exit()` and
-`external_call` confinements. Every directory under `src/mtest` that carries
-an `__init__.mojo` is a facade, subpackages included, and an import is checked
-against the deepest facade that owns it, so a subpackage such as
-`session/store/` has its own enforced surface. A cross-package import is judged
-by the name it imports, not the alias it binds locally, and an `exit` or
-`external_call` import is refused outside its permitted boundary the same way,
-so `from std.sys import exit as terminate` cannot launder a call past the
-rule. It reports a deep import of a name the owning facade does not export as
-information rather than a failure, because there is no facade path to have
-taken. Docstrings and comments are stripped before matching, so the
-`Examples:` blocks and the prose that names `exit()` and `external_call` are
-not read as code.
+siblings, deep imports that go around a facade export, and the `exit()` and
+`external_call` confinements. Every directory under `src/mtest` carrying an
+`__init__.mojo` is a facade — subpackages included, so `session/store/` has
+its own enforced surface. An import is judged by the name it imports, not the
+alias it binds locally, so `from std.sys import exit as terminate` cannot
+launder a call past the rule. Docstrings and comments are stripped before
+matching.
 
 Three named seams:
 
@@ -110,21 +103,19 @@ Three named seams:
 Only the sequential driver executes what the kernel's `next_step` decides:
 `session/selection.mojo` services one step at a time through `run_supervised`,
 and it is the one that takes the node-id and `-k` path. `session/pool.mojo`,
-the parallel scheduler behind `-n`/`--workers`, does not call `next_step` at
-all — it runs its own `_PENDING_BUILD` → `_BUILDING` → `_PENDING_RUN` →
-`_RUNNING` → `_DONE` phase machine, driving up to `workers` children at once
-under a single `Supervisor` over native ABI v2, and reaches into the kernel
-only for `admit_crash_retry`, `record_verdict`, `record_settled`, and the halt
-state (`halt()`, `halt_interrupted()`, `halt_internal_error()`);
-`--serial` pins its matching files to a final one-at-a-time pass that runs
-after the parallel batch drains. A scheduling feature meant for both drivers
-belongs in those kernel policy methods, never in `next_step`. Concurrency is
-only ever across files: one file's steps stay strictly ordered, and `-n 1` is
-byte-identical to the sequential path (one child per step, and no
+the parallel scheduler behind `-n`/`--workers`, never calls `next_step` — it
+drives its own build/run phase machine, running up to `workers` children at
+once under a single `Supervisor` over native ABI v2, and reaches into the
+kernel only for `admit_crash_retry`, `record_verdict`, `record_settled`, and
+the halt states; `--serial` pins its matching files to a final one-at-a-time
+pass after the parallel batch drains. A scheduling feature meant for both
+drivers belongs in those kernel policy methods, never in `next_step`.
+Concurrency is only ever across files: one file's steps stay strictly ordered,
+and `-n 1` is byte-identical to the sequential path (one child per step, no
 `--num-threads` on the build argv). Admission, retry, maxfail, serial, and
-accounting policy stay in the kernel and `session`, never in `exec` or `native`.
-No stage, step kind, or halt reason exists for a future phase: every one is
-driven today and pinned by `tests/unit/test_session_pipeline.mojo`.
+accounting policy stay in the kernel and `session`, never in `exec` or
+`native`. No stage, step kind, or halt reason exists for a future phase: every
+one is driven today and pinned by `tests/unit/test_session_pipeline.mojo`.
 
 ## Mojo, not Python
 
@@ -208,73 +199,47 @@ network contract: rattler-build solves against the pinned Modular and
 conda-forge channels, and nothing uploads or authenticates. Do not describe
 those jobs as hermetic or fold them into the Valgrind exception.
 
-**Do not restore the build-artifact store across hosted runs.** It was tried
-and reverted, and the failure is worth recording because the key looks
-complete until you ask what it does not frame. `KeyBuilder` frames the
-compiler, the toolchain libraries, the environment, the invocation root, the
-build arguments, the include-root contents, and the file's own bytes — and
-nothing about the host CPU. That is exactly right on one machine, where the
-CPU cannot change between two builds. Hosted runners are not one machine: a
-binary compiled on a runner with a wider instruction set, restored onto one
-without it, is a valid cache hit that dies with SIGILL the moment it executes.
-Observed, not theorised — cached e2e binaries crashed with `signal 4` in
-frames pointing into `.mtest-cache/build-v1/`.
-
-The lesson generalises past the cache. "A stale entry is a miss, never a wrong
-pass" holds only for the inputs the key actually frames; `store_probe`
-re-verifies the digest and refuses a binary that will not start, and neither
-check can notice that a byte-perfect binary is illegal on this host. Anything
-that moves a compiled artifact between machines has to frame the machine.
+**Do not restore the build-artifact store across hosted runs.** Tried and
+reverted: `KeyBuilder` frames everything about a build except the host CPU,
+and restored e2e binaries died with SIGILL on runners with a narrower
+instruction set. Anything that moves a compiled artifact between machines has
+to frame the machine — and no digest re-check can notice that a byte-perfect
+binary is illegal on this host. Full incident: `.agents/lessons.md`
+("Harness and workflow").
 
 ## Toolchain and verification
 
-The verification tasks are:
+`pixi.toml` is the task inventory — read it (or `pixi task list`) rather than
+any list here. The gates whose semantics you must know before invoking them:
 
-```text
-pixi run mojo-fmt          # format Mojo in place
-pixi run native-fmt        # format tracked native C and headers in place
-pixi run fmt               # run both source formatters before committing
-pixi run fmt-check         # format both languages, then reject any tree diff
-pixi run py-fmt            # ruff's safe lint fixes, then format Python in place
-pixi run py-check          # ruff format/lint and mypy --strict over scripts/ and
-                           #   tests/fixtures/exec/ (needs `uv`; see below)
-pixi run docs-build        # build the documentation site with pinned mkdocs
-                           #   (needs `uv`; not in `pixi run ci`; see below)
-pixi run version-check     # manifest, CLI, and shipped-version identity; every
-                           #   public transcript; every restatement of the Mojo
-                           #   pin, swept over reader-facing documentation
-pixi run harness-unit-check     # harness self-tests: runner, watchdog, comparators,
-                                #   and the two memory-lane oracles (no tools needed)
-pixi run repo-policy-check      # layout, layering, documentation-site parity, workflow
-                                #   and published-action security, tool pins, annotations
-pixi run release-tooling-check  # attestations, release, publication, public verify
-pixi run harness-check     # the aggregate of the three groups above
-pixi run coverage-capability  # tripwire: the pinned toolchain must have no coverage
-pixi run safety-check      # inventory every unsafe Mojo operation and local proof
-pixi run postfork-check    # audit production/testing post-fork call graphs
-pixi run clang-tidy-check  # parse-smoke and analyze every native C unit
-pixi run native-check      # own native analysis, ABI/layout/exports, and lifecycle
-pixi run junit-check       # validate the committed JUnit oracle and checker
-pixi run build             # the package-compiles gate
-pixi run build-profile-check  # verify release CPU/debug/deployment artifacts
-pixi run readme-help-check # compare README help with the real binary
-pixi run junit-render-check  # validate bytes emitted by the real JUnit reporter
-pixi run transcripts-check # regenerate to a temp dir and diff byte-for-byte
-pixi run test              # run the classified inventory through build/mtest itself, self-hosted
-pixi run assertions-check  # direct-run public assertion consumers at O0 and O3
-pixi run recipe-check      # render and compare the community submission recipe
-pixi run dogfood-check     # run three focused probes through the built mtest binary
-pixi run e2e               # exact CLI exits and output against e2e/manifest.json
-pixi run contract-check    # every documented behavior in docs/cli-contract.md
-pixi run package-check     # install the built artifact into a scratch env and run it
-pixi run ci-memory         # Linux: both memory lanes, ASan/LSan then Memcheck
-```
-
-Hosted GitHub required checks enforce most, but not all, of the platform and
-product lanes described below — see the Hosted CI section for which lanes run
-without blocking. `py-check` is worth running locally when Python changes, but
-it is no longer only local: the hosted `Python quality` job installs `uv`
-itself and blocks on it.
+- `fmt` / `fmt-check`: both formatters rewrite the tree in place; `fmt-check`
+  then ends in `git diff --exit-code`, so any remaining diff — including an
+  unstaged edit made while a long check ran — reds the gate. Stage the exact
+  bytes first, then gate: a result produced against different bytes than you
+  commit is not a result, and a background wrapper's exit status is the
+  wrapper's, not the gate's — read the gate's own marker.
+- `test`: the classified inventory, self-hosted through `build/mtest` itself
+  (`scripts/harness/selfhost.py`); `test-file -- <path>` focuses one module.
+- `transcripts-check`: regenerates every protocol snapshot to a temp dir and
+  diffs byte-for-byte; `transcripts` is the only legitimate writer.
+- `contract-check`: local rebuild-if-stale QA against `docs/cli-contract.md`;
+  `contract-check-strict` is the blocking gate form (`--strict --no-rebuild`,
+  failing closed on a stale or missing binary).
+- `safety-check`: inventories every unsafe Mojo operation and its `# SAFETY:`
+  proof — presence only; a green checker is not proof an argument is sound.
+- `py-check`: ruff and mypy `--strict` over `scripts/` and
+  `tests/fixtures/exec/`, at versions pinned in
+  `scripts/checks/python_quality.py`, run through `uvx`. It needs `uv` on PATH
+  and fails loudly without it, which is why it stays out of `pixi run ci`; the
+  hosted `Python quality` job installs a pinned `uv` itself and blocks.
+  (`pyproject.toml` holds config only — this repo is not a Python package.)
+- `ci-memory`: on linux-64, ASan/LSan then Valgrind Memcheck (about 90 seconds
+  plus 3 minutes warm). On any other host it reports the two uncovered lanes
+  and exits 0 — both lanes are pinned against the Linux toolchain — and fails
+  closed if reached on Linux, since that means the target override was
+  deleted.
+- `ci-preflight` is the fail-fast static barrier and `ci` the complete serial
+  floor; their exact memberships live in `pixi.toml` — read them there.
 
 ### Local agentic development loop
 
@@ -302,159 +267,72 @@ environment, about the CodeQL findings, or about ruff and mypy — all three of
 which hosted CI does block on. The required GitHub checks are the
 authoritative exhaustive merge verdict.
 
-`fmt-check` runs `mojo-fmt` and `native-fmt`, then `git diff --exit-code`.
-`mojo-fmt` formats each real Mojo source under `src`, `companions`, `tests`,
-and `e2e` in a separate deterministic, no-symlink-following invocation;
-`native-fmt` formats the complete tracked C/header inventory with pinned
-ClangFormat. The aggregate therefore mutates first and fails on any remaining
-tree diff, including an unstaged change made after a long check started. Stage
-the work first, then gate: a result produced against different bytes than you
-commit is not a result. Reading outcomes works the same way, since a background
-wrapper's exit status is the wrapper's and not the gate's, so read the gate's
-own marker.
-
-`pixi run ci-preflight` chains `version-check -> fmt-check ->
-harness-unit-check -> repo-policy-check -> abi-probe-check ->
-release-tooling-check -> safety-check -> postfork-check -> clang-tidy-check ->
-native-check -> junit-check -> build -> build-profile-check ->
-readme-help-check -> junit-render-check -> transcripts-check ->
-coverage-capability` in that exact
-fail-fast order. Here `fmt-check` owns `mojo-fmt` plus `native-fmt`, and
-`native-check` owns `clang-tidy-check`; the expanded names make those dependency
-edges visible. The three `*-check` groups replaced a single two-dozen-command
-`harness-check`
-chain, which survives as their aggregate: a red hosted preflight names the
-group that failed instead of reporting that something in the tooling broke. The `pixi run ci` floor is serial:
-`ci-preflight -> test -> assertions-check -> dogfood-check -> e2e ->
-cache-protocol-check -> build-stamp-check -> contract-check-strict ->
-ci-memory`. Both chains are read out of `pixi.toml`; nothing pins them, so read
-them there rather than from this paragraph if the two disagree.
-
-`py-check` is the one floor member whose tools are not in the pixi environment.
-ruff and mypy run through `uvx` at versions pinned in
-`scripts/checks/python_quality.py`, which keeps two build tools out of the
-environment the product compiles in and stops a floating formatter from
-reformatting the tree on its next release. The cost is a prerequisite: it needs
-`uv` on PATH and fails loudly rather than skipping when `uvx` is absent, which
-is why it stays out of `pixi run ci`: a floor that assumed a tool the pixi
-environment does not pin would be green or red by accident of the machine. The
-hosted `Python quality` job may run it precisely because it *supplies* the
-tool, installing a pinned `uv` through a pinned `astral-sh/setup-uv` before it
-calls the task. A red `py-check` on a fresh clone without `uv` is an
-environment gap, not a defect in the tree. It covers `scripts/` and `tests/fixtures/exec/`, every Python file the
-repo tracks. `pyproject.toml` holds the config and no `[project]` or
-`[build-system]`, because this repo is not a Python package.
-
-`ci-memory` is how the local floor covers memory safety. On linux-64 a
-`[target.linux-64.tasks]` override makes it `asan-check` then `valgrind-check`,
-about 90 seconds and about 3 minutes against clean main, cheap enough to belong
-in the ordinary floor. Off linux-64 it runs
-`scripts/checks/memory/host_support.py`, which reports the two uncovered lanes
-and exits 0: Memcheck is pinned for linux-64 alone and the ASan controls are
-pinned against the Linux toolchain, so no other host can compute that verdict.
-That module fails closed if it is ever reached on Linux, since arriving there
-means the override was deleted.
-
 ### Hosted CI
 
-Hosted CI never invokes `pixi run ci`. It gives each lane its own matrix cell,
-and `pixi.toml` plus `.github/workflows/ci.yml` are the only sources of truth
-for that topology: a tampered task graph or matrix row is visible in the PR
-diff, so nothing mirrors it in Python. `scripts/checks/workflow_security.py`
-instead pins the properties a diff cannot show: every external action resolves
-to a reviewed commit SHA; the CodeQL, documentation, and release/publication
-workflows keep their reviewed job permissions and forbid `continue-on-error:`;
-and the composite action this repository publishes runs exactly the reviewed
-invocation, in bash, with no expression substituted into its script text. That
-last one is the only file here that executes inside someone else's job under
-someone else's token, and it appears in no workflow diff at all.
+Hosted CI never invokes `pixi run ci`. Each lane is its own matrix cell, and
+`pixi.toml` plus `.github/workflows/ci.yml` are the only sources of truth for
+that topology: a tampered task graph or matrix row is visible in the PR diff.
+`scripts/checks/workflow_security.py` pins the properties a diff cannot show:
+every external action resolves to a reviewed commit SHA, the sensitive
+workflows keep their reviewed permissions and forbid `continue-on-error:`, and
+the composite action this repository publishes runs exactly the reviewed
+invocation — the one file here that executes inside someone else's job under
+someone else's token.
 
-Hosted CI runs the same logical floor as two platform-local chains:
+The topology in brief — read `ci.yml` for the detail:
 
-- Linux: a static preflight — pure Python over the tree, plus Mojo and tracked
-  native C/header formatting over it, and nothing that compiles — releases both
-  the behavioral matrix
-  (`test`, `assertions-check`, `e2e`, `cache-protocol-check`,
-  `build-stamp-check`, strict contract, ASan, Valgrind) and, beside it, a
-  `compiled oracles` job carrying every preflight member that needs a real
-  compiler: `native-check`, `build`, `build-profile-check`, `readme-help-check`,
-  `junit-render-check`, `transcripts-check`, and `coverage-capability`. The oracles run parallel to the matrix rather than
-  ahead of it, because jobs share no filesystem and every cell compiles what
-  it needs through its own task edges, so nothing downstream could ever
-  consume what the preflight built.
-- macOS: preflight runs the native audit and `build-profile-check`, proving the
-  native `apple-m1` IR and exact 14.0 minimum before it releases `test`,
-  `assertions-check`, `e2e`, `cache-protocol-check`, `build-stamp-check`, and
-  strict contract cells. The Linux repository-policy barrier separately pins
-  `-g0` in both profiles' exact link argv. Both matrices run
-  `fail-fast: false`, so one red lane never cancels the verdicts of the others.
+- Linux: a static, nothing-compiles preflight releases the behavioral matrix
+  and, beside it, a `compiled oracles` job carrying every preflight member
+  that needs a real compiler. macOS: preflight runs the native audit and
+  `build-profile-check` before releasing its matrix. Both matrices run
+  `fail-fast: false`, so one red lane never cancels the others' verdicts.
 - There is no self-hosted dogfood cell. `scripts/harness/dogfood.py` survives
   as a local task and as the helper `package-check` reuses against the
-  installed artifact on both platforms, which is where those three probes now
-  block from.
-- The cache-protocol and build-stamp cells run on both platforms because both
-  spawn real processes and read the filesystem directly, so the platform whose
-  `stat` layout and path semantics differ is where they have to be executed
-  rather than assumed.
-- The strict contract cell runs `contract-check-strict`
-  (`python -m scripts.qa.contract --strict --no-rebuild`) against the binary
-  that job's own `build-bin` dependency just produced in that fresh checkout.
-  Every documented exit, stream, and environment behavior in
-  `docs/cli-contract.md` is a blocking release-floor assertion, not manual QA.
-  `pixi run contract-check` remains the contributor-friendly, non-strict,
-  rebuild-if-stale entry point for local iteration.
-- Every lane runs on every pull request and configured main-branch push, not on
-  a schedule — but **running is not the same as blocking**. Which contexts block
-  a merge is configured in repository settings, not in this repo, and the two
-  lists have drifted apart before: the `cache protocol` and `build stamp` cells
-  ran unrequired on both platforms from the day they were added until the
-  ruleset was corrected to the 20 contexts listed below. Adding, renaming, or
-  splitting a lane must update the required-context list in the same change; a
-  workflow edit alone silently produces a lane nobody is required to pass, and
-  nothing in this repository can detect that.
-- The two CodeQL jobs (`C and C++`, `Python`) are deliberately not status-check
-  contexts. Merge protection for them comes from the ruleset's `code_scanning`
-  rule instead, which blocks on a CodeQL alert at high-or-higher security
-  severity or an error-level quality alert. A green CodeQL job proves only that
-  analysis uploaded; the alert threshold is what proves nothing was found. The
-  sanitizer negative controls under `MTEST_EXEC_TESTING` are dismissed there as
-  used-in-tests, on the standing evidence that `TEST_ONLY_SYMBOLS` in
-  `scripts/checks/native_abi.py` proves them absent from the production object.
+  installed artifact on both platforms — that is where those probes block
+  from.
 - Transcripts and ASan/Valgrind stay Linux-only. Packaged-artifact consumption
-  is blocking on both linux-64 and osx-arm64, one job per platform, both
-  running `pixi run package-check`.
-- A job's display name is its status-check context, so every name the ruleset
-  requires must stay byte-stable. The 20 currently required are eight names
-  carried on both `Linux /` and `macOS arm64 /` — `preflight`, `classified suite`,
-  `assertions`, `end-to-end tests`, `strict contract`, `cache protocol`,
-  `build stamp`, `packaged artifact` — plus the three Linux-only jobs
-  `Linux / compiled oracles`, `Linux / ASan + LSan`, and
-  `Linux / Valgrind Memcheck`, plus the unprefixed `Python quality`. Renaming
-  one does not red the lane; it removes the lane from the required set and
-  leaves a permanently pending context in its place.
+  blocks on both platforms. The cache-protocol and build-stamp cells run on
+  both platforms because both spawn real processes and read the filesystem
+  directly.
 - `native-check` depends on `postfork-check`, so the native gate alone cannot
   skip the child call-graph audit.
-- `.github/workflows/docs.yml` is a lane of its own, in neither platform
-  matrix. It builds the documentation site on every pull request and deploys it
-  to Pages only from a push to main, and it is the only workflow ever granted
-  `pages: write` and `id-token: write`. It is also the only place the site is
-  ever built, because `docs-build` runs mkdocs through `uv`, which the pixi
-  environment does not pin, so the job that supplies the tool is the job that
-  may run the task. Neither of its jobs is among the 20 required contexts named
-  above.
-- `.github/workflows/compat-canary.yml` is the other lane of its own, and it is
-  the only one that runs a compiler this repository does not pin. On weekday
-  nights it relaxes the Mojo pin in its throwaway checkout, installs whatever
-  the channels publish beyond it, and classifies what broke; `notify` then keeps
-  one pinned issue per lane that has ever had a finding. The two jobs are split
-  by credential — the job that executes the downloaded compiler holds no write
-  scope, persists no credential to disk and binds none into its environment,
-  and the job holding `issues: write` runs neither pixi nor Mojo — and
-  `setup-pixi` runs with a pinned `pixi-version:` and
-  `run-install: false`, so the tool the probe reads the channels through cannot
-  change under it and nothing solves the committed pin before the probe relaxes
-  it. `scripts/checks/workflow_security.py` pins all three properties.
-  Neither of its jobs is among the 20 required contexts either.
+
+**Running is not the same as blocking.** Which contexts block a merge is
+configured in repository settings, not in this repo, and the two lists have
+drifted apart before. Adding, renaming, or splitting a lane must update the
+required-context list in the same change; a workflow edit alone silently
+produces a lane nobody is required to pass, and nothing in this repository can
+detect that. A job's display name is its status-check context, so every
+required name must stay byte-stable: renaming one does not red the lane, it
+removes the lane from the required set and leaves a permanently pending
+context. The 20 required contexts are eight names carried on both `Linux /`
+and `macOS arm64 /` — `preflight`, `classified suite`, `assertions`,
+`end-to-end tests`, `strict contract`, `cache protocol`, `build stamp`,
+`packaged artifact` — plus the three Linux-only jobs
+`Linux / compiled oracles`, `Linux / ASan + LSan`, and
+`Linux / Valgrind Memcheck`, plus the unprefixed `Python quality`.
+
+The two CodeQL jobs (`C and C++`, `Python`) are deliberately not status-check
+contexts. Merge protection for them comes from the ruleset's `code_scanning`
+rule instead, which blocks on a CodeQL alert at high-or-higher security
+severity or an error-level quality alert; a green CodeQL job proves only that
+analysis uploaded. The sanitizer negative controls under `MTEST_EXEC_TESTING`
+are dismissed there as used-in-tests, on the standing evidence that
+`TEST_ONLY_SYMBOLS` in `scripts/checks/native_abi.py` proves them absent from
+the production object.
+
+Two lanes sit outside the platform matrices, neither among the required
+contexts. `.github/workflows/docs.yml` builds the documentation site on every
+pull request and deploys to Pages only from a push to main; it is the only
+workflow ever granted `pages: write` and `id-token: write`, and the only place
+the site is ever built (`docs-build` runs mkdocs through `uv`, which pixi does
+not pin — the job that supplies the tool is the job that may run the task).
+`.github/workflows/compat-canary.yml` is the only lane that runs a compiler
+this repository does not pin: on weekday nights it relaxes the Mojo pin in a
+throwaway checkout and classifies what broke. Its two jobs are split by
+credential — the job executing the downloaded compiler holds no write scope;
+the job holding `issues: write` runs neither pixi nor Mojo — and
+`scripts/checks/workflow_security.py` pins that split.
 
 ### Cross-compiling before commit
 
@@ -481,11 +359,9 @@ omits it because the hosted macOS lane compiles natively and owns that verdict.
 Classified modules under `tests/unit/` and `tests/integration/` each compile
 and run as their own program: they declare `test_*` functions **and must**
 declare their own `main()` handing them to `TestSuite.discover_tests`, exactly
-like every other test file in this repo (protocol fixtures, e2e fixtures,
-dogfood probes). This is a packaging constraint, not a style choice: a module
-with `main()` builds and runs fine on its own, and importing one that declares
-`main()` also builds fine, but `mojo precompile` over a tree containing one
-fails with `'main()' is not supported within packages` — which is why
+like every other test file in this repo. This is a packaging constraint, not a
+style choice: `mojo precompile` over a tree containing a `main()` fails with
+`'main()' is not supported within packages` — which is why
 `tests/unit/__init__.mojo` and `tests/integration/__init__.mojo` do not exist
 (package markers would make the directory precompilable) while
 `tests/__init__.mojo` does, and why `scripts/checks/layout.py` guards it.
@@ -496,15 +372,20 @@ sources on disk. Use `pixi run test-file -- <classified-test.mojo>` while
 investigating a failure.
 
 Membership is derived, not declared: there is no committed path list or test
-count to update. Adding a test file or a `test_*` function costs zero ledger
-edits — `scripts/checks/layout.py` and `scripts/harness/selfhost.py` both
-compute their expectations from the tree on each run. The trade this makes
-explicit: the oracle proves mtest ran every test the sources declare *right
-now*; it cannot prove the sources still declare every test they used to. A
-file dropping from N tests to M (M > 0) is invisible to every gate — that is a
-reviewable diff, not a runner defect. A file reaching **zero** `test_*`
-functions is loud and fails closed. See `scripts/harness/selfhost.py`'s module
-docstring for the full reasoning.
+count to update. The trade this makes explicit: the oracle proves mtest ran
+every test the sources declare *right now*; it cannot prove the sources still
+declare every test they used to. A file dropping from N tests to M (M > 0) is
+invisible to every gate — a reviewable diff, not a runner defect. A file
+reaching **zero** `test_*` functions is loud and fails closed. See
+`scripts/harness/selfhost.py`'s module docstring for the full reasoning.
+
+**An executable-topology change audits every harness consumer.** A change to
+whether classified modules own `main()`, how mtest discovers them, or which
+inventory a lane runs must cover `test`, `test-file`, ASan, Valgrind, dogfood,
+self-host, and package consumption — each classified module is a complete,
+directly buildable program in every one of those lanes, and a green primary
+test gate does not prove the specialized consumers use the same module
+contract. Add a harness regression that inspects each affected build command.
 
 ## Pin policy and ask-first boundaries
 
@@ -530,6 +411,10 @@ freezes; adding any dependency (or reaching for Python where native Mojo would
 do); weakening a gate (a tolerance, a skip, a delete) to reach green; changing
 the committed transcript/fixture format.
 
+After any non-trivial edit, summarize what changed, what was intentionally not
+touched, and any concerns — and always call out an Ask-first boundary you
+crossed.
+
 ## The standing per-phase quality gate
 
 Every phase repeats the same external review loop at both checkpoints, the plan
@@ -544,6 +429,12 @@ finding is triaged fixed or rejected-with-reason in that phase's notes.
 Conventional Commits with a required scope, atomic, imperative subject <=72
 chars, a body explaining why. Types: `feat`, `fix`, `refactor`, `perf`, `docs`,
 `test`, `bench`, `build`, `ci`, `chore`. Merge commits are exempt.
+`skills` is a scope, not a type: a docs edit to a skill is `docs(skills): …`,
+never `skills(...): …`.
+
+A commit that regenerates any transcript names the oracle-side reason in its
+body — a pin bump, a deliberate fixture or matrix edit. "Regenerated
+transcripts" with no reason reads as hand-fixing a failing gate.
 
 No AI or assistant attribution anywhere: no `Co-Authored-By` for an AI, no
 "Generated with" line, no robot emoji, in any commit, merge commit, or note.
@@ -612,13 +503,22 @@ The six that come up most often:
 
 ## Skills index
 
-- `.agents/skills/git-conventions`: commit/branch/PR conventions.
-- `.agents/skills/mojo-coding-guidance`: per-edit Mojo coding contract.
-- `.agents/skills/test-driven-development`: the protocol-snapshot lifecycle and
-  parser-testing discipline.
-- `.agents/skills/code-review-and-quality`: pre-merge review axes and the
-  dual-adversarial-review protocol.
-- `.agents/skills/improve-architecture`: deep-module thinking on the layering.
-- `.agents/skills/validating-mtest`: QA and acceptance testing against
-  `docs/cli-contract.md`.
-- global `mojo-syntax`: the authority on Mojo syntax.
+The skills under `.agents/skills/` are reference documents reached from here.
+Read the matching one **before** the work it names:
+
+- Writing, modifying, refactoring, or reviewing any Mojo in this repo →
+  [`mojo-coding-guidance`](.agents/skills/mojo-coding-guidance/SKILL.md): the
+  coding contract — exit-code fidelity, supervision invariants, error shapes,
+  docstrings, the rent test.
+- Writing or changing any test, or choosing how to prove a behavior →
+  [`mtest-testing-patterns`](.agents/skills/mtest-testing-patterns/SKILL.md):
+  which oracle each layer tests against, the four repo test patterns, and the
+  exactness policy.
+- About to merge, or asked to review a diff →
+  [`code-review-and-quality`](.agents/skills/code-review-and-quality/SKILL.md):
+  the repo-signature review axes (transcript fidelity, exit-code honesty) and
+  the severity table.
+- QA, acceptance, or release validation against `docs/cli-contract.md` →
+  [`validating-mtest`](.agents/skills/validating-mtest/SKILL.md):
+  contract-as-oracle checks, poison probes, harness traps, clean-room Docker.
+- All Mojo syntax → the global `mojo-syntax` skill; training data is stale.
