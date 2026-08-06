@@ -2,9 +2,11 @@
 
 The seam's own contract, tested away from any driver: what `seam_begin` learns,
 what `seam_stage` claims, and what `seam_settle` and `seam_discard` leave
-behind. The store protocol underneath it is pinned in `test_session_store.mojo`;
-these cases pin the answers the seam hands a driver, which is what decides which
-binary runs and which command line a reproduce line quotes.
+behind. The store protocol underneath it is pinned in
+`test_session_store_artifact.mojo` (probe and publish) and
+`test_session_store_keys.mojo` (keying); these cases pin the answers the seam
+hands a driver, which is what decides which binary runs and which command line a
+reproduce line quotes.
 
 Every case keys a bare `CacheContext` over a stub source, never the pinned
 toolchain: the subject is the seam's own routing, and an empty session prefix

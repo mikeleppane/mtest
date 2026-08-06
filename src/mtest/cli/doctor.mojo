@@ -96,80 +96,16 @@ struct _DoctorContext(Movable):
         )
 
 
-def _hex_escape(value: Int) -> String:
-    """Render one interpreted control as `\\xHH` in lowercase hex.
-
-    The single place doctor's escape text is assembled, so the C0/DEL and C1
-    forms cannot drift apart in width or letter case. Doctor keeps one spelling
-    for both classes (the console reporter distinguishes them) because a
-    diagnostic line is read, not parsed, and one form is the shorter thing to
-    recognize.
-
-    Args:
-        value: The code point being escaped. Only its low byte is rendered,
-            which is exact for every code point doctor escapes: they all lie in
-            `U+0000..U+009F`.
-
-    Returns:
-        A `\\x` introducer followed by exactly two lowercase hex digits.
-    """
-    comptime HEX = "0123456789abcdef"
-    return "\\x" + String(HEX[byte=value // 16]) + String(HEX[byte=value % 16])
-
-
-def _safe_text(text: String) -> String:
-    """Neutralize child-controlled text for one diagnostic line.
-
-    Escapes every code point `mtest.model.control_chars` classifies as a
-    terminal instruction: the C0 controls `U+0000..U+001F`, DEL `U+007F`, and
-    the C1 controls `U+0080..U+009F`. C1 is not optional: `U+009B` is CSI,
-    `U+009D` is OSC and `U+009C` is ST in their single-code-point form, so a
-    `--version` probe doctor interpolates could drive a terminal with no ESC
-    byte anywhere in its output. LF, CR and Tab get named short forms because
-    they are the ones a reader recognizes; the effect is the same.
-
-    Args:
-        text: Untrusted display text, already valid UTF-8.
-
-    Returns:
-        A single-line, control-free rendering of `text`, bounded to 240
-        code points with a trailing ellipsis when it would run longer.
-    """
-    var escaped = String("")
-    for cp in text.codepoints():
-        var value = Int(cp)
-        if value == 10:
-            escaped += "\\n"
-        elif value == 13:
-            escaped += "\\r"
-        elif value == 9:
-            escaped += "\\t"
-        elif is_interpreted_control(value, preserve_lf_tab=False):
-            escaped += _hex_escape(value)
-        else:
-            escaped += String(cp)
-    if escaped.count_codepoints() <= 240:
-        return escaped^
-    var shortened = String("")
-    var count = 0
-    for cp in escaped.codepoint_slices():
-        if count == 237:
-            break
-        shortened += String(cp)
-        count += 1
-    return shortened + "..."
-
-
 def _line(status: String, name: String, detail: String) -> String:
-    return status + " " + name + ": " + _safe_text(detail)
+    return status + " " + name + ": " + safe_path_label(detail)
 
 
 def _has_control(text: String) -> Bool:
     """Whether `text` carries any code point a terminal would interpret.
 
-    Covers the same three ranges `_safe_text` escapes, so a toolchain identity
-    made only of C1 controls is rejected as unusable rather than compared,
-    printed, and trusted.
+    Covers the same code points `safe_path_label` escapes, so a toolchain
+    identity made only of C1 controls is rejected as unusable rather than
+    compared, printed, and trusted.
 
     Args:
         text: Untrusted display text, already valid UTF-8.
@@ -282,7 +218,7 @@ def _load_config(
     else:
         absolute = _absolute_from_root(root, requested)
         selected = _relative_to_root(root, absolute)
-    var label = _safe_text(selected)
+    var label = safe_path_label(selected)
     if not exists(absolute):
         if explicit:
             return _ConfigLoad(

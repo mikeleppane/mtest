@@ -2,13 +2,14 @@
 
 Four surfaces render untrusted, child-controlled text to a terminal and must
 neutralize it first: the console reporter (`report/console_text.mojo`), the
-`doctor` diagnostic lines (`cli/doctor.mojo`), the `config show` TOML rendering
+one-line labels every CLI diagnostic quotes a path or value through
+(`config/value_validation.mojo`), the `config show` TOML rendering
 (`config/show.mojo`), and the configuration diagnostics that quote an offending
 key or value back from `mtest.toml` (`config/toml_bridge.mojo`). They cannot
 share their *escape text*: the console emits `\\xHH` and `\\u00HH` in uppercase
-hex, `doctor` and the TOML diagnostics emit lowercase `\\xHH`, and `config show`
-must emit `\\u00HH` because it is producing TOML, whose basic strings have a
-`\\uXXXX` escape and no `\\xHH` escape at all.
+hex, the labels and the TOML diagnostics emit lowercase `\\xHH`, and
+`config show` must emit `\\u00HH` because it is producing TOML, whose basic
+strings have a `\\uXXXX` escape and no `\\xHH` escape at all.
 
 They can and must share the *classification*: the set of code points a
 terminal treats as instructions. That set is defined once, here, so extending

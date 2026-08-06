@@ -107,7 +107,8 @@ the parallel scheduler behind `-n`/`--workers`, does not call `next_step` at
 all — it runs its own `_PENDING_BUILD` → `_BUILDING` → `_PENDING_RUN` →
 `_RUNNING` → `_DONE` phase machine, driving up to `workers` children at once
 under a single `Supervisor` over native ABI v2, and reaches into the kernel
-only for `admit_crash_retry`, `record_verdict`, and the halt predicates;
+only for `admit_crash_retry`, `record_verdict`, `record_settled`, and the halt
+state (`halt()`, `halt_interrupted()`, `halt_internal_error()`);
 `--serial` pins its matching files to a final one-at-a-time pass that runs
 after the parallel batch drains. A scheduling feature meant for both drivers
 belongs in those kernel policy methods, never in `next_step`. Concurrency is

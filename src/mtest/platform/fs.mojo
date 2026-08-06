@@ -75,12 +75,17 @@ def path_kind(path: String) raises -> Int:
         already masked with `S_IFMT`.
 
     Raises:
-        Error: If `path` cannot be characterized — absent, or inside a
-            directory this process may not search. The two are indistinguishable
-            through a Mojo `Error`, and a caller that treats either as a kind
-            would be reading an answer the filesystem never gave.
+        Error: `"platform: lstat failed: '<path>'"` if `path` cannot be
+            characterized — absent, or inside a directory this process may not
+            search. The two are indistinguishable through a Mojo `Error`, and a
+            caller that treats either as a kind would be reading an answer the
+            filesystem never gave. The stdlib error is replaced rather than
+            forwarded, because it names neither the call nor the path.
     """
-    return Int(lstat(path).st_mode) & S_IFMT
+    try:
+        return Int(lstat(path).st_mode) & S_IFMT
+    except:
+        raise Error("platform: lstat failed: '" + path + "'")
 
 
 def destination_identity(path: String) -> String:

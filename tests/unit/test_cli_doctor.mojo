@@ -19,7 +19,6 @@ from mtest.cli.doctor import (
     _doctor_platform_probe,
     _doctor_root_dependency_probe,
     _has_control,
-    _safe_text,
     _toolchain_identity_is_pinned,
 )
 from mtest.config import (
@@ -28,6 +27,7 @@ from mtest.config import (
     RunnerConfig,
     ShardMode,
     Verbosity,
+    safe_path_label,
 )
 
 
@@ -230,17 +230,17 @@ def test_doctor_detail_over_the_bound_is_truncated_not_dropped() raises:
     arm64. Exercising it keeps that shape under test instead of latent.
     """
     var under = _repeated("a", 240)
-    assert_equal(_safe_text(under), under)
-    assert_false("..." in _safe_text(under))
+    assert_equal(safe_path_label(under), under)
+    assert_false("..." in safe_path_label(under))
 
-    var bounded = _safe_text(_repeated("b", 241))
+    var bounded = safe_path_label(_repeated("b", 241))
     assert_equal(bounded.count_codepoints(), 240)
     assert_true(bounded.endswith("..."))
     assert_equal(bounded, _repeated("b", 237) + "...")
 
     # An escape expands one input codepoint into several, so the bound counts
     # escaped codepoints rather than source ones.
-    var escaped = _safe_text(_repeated("\n", 200))
+    var escaped = safe_path_label(_repeated("\n", 200))
     assert_equal(escaped.count_codepoints(), 240)
     assert_true(escaped.endswith("..."))
 
@@ -253,13 +253,13 @@ def test_doctor_escaper_neutralizes_c1_controls() raises:
     interpolates could repaint the screen or set the title through an escaper
     that only ever looked for ESC and the rest of C0.
     """
-    assert_equal(_safe_text(chr(0x9B) + "2J"), "\\x9b2J")
+    assert_equal(safe_path_label(chr(0x9B) + "2J"), "\\x9b2J")
     assert_equal(
-        _safe_text(chr(0x9D) + "0;pwned" + chr(0x9C)), "\\x9d0;pwned\\x9c"
+        safe_path_label(chr(0x9D) + "0;pwned" + chr(0x9C)), "\\x9d0;pwned\\x9c"
     )
-    assert_equal(_safe_text(chr(0x80) + chr(0x9F)), "\\x80\\x9f")
+    assert_equal(safe_path_label(chr(0x80) + chr(0x9F)), "\\x80\\x9f")
     # Either side of the C1 block is ordinary text and rides through verbatim.
-    assert_equal(_safe_text("~" + chr(0xA0) + "e"), "~" + chr(0xA0) + "e")
+    assert_equal(safe_path_label("~" + chr(0xA0) + "e"), "~" + chr(0xA0) + "e")
 
 
 def test_doctor_control_probe_rejects_a_c1_only_identity() raises:
@@ -267,7 +267,7 @@ def test_doctor_control_probe_rejects_a_c1_only_identity() raises:
 
     `_has_control` is the guard that stops such an identity being echoed back
     in the mismatch diagnostic at all, so it must cover exactly the range
-    `_safe_text` escapes.
+    `safe_path_label` escapes.
     """
     assert_true(_has_control(chr(0x9B)))
     assert_true(_has_control("mojo " + chr(0x9D) + "0;x"))
@@ -332,6 +332,20 @@ def test_doctor_checks_every_configured_report_destination() raises:
             _check_report_destinations(usable),
             "PASS report-destinations: 1 parent(s) usable",
         )
+
+
+def test_doctor_escapes_a_c1_control_in_a_report_destination() raises:
+    """Every doctor line escapes the same code points, destinations included.
+
+    The parent of a `[report]` destination is `mtest.toml` text quoted back at
+    a terminal, so a raw `U+009B` there is CSI reaching the reader with no ESC
+    byte in the line — exactly what the other doctor checks already refuse.
+    """
+    var hostile = _destination_context("md", chr(0x9B) + "31mnope/report.out")
+    assert_equal(
+        _check_report_destinations(hostile),
+        "FAIL report-destinations: md parent does not exist: '\\x9b31mnope'",
+    )
 
 
 def test_doctor_seeds_resolution_with_every_cli_only_field() raises:

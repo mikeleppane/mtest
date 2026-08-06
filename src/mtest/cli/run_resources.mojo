@@ -28,6 +28,33 @@ struct CloseOutcome(Copyable, Movable):
     """The failed release to report, or empty when every release succeeded."""
 
 
+def _discard_spool(spool: String):
+    """Remove one spool directory and everything in it, best effort.
+
+    The fragments go before the directory holding them, because `rmdir` refuses
+    a directory that still has entries and the spool would outlive the run.
+    Every format's spool is freed through here, so a hardening applied once
+    reaches all of them.
+
+    Args:
+        spool: The spool directory, or "" when the run owns none. A path that
+            is already gone, or that refuses to list or unlink, leaves whatever
+            it can behind rather than raising: this runs on every exit path,
+            including the ones already carrying a failure.
+    """
+    if spool == "":
+        return
+    try:
+        for name in listdir(spool):
+            try:
+                remove(spool + "/" + name)
+            except:
+                pass
+        rmdir(spool)
+    except:
+        pass
+
+
 @fieldwise_init
 struct RunResources:
     """Everything a configured run owns, and the one ladder that releases it.
@@ -98,10 +125,6 @@ struct RunResources:
         that never touches the published report; on failure the writer left it
         behind deliberately, and the prior report at the target is what survives.
 
-        The fragments are removed before the directory holding them, because
-        `rmdir` refuses a directory that still has entries and the spool would
-        outlive the run.
-
         The descriptors are NOT closed here — see `report_md_fd`.
 
         Best-effort and non-raising, so it is safe on every error path and with
@@ -117,16 +140,7 @@ struct RunResources:
                 remove(self.report_html_temp)
             except:
                 pass
-        if self.report_spool != "":
-            try:
-                for name in listdir(self.report_spool):
-                    try:
-                        remove(self.report_spool + "/" + name)
-                    except:
-                        pass
-                rmdir(self.report_spool)
-            except:
-                pass
+        _discard_spool(self.report_spool)
 
     def _discard_junit_scratch(self):
         """Remove the JUnit spool directory, its fragments, and any leftover temp.
@@ -138,9 +152,6 @@ struct RunResources:
         touches the published report; on failure the reporter discarded it.
         Either way the fragments and the spool directory are what is left.
 
-        The fragments are removed before the directory holding them, for the
-        reason `_discard_report_scratch` states.
-
         Best-effort and non-raising, so it is safe on every error path and with
         empty or missing paths.
         """
@@ -149,16 +160,7 @@ struct RunResources:
                 remove(self.junit_temp)
             except:
                 pass
-        if self.junit_spool != "":
-            try:
-                for name in listdir(self.junit_spool):
-                    try:
-                        remove(self.junit_spool + "/" + name)
-                    except:
-                        pass
-                rmdir(self.junit_spool)
-            except:
-                pass
+        _discard_spool(self.junit_spool)
 
     def close_into(mut self, code: Int, rank_delivery: Bool) -> CloseOutcome:
         """Release every owned resource and state the code to end on.

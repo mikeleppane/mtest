@@ -85,11 +85,15 @@ def test_path_kind_reports_the_link_never_its_target() raises:
 
 def test_path_kind_raises_for_a_path_it_cannot_characterize() raises:
     """An absent path is an error rather than a kind, so a caller cannot read
-    "not a directory" out of a question the filesystem never answered."""
+    "not a directory" out of a question the filesystem never answered.
+
+    The diagnostic names the call and the path it was given: a facade consumer
+    that does not catch this gets a located error rather than a stdlib one."""
     var root = temp_root()
+    var absent = root + "/absent"
     try:
-        with assert_raises():
-            _ = path_kind(root + "/absent")
+        with assert_raises(contains="platform: lstat failed: '" + absent + "'"):
+            _ = path_kind(absent)
     finally:
         remove_tree(root)
 

@@ -1976,7 +1976,8 @@ Arrows show the layering: each module may import only from layers below it.
   only caller for that question: it walks `next_step` one step at a time and
   folds each completion back. Retry policy, `--maxfail` accounting, and
   stale-state recovery live in the kernel's policy methods —
-  `admit_crash_retry`, `record_verdict`, and the halt predicates — and are
+  `admit_crash_retry`, `record_verdict`, `record_settled`, and the halt state
+  (`halt()`, `halt_interrupted()`, `halt_internal_error()`) — and are
   unit-tested without spawning a process. The parallel scheduler runs its own
   build-then-run phase machine over the worker pool, gate files first, then
   the parallel batch, then any `--serial` pass, and reaches into the kernel
