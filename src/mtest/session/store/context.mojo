@@ -242,12 +242,13 @@ def refuse_unsafe_tags(mut ctx: CacheContext, tags: List[String]) -> Bool:
     """Switch the cache off when `tags` cannot frame a key safely.
 
     The store's fail-closed channel for the one key hazard that lives in
-    mtest's own source rather than in the tree it is keying: a tag holding a
-    NUL, or a base tag wearing one of the suffixes `feed_file` derives, makes
-    two different builds key alike and serves a stale binary. `KeyBuilder`
-    cannot refuse either — `feed` and `feed_file` are total by contract, as is
-    every caller of theirs here — so the namespace that declares the tags
-    refuses on their behalf, before a single frame is fed.
+    mtest's own source rather than in the tree it is keying: a base tag wearing
+    one of the suffixes `feed_file` derives makes two different builds key alike
+    and serves a stale binary, and an empty or NUL-bearing tag names a
+    contribution nothing can quote back. `KeyBuilder` cannot refuse any of them
+    — `feed` and `feed_file` are total by contract, as is every caller of theirs
+    here — so the namespace that declares the tags refuses on their behalf,
+    before a single frame is fed.
 
     Args:
         ctx: The session's cache state, switched off when a tag is unsafe.

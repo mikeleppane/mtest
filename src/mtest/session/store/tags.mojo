@@ -3,14 +3,14 @@
 Layer 4 (`session`), inside `store`. Every tag any part of the store feeds is
 declared here, and `cache_key_tags` returns exactly that set.
 
-`KeyBuilder.feed` frames a contribution as tag bytes, one `0x00`, an eight-byte
-little-endian length, then the payload, and `feed_file` derives `tag + ".size"`
-and `tag + ".sha"` frames from the base tag it is given. So a tag holding a
-`0x00` byte would forge a frame boundary, a base tag literally spelled
-`something.size` would collide with another tag's derived frames, and two equal
-tags would make two different builds key alike — every one of which serves a
-stale binary. Anyone adding a tag adds it in this one place, and the suite
-re-checks the whole set.
+`KeyBuilder.feed` frames a contribution as the tag length, the tag bytes, the
+payload length, then the payload, so no byte a tag or payload holds can forge a
+boundary. What framing cannot separate is two contributions that choose the same
+tag: `feed_file` derives `tag + ".size"` and `tag + ".sha"` from the base tag it
+is given, so a base tag literally spelled `something.size` collides with another
+tag's derived frames, as do two equal tags — either of which makes two different
+builds key alike and serves a stale binary. Anyone adding a tag adds it in this
+one place, and the suite re-checks the whole set.
 """
 from mtest.cache import KEY_FORMAT_TAG, KeyBuilder
 

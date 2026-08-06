@@ -19,8 +19,9 @@ idempotent and the FIRST reason wins, because the first cause is the one the
 user can act on; a later symptom would bury it.
 
 **Frame order is the wire contract.** `KeyBuilder` frames each contribution as
-tag bytes, one `0x00`, an eight-byte little-endian length, then the payload, so
-the stream is self-delimiting and no payload can forge a boundary. What framing
+the tag length, the tag bytes, the payload length, then the payload, each length
+eight little-endian bytes, so the stream is self-delimiting and neither a tag nor
+a payload can forge a boundary. What framing
 does NOT do is make order irrelevant: two runs that feed the same facts in a
 different order digest differently and lose every hit. The order is therefore
 fixed, and changing it invalidates every stored key:

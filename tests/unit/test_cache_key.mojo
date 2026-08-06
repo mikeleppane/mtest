@@ -1,9 +1,10 @@
 """Unit tests for cache key frames, generation naming, and the meta format.
 
 Two properties carry the whole persistent cache. First, `KeyBuilder` frames
-every contribution with a tag, a NUL, and a length, so no payload — however
-many newlines or `tag:` lookalikes it contains — can forge a frame boundary
-and make two different builds hash alike. Second, `MetaFile.parse` is total:
+every contribution with the tag's length, the tag, the payload's length, and the
+payload, so neither a payload full of newlines nor a tag holding any byte at all
+can forge a frame boundary and make two different builds hash alike. Second,
+`MetaFile.parse` is total:
 a truncated, corrupt, or hand-edited file returns `None` so the caller treats
 the generation as a miss and rebuilds, rather than serving a wrong binary.
 """
@@ -49,10 +50,40 @@ def test_newline_payload_cannot_forge_frames() raises:
         raise Error("length-prefixed frames must not be forgeable")
 
 
+def test_a_tag_can_never_be_read_as_payload_bytes() raises:
+    # The tag is length-prefixed, so no tag byte sequence can be read as the
+    # boundary that follows it. Under a NUL terminator these two feeds emitted
+    # the same eighteen bytes: tag "a" with eight NUL bytes of payload, and the
+    # tag "a\x00\x08" + six NUL bytes with no payload at all.
+    var a = KeyBuilder()
+    var eight_nuls = List[UInt8]()
+    for _ in range(8):
+        eight_nuls.append(0)
+    a.feed("a", eight_nuls)
+    var b = KeyBuilder()
+    b.feed(String("a") + chr(0) + chr(8) + String(chr(0)) * 6, List[UInt8]())
+    if a^.digest_full() == b^.digest_full():
+        raise Error("a tag must not be readable as a length and a payload")
+
+
+def test_a_forged_tag_cannot_reproduce_a_feed_file_frame() raises:
+    # `feed_file` reaches `feed` through `feed_str`, so the same forgery must
+    # fail there too: the path frame of `feed_file("a", <eight NUL bytes>, ...)`
+    # is what the forged single tag above imitates.
+    var a = KeyBuilder()
+    a.feed_file("a", String(chr(0)) * 8, 3, "ab")
+    var b = KeyBuilder()
+    b.feed(String("a") + chr(0) + chr(8) + String(chr(0)) * 6, List[UInt8]())
+    b.feed_str("a.size", "3")
+    b.feed_str("a.sha", "ab")
+    if a^.digest_full() == b^.digest_full():
+        raise Error("a file frame must not be reproducible from one feed")
+
+
 def test_a_tag_holding_a_nul_is_refused_by_name_and_position() raises:
-    # `feed` writes the tag bytes then one NUL, so a tag carrying its own NUL
-    # forges a frame boundary and two different builds key alike. The reason
-    # names the position rather than the tag: the tag cannot be quoted safely.
+    # A tag is a source-level constant: an empty one names nothing and one
+    # carrying a NUL cannot be quoted back. The reason names the position
+    # rather than the tag, for exactly that reason.
     assert_equal(unsafe_tag_reason(["toolchain", "root"]), "")
     assert_equal(
         unsafe_tag_reason(["root", String("a\x00b")]),

@@ -87,7 +87,7 @@ def test_an_unframeable_tag_switches_the_cache_off() raises:
     """A namespace that cannot key safely takes the fail-closed channel.
 
     `collect_env_base` runs this over `cache_key_tags()` before it hashes or
-    spawns anything, so a tag that would make two builds key alike costs a
+    spawns anything, so a tag the namespace cannot frame or name costs a
     rebuild instead of serving a stale binary. Neither `feed` nor `feed_file`
     can refuse one itself: both are total by contract, as is every caller of
     theirs in the store's key path.
