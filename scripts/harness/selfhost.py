@@ -226,14 +226,19 @@ VERDICT_ROW_RE = re.compile(
 )
 """One per-file verdict row: the verdict token and the file it names.
 
-The alternation must be exactly the file-row token set `_verdict_token` in
-src/mtest/report/console.mojo can print (PASS through FLAKY, plus the
-NO-TESTS substitution): any looser pattern can match a line that only looks
-like a verdict row. Written out rather than derived from
-`scripts/formats/vocabulary.txt`, because this parser is one of two independent
-readers of the same run and a shared source would make them agree by
-construction. `scripts/tests/test_vocabulary.py` reconciles the two spellings
-instead, so drift is a loud failure rather than a hand-sync obligation.
+The alternation is every token that starts a per-file verdict row, and nothing
+else: any looser pattern matches a line that only looks like one. It is not
+`_verdict_token`'s output set, which is wider. EXCLUDED and DRIFT begin real
+column-zero rows and are left out deliberately — each is its own row shape, and
+a legitimate exclusion matched here would be reported as a bad verdict.
+`_reconcile_paths` catches both through path membership instead: a file that
+produced one of those rows never reported PASS, so it is named as missing.
+
+Written out rather than derived from `scripts/formats/vocabulary.txt`, because
+this parser is one of two independent readers of the same run and a shared
+source would make them agree by construction.
+`scripts/tests/test_vocabulary.py` reconciles the two spellings instead, so
+drift is a loud failure rather than a hand-sync obligation.
 
 Not scoped to a fixed root prefix the way `dogfood.py`'s row regex is. This
 harness gets its roots at runtime and compares every row against the
@@ -856,7 +861,12 @@ def _reconcile_header(
 
 
 def _reconcile_paths(output: str, inventory: Inventory, failures: list[str]) -> None:
-    """Check the exact set of PASS-reporting paths against the derived set."""
+    """Check the exact set of PASS-reporting paths against the derived set.
+
+    The membership half is what covers the rows `VERDICT_ROW_RE` does not match:
+    an EXCLUDED row or a DRIFT banner leaves its file absent from `passed`, so
+    it is reported here as never reported rather than as a bad verdict.
+    """
     rows = VERDICT_ROW_RE.findall(output)
     passed = {path for verdict, path in rows if verdict == "PASS"}
     other = sorted({(verdict, path) for verdict, path in rows if verdict != "PASS"})

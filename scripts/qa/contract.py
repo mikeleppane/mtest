@@ -3681,8 +3681,9 @@ def build_matrix() -> list[Check]:
         # What §20 places in STABLE here is the refusal itself: that it happens,
         # its exit code, and the flag or destination the diagnostic names. The
         # sentence phrasing it is INFORMAL, so these assert that structure and
-        # not the wording. The two exceptions carry a STABLE surface inside the
-        # text: `--report`'s value grammar and `--report-style`'s value set.
+        # not the wording. Three exceptions carry a STABLE surface inside the
+        # text: `--report`'s value grammar, `--report-style`'s value set, and
+        # the once-per-format repetition rule.
         Check(
             "run: --report bad format -> 4",
             "§15.5",
@@ -3690,12 +3691,14 @@ def build_matrix() -> list[Check]:
             EXIT_USAGE,
             err_has=["md:PATH or html:PATH"],
         ),
+        # The flag alone does not discriminate: a regression refusing
+        # `--report md:` outright satisfies it and names no repetition rule.
         Check(
             "run: --report duplicate format -> 4",
             "§15.5",
             [*I, "--report", "md:a.md", "--report", "md:b.md", "tests"],
             EXIT_USAGE,
-            err_has=["'--report md:'"],
+            err_has=["'--report md:'", "per format"],
         ),
         Check(
             "run: --report md=html collision -> 4",

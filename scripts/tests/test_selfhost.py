@@ -376,7 +376,12 @@ FILE_ROW_TOKENS = (
     "FLAKY",
     "NO-TESTS",
 )
-"""Every file-row token `_verdict_token` in `console.mojo` can print.
+"""Every token that starts a per-file verdict row in `console.mojo`.
+
+Not `_verdict_token`'s output set, which is wider: EXCLUDED and NOT-RUN come
+out of it too, and EXCLUDED begins a row of its own shape that must not read as
+a bad verdict. `DRIFT` is a banner, also column zero, also deliberately absent.
+`selfhost._reconcile_paths` catches both through path membership.
 
 Written out rather than imported, so it can disagree with the regex it checks.
 `scripts/tests/test_vocabulary.py` reconciles it against

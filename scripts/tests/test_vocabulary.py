@@ -60,6 +60,32 @@ A console substitution, not an outcome, so it is absent from the vocabulary and
 every file-row token set carries it beside the outcome tokens.
 """
 
+NON_FILE_ROW_LABELS = ("SKIP", "DESELECTED", "EXCLUDED", "NOT_RUN")
+"""The outcomes that never label a per-file verdict row.
+
+SKIP and DESELECTED are per-test outcomes, and EXCLUDED and NOT-RUN get their
+own accounting rows. Naming the four exclusions rather than the nine inclusions
+is what makes the domain below derived: a new outcome joins the file-row set
+unless someone adds it here, so it cannot arrive unnoticed in either direction.
+"""
+
+FILE_ROW_DOMAIN = frozenset(
+    {NO_TESTS}
+    | {
+        token
+        for code, token in CONSOLE_TOKENS.items()
+        if code not in {CODE_BY_LABEL[label] for label in NON_FILE_ROW_LABELS}
+    }
+)
+"""Exactly the console tokens that can start a per-file verdict row.
+
+Derived from the vocabulary so an omission is as loud as an invention: every
+file-row oracle is asserted equal to this set, not merely contained in it. A
+subset assertion passes for an oracle that forgot a real token, which is the
+whole failure mode — a new outcome printed by the console's generic branch and
+missing from every hand-written row list.
+"""
+
 
 def alternation_tokens(pattern: str, group: str) -> tuple[str, ...]:
     """The alternatives of one named group in a regex source.
@@ -154,9 +180,7 @@ class SharerTests(unittest.TestCase):
                 self.assertIsNotNone(match, f"VERDICT_ROW_RE is blind to {token}")
 
     def test_the_packaged_row_regex_stays_narrow(self) -> None:
-        # SKIP and DESELECTED are per-test outcomes and EXCLUDED and NOT-RUN
-        # get their own accounting rows, so none of them starts a verdict row.
-        for label in ("SKIP", "DESELECTED", "EXCLUDED", "NOT_RUN"):
+        for label in NON_FILE_ROW_LABELS:
             token = CONSOLE_TOKENS[CODE_BY_LABEL[label]]
             with self.subTest(token=token):
                 self.assertNotIn(token, package_consumption.VERDICT_ROW_TOKENS)
@@ -192,8 +216,7 @@ class IndependentOracleTests(unittest.TestCase):
         harvested = alternation_tokens(selfhost.VERDICT_ROW_RE.pattern, "verdict")
         self.assertEqual(harvested, package_consumption.VERDICT_ROW_TOKENS)
 
-    def test_every_harvested_file_row_token_is_a_console_token(self) -> None:
-        console = set(CONSOLE_TOKENS.values())
+    def test_every_file_row_oracle_carries_the_whole_domain(self) -> None:
         harvested = {
             "selfhost.VERDICT_ROW_RE": alternation_tokens(
                 selfhost.VERDICT_ROW_RE.pattern, "verdict"
@@ -209,11 +232,10 @@ class IndependentOracleTests(unittest.TestCase):
         for source, tokens in harvested.items():
             with self.subTest(source=source):
                 self.assertEqual(
-                    set(tokens) - {NO_TESTS} - console,
-                    set(),
-                    f"{source} carries a token no console outcome spells",
+                    set(tokens),
+                    set(FILE_ROW_DOMAIN),
+                    f"{source} disagrees with the vocabulary's file-row domain",
                 )
-                self.assertIn(NO_TESTS, tokens)
 
     def test_the_two_written_out_token_lists_agree(self) -> None:
         self.assertEqual(

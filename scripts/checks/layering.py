@@ -74,11 +74,36 @@ or by signalling from the harness. Delete this entry with the call:
 `check_foreign_allowance_is_live` fails on an entry that permits nothing.
 """
 
+EXTERNAL_CALL_PACKAGES = frozenset({"platform", "exec"})
+"""The packages that may import `external_call` at all.
+
+`platform` is the foreign-call boundary, and `exec` needs the intrinsic for the
+native-adapter ABI and the allowance above. Anywhere else the import is itself
+a finding: an alias binds a second spelling for the same intrinsic, and a call
+written through a spelling this file never saw bound cannot be matched.
+"""
+
 _FROM_RE = re.compile(r"^\s*from\s+([\w.]+)\s+import\s+(.*)$")
 _IMPORT_RE = re.compile(r"^\s*import\s+(.+)$")
-_EXIT_RE = re.compile(r"\bexit\s*\(")
-_EXTERNAL_CALL_RE = re.compile(r"\bexternal_call\s*\[\s*\"([^\"]*)\"")
+_EXIT_SYMBOL = "exit"
+_EXTERNAL_CALL_SYMBOL = "external_call"
 _TRIPLE_QUOTES = ('"""', "'''")
+
+
+class Binding(NamedTuple):
+    """One name an import statement binds.
+
+    Attributes:
+        imported: The name as the module it comes from spells it. The facade
+            and private-name rules judge this one, because it names the entity
+            being reached.
+        bound: The name the importing module writes, which is the alias when
+            `as` renames it. A facade's exports are these, because the alias is
+            what a caller can ask the facade for.
+    """
+
+    imported: str
+    bound: str
 
 
 class Import(NamedTuple):
@@ -87,14 +112,14 @@ class Import(NamedTuple):
     Attributes:
         line: The physical line the statement starts on.
         module: The dotted module the statement imports from, or imports.
-        names: The names bound into the importing module. Empty for the bare
-            `import mtest.<pkg>.<module>` form, which binds no symbol this
-            checker can see.
+        names: The bindings the statement makes, both spellings each. Empty for
+            the bare `import mtest.<pkg>.<module>` form, which binds no symbol
+            this checker can see.
     """
 
     line: int
     module: str
-    names: tuple[str, ...]
+    names: tuple[Binding, ...]
 
 
 class Report(NamedTuple):
@@ -210,22 +235,72 @@ def stripped_code(text: str) -> str:
     return "\n".join(line for _number, line in strip_docstrings_and_comments(text))
 
 
-def _bound_names(clause: str) -> tuple[str, ...]:
+def _bound_names(clause: str) -> tuple[Binding, ...]:
     """Return the names an import clause binds into the importing module.
+
+    Both spellings are kept. Dropping the imported name would leave every rule
+    reading the alias: `run_session as invoke` would look like a name no facade
+    exports, and `_slot as slot` would look like a public one.
 
     Args:
         clause: Everything after `import`, with any grouping parentheses.
 
     Returns:
-        One name per imported entity, using the alias where `as` renames it.
+        One binding per imported entity.
     """
-    names: list[str] = []
+    names: list[Binding] = []
     for piece in clause.replace("(", " ").replace(")", " ").split(","):
         words = piece.split()
         if not words:
             continue
-        names.append(words[2] if len(words) > 2 and words[1] == "as" else words[0])
+        aliased = len(words) > 2 and words[1] == "as"
+        names.append(Binding(words[0], words[2] if aliased else words[0]))
     return tuple(names)
+
+
+def _aliases(statements: list[Import], symbol: str) -> frozenset[str]:
+    """Return every local spelling one file's imports give a primitive.
+
+    Args:
+        statements: The file's import statements.
+        symbol: The primitive's own name.
+
+    Returns:
+        `symbol` itself and every alias bound to it, so a call written through
+        the alias reads as a call to the primitive.
+    """
+    return frozenset({symbol}) | {
+        binding.bound
+        for statement in statements
+        for binding in statement.names
+        if binding.imported == symbol
+    }
+
+
+def _call_re(names: frozenset[str]) -> re.Pattern[str]:
+    """Return a pattern matching a call to any of `names`.
+
+    Args:
+        names: Local spellings of one primitive, its aliases included.
+
+    Returns:
+        A pattern whose match starts at the callee.
+    """
+    spellings = "|".join(re.escape(name) for name in sorted(names))
+    return re.compile(rf"\b(?:{spellings})\s*\(")
+
+
+def _foreign_re(names: frozenset[str]) -> re.Pattern[str]:
+    """Return a pattern matching an `external_call` through any of `names`.
+
+    Args:
+        names: Local spellings of the intrinsic, its aliases included.
+
+    Returns:
+        A pattern capturing the declared foreign symbol.
+    """
+    spellings = "|".join(re.escape(name) for name in sorted(names))
+    return re.compile(rf"\b(?:{spellings})\s*\[\s*\"([^\"]*)\"")
 
 
 def parse_imports(text: str) -> list[Import]:
@@ -293,20 +368,46 @@ def facade_exports(root: Path, package: str) -> frozenset[str]:
 
     Args:
         root: Repository root.
-        package: Package directory name under `src/mtest`.
+        package: Dotted package path under `mtest`, a subpackage such as
+            `session.store` included.
 
     Returns:
-        Every name reachable as `from mtest.<package> import <name>`.
+        Every name reachable as `from mtest.<package> import <name>`, spelled
+        the way the facade binds it: an aliased re-export offers the alias.
     """
-    facade = root / PACKAGE_ROOT / package / FACADE_NAME
+    facade = root / PACKAGE_ROOT / Path(*package.split(".")) / FACADE_NAME
     if not facade.is_file():
         return frozenset()
     prefix = f"mtest.{package}."
     return frozenset(
-        name
+        binding.bound
         for statement in parse_imports(facade.read_text(encoding="utf-8"))
         if statement.module.startswith(prefix)
-        for name in statement.names
+        for binding in statement.names
+    )
+
+
+def facade_packages(files: list[Path]) -> frozenset[str]:
+    """Return every package under `src/mtest` that carries a facade.
+
+    Subpackages count. A subpackage with an `__init__.mojo` offers a surface of
+    its own, so reaching past it is a bypass even though the package it sits in
+    has a facade too — otherwise the deeper surface is invisible and every
+    import through it is judged against the outer facade alone.
+
+    Args:
+        files: Repository-relative Mojo paths, as `source_files` returns them.
+
+    Returns:
+        Dotted paths relative to `mtest`. `mtest` itself is excluded: it is the
+        distribution root, not a layer.
+    """
+    return frozenset(
+        ".".join(path.parts[2:-1])
+        for path in files
+        if path.name == FACADE_NAME
+        and path.parts[:2] == PACKAGE_ROOT.parts
+        and len(path.parts) > 3
     )
 
 
@@ -327,18 +428,22 @@ def package_of(relative: Path) -> str | None:
 
 
 def facade_home(relative: Path) -> str | None:
-    """Return the package a file sits inside, for the facade rule.
+    """Return the package directory a file sits in, for the facade rule.
 
     Args:
         relative: Repository-relative path of a Mojo file under `src/`.
 
     Returns:
-        The package whose internals this file may reach directly, which is
-        `cli` for the composition root. See `COMPOSITION_ROOT_PACKAGE`.
+        The dotted package whose internals this file may reach directly, which
+        is `cli` for the composition root (see `COMPOSITION_ROOT_PACKAGE`) and
+        `None` for a file outside `src/mtest`.
     """
     if relative == COMPOSITION_ROOT:
         return COMPOSITION_ROOT_PACKAGE
-    return package_of(relative)
+    parts = relative.parts
+    if len(parts) < 4 or parts[:2] != PACKAGE_ROOT.parts:
+        return None
+    return ".".join(parts[2:-1])
 
 
 def source_files(root: Path) -> list[Path]:
@@ -412,10 +517,46 @@ def _rank_findings(relative: Path, statement: Import) -> list[str]:
     ]
 
 
+def _owning_facade(
+    module: str, home: str | None, facades: dict[str, frozenset[str]]
+) -> str | None:
+    """Return the facade an import reaches past, or `None` for an inside reach.
+
+    The packages an import `mtest.a.b.c` reaches into are `a.b` and `a`, and
+    the deepest one wins: a subpackage's surface is the one a caller had to ask,
+    and judging against its parent instead would call a bypass of the inner
+    facade a name the outer one happens not to export.
+
+    Args:
+        module: The dotted module the import names.
+        home: The importing file's own package directory, dotted.
+        facades: Dotted package -> what that package's facade re-exports.
+
+    Returns:
+        The dotted package whose facade the import goes around; `None` when the
+        importing file sits in that package or below it, which makes the import
+        an internal reach, or when the module names no package's internals.
+    """
+    parts = module.split(".")
+    if parts[0] != "mtest" or len(parts) < 3:
+        return None
+    reached = [".".join(parts[1:end]) for end in range(len(parts) - 1, 1, -1)]
+    for candidate in reached:
+        if home is not None and (home == candidate or home.startswith(f"{candidate}.")):
+            return None
+        if candidate in facades:
+            return candidate
+    return reached[-1]
+
+
 def _facade_findings(
     relative: Path, statement: Import, exports: dict[str, frozenset[str]]
 ) -> tuple[list[str], list[str]]:
     """Check one import against the facade rule.
+
+    An import is judged by the name the module it reaches into spells, not by
+    the alias the importer binds: `run_session as invoke` reaches the same
+    exported entity, and `_slot as slot` takes the same package-private one.
 
     An aliased re-export shadows: a facade writing `from mtest.x.y import Slot
     as Store` makes `Store` this package's surface, so a deep
@@ -433,16 +574,16 @@ def _facade_findings(
     Args:
         relative: Repository-relative path of the importing file.
         statement: The import to classify.
-        exports: Package name -> what that package's facade re-exports.
+        exports: Dotted package -> what that package's facade re-exports.
 
     Returns:
         The violations and the informational findings, in that order.
     """
-    parts = statement.module.split(".")
-    if parts[0] != "mtest" or len(parts) < 3 or parts[1] == facade_home(relative):
+    package = _owning_facade(statement.module, facade_home(relative), exports)
+    if package is None:
         return [], []
-    package = parts[1]
     exported = exports.get(package, frozenset())
+    facade = f"mtest/{package.replace('.', '/')}/{FACADE_NAME}"
     where = f"{relative.as_posix()}:{statement.line}"
     violations: list[str] = []
     infos: list[str] = []
@@ -450,10 +591,11 @@ def _facade_findings(
         return [], [
             (
                 f"{where}: R3-deep-import: {statement.module} is imported whole, "
-                f"around mtest/{package}/{FACADE_NAME}"
+                f"around {facade}"
             )
         ]
-    for name in statement.names:
+    for binding in statement.names:
+        name = binding.imported
         if name.startswith("_"):
             violations.append(
                 f"{where}: R3-facade-bypass: {statement.module} import {name} "
@@ -462,45 +604,79 @@ def _facade_findings(
         elif name in exported:
             violations.append(
                 f"{where}: R3-facade-bypass: {statement.module} import {name} "
-                f"goes around mtest/{package}/{FACADE_NAME}, which exports {name}"
+                f"goes around {facade}, which exports {name}"
             )
         else:
             infos.append(
                 f"{where}: R3-deep-import: {statement.module} import {name} "
-                f"is not exported by mtest/{package}/{FACADE_NAME}"
+                f"is not exported by {facade}"
             )
     return violations, infos
 
 
-def _confinement_findings(relative: Path, text: str) -> list[str]:
+def _confinement_findings(
+    relative: Path, text: str, statements: list[Import]
+) -> list[str]:
     """Check one file against the `exit()` and `external_call` rules.
+
+    Both primitives are followed through import aliases, and the import itself
+    is refused wherever the primitive does not belong. The import rule is what
+    makes the call scan complete: an alias the scanner never saw bound is a
+    spelling it cannot match, so `exit as terminate` would otherwise carry a
+    process exit into any layer under a name of the author's choosing.
 
     Both patterns are matched over the file's stripped code rejoined, because a
     foreign symbol sits on the line after its opening bracket often enough that
     a per-line match would read the call as having no symbol at all.
 
+    A call spelled `_exit(` is not matched, deliberately: the underscore is part
+    of an identifier, so a pattern loose enough to see it also reports every
+    `resolve_exit`-shaped definition. The `_exit` spelling is not itself matched
+    by either rule; the practical protection for the libc route is R5, which
+    matches the declared foreign symbol inside `external_call[...]` regardless
+    of the identifier around it.
+
     Args:
         relative: Repository-relative path of the file.
         text: The file's source.
+        statements: The file's import statements.
 
     Returns:
-        One finding per offending call site.
+        One finding per offending import and call site.
     """
     code = stripped_code(text)
     posix = relative.as_posix()
+    package = package_of(relative)
     findings: list[str] = []
     if relative != COMPOSITION_ROOT:
-        for match in _EXIT_RE.finditer(code):
+        findings.extend(
+            f"{posix}:{statement.line}: R4-exit-import: only "
+            f"{COMPOSITION_ROOT.as_posix()} imports exit(); an alias binds a "
+            "call site under another name"
+            for statement in statements
+            for binding in statement.names
+            if binding.imported == _EXIT_SYMBOL
+        )
+        for match in _call_re(_aliases(statements, _EXIT_SYMBOL)).finditer(code):
             line = code.count("\n", 0, match.start()) + 1
             findings.append(
                 f"{posix}:{line}: R4-exit: only {COMPOSITION_ROOT.as_posix()} "
                 "calls exit(); every module below it returns a typed result"
             )
-    package = package_of(relative)
+    if package not in EXTERNAL_CALL_PACKAGES:
+        findings.extend(
+            f"{posix}:{statement.line}: R5-external-call-import: "
+            f"{_EXTERNAL_CALL_SYMBOL} is imported outside "
+            f"{PACKAGE_ROOT.as_posix()}/platform and {PACKAGE_ROOT.as_posix()}/exec"
+            for statement in statements
+            for binding in statement.names
+            if binding.imported == _EXTERNAL_CALL_SYMBOL
+        )
     if package == "platform":
         return findings
     allowed = EXEC_LIBC_ALLOWANCE.get(posix, frozenset())
-    for match in _EXTERNAL_CALL_RE.finditer(code):
+    foreign = _foreign_re(_aliases(statements, _EXTERNAL_CALL_SYMBOL))
+    for match in foreign.finditer(code):
         symbol = match.group(1)
         if package == "exec" and (
             symbol.startswith(NATIVE_ABI_PREFIX) or symbol in allowed
@@ -535,7 +711,10 @@ def scan(root: Path) -> Report:
     violations: list[str] = []
     infos: list[str] = []
     packages = sorted({owner for path in files if (owner := package_of(path))})
-    exports = {package: facade_exports(root, package) for package in packages}
+    exports = {
+        package: facade_exports(root, package)
+        for package in sorted(facade_packages(files))
+    }
     violations.extend(
         f"{(PACKAGE_ROOT / package / FACADE_NAME).as_posix()}:1: R1-rank: "
         f"{package} carries Mojo source and has no declared layer"
@@ -544,8 +723,9 @@ def scan(root: Path) -> Report:
     )
     for relative in files:
         text = (root / relative).read_text(encoding="utf-8")
-        violations.extend(_confinement_findings(relative, text))
-        for statement in parse_imports(text):
+        statements = parse_imports(text)
+        violations.extend(_confinement_findings(relative, text, statements))
+        for statement in statements:
             violations.extend(_rank_findings(relative, statement))
             found, noted = _facade_findings(relative, statement, exports)
             violations.extend(found)
@@ -597,12 +777,9 @@ def check_foreign_allowance_is_live(root: Path) -> None:
         path = root / posix
         if not path.is_file():
             raise AssertionError(f"exec libc allowance names a missing file: {posix}")
-        called = {
-            match.group(1)
-            for match in _EXTERNAL_CALL_RE.finditer(
-                stripped_code(path.read_text(encoding="utf-8"))
-            )
-        }
+        text = path.read_text(encoding="utf-8")
+        foreign = _foreign_re(_aliases(parse_imports(text), _EXTERNAL_CALL_SYMBOL))
+        called = {match.group(1) for match in foreign.finditer(stripped_code(text))}
         stale = sorted(symbols - called)
         if stale:
             raise AssertionError(

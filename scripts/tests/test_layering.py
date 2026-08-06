@@ -322,6 +322,39 @@ class FacadeBypassTests(unittest.TestCase):
         self.assertEqual(len(report.violations), 1)
         self.assertIn("mtest.session.store", report.violations[0])
 
+    def test_an_aliased_deep_import_of_an_exported_name_is_a_violation(self) -> None:
+        # Judging the alias instead would call `invoke` a name the facade does
+        # not export and report the bypass as information.
+        report = _scan(
+            {
+                "src/mtest/cli/doctor.mojo": (
+                    "from mtest.session.session import run_session as invoke\n"
+                ),
+                "src/mtest/session/__init__.mojo": (
+                    "from mtest.session.session import run_session\n"
+                ),
+            }
+        )
+
+        self.assertEqual(len(report.violations), 1)
+        self.assertIn("R3-facade-bypass:", report.violations[0])
+        self.assertIn("run_session", report.violations[0])
+        self.assertEqual(report.infos, ())
+
+    def test_an_aliased_private_import_is_still_private(self) -> None:
+        report = _scan(
+            {
+                "src/mtest/cli/doctor.mojo": (
+                    "from mtest.session.store import _slot as public_name\n"
+                ),
+                "src/mtest/session/__init__.mojo": self.FACADE,
+            }
+        )
+
+        self.assertEqual(len(report.violations), 1)
+        self.assertIn("R3-facade-bypass:", report.violations[0])
+        self.assertIn("_slot", report.violations[0])
+
     def test_a_multi_line_import_list_is_parsed(self) -> None:
         report = _scan(
             {
@@ -338,6 +371,105 @@ class FacadeBypassTests(unittest.TestCase):
         self.assertIn("Slot", report.infos[0])
 
 
+class SubpackageFacadeTests(unittest.TestCase):
+    """A package nested inside a package offers a surface of its own."""
+
+    STORE_FACADE = "from mtest.session.store.filesystem import STORE_DIR\n"
+    SESSION_FACADE = "from mtest.session.store import ensure_cache_root\n"
+
+    def test_a_deep_import_around_a_subpackage_facade_is_a_violation(self) -> None:
+        # The name is exported by the store's own facade and not by the
+        # session facade above it, so a checker that only reads top-level
+        # facades reports this bypass as information.
+        report = _scan(
+            {
+                "src/mtest/cli/cache_admin.mojo": (
+                    "from mtest.session.store.filesystem import STORE_DIR\n"
+                ),
+                "src/mtest/session/store/__init__.mojo": self.STORE_FACADE,
+                "src/mtest/session/__init__.mojo": self.SESSION_FACADE,
+            }
+        )
+
+        self.assertEqual(len(report.violations), 1)
+        self.assertIn("R3-facade-bypass:", report.violations[0])
+        self.assertIn("STORE_DIR", report.violations[0])
+        self.assertIn("mtest/session/store/__init__.mojo", report.violations[0])
+        self.assertEqual(report.infos, ())
+
+    def test_a_subpackage_module_may_reach_its_own_siblings(self) -> None:
+        report = _scan(
+            {
+                "src/mtest/session/store/artifact.mojo": (
+                    "from mtest.session.store.filesystem import STORE_DIR\n"
+                ),
+                "src/mtest/session/store/__init__.mojo": self.STORE_FACADE,
+                "src/mtest/session/__init__.mojo": self.SESSION_FACADE,
+            }
+        )
+
+        self.assertEqual(report.violations, ())
+        self.assertEqual(report.infos, ())
+
+    def test_a_subpackage_module_may_reach_the_package_it_sits_in(self) -> None:
+        report = _scan(
+            {
+                "src/mtest/session/store/artifact.mojo": (
+                    "from mtest.session.scratch import _mangle\n"
+                ),
+                "src/mtest/session/store/__init__.mojo": self.STORE_FACADE,
+                "src/mtest/session/__init__.mojo": self.SESSION_FACADE,
+            }
+        )
+
+        self.assertEqual(report.violations, ())
+        self.assertEqual(report.infos, ())
+
+    def test_the_package_above_must_use_the_subpackage_facade(self) -> None:
+        report = _scan(
+            {
+                "src/mtest/session/pool.mojo": (
+                    "from mtest.session.store.filesystem import STORE_DIR\n"
+                ),
+                "src/mtest/session/store/__init__.mojo": self.STORE_FACADE,
+                "src/mtest/session/__init__.mojo": self.SESSION_FACADE,
+            }
+        )
+
+        self.assertEqual(len(report.violations), 1)
+        self.assertIn("mtest/session/store/__init__.mojo", report.violations[0])
+
+    def test_an_import_through_the_subpackage_facade_is_judged_above_it(self) -> None:
+        report = _scan(
+            {
+                "src/mtest/cli/cache_admin.mojo": (
+                    "from mtest.session.store import ensure_cache_root\n"
+                ),
+                "src/mtest/session/store/__init__.mojo": self.STORE_FACADE,
+                "src/mtest/session/__init__.mojo": self.SESSION_FACADE,
+            }
+        )
+
+        self.assertEqual(len(report.violations), 1)
+        self.assertIn("mtest/session/__init__.mojo", report.violations[0])
+        self.assertIn("ensure_cache_root", report.violations[0])
+
+    def test_a_directory_with_no_facade_falls_back_to_its_package(self) -> None:
+        report = _scan(
+            {
+                "src/mtest/cli/doctor.mojo": (
+                    "from mtest.session.detail.thing import Store\n"
+                ),
+                "src/mtest/session/__init__.mojo": (
+                    "from mtest.session.store import Store\n"
+                ),
+            }
+        )
+
+        self.assertEqual(len(report.violations), 1)
+        self.assertIn("mtest/session/__init__.mojo", report.violations[0])
+
+
 class ExitConfinementTests(unittest.TestCase):
     def test_exit_in_the_composition_root_is_clean(self) -> None:
         report = _scan({"src/main.mojo": "exit(status)\n"})
@@ -352,6 +484,36 @@ class ExitConfinementTests(unittest.TestCase):
 
     def test_an_identifier_ending_in_exit_is_not_an_exit_call(self) -> None:
         report = _scan({"src/mtest/model/exit_code.mojo": "def resolve_exit(code):\n"})
+
+        self.assertEqual(report.violations, ())
+
+    def test_an_aliased_exit_call_is_a_violation(self) -> None:
+        # Without alias tracking neither line is seen: the import binds a name
+        # the rule does not know, and the call spells that name.
+        report = _scan(
+            {
+                "src/mtest/cli/doctor.mojo": (
+                    "from std.sys import exit as terminate\nterminate(1)\n"
+                )
+            }
+        )
+
+        self.assertEqual(len(report.violations), 2)
+        self.assertIn(
+            "src/mtest/cli/doctor.mojo:1: R4-exit-import:", report.violations[0]
+        )
+        self.assertIn("src/mtest/cli/doctor.mojo:2: R4-exit:", report.violations[1])
+
+    def test_importing_exit_outside_the_composition_root_is_a_violation(self) -> None:
+        report = _scan({"src/mtest/cli/doctor.mojo": "from std.sys import exit\n"})
+
+        self.assertEqual(len(report.violations), 1)
+        self.assertIn("R4-exit-import:", report.violations[0])
+
+    def test_the_composition_root_may_alias_exit(self) -> None:
+        report = _scan(
+            {"src/main.mojo": "from std.sys import exit as terminate\nterminate(1)\n"}
+        )
 
         self.assertEqual(report.violations, ())
 
@@ -422,6 +584,74 @@ class ForeignCallTests(unittest.TestCase):
         )
 
         self.assertEqual(report.violations, ())
+
+    def test_an_aliased_foreign_call_above_exec_is_a_violation(self) -> None:
+        # Without alias tracking neither line is seen: the import binds a name
+        # the rule does not know, and the call subscripts that name.
+        report = _scan(
+            {
+                "src/mtest/report/console.mojo": (
+                    'from std.ffi import external_call as ffi\nffi["write", Int]()\n'
+                )
+            }
+        )
+
+        self.assertEqual(len(report.violations), 2)
+        self.assertIn(
+            "src/mtest/report/console.mojo:1: R5-external-call-import:",
+            report.violations[0],
+        )
+        self.assertIn(
+            "src/mtest/report/console.mojo:2: R5-external-call:", report.violations[1]
+        )
+        self.assertIn("write", report.violations[1])
+
+    def test_importing_the_intrinsic_above_exec_is_a_violation(self) -> None:
+        report = _scan(
+            {"src/mtest/report/console.mojo": "from std.ffi import external_call\n"}
+        )
+
+        self.assertEqual(len(report.violations), 1)
+        self.assertIn("R5-external-call-import:", report.violations[0])
+
+    def test_an_alias_does_not_launder_an_unsanctioned_exec_symbol(self) -> None:
+        report = _scan(
+            {
+                "src/mtest/exec/signals.mojo": (
+                    'from std.ffi import external_call as ffi\nffi["execve", Int32]()\n'
+                )
+            }
+        )
+
+        self.assertEqual(len(report.violations), 1)
+        self.assertIn("R5-external-call:", report.violations[0])
+        self.assertIn("execve", report.violations[0])
+
+    def test_the_platform_layer_may_alias_the_intrinsic(self) -> None:
+        report = _scan(
+            {
+                "src/mtest/platform/fs.mojo": (
+                    'from std.ffi import external_call as ffi\nffi["chmod", Int32]()\n'
+                )
+            }
+        )
+
+        self.assertEqual(report.violations, ())
+
+    def test_an_aliased_allowance_call_is_still_reconciled(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="mtest-layering-") as raw:
+            root = Path(raw)
+            _write(
+                root,
+                {
+                    "src/mtest/exec/signals.mojo": (
+                        "from std.ffi import external_call as ffi\n"
+                        'ffi["kill", Int32]()\n'
+                    )
+                },
+            )
+
+            layering.check_foreign_allowance_is_live(root)
 
 
 class DocstringRedHerringTests(unittest.TestCase):
@@ -511,6 +741,16 @@ class RepositoryTests(unittest.TestCase):
             report = layering.scan(layering.REPO_ROOT)
 
         self.assertTrue(any("session" in line for line in report.violations))
+
+    def test_every_facade_on_disk_is_in_the_inventory(self) -> None:
+        # The nested one is the case the top-level-only lookup missed: its
+        # exports are the surface a `mtest.session.store.*` import goes around.
+        facades = layering.facade_packages(layering.source_files(layering.REPO_ROOT))
+
+        self.assertIn("session.store", facades)
+        self.assertIn(
+            "STORE_DIR", layering.facade_exports(layering.REPO_ROOT, "session.store")
+        )
 
     def test_the_rank_table_names_exactly_the_packages_on_disk(self) -> None:
         layering.check_rank_covers_the_tree(layering.REPO_ROOT)

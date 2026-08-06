@@ -74,11 +74,18 @@ differences, and cleanup invariants.
 
 `scripts/checks/layering.py` enforces all of this: the rank order, the Layer 2
 siblings, deep imports that go around a facade export, the `exit()` and
-`external_call` confinements. It reports a deep import of a name the owning
-facade does not export as information rather than a failure, because there is
-no facade path to have taken. Docstrings and comments are stripped before
-matching, so the `Examples:` blocks and the prose that names `exit()` and
-`external_call` are not read as code.
+`external_call` confinements. Every directory under `src/mtest` that carries
+an `__init__.mojo` is a facade, subpackages included, and an import is checked
+against the deepest facade that owns it, so a subpackage such as
+`session/store/` has its own enforced surface. A cross-package import is judged
+by the name it imports, not the alias it binds locally, and an `exit` or
+`external_call` import is refused outside its permitted boundary the same way,
+so `from std.sys import exit as terminate` cannot launder a call past the
+rule. It reports a deep import of a name the owning facade does not export as
+information rather than a failure, because there is no facade path to have
+taken. Docstrings and comments are stripped before matching, so the
+`Examples:` blocks and the prose that names `exit()` and `external_call` are
+not read as code.
 
 Three named seams:
 

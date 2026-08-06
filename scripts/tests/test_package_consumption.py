@@ -774,16 +774,18 @@ FILE_ROW_TOKENS = (
     "FLAKY",
     "NO-TESTS",
 )
-"""Every file-row token `_verdict_token` in `console.mojo` can print.
+"""Every token that starts a per-file verdict row in `console.mojo`.
 
-Derived by reading the row-emission sites, not the old alternation: PASS
-through FLAKY fall through `_on_file_finished`'s generic branch
-(`console.mojo:1339`) for any outcome not specially handled, COMPILE-TIMEOUT
-and MALFORMED-SUITE among them; PRECOMPILE-ERROR is the literal banner token
-`_on_precompile_failed` prints (`console.mojo:1279`); NO-TESTS is substituted
-for PASS ahead of `_verdict_token` (`console.mojo:1339`, `:1588`). SKIP and
-DESELECTED never label a file row (per-test only, or never assigned); EXCLUDED
-and NOT-RUN are their own accounting rows, not `_verdict_token` output.
+Derived by reading the row-emission sites, not `_verdict_token`'s output set,
+which is wider: PASS through FLAKY fall through `_on_file_finished`'s generic
+branch for any outcome not specially handled, COMPILE-TIMEOUT and
+MALFORMED-SUITE among them; PRECOMPILE-ERROR is the literal banner token
+`_on_precompile_failed` prints; NO-TESTS is substituted for PASS ahead of
+`_verdict_token`. SKIP and DESELECTED never label a file row (per-test only, or
+never assigned). EXCLUDED is `_verdict_token` output but starts a row of its
+own shape, carrying the pattern that excluded the file, and NOT-RUN is a
+summary count with no row at all; neither belongs in a verdict alternation,
+where a legitimate exclusion would read as a bad verdict.
 
 Written out rather than imported, so it can disagree with the regex it checks.
 `scripts/tests/test_vocabulary.py` reconciles it against
