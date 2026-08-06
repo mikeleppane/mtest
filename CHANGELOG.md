@@ -12,7 +12,44 @@ the Mojo runtime and parses `TestSuite`'s printed report, so a release supports
 exactly one toolchain and there is no compatibility range; see the support
 matrix under [Installation](README.md#installation).
 
-## Unreleased
+## 1.1.0 — 2026-08-06
+
+Additive throughout: every 1.0.0 invocation that had a defined meaning still
+means what it meant. What is new is four subcommands, six flags, a
+documentation site, and a composite GitHub Action. What is not additive sits
+under Changed and Fixed: two argument vectors that had no defined meaning are
+refused before a run now, and three defects an installed 1.0.0 still carries.
+
+### Toolchain
+
+- Mojo `1.0.0b2`, unchanged from 1.0.0. The conda package declares
+  `mojo-compiler ==1.0.0b2` as its sole run dependency. A weekday canary now
+  probes newer toolchains and records what each would break;
+  [docs/compatibility.md](docs/compatibility.md) states what its results do and
+  do not say about support.
+
+### Platforms
+
+- `linux-64` and `osx-arm64`. The package is built from source once per
+  platform; there is no `noarch` artifact.
+
+### Published
+
+- Not yet. This subsection is filled in once **Community Verify** installs the
+  release from the public channels, per
+  [docs/releasing.md](docs/releasing.md).
+
+### Command-line contract
+
+- Growth is additive within 1.x, which is what §20 states rather than a freeze
+  for the release series. Every subcommand 1.0.0 served keeps its name,
+  grammar, and meaning; the bare subcommand *vocabulary* is the one declared
+  exception, so reserving a new leading token is permitted.
+- New STABLE surfaces, each recorded in §20: the `new`, `init`, `debug`, and
+  `completions` subcommands; `collect --format json` at collect-stream
+  `version` 1, growing additively under the same rule as the `--json` run
+  stream; and the `--report`, `--report-style`, `--shuffle`, `--seed`, and
+  `--fail-on-flaky` flags.
 
 ### Added
 
@@ -38,6 +75,40 @@ matrix under [Installation](README.md#installation).
     is a run with a path operand rather than the subcommand. Which candidates
     a shell shows is INFORMAL (§20), and the fix changes what the mixed
     subcommand-and-path arm offers, so it is being taken on its own.
+- `mtest new` and `mtest init`, writing source for the first time
+  ([§29](docs/cli-contract.md)). `new` writes one test file; `init` writes the
+  whole starting project — a test, an `mtest.toml`, a `.gitignore` entry, and
+  optionally a CI workflow. Neither ever replaces a file that is already
+  there, and each artifact is published or refused on its own, so a partial
+  run says which artifacts it wrote. The scaffolded workflow is held
+  byte-identical to the first YAML block of
+  [the continuous-integration page](docs/ci.md), third-party action pins
+  included, so a pin that moves in the documentation moves in the scaffold.
+- `mtest debug path::test`, handing the terminal to one test
+  ([§28](docs/cli-contract.md)). It prepares that test exactly as a run would,
+  prints the `build:` and `run:` commands it used, then replaces itself with
+  the test binary and gets out of the way: no capture pipe, no summary, no
+  mtest verdict, and the test's own exit status is the process's.
+- `collect --format json`, serving the `collect` listing as a versioned NDJSON
+  stream ([§16](docs/cli-contract.md); normatively
+  [docs/collect-stream.md](docs/collect-stream.md)). Held at collect-stream
+  `version` 1 and growing only additively, on the same rule as the `--json`
+  run stream. `--format lines` is the default and prints exactly what 1.0.0
+  printed.
+- `--shuffle` and `--seed N`, for the suite that only passes in one order
+  ([§17](docs/cli-contract.md), §18). `--shuffle` randomizes run-file order
+  and prints the seed it drew; `--seed N` replays it, and one seed names one
+  permutation of one file list byte-identically on every platform, so a
+  printed seed reproduces the order that produced a failure. Gate files keep
+  their listed order, and every other surface — the console summary, the
+  reporters, the `collect` listing — stays node-id sorted. `--seed` without
+  `--shuffle` is a usage error (exit 4), and so is `--shuffle` beside
+  `--lf`/`--ff`, which choose a conflicting order. Command line only; it is
+  never read from `mtest.toml`.
+- `--fail-on-flaky`, turning a FLAKY-only session's `0` into a `1`
+  ([§13](docs/cli-contract.md), §9) for a pipeline that will not tolerate a
+  pass that needed retries. Its position in the exit precedence is part of the
+  contract; the JUnit document stays green beside the process that exits 1.
 - A composite GitHub Action at the repository root. `uses: mikeleppane/mtest@v1`
   with `paths` and `args` replaces writing the invocation out; `args` is
   appended verbatim, so every flag stays reachable and none is promoted to an
@@ -46,10 +117,11 @@ matrix under [Installation](README.md#installation).
   alias; pin a commit instead to adopt each release deliberately.
 - A documentation site under `docs/`, built with mkdocs and published to
   GitHub Pages at <https://mikeleppane.github.io/mtest/>. It carries a landing
-  page, a getting-started path, and a continuous-integration page, and
-  navigates to the command-line contract, the JSON event stream, and the
-  release runbook. The README stays the reference; the site's commands and
-  outputs are mirrored from it rather than retyped.
+  page, a getting-started path, a continuous-integration page, and pages for
+  run reports and shell completion, and navigates to the command-line
+  contract, the two JSON stream references, the toolchain-compatibility page,
+  and the release runbook. The README stays the reference; the site's commands
+  and outputs are mirrored from it rather than retyped.
 
 ### Changed
 
@@ -66,6 +138,32 @@ matrix under [Installation](README.md#installation).
   rationale, and states the ten-error/ten-warning per-step cap that GitHub
   applies to inline annotations where the flag is introduced rather than only
   under its limitations.
+- The binary's usage block lists `collect`, which it had left out.
+
+### Fixed
+
+- The build cache could serve a stale binary. A contribution's tag was fed
+  into the key without a length prefix, so the frame was not injective over
+  the pair: two different build inputs could produce the same SHA-256, and the
+  store could then answer with a binary it had never built for that source — a
+  green run that never happened. Tags are length-prefixed now. Every cache key
+  changes value on upgrade, which is a miss rather than a correctness event:
+  the file rebuilds, publishes under the new name, and the generations written
+  under the old framing are reaped by the per-source retention window.
+- A `test_*.mojo` file whose path contains `::` was collected and run even
+  though no operand could ever address it, because an operand splits at its
+  first separator — so the file became a node id whose path was the text
+  before the `::`, and the refusal quoted a path the caller never typed. §5
+  has always said `::` in a path is unsupported; discovery now enforces it,
+  skipping such a file with a `skipped-unaddressable` warning and still
+  descending the directory holding it. An operand carrying `::` in its file
+  part gets an accurate refusal, still exit 4, quoting the operand as typed.
+- Every command that wrote straight to a descriptor — `help`, `version`,
+  `config show`, `doctor`, `new`, `init`, and `collect --format json` — died
+  at signal 13 (`141` at the shell, a status in no documented exit domain)
+  when stdout was a pipe whose reader had closed. Those writes now run under a
+  single SIGPIPE guard and report an undelivered write inside their own exit
+  domain, with `new` and `init` reporting artifacts they had already created.
 
 ## 1.0.0 — 2026-07-31
 

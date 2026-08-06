@@ -44,7 +44,7 @@ $ pixi workspace channel add https://conda.modular.com/max/
 $ pixi workspace channel add https://repo.prefix.dev/modular-community
 $ pixi add mtest
 $ pixi run mtest --version
-mtest 1.0.0
+mtest 1.1.0
 ```
 
 Skip the first command in a workspace that already exists. It is there because
@@ -72,7 +72,7 @@ To run mtest straight from a checkout instead, see
 
 | mtest | Mojo | Platforms | Status |
 |-------|------|-----------|--------|
-| 1.0.x | `1.0.0b2` | linux-64, osx-arm64 | Supported |
+| 1.1.x | `1.0.0b2` | linux-64, osx-arm64 | Supported |
 
 **Supported** means this repository builds, gates, and publishes that
 combination: the pinned toolchain is what the protocol snapshots were captured
@@ -171,7 +171,7 @@ subcommand, so `mtest tests/` means `mtest run tests/`:
 
 ```console
 $ pixi run mtest tests/
-mtest 1.0.0 (mojo)
+mtest 1.1.0 (mojo)
 root: /tmp/mtest-quickstart   selected: 1 files   excluded: 0
 
 PASS           tests/test_math.mojo            0.03s
@@ -191,7 +191,7 @@ as a failure, and the run exits non-zero:
 
 ```console
 $ pixi run mtest tests/
-mtest 1.0.0 (mojo)
+mtest 1.1.0 (mojo)
 root: /tmp/mtest-quickstart   selected: 1 files   excluded: 0
 
 COMPILE-ERROR  tests/test_math.mojo            0.00s
@@ -453,7 +453,7 @@ A file without that `main()` does not build as a standalone program.
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/suite/test_passing.mojo'
-mtest 1.0.0 (mojo)
+mtest 1.1.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 PASS           e2e/suite/test_passing.mojo  0.07s
@@ -477,7 +477,7 @@ against. One directory exercises most of the outcome model at once:
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/suite'
-mtest 1.0.0 (mojo)
+mtest 1.1.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 7 files   excluded: 0
 
 PASS           e2e/suite/nested/test_nested.mojo  0.07s
@@ -523,7 +523,7 @@ zero tests ran. A session that collects nothing but NO-TESTS files exits `5`.
 
 ```console
 $ pixi run bash -c 'build/mtest -k one e2e/matrix'
-mtest 1.0.0 (mojo)
+mtest 1.1.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
 
 PASS           e2e/matrix/test_alpha.mojo 0.02s
@@ -536,7 +536,7 @@ A node-id operand selects exactly one test:
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/matrix/test_alpha.mojo::test_alpha_two'
-mtest 1.0.0 (mojo)
+mtest 1.1.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 PASS           e2e/matrix/test_alpha.mojo 0.03s
@@ -580,7 +580,7 @@ job or an editor integration that would otherwise split the plain lines
 
 ```console
 $ pixi run bash -c 'build/mtest collect --format json e2e/matrix'
-{"event":"collect","version":1,"generator":"mtest 1.0.0"}
+{"event":"collect","version":1,"generator":"mtest 1.1.0"}
 {"event":"node","node_id":"e2e/matrix/test_alpha.mojo::test_alpha_one","path":"e2e/matrix/test_alpha.mojo","name":"test_alpha_one"}
 [...one node record per test, in the same order as the plain listing...]
 {"event":"collect_finished","nodes":5,"exit_code":0}
@@ -612,7 +612,7 @@ attribution pass:
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/attribution/test_deterministic_crasher.mojo'
-mtest 1.0.0 (mojo)
+mtest 1.1.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 CRASH          e2e/attribution/test_deterministic_crasher.mojo  1.12s  (signal 4 — SIGILL, illegal instruction)
@@ -641,7 +641,7 @@ force-killed, and the verdict line says so in words:
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/stubborn/test_stubborn.mojo --timeout 1 --retries 0'
-mtest 1.0.0 (mojo)
+mtest 1.1.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 1 files   excluded: 0
 
 TIMEOUT        e2e/stubborn/test_stubborn.mojo 1.31s  (timed out after 1s, escalated to SIGKILL)
@@ -692,7 +692,7 @@ own section, [Run reports](#run-reports).
 ```console
 $ pixi run bash -c 'build/mtest --json - --gh-annotations off e2e/matrix' 1>/tmp/stream.ndjson
 $ head -n 4 /tmp/stream.ndjson
-{"event":"stream","version":1,"generator":"mtest 1.0.0"}
+{"event":"stream","version":1,"generator":"mtest 1.1.0"}
 {"event":"session_started","root":"/home/mikko/dev/mtest","toolchain":"mojo","selected_count":2,"excluded_count":0,"shard_label":"","sharded_out_count":0,"workers":1}
 {"event":"file_started","path":"e2e/matrix/test_alpha.mojo"}
 {"event":"test_reported","path":"e2e/matrix/test_alpha.mojo","name":"test_alpha_one","outcome":"pass","detail":"","detail_omitted_bytes":0,"timing":"0.001"}
@@ -766,7 +766,7 @@ serial = true
 
 ```console
 $ pixi run bash -c 'build/mtest'
-mtest 1.0.0 (mojo)
+mtest 1.1.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0   workers: 16
 
 PASS           e2e/matrix/test_alpha.mojo      0.02s
@@ -911,7 +911,7 @@ single worker, ignoring `-n`:
 
 ```console
 $ pixi run bash -c 'build/mtest --lf e2e/matrix e2e/suite/test_failing.mojo'
-mtest 1.0.0 (mojo)
+mtest 1.1.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 3 files   excluded: 0
 
 FAIL           e2e/suite/test_failing.mojo     0.02s
@@ -934,7 +934,7 @@ files to the front, so a rerun fails fast without giving up coverage:
 
 ```console
 $ pixi run bash -c 'build/mtest --ff --show-output none e2e/matrix e2e/suite/test_failing.mojo'
-mtest 1.0.0 (mojo)
+mtest 1.1.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 3 files   excluded: 0
 
 FAIL           e2e/suite/test_failing.mojo     0.02s
@@ -953,7 +953,7 @@ rather than exiting `5`:
 
 ```console
 $ pixi run bash -c 'build/mtest --lf e2e/matrix'
-mtest 1.0.0 (mojo)
+mtest 1.1.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
 
 lf: previously-failing e2e/suite/test_failing.mojo::test_second_fails no longer exists — dropped
@@ -986,7 +986,7 @@ able to run it again:
 
 ```console
 $ pixi run bash -c 'build/mtest --shuffle --show-output none e2e/matrix e2e/suite/test_passing.mojo'
-mtest 1.0.0 (mojo)
+mtest 1.1.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 3 files   excluded: 0   shuffle seed: 4039837840016826
 
 PASS           e2e/suite/test_passing.mojo     0.02s
@@ -1003,7 +1003,7 @@ the only thing that makes randomizing safe to leave on.
 
 ```console
 $ pixi run bash -c 'build/mtest --shuffle --seed 4039837840016826 --show-output none e2e/matrix e2e/suite/test_passing.mojo'
-mtest 1.0.0 (mojo)
+mtest 1.1.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 3 files   excluded: 0   shuffle seed: 4039837840016826
 
 PASS           e2e/suite/test_passing.mojo     0.02s
@@ -1040,7 +1040,7 @@ missing line would be the one you needed:
 
 ```console
 $ pixi run bash -c 'build/mtest doctor'
-PASS version: mtest 1.0.0
+PASS version: mtest 1.1.0
 PASS platform: Linux x86_64 supported
 PASS root: /home/mikko/dev/mtest
 PASS exec: runtime acquired
@@ -1060,7 +1060,7 @@ capability they were missing, and the rest still run.
 
 ```console
 $ pixi run bash -c 'MTEST_MOJO=/opt/nonexistent/mojo build/mtest doctor --no-config'
-PASS version: mtest 1.0.0
+PASS version: mtest 1.1.0
 PASS platform: Linux x86_64 supported
 PASS root: /home/mikko/dev/mtest
 PASS exec: runtime acquired
@@ -1275,7 +1275,7 @@ def main() raises:
 $ mtest --no-config --no-cache --show-output failures \
     -I <PREFIX>/share/mtest/companions/assertions/src \
     companions/assertions/examples
-mtest 1.0.0 (mojo)
+mtest 1.1.0 (mojo)
 root: <REPO>   selected: 1 files   excluded: 0
 
 FAIL           companions/assertions/examples/test_diagnostics.mojo  <TIME>
@@ -1368,7 +1368,7 @@ The summary band reports the split. A cold store builds everything:
 
 ```console
 $ pixi run bash -c 'build/mtest --cache-clear e2e/matrix'
-mtest 1.0.0 (mojo)
+mtest 1.1.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
 
 PASS           e2e/matrix/test_alpha.mojo      0.02s
@@ -1381,7 +1381,7 @@ Run it again over the same tree and nothing is compiled:
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/matrix'
-mtest 1.0.0 (mojo)
+mtest 1.1.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
 
 PASS           e2e/matrix/test_alpha.mojo      0.02s
@@ -1517,7 +1517,7 @@ first cause, and the run proceeds normally, compiling everything:
 
 ```console
 $ pixi run bash -c 'build/mtest --build-arg --target-cpu --build-arg x86-64-v3 e2e/matrix'
-mtest 1.0.0 (mojo)
+mtest 1.1.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
 
 WARNING  cache-off: unrecognized build argument '--target-cpu'
@@ -1549,7 +1549,7 @@ a measurement with the store out of the picture:
 
 ```console
 $ pixi run bash -c 'build/mtest --no-cache e2e/matrix'
-mtest 1.0.0 (mojo)
+mtest 1.1.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
 
 PASS           e2e/matrix/test_alpha.mojo      0.02s
@@ -1889,7 +1889,7 @@ parallelism:
 
 ```console
 $ pixi run bash -c 'build/mtest -n 2 e2e/matrix'
-mtest 1.0.0 (mojo)
+mtest 1.1.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0   workers: 2
 
 PASS           e2e/matrix/test_beta.mojo       0.02s
@@ -1904,7 +1904,7 @@ machine with its peers. Pinned files carry a `SERIAL` tag:
 
 ```console
 $ pixi run bash -c "build/mtest -n 2 --serial 'e2e/matrix/test_alpha.mojo' e2e/matrix"
-mtest 1.0.0 (mojo)
+mtest 1.1.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0   workers: 2
 
 PASS           e2e/matrix/test_beta.mojo       0.02s

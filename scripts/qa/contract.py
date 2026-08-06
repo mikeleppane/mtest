@@ -3309,7 +3309,7 @@ def build_matrix() -> list[Check]:
             "§19",
             ["version"],
             EXIT_SUCCESS,
-            out_has=["mtest 1.0.0"],
+            out_has=["mtest 1.1.0"],
         ),
         # Outcomes + STABLE exit codes (§9,§10). CRASH must stay distinct from
         # FAIL (§10).

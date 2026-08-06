@@ -50,7 +50,7 @@ from mtest.config import (
     safe_path_label,
 )
 
-comptime MTEST_VERSION = "1.0.0"
+comptime MTEST_VERSION = "1.1.0"
 """The single source of the version string; `main` reuses this exact value.
 
 `pixi run version-check` asserts it agrees with `pixi.toml`, with

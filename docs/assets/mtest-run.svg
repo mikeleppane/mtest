@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1119 656" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="13">
 <rect width="1119" height="656" rx="8" fill="#0d1117" stroke="#30363d"/>
 <text x="18" y="31" xml:space="preserve"><tspan fill="#8b949e">$ </tspan><tspan fill="#c9d1d9">mtest e2e/matrix e2e/suite/test_failing.mojo</tspan></text>
-<text x="18" y="51" xml:space="preserve"><tspan fill="#c9d1d9">mtest 1.0.0 (mojo)</tspan></text>
+<text x="18" y="51" xml:space="preserve"><tspan fill="#c9d1d9">mtest 1.1.0 (mojo)</tspan></text>
 <text x="18" y="71" xml:space="preserve"><tspan fill="#c9d1d9">root: /home/mikko/dev/mtest   selected: 3 files   excluded: 0</tspan></text>
 <text x="18" y="111" xml:space="preserve"><tspan fill="#3fb950">PASS           e2e/matrix/test_alpha.mojo      0.02s</tspan></text>
 <text x="18" y="131" xml:space="preserve"><tspan fill="#3fb950">PASS           e2e/matrix/test_beta.mojo       0.02s</tspan></text>
