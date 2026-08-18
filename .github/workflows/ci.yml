@@ -368,7 +368,7 @@ jobs:
       # changing in this repository. Its download cache is left off because both
       # tools are pinned exactly, so what gets fetched is already determined.
       - name: Set up uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: "0.11.17"
           enable-cache: false
