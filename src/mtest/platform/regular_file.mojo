@@ -20,11 +20,11 @@ rename that commits them. It reuses the same three-argument `open` shape and
 adds the binary's only `fsync` declaration.
 """
 from std.ffi import external_call
-from std.memory import Span, alloc, memset_zero
 from std.os import lstat
 from std.sys.info import CompilationTarget, is_triple
 
 from mtest.platform.cstring import c_string_bytes
+from mtest.platform.ffi_record import FfiRecord
 from mtest.platform.fs import S_IFMT, S_IFREG
 from mtest.platform.stream import EINTR, close_fd, errno_now, read_fd
 
@@ -168,19 +168,14 @@ def _open_read_flags() -> Int32:
 
 
 def _opened_mode(
-    storage: UnsafePointer[UInt64, MutUntrackedOrigin],
+    storage: FfiRecord,
 ) -> Int:
     comptime if CompilationTarget.is_macos():
         comptime assert (
             not CompilationTarget.is_x86()
         ), "platform regular-file reads support macOS arm64 only"
-        # SAFETY: the caller supplies 144 initialized bytes aligned to 8 that
-        # `fstat` has filled as Darwin arm64 `struct stat`. Darwin's `st_mode`
-        # is a fully initialized UInt16 at byte offset 4. Adding four stays
-        # within the allocation and preserves the two-byte alignment required
-        # by UInt16; the typed pointer is read once while `storage` is live and
-        # does not escape. The caller retains and frees the allocation.
-        return Int((storage.bitcast[UInt8]() + 4).bitcast[UInt16]()[0])
+        # Darwin arm64 `st_mode` is a UInt16 at byte offset 4.
+        return Int(storage.load[UInt16](2))
     else:
         comptime assert (
             CompilationTarget.is_linux()
@@ -188,16 +183,12 @@ def _opened_mode(
         comptime assert is_triple[
             "x86_64-unknown-linux-gnu"
         ](), "platform regular-file reads support Linux x86_64 only"
-        # SAFETY: the caller supplies 144 initialized bytes aligned to 8 that
-        # `fstat` has filled as Linux x86_64 `struct stat`. Linux's `st_mode`
-        # is a fully initialized UInt32 at byte offset 24, which is element six
-        # of this aligned UInt32 view. The read stays inside the allocation,
-        # the pointer remains live and local, and the caller owns and frees it.
-        return Int(storage.bitcast[UInt32]()[6])
+        # Linux x86_64 `st_mode` is a UInt32 at byte offset 24.
+        return Int(storage.load[UInt32](6))
 
 
 def _opened_size_hint(
-    storage: UnsafePointer[UInt64, MutUntrackedOrigin],
+    storage: FfiRecord,
 ) -> Int:
     """Read `st_size` out of a filled `struct stat` as a SIZING HINT ONLY.
 
@@ -220,15 +211,8 @@ def _opened_size_hint(
         comptime assert (
             not CompilationTarget.is_x86()
         ), "platform regular-file reads support macOS arm64 only"
-        # SAFETY: the caller supplies 144 initialized bytes aligned to 8 that
-        # `fstat` has filled as Darwin arm64 `struct stat`. Darwin's `st_size` is
-        # a fully initialized `off_t` (Int64) at byte offset 96 — element twelve
-        # of this aligned Int64 view — which the 144-byte struct fully contains.
-        # The read stays inside the allocation, the typed pointer is read once
-        # while `storage` is live and does not escape, and the caller retains and
-        # frees the allocation. A wrong value could only mis-size a reservation,
-        # never a bound: the caller clamps it and the read loop ignores it.
-        return Int(storage.bitcast[Int64]()[12])
+        # Darwin arm64 `st_size` is an Int64 at byte offset 96.
+        return Int(storage.load[Int64](12))
     else:
         comptime assert (
             CompilationTarget.is_linux()
@@ -236,15 +220,8 @@ def _opened_size_hint(
         comptime assert is_triple[
             "x86_64-unknown-linux-gnu"
         ](), "platform regular-file reads support Linux x86_64 only"
-        # SAFETY: the caller supplies 144 initialized bytes aligned to 8 that
-        # `fstat` has filled as Linux x86_64 `struct stat`. Linux's `st_size` is
-        # a fully initialized `off_t` (Int64) at byte offset 48 — element six of
-        # this aligned Int64 view — which the 144-byte struct fully contains. The
-        # read stays inside the allocation, the pointer remains live and local,
-        # and the caller owns and frees it. A wrong value could only mis-size a
-        # reservation, never a bound: the caller clamps it and the read loop
-        # ignores it.
-        return Int(storage.bitcast[Int64]()[6])
+        # Linux x86_64 `st_size` is an Int64 at byte offset 48.
+        return Int(storage.load[Int64](6))
 
 
 def _read_opened_regular_file_bytes(
@@ -286,8 +263,8 @@ def _read_opened_regular_file_bytes(
         # it. The guarded flags are O_RDONLY|O_NONBLOCK|O_CLOEXEC, so a swapped
         # FIFO cannot block and the descriptor cannot cross exec. Failure owns
         # no descriptor; success transfers exactly one descriptor here.
-        raw_fd = external_call["open", Int32](
-            path_bytes.unsafe_ptr().bitcast[NoneType](),
+        raw_fd = external_call["open", Int32, num_fixed_args=2](
+            path_bytes.unsafe_ptr().unsafe_bitcast[NoneType](),
             _open_read_flags(),
             UInt32(0),
         )
@@ -307,35 +284,22 @@ def _read_opened_regular_file_bytes(
         )
     var fd = Int(raw_fd)
 
-    # SAFETY: `alloc[UInt64](18)` owns exactly 144 bytes aligned to 8, enough
-    # for `struct stat` on both guarded targets. `memset_zero` initializes the
-    # complete allocation before any foreign write or Mojo read. The pointer's
-    # concrete mutable origin stays local and live until every mode read is
-    # complete, and this function frees it on every path below.
-    var stat_storage = alloc[UInt64](_STAT_BYTES // 8)
-    memset_zero(stat_storage.bitcast[UInt8](), _STAT_BYTES)
+    # 144 bytes is `struct stat` on both guarded targets.
+    var stat_storage = FfiRecord(bytes=_STAT_BYTES)
     var stat_rc: Int32
     var stat_errno = 0
     while True:
         # SAFETY: libc `fstat` has ABI `int fstat(int, struct stat*)`. `fd` is
-        # live; `stat_storage` is 144 initialized writable bytes aligned to 8,
+        # live; `stat_storage` is 144 zeroed writable bytes aligned to 8,
         # exactly the guarded target's struct size. The synchronous call writes
-        # only that region, retains no pointer, and owns neither resource. Both
-        # remain owned here after failure; success initializes `st_mode`
-        # according to the compile-time-selected ABI layout.
-        stat_rc = external_call["fstat", Int32](
-            Int32(fd), stat_storage.bitcast[NoneType]()
-        )
+        # only that region and retains no pointer.
+        stat_rc = external_call["fstat", Int32](Int32(fd), stat_storage.ptr())
         if stat_rc == 0:
             break
         stat_errno = errno_now()
         if stat_errno != EINTR:
             break
     if stat_rc != 0:
-        # SAFETY: this is the sole owner of the 144-byte allocation; `fstat`
-        # returned and retained no pointer, no view exists, and no later path
-        # can access or free the storage after this raising branch.
-        stat_storage.free()
         # Inspect close to discharge ownership, but preserve fstat's primary
         # errno deterministically if cleanup also reports an error.
         var close_rc = close_fd(fd)
@@ -349,10 +313,6 @@ def _read_opened_regular_file_bytes(
         )
     var mode = _opened_mode(stat_storage)
     var size_hint = _opened_size_hint(stat_storage)
-    # SAFETY: `_opened_mode` and `_opened_size_hint` each completed their one
-    # bounded read and retained no pointer. This is the allocation's sole owner
-    # and frees it exactly once; only the copied scalars remain live afterward.
-    stat_storage.free()
     if mode & S_IFMT != S_IFREG:
         if close_fd(fd) != 0:
             raise Error("platform: close failed after regular-file validation")
@@ -374,34 +334,17 @@ def _read_opened_regular_file_bytes(
         reserved = capacity
     var data = List[UInt8](capacity=reserved)
     var chunk_len = capacity if capacity < _READ_CHUNK else _READ_CHUNK
-    # SAFETY: `chunk_len` is in `[1, _READ_CHUNK]` because `capacity` is positive
-    # (`max_bytes` is nonnegative). This allocation owns exactly `chunk_len`
-    # writable UInt8 slots with a concrete mutable origin. No byte is read until
-    # `read_fd` reports it initialized; the pointer remains live through every
-    # synchronous read and every copy out of it, never escapes, and is freed on
-    # every success or error path below.
-    var buffer = alloc[UInt8](chunk_len)
+    var buffer = List[UInt8](length=chunk_len, fill=0)
     var total = 0
     while total < capacity:
         var room = capacity - total
         if room > chunk_len:
             room = chunk_len
-        # SAFETY: `room` is in `[1, chunk_len]` because `total < capacity` here,
-        # so the whole requested span lies inside the staging allocation, which
-        # is rewritten from its start on every iteration — the bytes carried over
-        # from the previous read were already copied out. `read_fd` initializes
-        # at most `room` bytes, retains no pointer, and reports the initialized
-        # count before Mojo inspects any content. The allocation and the
-        # descriptor remain owned here.
-        var count = read_fd(fd, buffer, room)
+        var count = read_fd(fd, Span(buffer)[:room])
         if count < 0:
             var read_errno = errno_now()
             if read_errno == EINTR:
                 continue
-            # SAFETY: this is the buffer's sole owner; the failed synchronous
-            # read retained no pointer, no byte view exists, and this raising
-            # branch prevents any later access or second free.
-            buffer.free()
             # Inspect close to discharge ownership, but preserve read's primary
             # errno deterministically if cleanup also reports an error.
             var close_rc = close_fd(fd)
@@ -416,26 +359,12 @@ def _read_opened_regular_file_bytes(
         if count == 0:
             break
         if count > room:
-            # SAFETY: this is the buffer's sole owner and `read_fd` retained no
-            # pointer. No view was constructed, and the raising branch makes
-            # this the allocation's only free with no subsequent access.
-            buffer.free()
             var close_rc = close_fd(fd)
             _ = close_rc
             raise Error("platform: read reported impossible progress")
-        # SAFETY: `read_fd` initialized exactly bytes `[0, count)` of the still
-        # live staging allocation and `count <= room <= chunk_len`. `Span`
-        # preserves that precise bound, and `List` copies every byte out of it
-        # eagerly; the view is a temporary that cannot outlive this statement,
-        # let alone the buffer.
-        data.extend(Span(ptr=buffer, length=count))
+        data.extend(Span(buffer)[:count])
         total += count
 
-    # SAFETY: every byte the staging allocation ever held was copied into `data`
-    # in the loop above, and no view of it survived the statement that copied it.
-    # This is its sole owner and final use, so freeing exactly once here leaves
-    # only the independent owned `data`; no path below touches the buffer.
-    buffer.free()
     if close_fd(fd) != 0:
         raise Error("platform: close failed after bounded regular-file read")
     return _OpenedRegularFileBytes(True, data^)
@@ -492,8 +421,8 @@ def fsync_path(path: String) raises:
         # it. The guarded flags are O_RDONLY|O_NONBLOCK|O_CLOEXEC, so opening a
         # replaced FIFO cannot block and the descriptor cannot cross an exec.
         # Failure owns no descriptor; success transfers exactly one here.
-        raw_fd = external_call["open", Int32](
-            path_bytes.unsafe_ptr().bitcast[NoneType](),
+        raw_fd = external_call["open", Int32, num_fixed_args=2](
+            path_bytes.unsafe_ptr().unsafe_bitcast[NoneType](),
             _open_read_flags(),
             UInt32(0),
         )
@@ -581,7 +510,7 @@ def read_bounded_regular_file(
         return BoundedRegularFileRead(False, "")
     var text: String
     try:
-        text = String(StringSlice(from_utf8=Span(opened.data)))
+        text = String(from_utf8=opened.data)
     except:
         raise Error("platform: regular file is not valid UTF-8")
     return BoundedRegularFileRead(True, text^)

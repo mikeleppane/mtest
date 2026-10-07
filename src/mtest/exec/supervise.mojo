@@ -9,17 +9,21 @@ exit 127, and an mtest deadline or interrupt kill versus the child's underlying
 final status.
 """
 from std.ffi import external_call
-from std.memory import UnsafePointer, alloc, memset_zero
 from std.time import sleep
 
 from mtest.exec.capture import BoundedCapture
 from mtest.exec.result import ProcessResult
-from mtest.exec.signals import ExecRuntime, interrupt_count
+from mtest.exec.signals import (
+    ERROR_BYTES,
+    ExecRuntime,
+    interrupt_count,
+    native_error,
+)
 from mtest.exec.spec import DEFAULT_GRACE_MS, ProcessSpec
 from mtest.exec.termination import Termination
+from mtest.platform import FfiRecord, c_string_bytes
 
-comptime _BytePtr = UnsafePointer[UInt8, MutUntrackedOrigin]
-comptime _U64Ptr = UnsafePointer[UInt64, MutUntrackedOrigin]
+comptime _Address = MutPointer[NoneType, MutAnyOrigin]
 
 comptime _DEFAULT_CAP_BYTES = 8 * 1024 * 1024
 """Default per-stream capture bound: 8 MiB (head + tail)."""
@@ -82,199 +86,100 @@ comptime _REAP_SIGNALED: UInt32 = 2
 comptime _PROCESS_HAS_CWD: UInt32 = 1
 
 
-def _copy_c_string(value: String) -> _BytePtr:
-    """Allocate an initialized NUL-terminated byte copy; caller owns it."""
-    var length = value.byte_length()
-    # SAFETY: the allocation owns `length + 1` UInt8 elements. Zeroing first
-    # initializes every pointee and the terminator; each subsequent assignment
-    # replaces one initialized byte with a byte read within `value`'s lifetime.
-    var copied = alloc[UInt8](length + 1)
-    memset_zero(copied, length + 1)
-    for i in range(length):
-        # SAFETY: `i` is in 0..<length for both the owned destination and the
-        # borrowed String bytes; the borrow ends before `value` can move.
-        copied[i] = value.unsafe_ptr()[i]
-    return copied
-
-
 struct _NativeBuffers(Movable):
-    """Aligned storage for the exact native ABI-v2 records of one run."""
+    """The exact native ABI-v2 records of one run, each a zeroed `FfiRecord`.
 
-    var owned_strings: List[_BytePtr]
-    var argv_records: _U64Ptr
-    var env_records: _U64Ptr
-    var spec_record: _U64Ptr
-    var error: _U64Ptr
-    var process_ref: _U64Ptr
-    var milliseconds: UnsafePointer[Int64, MutUntrackedOrigin]
-    var poll_result: UnsafePointer[UInt32, MutUntrackedOrigin]
-    var read_result: _U64Ptr
-    var setup_state: _U64Ptr
-    var group_result: UnsafePointer[UInt32, MutUntrackedOrigin]
-    var observe_result: UnsafePointer[UInt32, MutUntrackedOrigin]
-    var reap_result: UnsafePointer[UInt32, MutUntrackedOrigin]
-    var io_buffer: _BytePtr
+    Records free themselves, so no path here allocates or releases by hand.
+    """
+
+    var owned_strings: List[List[UInt8]]
+    var argv_records: FfiRecord
+    var env_records: FfiRecord
+    var spec_record: FfiRecord
+    var error: FfiRecord
+    var process_ref: FfiRecord
+    var milliseconds: FfiRecord
+    var poll_result: FfiRecord
+    var read_result: FfiRecord
+    var setup_state: FfiRecord
+    var group_result: FfiRecord
+    var observe_result: FfiRecord
+    var reap_result: FfiRecord
+    var io_buffer: List[UInt8]
 
     def __init__(out self, spec: ProcessSpec):
-        """Allocate and initialize all records before the native process opens.
+        """Build and initialize all records before the native process opens.
 
-        The process-spec pointer fields borrow `spec` only for the synchronous
-        `process_open` call. The adapter copies argv, cwd, and environment
-        before returning and never retains a Mojo pointer.
+        The spec record's string pointers address copies owned here, borrowed
+        only for the synchronous `process_open` call. The adapter copies argv,
+        cwd, and environment before returning and never retains a Mojo pointer.
         """
-        self.owned_strings = List[_BytePtr]()
-        # SAFETY: each allocation uses its record's required ABI-v2 alignment
-        # (8 for pointer/64-bit records, 4 for 32-bit records). Counts cover the
-        # complete fixed layouts asserted by the C header; every allocation has
-        # this object as its sole owner and is freed in `__del__`.
-        self.argv_records = alloc[UInt64](len(spec.argv) * 2)
-        # SAFETY: this object solely owns the env-extra records array, one 16-byte
-        # {data,length} record per override entry, freed in `__del__`. A nonzero
-        # count writes every slot below before C reads it; a zero count yields an
-        # untouched zero-length span the NULL/0 spec never wires in, so this
-        # allocation needs no zeroing.
-        self.env_records = alloc[UInt64](len(spec.env_extra) * 2)
-        self.spec_record = alloc[UInt64](7)
-        self.error = alloc[UInt64](4)
-        self.process_ref = alloc[UInt64](2)
-        self.milliseconds = alloc[Int64](1)
-        self.poll_result = alloc[UInt32](2)
-        self.read_result = alloc[UInt64](2)
-        self.setup_state = alloc[UInt64](3)
-        # SAFETY: these 4-byte-aligned UInt32 allocations exactly cover their
-        # ABI-v1 records (8, 8, and 16 bytes); this object uniquely owns them.
-        self.group_result = alloc[UInt32](2)
-        self.observe_result = alloc[UInt32](2)
-        self.reap_result = alloc[UInt32](4)
-        # SAFETY: this object uniquely owns all `_BUFSIZE` UInt8 elements; C
-        # writes at most the returned count and retains no pointer after a call.
-        self.io_buffer = alloc[UInt8](_BUFSIZE)
-
-        # SAFETY: zeroing covers every byte of every outbound/result record
-        # before either Mojo or C reads it. UInt8 has no invalid bit patterns;
-        # the I/O buffer is an out-buffer and is read only through returned count.
-        memset_zero(self.argv_records.bitcast[UInt8](), len(spec.argv) * 16)
-        memset_zero(self.spec_record.bitcast[UInt8](), 56)
-        memset_zero(self.error.bitcast[UInt8](), 32)
-        memset_zero(self.process_ref.bitcast[UInt8](), 16)
-        memset_zero(self.milliseconds.bitcast[UInt8](), 8)
-        memset_zero(self.poll_result.bitcast[UInt8](), 8)
-        memset_zero(self.read_result.bitcast[UInt8](), 16)
-        memset_zero(self.setup_state.bitcast[UInt8](), 24)
-        # SAFETY: these aligned records own 8, 8, and 16 bytes respectively;
-        # all-zero is valid for every UInt32 field and initializes every byte.
-        memset_zero(self.group_result.bitcast[UInt8](), 8)
-        memset_zero(self.observe_result.bitcast[UInt8](), 8)
-        memset_zero(self.reap_result.bitcast[UInt8](), 16)
+        self.owned_strings = List[List[UInt8]]()
+        # One 16-byte {data,length} record per argv and env-extra entry.
+        self.argv_records = FfiRecord(bytes=len(spec.argv) * 16)
+        self.env_records = FfiRecord(bytes=len(spec.env_extra) * 16)
+        self.spec_record = FfiRecord(bytes=56)
+        self.error = FfiRecord(bytes=ERROR_BYTES)
+        self.process_ref = FfiRecord(bytes=16)
+        self.milliseconds = FfiRecord(bytes=8)
+        self.poll_result = FfiRecord(bytes=8)
+        self.read_result = FfiRecord(bytes=16)
+        self.setup_state = FfiRecord(bytes=24)
+        self.group_result = FfiRecord(bytes=8)
+        self.observe_result = FfiRecord(bytes=8)
+        self.reap_result = FfiRecord(bytes=16)
+        self.io_buffer = List[UInt8](length=_BUFSIZE, fill=0)
 
         for i in range(len(spec.argv)):
-            var copied = _copy_c_string(spec.argv[i])
-            self.owned_strings.append(copied)
-            # SAFETY: `owned_strings` owns this initialized allocation until the
-            # native open has copied exactly the recorded number of bytes.
-            self.argv_records.bitcast[_BytePtr]()[i * 2] = copied
-            self.argv_records[i * 2 + 1] = UInt64(spec.argv[i].byte_length())
-
-        # SAFETY: the first ABI-v2 spec field is a non-retained pointer to the
-        # complete 16-byte argv records above. Remaining scalar slots are exact
-        # fixed-width fields; every slot was zeroed first, so reserved=0.
-        self.spec_record.bitcast[_U64Ptr]()[0] = self.argv_records
-        self.spec_record[1] = UInt64(len(spec.argv))
-        # The two ABI-v2 spec tail slots are the env-extra records pointer at u64
-        # index 5 (byte 40) and its count at index 6 (byte 48). A zero count keeps
-        # both slots NULL/0, reproducing the v1 environment snapshot byte for byte;
-        # a nonzero count hands C the raw override records, which it validates and
-        # merges replace-not-append before fork.
-        if len(spec.env_extra) == 0:
-            self.spec_record[5] = UInt64(0)
-            self.spec_record[6] = UInt64(0)
-        else:
+            self.argv_records.store[_Address](i * 2, self._own(spec.argv[i]))
+            self.argv_records.store[UInt64](
+                i * 2 + 1, UInt64(spec.argv[i].byte_length())
+            )
+        self.spec_record.store[_Address](0, self.argv_records.ptr())
+        self.spec_record.store[UInt64](1, UInt64(len(spec.argv)))
+        # The env-extra records pointer and count sit at u64 slots 5 and 6. A
+        # zero count leaves both NULL/0, reproducing the v1 environment
+        # snapshot byte for byte; a nonzero count hands C the raw override
+        # records, which it validates and merges replace-not-append before fork.
+        if len(spec.env_extra) > 0:
             for i in range(len(spec.env_extra)):
-                var copied = _copy_c_string(spec.env_extra[i])
-                self.owned_strings.append(copied)
-                # SAFETY: `owned_strings` owns this initialized allocation until
-                # the native open has copied exactly the recorded number of bytes.
-                self.env_records.bitcast[_BytePtr]()[i * 2] = copied
-                self.env_records[i * 2 + 1] = UInt64(
-                    spec.env_extra[i].byte_length()
+                self.env_records.store[_Address](
+                    i * 2, self._own(spec.env_extra[i])
                 )
-            # SAFETY: the env-extra spec field is a non-retained pointer to the
-            # complete 16-byte records above, which outlive the synchronous
-            # `process_open`; C copies each entry and retains no Mojo pointer.
-            self.spec_record.bitcast[_U64Ptr]()[5] = self.env_records
-            self.spec_record[6] = UInt64(len(spec.env_extra))
+                self.env_records.store[UInt64](
+                    i * 2 + 1, UInt64(spec.env_extra[i].byte_length())
+                )
+            self.spec_record.store[_Address](5, self.env_records.ptr())
+            self.spec_record.store[UInt64](6, UInt64(len(spec.env_extra)))
         if spec.cwd:
-            var copied = _copy_c_string(spec.cwd.value())
-            self.owned_strings.append(copied)
-            # SAFETY: `owned_strings` owns the complete initialized cwd copy
-            # until the native open copies it and returns without retaining it.
-            self.spec_record.bitcast[_BytePtr]()[2] = copied
-            self.spec_record[3] = UInt64(spec.cwd.value().byte_length())
-            # SAFETY: `spec_record` owns 56 initialized bytes aligned to 8; byte
-            # offset 32 is the exact ABI-v2 UInt32 flags field and value 1 is valid.
-            self.spec_record.bitcast[UInt32]()[8] = _PROCESS_HAS_CWD
+            self.spec_record.store[_Address](2, self._own(spec.cwd.value()))
+            self.spec_record.store[UInt64](
+                3, UInt64(spec.cwd.value().byte_length())
+            )
+            # Byte offset 32 is the ABI-v2 UInt32 flags field.
+            self.spec_record.store[UInt32](8, _PROCESS_HAS_CWD)
 
-    def __del__(deinit self):
-        """Free every ABI record once, after native calls have returned."""
-        # SAFETY: C never retains any string, record, or I/O pointer. This object
-        # uniquely owns every allocation and deinitialization runs exactly once.
-        for i in range(len(self.owned_strings)):
-            # SAFETY: `i` is within the owning list; each entry is a distinct
-            # C-string allocation that C did not retain and no path freed early.
-            self.owned_strings[i].free()
-        # SAFETY: C retained none of these aligned ABI-record pointers; this
-        # object uniquely owns each allocation and frees each exactly once.
-        self.argv_records.free()
-        self.env_records.free()
-        self.spec_record.free()
-        self.error.free()
-        self.process_ref.free()
-        self.milliseconds.free()
-        # SAFETY: C retained none of these record pointers; this object still
-        # uniquely owns each allocation and deinitialization runs exactly once.
-        self.poll_result.free()
-        self.read_result.free()
-        self.setup_state.free()
-        self.group_result.free()
-        self.observe_result.free()
-        self.reap_result.free()
-        # SAFETY: C retained no I/O pointer and this object uniquely owns the
-        # `_BUFSIZE` allocation, which has not been freed on any other path.
-        self.io_buffer.free()
-
-
-def _native_error(prefix: String, error: _U64Ptr) -> String:
-    """Render the adapter's error record, keeping any cleanup failure."""
-    # SAFETY: every failing ABI function initializes the complete aligned error
-    # record. ABI-v1 fixes operation/errno at 0/4 and cleanup values at 8/12.
-    var operation = Int(error.bitcast[UInt32]()[0])
-    var error_number = Int(error.bitcast[Int32]()[1])
-    var cleanup_operation = Int(error.bitcast[UInt32]()[2])
-    var cleanup_error = Int(error.bitcast[Int32]()[3])
-    var message = (
-        prefix
-        + " (operation "
-        + String(operation)
-        + ", errno "
-        + String(error_number)
-        + ")"
-    )
-    if cleanup_operation != 0:
-        message += (
-            "; cleanup operation "
-            + String(cleanup_operation)
-            + " failed with errno "
-            + String(cleanup_error)
+    def _own(mut self, value: String) -> _Address:
+        """Keep a NUL-terminated copy of `value` alive with these records."""
+        self.owned_strings.append(c_string_bytes(value))
+        # SAFETY: `owned_strings` keeps this copy alive until the records are
+        # destroyed; growing the outer list moves the inner `List` values, not
+        # their heap buffers, so the address stays valid. C copies the bytes
+        # during the synchronous `process_open` and retains no pointer.
+        return (
+            self.owned_strings[len(self.owned_strings) - 1]
+            .unsafe_ptr()
+            .unsafe_bitcast[NoneType]()
+            .as_unsafe_any_origin()
         )
-    return message^
 
 
 def _native_poll_set(
-    handles: _U64Ptr,
+    mut handles: List[UInt64],
     count: UInt64,
     timeout_ms: Int32,
-    results: _BytePtr,
-    error: _BytePtr,
+    mut results: FfiRecord,
+    mut error: FfiRecord,
 ) -> Int32:
     """Thin ABI-v2 binding: poll readiness across a set of handles at once.
 
@@ -283,73 +188,53 @@ def _native_poll_set(
     addresses `count` 8-byte poll-result records that the native two-phase
     validation zeroes; C retains neither pointer.
     """
-    # SAFETY: `handles` and `results` are caller-owned records spanning exactly
-    # `count` entries each, and `error` a complete aligned error record; the ABI
+    # SAFETY: `handles` and `results` are caller-owned records spanning at
+    # least `count` entries each, and `error` a complete error record; the ABI
     # validates the count, writes only within those spans, and retains no
-    # pointer. All four outlive this synchronous call.
+    # pointer. All three outlive this synchronous call.
     return external_call["mtest_exec_poll_set", Int32](
-        handles, count, timeout_ms, results, error
+        handles.unsafe_ptr(), count, timeout_ms, results.ptr(), error.ptr()
     )
-
-
-def _native_fd_limit(soft_limit: _BytePtr, error: _BytePtr) -> Int32:
-    """Thin ABI-v2 binding: report the RLIMIT_NOFILE soft limit.
-
-    `query_effective_cap` reads the live soft limit through this binding, and
-    RLIM_INFINITY arrives as the UINT64_MAX sentinel. C retains no pointer.
-    """
-    # SAFETY: `soft_limit` addresses a caller-owned 8-byte cell and `error` a
-    # complete aligned error record; the ABI writes only those and retains no
-    # pointer. Both outlive this synchronous call.
-    return external_call["mtest_exec_fd_limit", Int32](soft_limit, error)
 
 
 def _monotonic_ms(mut native: _NativeBuffers) raises -> Int:
     """Read the adapter's checked monotonic millisecond clock."""
-    # SAFETY: both pointers address complete aligned ABI-v1 out records owned by
-    # `native`; the call initializes them and retains neither pointer.
+    # SAFETY: both pointers address complete out records owned by `native`;
+    # the call initializes them and retains neither pointer.
     var status = external_call["mtest_exec_monotonic_ms", Int32](
-        native.milliseconds, native.error.bitcast[UInt8]()
+        native.milliseconds.ptr(), native.error.ptr()
     )
     if status != 0:
-        raise Error(_native_error("exec: monotonic clock failed", native.error))
-    # SAFETY: the successful call initialized the complete Int64 out-pointee.
-    return Int(native.milliseconds[0])
+        raise Error(native_error("exec: monotonic clock failed", native.error))
+    return Int(native.milliseconds.load[Int64](0))
 
 
 def _process_open(mut native: _NativeBuffers) raises -> UInt64:
     """Open one native child and return its opaque generation-token handle."""
-    # SAFETY: spec/process/error point to complete, aligned ABI-v1 records. All
-    # borrowed spec strings remain alive for this synchronous call; C copies
-    # them before fork/return and retains no Mojo pointer.
+    # SAFETY: spec/process/error are complete records owned by `native`, whose
+    # string copies stay alive for this synchronous call; C copies them before
+    # fork/return and retains no Mojo pointer.
     var status = external_call["mtest_exec_process_open", Int32](
-        native.spec_record.bitcast[UInt8](),
-        native.process_ref.bitcast[UInt8](),
-        native.error.bitcast[UInt8](),
+        native.spec_record.ptr(), native.process_ref.ptr(), native.error.ptr()
     )
     if status != 0:
-        raise Error(_native_error("exec: process open failed", native.error))
-    # SAFETY: success initialized the complete 16-byte process-ref record; its
-    # first eight bytes are the nonzero opaque handle, never a pointer address.
-    return native.process_ref[0]
+        raise Error(native_error("exec: process open failed", native.error))
+    # The first eight bytes are the nonzero opaque handle, never an address.
+    return native.process_ref.load[UInt64](0)
 
 
 def _poll(
     handle: UInt64, timeout_ms: Int, mut native: _NativeBuffers
 ) raises -> UInt32:
     """Poll all still-owned native channels and return readiness bits."""
-    # SAFETY: handle is the live opaque token; result/error are complete aligned
+    # SAFETY: handle is the live opaque token; result/error are complete
     # records owned by `native`, initialized by C and never retained.
     var status = external_call["mtest_exec_process_poll", Int32](
-        handle,
-        Int32(timeout_ms),
-        native.poll_result,
-        native.error.bitcast[UInt8](),
+        handle, Int32(timeout_ms), native.poll_result.ptr(), native.error.ptr()
     )
     if status != 0:
-        raise Error(_native_error("exec: poll failed", native.error))
-    # SAFETY: successful poll initialized the full result; readiness is slot 0.
-    return native.poll_result[0]
+        raise Error(native_error("exec: poll failed", native.error))
+    return native.poll_result.load[UInt32](0)
 
 
 def _read_quantum(
@@ -362,35 +247,33 @@ def _read_quantum(
 
     Returns the native read state (`_READ_BYTES`, `_READ_EOF`, or
     `_READ_WOULD_BLOCK`). On `_READ_BYTES` the chunk's bytes are pushed into
-    `capture` and its length is left in `native.read_result[1]` for the caller's
-    sweep budget. This one-chunk quantum is the fair unit the Supervisor charges
-    against its per-sweep byte budget so no single fd monopolizes a sweep.
+    `capture` and its length is left in `native.read_result` u64 slot 1 for the
+    caller's sweep budget. This one-chunk quantum is the fair unit the
+    Supervisor charges against its per-sweep byte budget so no single fd
+    monopolizes a sweep.
     """
-    # SAFETY: the live token names an owned process; `io_buffer` owns `_BUFSIZE`
-    # writable bytes and read-result/error are complete aligned non-retained
-    # records. C rejects counts beyond the supplied capacity.
+    # SAFETY: the live token names an owned process; `io_buffer` owns
+    # `_BUFSIZE` writable bytes and read-result/error are complete
+    # non-retained records. C rejects counts beyond the supplied capacity.
     var status = external_call["mtest_exec_process_read", Int32](
         handle,
         channel,
-        native.io_buffer,
+        native.io_buffer.unsafe_ptr(),
         UInt64(_BUFSIZE),
-        native.read_result.bitcast[UInt8](),
-        native.error.bitcast[UInt8](),
+        native.read_result.ptr(),
+        native.error.ptr(),
     )
     if status != 0:
-        raise Error(_native_error("exec: channel read failed", native.error))
-    # SAFETY: success initialized the 16-byte result. State is bytes 0..3;
-    # count is bytes 8..15 and is read only for READ_BYTES.
-    var state = native.read_result.bitcast[UInt32]()[0]
+        raise Error(native_error("exec: channel read failed", native.error))
+    # State is UInt32 field 0; the count is u64 slot 1, read only for BYTES.
+    var state = native.read_result.load[UInt32](0)
     if state == _READ_EOF or state == _READ_WOULD_BLOCK:
         return state
     if state != _READ_BYTES:
         raise Error("exec: native channel returned an invalid read state")
-    var count = Int(native.read_result[1])
+    var count = Int(native.read_result.load[UInt64](1))
     if count < 0 or count > _BUFSIZE:
         raise Error("exec: native channel returned an invalid byte count")
-    # SAFETY: C reported `count <= _BUFSIZE` bytes and initialized exactly that
-    # prefix before returning; the buffer remains alive and unaliased.
     for i in range(count):
         capture.push_byte(native.io_buffer[i])
     return state
@@ -398,18 +281,16 @@ def _read_quantum(
 
 def _setup_drain(handle: UInt64, mut native: _NativeBuffers) raises -> UInt32:
     """Advance the persistent framed child-setup state without blocking."""
-    # SAFETY: setup_state is the same initialized 24-byte record across calls so
-    # partial frames persist. C validates its fields, retains no pointer, and
-    # writes only within the ABI-v1 record; error is complete and aligned.
+    # SAFETY: setup_state is the same 24-byte record across calls so partial
+    # frames persist. C validates its fields, retains no pointer, and writes
+    # only within the ABI-v1 record; error is complete.
     var status = external_call["mtest_exec_process_setup_drain", Int32](
-        handle,
-        native.setup_state.bitcast[UInt8](),
-        native.error.bitcast[UInt8](),
+        handle, native.setup_state.ptr(), native.error.ptr()
     )
     if status != 0:
-        raise Error(_native_error("exec: setup channel failed", native.error))
-    # SAFETY: outcome is the UInt32 at byte offset 12 in the validated record.
-    return native.setup_state.bitcast[UInt32]()[3]
+        raise Error(native_error("exec: setup channel failed", native.error))
+    # The outcome is the UInt32 at byte offset 12.
+    return native.setup_state.load[UInt32](3)
 
 
 def _group(
@@ -417,68 +298,56 @@ def _group(
 ) raises -> UInt32:
     """Probe or signal the owned process group through the adapter."""
     # SAFETY: action is one of ABI-v1's three group discriminants; result/error
-    # are full aligned non-retained records and handle is the live token.
+    # are complete non-retained records and handle is the live token.
     var status = external_call["mtest_exec_process_group", Int32](
-        handle,
-        action,
-        native.group_result,
-        native.error.bitcast[UInt8](),
+        handle, action, native.group_result.ptr(), native.error.ptr()
     )
     if status != 0:
         raise Error(
-            _native_error("exec: process-group action failed", native.error)
+            native_error("exec: process-group action failed", native.error)
         )
-    # SAFETY: C initialized the full result; state is its first UInt32.
-    return native.group_result[0]
+    return native.group_result.load[UInt32](0)
 
 
 def _observe(handle: UInt64, mut native: _NativeBuffers) raises -> UInt32:
     """Observe leader waitability with waitid(WNOWAIT), without reaping."""
-    # SAFETY: result/error are complete aligned non-retained records and handle
-    # is the sole active process's opaque token.
+    # SAFETY: result/error are complete non-retained records and handle is the
+    # sole active process's opaque token.
     var status = external_call["mtest_exec_process_observe", Int32](
-        handle,
-        native.observe_result,
-        native.error.bitcast[UInt8](),
+        handle, native.observe_result.ptr(), native.error.ptr()
     )
     if status != 0:
         raise Error(
-            _native_error("exec: leader observation failed", native.error)
+            native_error("exec: leader observation failed", native.error)
         )
-    # SAFETY: C initialized the full result; state is its first UInt32.
-    return native.observe_result[0]
+    return native.observe_result.load[UInt32](0)
 
 
 def _close_channel(
     handle: UInt64, channel: UInt32, mut native: _NativeBuffers
 ) raises:
     """Explicitly close one retained native read channel."""
-    # SAFETY: the action retains no pointer; error is a complete aligned record
-    # and the live token/channel identify one adapter-owned descriptor.
+    # SAFETY: the action retains no pointer; error is a complete record and the
+    # live token/channel identify one adapter-owned descriptor.
     var status = external_call["mtest_exec_process_channel_close", Int32](
-        handle, channel, native.error.bitcast[UInt8]()
+        handle, channel, native.error.ptr()
     )
     if status != 0:
-        raise Error(_native_error("exec: channel close failed", native.error))
+        raise Error(native_error("exec: channel close failed", native.error))
 
 
 def _reap(handle: UInt64, mut native: _NativeBuffers) raises -> Termination:
     """Reap the already-observed leader exactly once and decode C's result."""
     # SAFETY: waitid observation established waitability without consumption;
-    # result/error are complete aligned non-retained ABI-v1 records.
+    # result/error are complete non-retained ABI-v1 records.
     var status = external_call["mtest_exec_process_reap", Int32](
-        handle,
-        native.reap_result,
-        native.error.bitcast[UInt8](),
+        handle, native.reap_result.ptr(), native.error.ptr()
     )
     if status != 0:
-        raise Error(_native_error("exec: leader reap failed", native.error))
-    # SAFETY: successful reap initialized the full 16-byte record. Kind is the
-    # UInt32 at offset 4 and value the Int32 at offset 8.
-    var kind = native.reap_result[1]
-    # SAFETY: the 16-byte record is 4-byte aligned and C initialized its Int32
-    # value field at byte offset 8 before returning success; the cast does not escape.
-    var value = Int(native.reap_result.bitcast[Int32]()[2])
+        raise Error(native_error("exec: leader reap failed", native.error))
+    # Kind is the UInt32 at byte offset 4 and value the Int32 at offset 8.
+    var kind = native.reap_result.load[UInt32](1)
+    var value = Int(native.reap_result.load[Int32](2))
     if kind == _REAP_EXITED:
         return Termination.exited(value)
     if kind == _REAP_SIGNALED:
@@ -488,13 +357,13 @@ def _reap(handle: UInt64, mut native: _NativeBuffers) raises -> Termination:
 
 def _process_close(handle: UInt64, mut native: _NativeBuffers) raises:
     """Release a fully reaped, swept, channel-closed native process record."""
-    # SAFETY: handle is the live token and error is a complete aligned record;
-    # success consumes adapter ownership and retains no Mojo pointer.
+    # SAFETY: handle is the live token and error is a complete record; success
+    # consumes adapter ownership and retains no Mojo pointer.
     var status = external_call["mtest_exec_process_close", Int32](
-        handle, native.error.bitcast[UInt8]()
+        handle, native.error.ptr()
     )
     if status != 0:
-        raise Error(_native_error("exec: process close failed", native.error))
+        raise Error(native_error("exec: process close failed", native.error))
 
 
 def _abort_process(handle: UInt64, mut native: _NativeBuffers) -> String:
@@ -505,13 +374,13 @@ def _abort_process(handle: UInt64, mut native: _NativeBuffers) -> String:
     # it retains the unreaped leader (live or waitable) and native-static handle.
     # The still-active ExecRuntime token remains its sole cross-ABI owner, and
     # runtime.close() retries that exact handle before restoring signal state.
-    # Error is complete, aligned, and non-retained.
+    # Error is complete and non-retained.
     var status = external_call["mtest_exec_process_abort", Int32](
-        handle, UInt32(_GRACE_MS), native.error.bitcast[UInt8]()
+        handle, UInt32(_GRACE_MS), native.error.ptr()
     )
     if status == 0:
         return String("")
-    return String("; ") + _native_error("exec: cleanup failed", native.error)
+    return String("; ") + native_error("exec: cleanup failed", native.error)
 
 
 def run_supervised(
@@ -737,28 +606,17 @@ def query_effective_cap() raises -> Int:
         Error: A native fd-limit query failure, or the hard environment error
             from `effective_cap` when even one child does not fit.
     """
-    # SAFETY: `soft_limit` owns one 8-byte cell and `error` a complete 32-byte
-    # aligned ABI-v1 error record; both are zeroed before the non-retaining query
-    # and freed on every path below. C writes only the soft limit and the error.
-    var soft_limit = alloc[UInt64](1)
-    var error = alloc[UInt64](4)
-    memset_zero(soft_limit.bitcast[UInt8](), 8)
-    memset_zero(error.bitcast[UInt8](), 32)
-    var status = _native_fd_limit(
-        soft_limit.bitcast[UInt8](), error.bitcast[UInt8]()
+    var soft_limit = FfiRecord(bytes=8)
+    var error = FfiRecord(bytes=ERROR_BYTES)
+    # SAFETY: `soft_limit` is a complete 8-byte cell and `error` a complete
+    # error record; the ABI writes only those and retains no pointer. Both
+    # outlive this synchronous call. RLIM_INFINITY arrives as UINT64_MAX.
+    var status = external_call["mtest_exec_fd_limit", Int32](
+        soft_limit.ptr(), error.ptr()
     )
     if status != 0:
-        var message = _native_error("exec: fd limit query failed", error)
-        # SAFETY: both cells are uniquely owned here and C retained neither; free
-        # each exactly once before raising, on this early-return path.
-        soft_limit.free()
-        error.free()
-        raise Error(message)
-    var value = soft_limit[0]
-    # SAFETY: the query succeeded and read `value` out; both uniquely-owned,
-    # non-retained cells are now dead and freed exactly once each.
-    soft_limit.free()
-    error.free()
+        raise Error(native_error("exec: fd limit query failed", error))
+    var value = soft_limit.load[UInt64](0)
     return effective_cap(value)
 
 
@@ -912,8 +770,8 @@ struct Supervisor(Movable):
     var cursor: Int
     var next_generation: Int
     var scratch: _NativeBuffers
-    var poll_handles: _U64Ptr
-    var poll_results: _BytePtr
+    var poll_handles: List[UInt64]
+    var poll_results: FfiRecord
 
     def __init__(
         out self, capacity: Int, capture_bound_bytes: Int = _DEFAULT_CAP_BYTES
@@ -946,18 +804,12 @@ struct Supervisor(Movable):
         self.next_generation = 1
         var dummy = ProcessSpec.command(["mtest-supervisor-scratch"], 0)
         self.scratch = _NativeBuffers(dummy)
-        # SAFETY: these two records are sized to the fixed capacity and owned
-        # solely by this Supervisor; `poll_handles` holds `capacity` tokens and
-        # `poll_results` `capacity` 8-byte poll-result records. Both are freed in
-        # `__del__` and C retains neither across a `poll_set` call.
-        self.poll_handles = alloc[UInt64](capacity)
-        self.poll_results = alloc[UInt8](capacity * 8)
-        memset_zero(self.poll_handles.bitcast[UInt8](), capacity * 8)
-        memset_zero(self.poll_results, capacity * 8)
+        # `capacity` tokens and `capacity` 8-byte poll-result records.
+        self.poll_handles = List[UInt64](length=capacity, fill=0)
+        self.poll_results = FfiRecord(bytes=capacity * 8)
 
-    def __del__(deinit self):
-        """Best-effort teardown of any slot left in flight, then free buffers.
-        """
+    def __deinit__(deinit self):
+        """Best-effort teardown of any slot left in flight."""
         # SAFETY: an abandoned live slot is torn down through the native abort,
         # which consumes its handle; failures cannot be raised from a destructor,
         # so callers use `kill_all`/`wait_any` for a reported teardown.
@@ -965,10 +817,6 @@ struct Supervisor(Movable):
             if self.slots[i].active:
                 _ = _abort_process(self.slots[i].handle, self.slots[i].native)
                 self.slots[i].active = False
-        # SAFETY: this Supervisor uniquely owns both poll-set records and frees
-        # each exactly once; C retained neither.
-        self.poll_handles.free()
-        self.poll_results.free()
 
     def in_flight(self) -> Int:
         """How many slots currently hold a live, unfinalized child."""
@@ -1163,25 +1011,20 @@ struct Supervisor(Movable):
         var count = 0
         for i in range(len(self.slots)):
             if self.slots[i].active:
-                # SAFETY: `poll_handles` owns `capacity` slots and `count` never
-                # exceeds the number of active slots, itself bounded by capacity.
                 self.poll_handles[count] = self.slots[i].handle
                 count += 1
         if count == 0:
             return
-        # SAFETY: `poll_handles`/`poll_results` are the capacity-sized owned
-        # records, `count` is bounded by capacity, and the scratch error record
-        # is complete and aligned; C validates the count and retains no pointer.
         var status = _native_poll_set(
             self.poll_handles,
             UInt64(count),
             Int32(timeout_ms),
             self.poll_results,
-            self.scratch.error.bitcast[UInt8](),
+            self.scratch.error,
         )
         if status != 0:
             raise Error(
-                _native_error("exec: poll set failed", self.scratch.error)
+                native_error("exec: poll set failed", self.scratch.error)
             )
 
     def _drain_sweep(mut self) raises:
@@ -1221,7 +1064,9 @@ struct Supervisor(Movable):
                 if state == _READ_EOF:
                     self.slots[i].stdout_open = False
                 elif state == _READ_BYTES:
-                    bytes_left -= Int(self.slots[i].native.read_result[1])
+                    bytes_left -= Int(
+                        self.slots[i].native.read_result.load[UInt64](1)
+                    )
             if self.slots[i].stderr_open and (readiness & _READY_STDERR) != 0:
                 var state = _read_quantum(
                     self.slots[i].handle,
@@ -1232,7 +1077,9 @@ struct Supervisor(Movable):
                 if state == _READ_EOF:
                     self.slots[i].stderr_open = False
                 elif state == _READ_BYTES:
-                    bytes_left -= Int(self.slots[i].native.read_result[1])
+                    bytes_left -= Int(
+                        self.slots[i].native.read_result.load[UInt64](1)
+                    )
         if resumed:
             self.cursor = stopped_at
         else:
@@ -1374,10 +1221,10 @@ struct Supervisor(Movable):
                 final.kind, final.value, self.slots[i].escalated
             )
         elif self.slots[i].setup_outcome == _SETUP_SPAWN_FAILED:
-            # SAFETY: a validated setup frame fixes stage at byte 16 and errno at
-            # byte 20. SpawnFailed carries the child-side setup/exec errno.
+            # A validated setup frame fixes errno at byte 20. SpawnFailed
+            # carries the child-side setup/exec errno.
             var error_number = Int(
-                self.slots[i].native.setup_state.bitcast[Int32]()[5]
+                self.slots[i].native.setup_state.load[Int32](5)
             )
             termination = Termination.spawn_failed(error_number)
         else:

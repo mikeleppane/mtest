@@ -53,22 +53,16 @@ def test_a_mode_that_could_not_be_applied_is_reported_as_such() raises:
     assert_false(apply_permissions("/no/such/dir/absent", 0o644))
 
 
-def test_the_pinned_open_ignores_the_umask_a_report_must_honor() raises:
-    """Why a published report is given its mode explicitly at all.
-
-    The pinned toolchain's `open` creates at a literal `0666`, umask and all —
-    which is why `--junit-xml`'s artifact ships world-writable and why a report
-    written beside it takes `default_file_mode()` instead of copying it. Pinned
-    here so the claim is a measurement rather than a remembered fact: under any
-    nonzero umask an `open` that started honoring it would turn this red.
-    """
+def test_the_pinned_open_honors_the_umask_like_a_report() raises:
+    """The stdlib `open` creates at `0666` minus the umask (Mojo 1.0 onward),
+    the same `default_file_mode()` a published report is given, so a report
+    and the `--junit-xml` artifact beside it agree on their mode."""
     var root = temp_root()
     try:
         var ordinary = root + "/plain"
         with open(ordinary, "w") as destination:
             destination.write("x")
-        assert_equal(observe_path(ordinary).mode, 0o666)
-        assert_true(default_file_mode() <= 0o666)
+        assert_equal(observe_path(ordinary).mode, default_file_mode())
         remove(ordinary)
     finally:
         remove_tree(root)

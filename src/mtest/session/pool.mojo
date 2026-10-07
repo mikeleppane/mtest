@@ -441,8 +441,7 @@ def _flush_console_with_progress[
     reason `session._flush_console` states: the console report is the run's
     primary output, so an undelivered one is a delivery failure the model
     ranks. A departed consumer is the carve-out and never latches. The latch
-    is an out-parameter because the return already carries the counter state
-    and 1.0.0b2 has no tuple return.
+    is an out-parameter because the return already carries the counter state.
 
     A raw `write(2)` rather than a `FileDescriptor`, for the reason
     `session._flush_console` records: constructing one takes ownership of a

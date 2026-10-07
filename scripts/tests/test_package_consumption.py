@@ -1057,7 +1057,7 @@ class CallSiteTests(unittest.TestCase):
         (prefix / "bin").mkdir(parents=True, exist_ok=True)
         (prefix / "bin" / "mtest").write_text("", encoding="utf-8")
         (prefix / "conda-meta").mkdir(parents=True, exist_ok=True)
-        (prefix / "conda-meta" / "mojo-compiler-1.0.0b2-release.json").write_text(
+        (prefix / "conda-meta" / "mojo-compiler-1.1.0-release.json").write_text(
             "{}", encoding="utf-8"
         )
         return prefix
@@ -2190,9 +2190,9 @@ class ExpectedMojoVersionTests(unittest.TestCase):
         # version the workspace actually builds with are one number, and a bump
         # that moves only one of them turns this red rather than turning the
         # dependency proof into a check of a version nobody uses.
-        self.assertEqual(package_consumption.PRODUCTION_MOJO_PIN, "1.0.0b2")
+        self.assertEqual(package_consumption.PRODUCTION_MOJO_PIN, "1.1.0")
         self.assertIn(
-            'mojo = "==1.0.0b2,<2"',
+            'mojo = "==1.1.0,<2"',
             (package_consumption.PIXI_TOML).read_text(encoding="utf-8"),
         )
 

@@ -38,7 +38,7 @@ def assert_equal(
 
 @always_inline
 def assert_equal[
-    T: Copyable & ImplicitlyDestructible & Equatable & Writable
+    T: Copyable & Deinitable & Equatable & Writable
 ](
     actual: List[T],
     expected: List[T],
@@ -71,7 +71,7 @@ def assert_equal[
 
 @always_inline
 def assert_equal[
-    V: Copyable & ImplicitlyDestructible & Equatable & Writable
+    V: Copyable & Deinitable & Equatable & Writable
 ](
     actual: Dict[String, V],
     expected: Dict[String, V],

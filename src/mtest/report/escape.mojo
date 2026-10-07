@@ -55,7 +55,7 @@ def _bytes_to_string(bytes: List[UInt8]) -> String:
     # sequences or the fixed 3-byte U+FFFD encoding (EF BF BD) — no multi-byte
     # sequence is ever split and no invalid byte is introduced, so the buffer is
     # valid UTF-8 by construction.
-    return String(StringSlice(unsafe_from_utf8=Span(bytes)))
+    return String(unsafe_from_utf8=bytes)
 
 
 def json_escape_string(s: String) -> String:

@@ -938,7 +938,7 @@ struct ConsoleReporter(Reporter):
         # full `byte_length()` — an append boundary — so the suffix begins on a
         # codepoint boundary and is itself well-formed UTF-8. `pending` stays
         # live until `String` copies the Span.
-        var out = String(StringSlice(unsafe_from_utf8=Span(pending)))
+        var out = String(unsafe_from_utf8=pending)
         if closing:
             if self._sections.byte_length() > 0:
                 out += "\n" + self._sections

@@ -108,13 +108,8 @@ def test_fd_primitives_round_trip_through_the_facade() raises:
         var created: CreatResult = create_truncate_fd_guarded(path)
         assert_true(created.fd >= 0)
         var payload = String("through the facade")
-        var bytes = payload.as_bytes()
-        # SAFETY: `bytes` borrows `payload`'s live buffer for this statement;
-        # `write_fd` reads at most `len(bytes)` bytes through the pointer,
-        # retains nothing past its synchronous return, and the pointer does
-        # not escape this call.
-        var written = write_fd(created.fd, bytes.unsafe_ptr(), len(bytes))
-        assert_equal(written, len(bytes))
+        var written = write_fd(created.fd, payload.as_bytes())
+        assert_equal(written, payload.byte_length())
         assert_equal(close_fd(created.fd), 0)
 
         with open(path, "r") as source:
@@ -131,14 +126,8 @@ def test_read_fd_and_errno_now_report_a_write_only_descriptors_bad_read() raises
     try:
         var created = create_truncate_fd_guarded(root + "/write_only.txt")
         assert_true(created.fd >= 0)
-        var buf = List[UInt8]()
-        for _ in range(8):
-            buf.append(0)
-        # SAFETY: `buf` owns 8 initialized writable bytes for this statement;
-        # `read_fd` writes at most 8 bytes through the pointer, retains
-        # nothing past its synchronous return, and the pointer does not
-        # escape this call.
-        var result = read_fd(created.fd, buf.unsafe_ptr(), 8)
+        var buf = List[UInt8](length=8, fill=0)
+        var result = read_fd(created.fd, buf)
         assert_true(result < 0)
         assert_equal(errno_now(), 9)
         assert_equal(close_fd(created.fd), 0)

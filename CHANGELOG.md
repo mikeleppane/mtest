@@ -12,6 +12,24 @@ the Mojo runtime and parses `TestSuite`'s printed report, so a release supports
 exactly one toolchain and there is no compatibility range; see the support
 matrix under [Installation](README.md#installation).
 
+## Unreleased
+
+### Toolchain
+
+- Mojo `1.1.0`. The conda package declares `mojo-compiler ==1.1.0` as its sole
+  run dependency.
+
+### Changed
+
+- A failing `TestSuite` now delivers its report on stderr (Mojo 1.1 prints an
+  uncaught exception there); mtest reads the report from stdout on exit 0 and
+  from stderr otherwise.
+- Every test build passes `-D MTEST_SOURCE=<path>`. Mojo 1.1's compilation
+  cache keys on source content, so two files with identical bytes at different
+  paths otherwise share one object whose report names the wrong file.
+- A precompile step's default output is `build/<name>.mojoc`; Mojo 1.1 no
+  longer accepts `.mojopkg`.
+
 ## 1.1.0 — 2026-08-06
 
 Additive throughout: every 1.0.0 invocation that had a defined meaning still

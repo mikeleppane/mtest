@@ -30,7 +30,6 @@ Nothing here prints or exits. Both entry points report lines and a code, so the
 composition root stays the only place that decides where a line goes and what
 the process exits with.
 """
-from std.memory import Span
 from std.os import makedirs, remove
 from std.os.path import basename, dirname, isdir
 

@@ -29,8 +29,8 @@ mtest ships as a conda package built **from source** by
 [rattler-build](https://prefix-dev.github.io/rattler-build/) from
 [`recipe/recipe.yaml`](recipe/recipe.yaml), inside an isolated build
 environment pinned to the same toolchain this repo builds against
-(`mojo ==1.0.0b2`, `clang ==18.1.8`). The binary links against the Mojo runtime,
-so the package declares `mojo-compiler ==1.0.0b2` as its sole conda run
+(`mojo ==1.1.0`, `clang ==18.1.8`). The binary links against the Mojo runtime,
+so the package declares `mojo-compiler ==1.1.0` as its sole conda run
 dependency. The native TOML parser is compiled into the shipped binary from
 the pinned vendored source.
 
@@ -72,13 +72,15 @@ To run mtest straight from a checkout instead, see
 
 | mtest | Mojo | Platforms | Status |
 |-------|------|-----------|--------|
-| 1.1.x | `1.0.0b2` | linux-64, osx-arm64 | Supported |
+| `main` | `1.1.0` | linux-64, osx-arm64 | Supported |
+| 1.1.x | `1.0.0b2` | linux-64, osx-arm64 | Released |
 
 **Supported** means this repository builds, gates, and publishes that
 combination: the pinned toolchain is what the protocol snapshots were captured
 against, what both blocking packaged-artifact jobs install, and what the conda
-package declares as its run dependency. There is no compatibility range, and
-that is a deliberate design position rather than an unfinished one. mtest links
+package declares as its run dependency. A **Released** row records the
+toolchain a published release was built against. There is no compatibility
+range, and that is a deliberate design position rather than an unfinished one. mtest links
 the Mojo runtime and parses the exact report `TestSuite` prints, so a build
 serves one toolchain; accepting a report the runner does not fully understand
 is how a runner produces a false green, and this one exits 3 on protocol drift
@@ -1044,7 +1046,7 @@ PASS version: mtest 1.1.0
 PASS platform: Linux x86_64 supported
 PASS root: /home/mikko/dev/mtest
 PASS exec: runtime acquired
-PASS toolchain: 'mojo' from PATH default: Mojo 1.0.0b2 (2cf4d08a)
+PASS toolchain: 'mojo' from PATH default: Mojo 1.1.0 (8189361e)
 PASS config: valid 'mtest.toml'
 PASS config-semantics: resolved values valid
 PASS state: cache and lastrun usable
@@ -1075,7 +1077,7 @@ $ echo $?
 ```
 
 The `toolchain` check is deliberately strict: a `PASS` requires the exact
-pinned identity `Mojo 1.0.0b2 (2cf4d08a)`, because a different toolchain is a
+pinned identity `Mojo 1.1.0 (8189361e)`, because a different toolchain is a
 different `TestSuite` report format. `doctor` also treats a broken
 configuration differently from every other command on purpose. A missing or
 malformed selected config is a `FAIL`ed check and exit `1`, not the usage error
@@ -2091,7 +2093,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the contributor workflow and
 use [docs/releasing.md](docs/releasing.md) for the GitHub and
 modular-community publication procedure.
 
-Requires [pixi](https://pixi.sh). The toolchain (Mojo `1.0.0b2`) and all
+Requires [pixi](https://pixi.sh). The toolchain (Mojo `1.1.0`) and all
 tasks are pinned in [pixi.toml](pixi.toml); re-pinning on a Modular release
 regenerates the protocol transcripts. See [CHANGELOG.md](CHANGELOG.md) for
 release-to-release changes.

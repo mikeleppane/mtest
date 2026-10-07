@@ -99,8 +99,8 @@ FIXTURES = REPO_ROOT / "scripts" / "fixtures" / "canary"
 
 # Independently transcribed from pixi.toml and recipe/recipe.yaml. Reading the
 # pin out of the module under test would make every assertion below a tautology.
-PINNED_MOJO = "1.0.0b2"
-CANDIDATE = ResolvedToolchain("1.0.0b3", "cafef00d")
+PINNED_MOJO = "1.1.0"
+CANDIDATE = ResolvedToolchain("1.1.1", "cafef00d")
 
 STABLE = "stable"
 NIGHTLY = "nightly"
@@ -558,7 +558,7 @@ class ResolvedToolchainTests(CanaryTestCase):
         source = inspect.getsource(toolchain)
         self.assertIn("from scripts.gen_transcripts import MOJO_VERSION_RE", source)
         self.assertNotIn("Mojo (", source)
-        banner = GENERATOR_VERSION_RE.search("Mojo 1.0.0b3 (cafef00d)")
+        banner = GENERATOR_VERSION_RE.search("Mojo 1.1.1 (cafef00d)")
         self.assertIsNotNone(banner)
         self.assertEqual(
             banner.groups() if banner else (),
@@ -624,7 +624,7 @@ class ResolvedToolchainTests(CanaryTestCase):
         self.assertIn('mojo-version = "mojo --version"\n', manifest)
 
     def test_it_parses_a_version_banner(self) -> None:
-        self.assertEqual(parse_toolchain("Mojo 1.0.0b3 (cafef00d)\n"), CANDIDATE)
+        self.assertEqual(parse_toolchain("Mojo 1.1.1 (cafef00d)\n"), CANDIDATE)
 
     def test_it_refuses_an_unreadable_banner(self) -> None:
         with self.assertRaises(ToolchainError):
@@ -1034,7 +1034,7 @@ class ChannelSearchTests(CanaryTestCase):
     def test_it_reads_versions_newest_first(self) -> None:
         # Trimmed from a real `pixi search --json` answer. The ordering is
         # pixi's, and it is the reason the versions are never compared here:
-        # 1.0.0rc0 outranks 1.0.0b3.dev2026080406, which no lexical or
+        # 1.2.0rc0 outranks 1.1.1.dev2026080406, which no lexical or
         # dotted-numeric comparison gets right.
         answer = CommandResult(
             ("pixi", "search", "--json", "mojo"),
@@ -1042,18 +1042,18 @@ class ChannelSearchTests(CanaryTestCase):
             json.dumps(
                 {
                     "linux-64": [
-                        {"name": "mojo", "version": "1.0.0rc0"},
-                        {"name": "mojo", "version": "1.0.0b3.dev2026080406"},
+                        {"name": "mojo", "version": "1.2.0rc0"},
+                        {"name": "mojo", "version": "1.1.1.dev2026080406"},
                     ],
                     "osx-arm64": [
-                        {"name": "mojo", "version": "1.0.0rc0"},
-                        {"name": "mojo", "version": "1.0.0b3.dev2026080406"},
+                        {"name": "mojo", "version": "1.2.0rc0"},
+                        {"name": "mojo", "version": "1.1.1.dev2026080406"},
                     ],
                 }
             ),
             "",
         )
-        self.assertEqual(search_versions(answer), ("1.0.0rc0", "1.0.0b3.dev2026080406"))
+        self.assertEqual(search_versions(answer), ("1.2.0rc0", "1.1.1.dev2026080406"))
 
     def test_the_flattened_reading_is_not_a_newest_first_ordering(self) -> None:
         # Two subdirs that have diverged, which is the case the flattening
@@ -1066,17 +1066,17 @@ class ChannelSearchTests(CanaryTestCase):
             0,
             json.dumps(
                 {
-                    "linux-64": [{"name": "mojo", "version": "1.0.0b2"}],
+                    "linux-64": [{"name": "mojo", "version": "1.1.0"}],
                     "osx-arm64": [
-                        {"name": "mojo", "version": "1.0.0rc0"},
-                        {"name": "mojo", "version": "1.0.0b2"},
+                        {"name": "mojo", "version": "1.2.0rc0"},
+                        {"name": "mojo", "version": "1.1.0"},
                     ],
                 }
             ),
             "",
         )
-        self.assertEqual(search_versions(answer), ("1.0.0b2", "1.0.0rc0"))
-        self.assertEqual(search_newest(answer), ("1.0.0b2", "1.0.0rc0"))
+        self.assertEqual(search_versions(answer), ("1.1.0", "1.2.0rc0"))
+        self.assertEqual(search_newest(answer), ("1.1.0", "1.2.0rc0"))
 
     def test_an_idle_lane_names_every_subdirs_newest(self) -> None:
         # The subdirs have diverged: one carries the pin, the other stopped at
@@ -1092,7 +1092,7 @@ class ChannelSearchTests(CanaryTestCase):
                 json.dumps(
                     {
                         "linux-64": [{"name": "mojo", "version": PINNED_MOJO}],
-                        "osx-arm64": [{"name": "mojo", "version": "1.0.0b1"}],
+                        "osx-arm64": [{"name": "mojo", "version": "1.0.0"}],
                     }
                 ),
                 "",
@@ -1101,7 +1101,7 @@ class ChannelSearchTests(CanaryTestCase):
         runner.outcomes("search-candidates", _Outcome(0, _search_answer(), ""))
         result = self.classify(repo, runner)
         self.assertEqual(result.classification, NO_NEWER_CANDIDATE)
-        self.assertIn(f"published there is {PINNED_MOJO}, 1.0.0b1", result.detail)
+        self.assertIn(f"published there is {PINNED_MOJO}, 1.0.0", result.detail)
 
     def test_only_a_subdir_that_carries_the_pin_can_outrank_it(self) -> None:
         """The one ordering claim that can be read straight off an answer.
@@ -1119,22 +1119,22 @@ class ChannelSearchTests(CanaryTestCase):
             json.dumps(
                 {
                     "linux-64": [
-                        {"name": "mojo", "version": "1.0.0rc0"},
+                        {"name": "mojo", "version": "1.2.0rc0"},
                         {"name": "mojo", "version": PINNED_MOJO},
-                        {"name": "mojo", "version": "1.0.0b1"},
+                        {"name": "mojo", "version": "1.0.0"},
                     ],
                     "osx-arm64": [
-                        {"name": "mojo", "version": "1.0.0rc0"},
-                        {"name": "mojo", "version": "1.0.0b3"},
+                        {"name": "mojo", "version": "1.2.0rc0"},
+                        {"name": "mojo", "version": "1.1.1"},
                     ],
                 }
             ),
             "",
         )
         self.assertEqual(
-            canary_run.versions_newer_than(answer, PINNED_MOJO), ("1.0.0rc0",)
+            canary_run.versions_newer_than(answer, PINNED_MOJO), ("1.2.0rc0",)
         )
-        self.assertEqual(canary_run.versions_newer_than(answer, "1.0.0rc0"), ())
+        self.assertEqual(canary_run.versions_newer_than(answer, "1.2.0rc0"), ())
         self.assertEqual(
             canary_run.versions_newer_than(
                 CommandResult(("pixi", "search"), 0, _search_answer(), ""), PINNED_MOJO
@@ -1160,8 +1160,8 @@ class ChannelSearchTests(CanaryTestCase):
 
     def test_the_command_names_every_channel(self) -> None:
         self.assertEqual(
-            search_argv(("one", "two"), "mojo >1.0.0b2,<2"),
-            ("pixi", "search", "--json", "-c", "one", "-c", "two", "mojo >1.0.0b2,<2"),
+            search_argv(("one", "two"), "mojo >1.1.0,<2"),
+            ("pixi", "search", "--json", "-c", "one", "-c", "two", "mojo >1.1.0,<2"),
         )
 
     def test_the_search_asks_for_no_limit_it_cannot_pass(self) -> None:
@@ -1174,7 +1174,7 @@ class ChannelSearchTests(CanaryTestCase):
         it. Passed anyway, every search would exit 2 and every day would end on
         an infrastructure non-answer.
         """
-        argv = search_argv(("one",), "mojo >1.0.0b2,<2")
+        argv = search_argv(("one",), "mojo >1.1.0,<2")
         self.assertIn("--json", argv)
         for flag in ("--limit", "-l", "--limit-packages", "-n"):
             self.assertNotIn(flag, argv)
@@ -1260,7 +1260,7 @@ class IdleLaneTests(CanaryTestCase):
             "search-published", _Outcome(0, _search_answer(PINNED_MOJO), "")
         )
         # Verbatim from `pixi search --json -c .../max/ -c conda-forge
-        # 'mojo >1.0.0b2,<2'`: exit 1, nothing on stdout, the refusal on
+        # 'mojo >1.1.0,<2'`: exit 1, nothing on stdout, the refusal on
         # stderr. An unreachable channel exits 1 with an empty stdout too,
         # which is exactly why the exit code cannot be read on its own.
         runner.outcomes(
@@ -1301,7 +1301,7 @@ class IdleLaneTests(CanaryTestCase):
         repo, runner = self.build()
         self._idle_stable_channel(runner)
         runner.fails(
-            "search-control", stderr="error: invalid version spec '>=1.0.0b2,<2'\n"
+            "search-control", stderr="error: invalid version spec '>=1.1.0,<2'\n"
         )
         result = self.classify(repo, runner)
         self.assertEqual(result.classification, INFRA_FAILURE)
@@ -1332,7 +1332,7 @@ class IdleLaneTests(CanaryTestCase):
         """The run already held the evidence that the quiet answer was wrong.
 
         The unbounded search names what the channels publish, and it named
-        1.0.0b3 above the pin. The bounded search then failed for a reason of
+        1.1.1 above the pin. The bounded search then failed for a reason of
         its own — a transient 503, a connection reset — and the control, which
         answers instantly out of cached repodata, confirmed the channels. That
         was read as an empty match set, so the lane reported the quiet
@@ -1384,9 +1384,9 @@ class IdleLaneTests(CanaryTestCase):
                     {
                         "linux-64": [
                             {"name": "mojo", "version": PINNED_MOJO},
-                            {"name": "mojo", "version": "1.0.0b1"},
+                            {"name": "mojo", "version": "1.0.0"},
                         ],
-                        "osx-arm64": [{"name": "mojo", "version": "1.0.0b1"}],
+                        "osx-arm64": [{"name": "mojo", "version": "1.0.0"}],
                     }
                 ),
                 "",
@@ -1779,7 +1779,7 @@ class StageClassificationTests(CanaryTestCase):
         repo, runner = self.build()
         runner.fails(
             "install",
-            stderr="Error: cannot solve the request: mojo 1.0.0rc0 needs python 3.13\n",
+            stderr="Error: cannot solve the request: mojo 1.2.0rc0 needs python 3.13\n",
         )
         result = self.classify(repo, runner)
         self.assertEqual(result.classification, SOURCE_INCOMPATIBLE)
@@ -1813,7 +1813,7 @@ class StageClassificationTests(CanaryTestCase):
         repo, runner = self.build()
         runner.fails(
             "install",
-            stderr="ERROR failed to fetch mojo-1.0.0b3.conda: HTTP status 503\n",
+            stderr="ERROR failed to fetch mojo-1.1.1.conda: HTTP status 503\n",
         )
         result = self.classify(repo, runner)
         self.assertEqual(result.classification, SOURCE_INCOMPATIBLE)
@@ -1881,7 +1881,7 @@ class StageClassificationTests(CanaryTestCase):
         candidate, and every gate below then reported about a toolchain nobody
         had screened.
         """
-        for version in (PINNED_MOJO, "1.0.0b9"):
+        for version in (PINNED_MOJO, "1.1.9"):
             with self.subTest(version=version):
                 repo, runner = self.build()
                 result = self.classify(

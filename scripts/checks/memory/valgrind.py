@@ -298,7 +298,7 @@ gh-annotations = "off"
 Byte-identical to the ASan lane's, and `test_valgrind.py` asserts that equality
 so the two lanes cannot drift into probing different runs."""
 
-EXPECTED_REACHABLE = (78_596, 10)
+EXPECTED_REACHABLE = (78_599, 10)
 VALGRIND_TARGET_CPU = "x86-64-v3"
 
 

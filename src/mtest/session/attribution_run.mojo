@@ -51,7 +51,7 @@ from mtest.session.names import _select_names
 # whenever isolation does not reproduce; the pass never guesses.
 
 
-def _secs_since(started_ns: UInt) -> Float64:
+def _secs_since(started_ns: Int) -> Float64:
     """Wall seconds elapsed since a `perf_counter_ns` reading."""
     return Float64(perf_counter_ns() - started_ns) / 1.0e9
 
@@ -198,7 +198,7 @@ def _attribute_one[
     binary: String,
     selected: List[String],
     reg: BuildRegistry,
-    pass_started_ns: UInt,
+    pass_started_ns: Int,
     mut reporter: C,
 ) raises -> Bool:
     """Attribute one crashed file, normally emitting one `CrashAttribution`.

@@ -6,10 +6,8 @@ replaces its own image lets the target own the controlling terminal, the
 process group, and the exit status with nothing in between.
 
 `execv(2)` is POSIX and has a fixed parameter list on both supported targets,
-so one declaration serves Linux and macOS. The variadic `execl` family is
-deliberately avoided: `external_call` emits a non-variadic call, and on Darwin
-arm64 a consumed variadic argument is then read from the wrong place, which
-would silently hand the target garbage arguments.
+so one declaration serves Linux and macOS, with no variadic tail whose Darwin
+arm64 calling convention could silently hand the target garbage arguments.
 
 The argument vector is built as a list of addresses rather than a list of
 pointers because `UnsafePointer` is non-nullable at the pinned toolchain, so

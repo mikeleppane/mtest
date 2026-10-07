@@ -30,7 +30,8 @@ def _strip_trailing_slash(s: String) -> String:
     """`s` with any trailing `/` removed (but never reduced below `/`)."""
     var out = s
     while out.byte_length() > 1 and out.endswith("/"):
-        out = String(out.removesuffix("/"))
+        var trimmed = String(out.removesuffix("/"))
+        out = trimmed^
     return out^
 
 

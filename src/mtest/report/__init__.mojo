@@ -4,7 +4,7 @@ This is the only part of the runner that formats text for humans. The session
 emits the closed `Event` set and nothing else; reporters consume that stream
 through a single `handle` method and are composed at compile time via a
 variadic type-parameter pack rather than a runtime trait-object list, because
-Mojo 1.0.0b2 polymorphism is static.
+Mojo polymorphism is static.
 
 The seam is two entities: `Reporter`, the trait a reporter conforms to, and
 `CompositeReporter[*Rs]`, which fans one event to a comptime tuple of them.

@@ -47,7 +47,7 @@ from mtest.platform import (
 comptime _CHECK_COUNT = 10
 comptime _TOOLCHAIN_DEADLINE_MS = 5000
 comptime _STATE_MAX_BYTES = 1024 * 1024
-comptime _PINNED_MOJO_IDENTITY = "Mojo 1.0.0b2 (2cf4d08a)"
+comptime _PINNED_MOJO_IDENTITY = "Mojo 1.1.0 (8189361e)"
 
 
 @fieldwise_init

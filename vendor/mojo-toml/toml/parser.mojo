@@ -27,7 +27,7 @@ This keeps parsing logic separate from tokenisation, making both simpler.
 
 from std.collections import Dict, List
 from std.math import inf, nan
-from .lexer import Token, TokenKind, Lexer
+from .lexer import Token, TokenKind, Lexer, Position
 
 comptime _I64_MAX = 9223372036854775807
 comptime _MAX_PARSE_DEPTH = 64
@@ -63,7 +63,7 @@ struct TomlValueType:
 
 
 # TOML Value variant type - can hold any TOML value
-struct TomlValue(Copyable, Movable):
+struct TomlValue(Copyable, Deinitable, Movable):
     """Represents any TOML value type.
 
     TOML supports: strings, integers, floats, booleans, datetimes,
@@ -137,6 +137,10 @@ struct TomlValue(Copyable, Movable):
         self.bool_value = False
         self.array_value = List[TomlValue]()
         self.table_value = value^
+
+    def __deinit__(deinit self):
+        """Explicit destructor: breaks the recursive `Deinitable` check."""
+        pass
 
     def is_string(self) -> Bool:
         return self.value_type == TomlValueType.STRING

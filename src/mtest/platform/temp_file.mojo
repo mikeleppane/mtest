@@ -15,7 +15,6 @@ unwritable destination is not, and telling them apart from an error message
 would be classification across a seam.
 """
 from std.ffi import external_call
-from std.memory import Span
 
 from mtest.platform.cstring import c_string_bytes
 from mtest.platform.stream import EINTR, close_fd, errno_now, write_fd
@@ -82,7 +81,7 @@ def create_unique_temp(template: String) raises -> UniqueTempFile:
     # The list remains owned here on both paths and is released after errno/path
     # extraction, so partial initialization and foreign ownership cannot leak.
     var raw_fd = external_call["mkstemp", Int32](
-        buffer.unsafe_ptr().bitcast[NoneType]()
+        buffer.unsafe_ptr().unsafe_bitcast[NoneType]()
     )
     var err = errno_now() if raw_fd < 0 else 0
     if raw_fd < 0:
@@ -100,7 +99,7 @@ def create_unique_temp(template: String) raises -> UniqueTempFile:
     # terminator leaves exactly the initialized, valid UTF-8 path bytes.
     # `String` copies the span before `buffer` is consumed; the borrow neither
     # escapes nor outlives its owner.
-    var path = String(StringSlice(unsafe_from_utf8=Span(buffer)))
+    var path = String(unsafe_from_utf8=buffer)
     _ = buffer^
     return UniqueTempFile(path^, Int(raw_fd))
 
@@ -170,12 +169,7 @@ def write_all_bytes_fd_status(fd: Int, data: Span[UInt8, _]) -> Int:
     var total = len(data)
     var offset = 0
     while offset < total:
-        # SAFETY: `data` is the caller's borrow, live for this whole loop.
-        # `offset` is in `[0, total)`, so the derived pointer addresses exactly
-        # the remaining `total - offset` initialized bytes. `write_fd` retains
-        # no pointer and mutates no input bytes; the borrow outlives every
-        # synchronous call.
-        var count = write_fd(fd, data.unsafe_ptr() + offset, total - offset)
+        var count = write_fd(fd, data[offset:])
         if count < 0:
             var err = errno_now()
             if err == EINTR:

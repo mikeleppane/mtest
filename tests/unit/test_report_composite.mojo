@@ -1,6 +1,6 @@
 """The composition proof for the reporter seam (Layer 2).
 
-1.0.0b2 polymorphism is static, so the fan-out from one event to many reporters
+Mojo polymorphism is static, so the fan-out from one event to many reporters
 is a comptime variadic type-parameter pack, not a runtime trait-object list.
 These tests build a `CompositeReporter` of TWO stateful reporters, fan EVERY
 event kind through it, and assert BOTH reporters observed all events and updated

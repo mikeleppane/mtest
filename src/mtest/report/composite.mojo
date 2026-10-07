@@ -1,7 +1,7 @@
 """The comptime fan-out: `CompositeReporter`.
 
 Fans every event to every reporter in a comptime-known tuple, via static
-dispatch. Mojo 1.0.0b2 polymorphism is static, so this is a variadic
+dispatch. Mojo polymorphism is static, so this is a variadic
 type-parameter pack (`*Rs: Reporter`) over a `Tuple`, not a runtime
 heterogeneous trait-object list. Adding a reporter means adding a tuple element
 at the call site; dispatch stays fully static.

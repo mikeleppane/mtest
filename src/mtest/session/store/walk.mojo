@@ -85,7 +85,7 @@ def _module_name(name: String) -> String:
     # index of a literal ASCII `.` (0x2E). A byte below 0x80 never appears
     # inside a multi-byte sequence, so cutting at that `.` cannot split one and
     # the prefix `[0, cut)` is well-formed on its own.
-    return String(StringSlice(unsafe_from_utf8=Span(out)))
+    return String(unsafe_from_utf8=out)
 
 
 def _names_contain(names: List[String], needle: String) -> Bool:
@@ -338,9 +338,9 @@ def _witness_of(
         Int(st.st_ino),
         Int(st.st_size),
         Int(st.st_mtimespec.tv_sec),
-        Int(st.st_mtimespec.tv_subsec),
+        Int(st.st_mtimespec.tv_nsec),
         Int(st.st_ctimespec.tv_sec),
-        Int(st.st_ctimespec.tv_subsec),
+        Int(st.st_ctimespec.tv_nsec),
     )
 
 

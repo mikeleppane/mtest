@@ -62,7 +62,7 @@ def test_run_supervised_bails_out_promptly_on_interrupt() raises:
 def test_inactive_runtime_rejects_supervision() raises:
     var runtime = ExecRuntime()
     assert_false(runtime.active, "new token must not claim native ownership")
-    var argv = [true_binary()]
+    var argv: List[String] = [true_binary()]
     var message = String("")
     try:
         _ = run_supervised(runtime, ProcessSpec.command(argv^))

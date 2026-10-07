@@ -1774,7 +1774,7 @@ branch (repackaging an already-linked executable) is **not** taken. The
 installed binary is not loader-clean: it carries a direct link dependency on
 the Mojo runtime's shared libraries, whose transitive closure is owned by the
 `mojo-compiler` conda package. The recipe therefore declares
-`mojo-compiler ==1.0.0b2` as its sole **conda run dependency**. Project
+`mojo-compiler ==1.1.0` as its sole **conda run dependency**. Project
 configuration is parsed natively by a pinned vendored Mojo parser compiled
 into the binary. A fresh environment carrying only the declared dependency
 (not the full build toolchain) is proven sufficient to load and run the
@@ -2014,7 +2014,7 @@ PASS version: mtest 1.1.0
 PASS platform: Linux x86_64 supported
 PASS root: /home/mikko/dev/mtest
 PASS exec: runtime acquired
-PASS toolchain: 'mojo' from PATH default: Mojo 1.0.0b2 (2cf4d08a)
+PASS toolchain: 'mojo' from PATH default: Mojo 1.1.0 (8189361e)
 PASS config: valid 'mtest.toml'
 PASS config-semantics: resolved values valid
 PASS state: cache and lastrun usable
@@ -2528,7 +2528,7 @@ fixed order:
 5. `toolchain` — the resolved Mojo path and supplying layer, checked by a
    bounded `mojo --version` probe under the ordinary supervision substrate.
    A pass requires the exact pinned identity
-   `Mojo 1.0.0b2 (2cf4d08a)`.
+   `Mojo 1.1.0 (8189361e)`.
 6. `config` — the selected file, `none`, or its normalized parse/read failure.
    `--no-config` is root-independent. An absolute explicit config remains
    checkable without a root; discovery and relative explicit paths require the

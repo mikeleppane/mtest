@@ -23,7 +23,6 @@ for a discovered suite.
 
 Reached ONLY by the crash-attribution scenario; never in the default suite.
 """
-from std.memory import UnsafePointer
 from std.os import getenv, setenv
 from std.testing import assert_true, TestSuite
 
@@ -44,12 +43,12 @@ def test_trips_over_shared_state() raises:
         # over, so this test passes and the crash does not reproduce.
         assert_true(True)
         return
-    # SAFETY: this deliberately constructs an UnsafePointer at a known-invalid
+    # SAFETY: this deliberately constructs a Pointer at a known-invalid
     # address so the load below raises a genuine SIGSEGV — the order-dependent
     # crash this fixture exists to produce for the crash-attribution e2e
     # scenario. It is reached only when the sibling test corrupted the shared
     # state earlier in the SAME process, and never runs outside this fixture.
-    var p = UnsafePointer[Int, MutUntrackedOrigin](unsafe_from_address=8)
+    var p = Pointer[Int, MutUntrackedOrigin](unsafe_from_address=8)
     print(p[])
 
 

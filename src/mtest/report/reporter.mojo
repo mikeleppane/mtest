@@ -13,7 +13,7 @@ composition tuple and their state read back by index.
 from mtest.model import Event
 
 
-trait Reporter(Copyable, Movable):
+trait Reporter(Copyable, Deinitable):
     """A consumer of the session's event stream.
 
     One method, `handle`, receives every event in emission order. Conforming

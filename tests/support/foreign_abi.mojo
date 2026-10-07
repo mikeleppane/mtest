@@ -257,6 +257,4 @@ def reap_child(pid: Int32, options: Int32) -> Int32:
     # returning. Passing `pid` unchanged means a caller naming an exact child
     # cannot consume a different one, and the result is a plain `pid_t` by
     # value.
-    return external_call["waitpid", Int32](
-        pid, UnsafePointer(to=status), options
-    )
+    return external_call["waitpid", Int32](pid, Pointer(to=status), options)

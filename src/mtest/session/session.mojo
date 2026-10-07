@@ -319,7 +319,7 @@ def run_session[
         shuffle_seed = config.shuffle_seed
         if shuffle_seed < 0:
             shuffle_seed = Int(
-                (perf_counter_ns() ^ UInt(process_id() << 20))
+                (perf_counter_ns() ^ (process_id() << 20))
                 & 0x7FFF_FFFF_FFFF_FFFF
             )
         shuffle_strings(disc.run_files, UInt64(shuffle_seed))

@@ -594,14 +594,14 @@ def _validate_public_api_docs(mojo: Path) -> None:
                         "Optional[SourceLocation] = None)"
                     ),
                     (
-                        "def assert_equal[T: Copyable & ImplicitlyDeletable & "
-                        "Equatable & Writable](actual: List[T], expected: "
+                        "def assert_equal[T: Equatable & Writable & Copyable & "
+                        "Deinitable](actual: List[T], expected: "
                         'List[T], msg: String = "", *, location: '
                         "Optional[SourceLocation] = None)"
                     ),
                     (
-                        "def assert_equal[V: Copyable & ImplicitlyDeletable & "
-                        "Equatable & Writable](actual: Dict[String, V], "
+                        "def assert_equal[V: Equatable & Writable & Copyable & "
+                        "Deinitable](actual: Dict[String, V], "
                         'expected: Dict[String, V], msg: String = "", *, '
                         "location: Optional[SourceLocation] = None)"
                     ),

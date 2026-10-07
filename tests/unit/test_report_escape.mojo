@@ -446,14 +446,16 @@ def test_minted_fence_tokens_are_full_width_hex_and_all_distinct() raises:
     var tokens = mint_fence_tokens(FENCE_TOKEN_POOL)
     assert_equal(len(tokens), FENCE_TOKEN_POOL)
     for i in range(len(tokens)):
-        assert_equal(tokens[i].byte_length(), 32)
-        for b in tokens[i].as_bytes():
+        var token = tokens[i].copy()
+        var message = "a minted token carries a non-hex byte: " + token
+        assert_equal(token.byte_length(), 32)
+        for b in token.as_bytes():
             var lowercase_hex = (
                 b >= UInt8(ord("0")) and b <= UInt8(ord("9"))
             ) or (b >= UInt8(ord("a")) and b <= UInt8(ord("f")))
             assert_true(
                 lowercase_hex,
-                "a minted token carries a non-hex byte: " + tokens[i],
+                message,
             )
         for j in range(i + 1, len(tokens)):
             assert_true(

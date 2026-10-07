@@ -5,7 +5,7 @@ under `build/e2e-scratch/` that the e2e harness owns (it creates the scratch dir
 and resets the marker between runs, so ordering is deterministic):
 
 - First attempt — no marker: drop the marker, then force a hard runtime SIGSEGV
-  (the invalid-`UnsafePointer` load technique from
+  (the invalid-`Pointer` load technique from
   `tests/fixtures/protocol/segfault.mojo`). The process dies by signal, so the
   buffered report is LOST and mtest reads a crash-class failure.
 - Retry — marker present: the test passes and mtest reads a VALID report.
@@ -15,7 +15,6 @@ file FLAKY (process exit 0). `--retries 0` reports the first crash as CRASH
 (process exit 1). This file is reached ONLY by the retries scenario; it is never
 in the default suite.
 """
-from std.memory import UnsafePointer
 from std.os.path import exists
 from std.testing import assert_equal, TestSuite
 
@@ -32,11 +31,11 @@ def test_flaky_passes_on_retry() raises:
         # closes before the fault), then die by a raw SIGSEGV.
         with open(_MARKER, "w") as f:
             f.write("crashed once\n")
-        # SAFETY: this deliberately constructs an UnsafePointer at a known-invalid
+        # SAFETY: this deliberately constructs a Pointer at a known-invalid
         # address so the load below raises a genuine SIGSEGV, the exact crash this
         # fixture exists to produce for the retry e2e scenario. It never runs
         # outside this test fixture.
-        var p = UnsafePointer[Int, MutUntrackedOrigin](unsafe_from_address=8)
+        var p = Pointer[Int, MutUntrackedOrigin](unsafe_from_address=8)
         print(p[])
 
 

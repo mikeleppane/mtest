@@ -19,7 +19,7 @@ struct _RenderedListSlice(Movable):
 
 
 def _render_list_slice[
-    T: Copyable & ImplicitlyDestructible & Equatable & Writable
+    T: Copyable & Deinitable & Equatable & Writable
 ](values: List[T], start: Int, stop: Int, byte_cap: Int,) -> _RenderedListSlice:
     var output = BoundedWriter(byte_cap)
     output.write_trusted("[")
@@ -46,7 +46,7 @@ def _render_list_slice[
 
 
 def _write_list_span[
-    T: Copyable & ImplicitlyDestructible & Equatable & Writable
+    T: Copyable & Deinitable & Equatable & Writable
 ](
     mut output: BoundedWriter,
     actual: List[T],
@@ -94,7 +94,7 @@ def _write_list_span[
 
 
 def write_list_difference[
-    T: Copyable & ImplicitlyDestructible & Equatable & Writable
+    T: Copyable & Deinitable & Equatable & Writable
 ](mut output: BoundedWriter, actual: List[T], expected: List[T],) -> Bool:
     """Derive equality and write one bounded list mismatch diagnostic."""
     var shared = min(len(actual), len(expected))

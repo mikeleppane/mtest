@@ -146,14 +146,14 @@ def test_doctor_contains_an_unexpected_throw_and_continues() raises:
 
 
 def test_doctor_requires_the_pinned_toolchain_identity() raises:
-    assert_true(_toolchain_identity_is_pinned("Mojo 1.0.0b2 (2cf4d08a)"))
-    assert_false(_toolchain_identity_is_pinned("Mojo 1.0.0b2 (deadbeef)"))
+    assert_true(_toolchain_identity_is_pinned("Mojo 1.1.0 (8189361e)"))
+    assert_false(_toolchain_identity_is_pinned("Mojo 1.1.0 (deadbeef)"))
     assert_false(_toolchain_identity_is_pinned("compatible compiler"))
-    assert_false(_toolchain_identity_is_pinned("Mojo 1.0.0b1 (deadbeef)"))
-    assert_false(_toolchain_identity_is_pinned("Mojo 1.0.0b2"))
-    assert_false(_toolchain_identity_is_pinned("Mojo 1.0.0b2 (DEADBEEF)"))
-    assert_false(_toolchain_identity_is_pinned("Mojo 1.0.0b2 (deadbee)"))
-    assert_false(_toolchain_identity_is_pinned("Mojo 1.0.0b2 (deadbeef0)"))
+    assert_false(_toolchain_identity_is_pinned("Mojo 1.0.0 (deadbeef)"))
+    assert_false(_toolchain_identity_is_pinned("Mojo 1.1.0"))
+    assert_false(_toolchain_identity_is_pinned("Mojo 1.1.0 (DEADBEEF)"))
+    assert_false(_toolchain_identity_is_pinned("Mojo 1.1.0 (deadbee)"))
+    assert_false(_toolchain_identity_is_pinned("Mojo 1.1.0 (deadbeef0)"))
 
 
 def test_doctor_config_dependency_is_truthful_without_a_root() raises:

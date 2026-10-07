@@ -326,7 +326,7 @@ struct _ToolchainMemo(Copyable, Movable):
     two compilers that are not the same file cannot be spelled the same way.
     """
 
-    var path: InlineArray[UInt8, _MEMO_PATH_CAP]
+    var path: Array[UInt8, _MEMO_PATH_CAP]
     """The canonical path's bytes. Only the leading `path_len` are meaningful;
     the rest is the fill this record was constructed with."""
 
@@ -337,16 +337,16 @@ struct _ToolchainMemo(Copyable, Movable):
     var size: Int
     """The number of bytes actually read and hashed under that path."""
 
-    var sha: InlineArray[UInt8, _MEMO_SHA_LEN]
+    var sha: Array[UInt8, _MEMO_SHA_LEN]
     """The digest's hex characters. Meaningful only when `path_len` is
     nonzero."""
 
     def __init__(out self):
         """Start empty, so the first lookup in a process always misses."""
-        self.path = InlineArray[UInt8, _MEMO_PATH_CAP](fill=0)
+        self.path = Array[UInt8, _MEMO_PATH_CAP](fill=0)
         self.path_len = 0
         self.size = 0
-        self.sha = InlineArray[UInt8, _MEMO_SHA_LEN](fill=0)
+        self.sha = Array[UInt8, _MEMO_SHA_LEN](fill=0)
 
     @staticmethod
     def of(
@@ -421,7 +421,7 @@ struct _ToolchainMemo(Copyable, Movable):
                 one, and the single caller already treats any failure to reach
                 the memo as a reason to recompute.
         """
-        return String(StringSlice(from_utf8=Span(self.sha)))
+        return String(from_utf8=self.sha)
 
 
 def _no_toolchain_memo() -> _ToolchainMemo:
@@ -452,8 +452,8 @@ those three fields, turning the one input that identifies the compiler into a
 poisonable indirection. This memo dies with the process that made it, so the
 worst it can do is reuse a digest taken moments earlier by the same process.
 
-`_Global` is stdlib-private at the pinned toolchain. It is used because Mojo
-1.0.0b2 offers no other process-lifetime mutable slot without a foreign symbol,
+`_Global` is stdlib-private at the pinned toolchain. It is used because the
+pinned Mojo offers no other process-lifetime mutable slot without a foreign symbol,
 and the pin means it cannot move underneath this code. The session layer is
 single-threaded — concurrency in this runner is child PROCESSES, never threads —
 so the unsynchronized read-modify-write below has no racing writer.

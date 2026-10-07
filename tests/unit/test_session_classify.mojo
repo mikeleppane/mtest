@@ -56,7 +56,7 @@ def test_timed_out_is_timeout_no_report() raises:
 
 def test_timeout_valid_report_does_not_rescue() raises:
     # A latched TIMEOUT stays TIMEOUT even if a complete valid report was seen.
-    var rows = [_row("a", Outcome.PASS)]
+    var rows: List[ParsedRow] = [_row("a", Outcome.PASS)]
     var t = Termination.timed_out(Termination.EXITED, 0, False)
     var c = classify(t, _valid(rows^, 1, 0, 0), False)
     assert_true(c.file_outcome == Outcome.TIMEOUT)
@@ -79,7 +79,7 @@ def test_overflow_exit0_is_fail_capture_overflow() raises:
 def test_overflow_beats_a_valid_report() raises:
     # Overflow never yields a successful verdict even if the trusted report is
     # somehow VALID — the session only sets is_overflow when the tail lost it.
-    var rows = [_row("a", Outcome.PASS)]
+    var rows: List[ParsedRow] = [_row("a", Outcome.PASS)]
     var c = classify(Termination.exited(0), _valid(rows^, 1, 0, 0), True)
     assert_true(c.file_outcome == Outcome.FAIL)
     assert_true(c.disposition == ParseDisposition.CAPTURE_OVERFLOW)
@@ -132,7 +132,10 @@ def test_off_grammar_is_drift_exit3() raises:
 
 
 def test_exit0_valid_no_failures_is_pass() raises:
-    var rows = [_row("a", Outcome.PASS), _row("b", Outcome.SKIP)]
+    var rows: List[ParsedRow] = [
+        _row("a", Outcome.PASS),
+        _row("b", Outcome.SKIP),
+    ]
     var c = classify(Termination.exited(0), _valid(rows^, 1, 0, 1), False)
     assert_true(c.file_outcome == Outcome.PASS)
     assert_true(c.disposition == ParseDisposition.PARSED)
@@ -147,7 +150,10 @@ def test_exit0_valid_no_failures_is_pass() raises:
 
 
 def test_exit1_valid_with_failures_is_fail() raises:
-    var rows = [_row("a", Outcome.PASS), _row("b", Outcome.FAIL)]
+    var rows: List[ParsedRow] = [
+        _row("a", Outcome.PASS),
+        _row("b", Outcome.FAIL),
+    ]
     var c = classify(Termination.exited(1), _valid(rows^, 1, 1, 0), False)
     assert_true(c.file_outcome == Outcome.FAIL)
     assert_true(c.disposition == ParseDisposition.PARSED)
@@ -172,7 +178,7 @@ def test_zero_test_valid_is_pass_zero_counts() raises:
 
 
 def test_exit0_valid_with_failures_is_fail_and_warns() raises:
-    var rows = [_row("a", Outcome.FAIL)]
+    var rows: List[ParsedRow] = [_row("a", Outcome.FAIL)]
     var c = classify(Termination.exited(0), _valid(rows^, 0, 1, 0), False)
     assert_true(c.file_outcome == Outcome.FAIL)
     assert_true(c.disposition == ParseDisposition.PARSED)
@@ -183,7 +189,7 @@ def test_exit0_valid_with_failures_is_fail_and_warns() raises:
 
 
 def test_exit1_valid_no_failures_is_fail_file_level() raises:
-    var rows = [_row("a", Outcome.PASS)]
+    var rows: List[ParsedRow] = [_row("a", Outcome.PASS)]
     var c = classify(Termination.exited(1), _valid(rows^, 1, 0, 0), False)
     assert_true(c.file_outcome == Outcome.FAIL)
     assert_true(c.disposition == ParseDisposition.PARSED)
@@ -195,7 +201,7 @@ def test_exit1_valid_no_failures_is_fail_file_level() raises:
 
 
 def test_unexpected_exit_code_valid_is_fail() raises:
-    var rows = [_row("a", Outcome.FAIL)]
+    var rows: List[ParsedRow] = [_row("a", Outcome.FAIL)]
     var c = classify(Termination.exited(42), _valid(rows^, 0, 1, 0), False)
     assert_true(c.file_outcome == Outcome.FAIL)
     assert_true(c.disposition == ParseDisposition.PARSED)
@@ -207,7 +213,7 @@ def test_unexpected_exit_code_valid_is_fail() raises:
 
 
 def test_unexpected_exit_code_valid_all_pass_is_file_level_fail() raises:
-    var rows = [_row("a", Outcome.PASS)]
+    var rows: List[ParsedRow] = [_row("a", Outcome.PASS)]
     var c = classify(Termination.exited(42), _valid(rows^, 1, 0, 0), False)
     assert_true(c.file_outcome == Outcome.FAIL)
     # No failing row -> a single file-level FAIL contributes to the multiset.

@@ -62,7 +62,7 @@ MATRIX = [
         ["--only", "test_zeta_passes", "--skip", "test_alpha_passes"],
     ),
     ("skip-all-args", "passing", ["--skip-all", "--only", "x"]),
-    # Conditional: only because 1.0.0b2's TestSuite exposes an in-code skip API.
+    # Conditional: only because the pinned TestSuite exposes an in-code skip API.
     ("default", "skipped", []),
     ("skip-all", "skipped", ["--skip-all"]),
     ("only-native", "skipped", ["--only", "test_natively_skipped"]),

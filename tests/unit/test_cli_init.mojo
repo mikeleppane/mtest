@@ -10,7 +10,6 @@ the first artifact is created, so a refused `init` leaves the directory exactly
 as it found it.
 """
 from std.os import listdir, makedirs, mkdir, stat, symlink
-from std.memory import Span
 from std.os.path import dirname, exists
 from std.testing import (
     assert_equal,

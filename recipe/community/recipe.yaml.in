@@ -25,12 +25,12 @@ build:
 
 requirements:
   build:
-    - mojo ==1.0.0b2
+    - mojo ==1.1.0
     - clang ==18.1.8
   host:
-    - mojo-compiler ==1.0.0b2
+    - mojo-compiler ==1.1.0
   run:
-    - mojo-compiler ==1.0.0b2
+    - mojo-compiler ==1.1.0
 
 tests:
   - files:

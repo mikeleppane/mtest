@@ -360,8 +360,8 @@ class CommunityRecipeDriftTests(unittest.TestCase):
     def test_shared_and_community_only_contract_drift_is_rejected(self) -> None:
         mutations = (
             ("name: mtest", "name: other"),
-            ("mojo ==1.0.0b2", "mojo ==1.0.0b3"),
-            ("mojo-compiler ==1.0.0b2", "mojo-compiler ==1.0.0b3"),
+            ("mojo ==1.1.0", "mojo ==1.1.1"),
+            ("mojo-compiler ==1.1.0", "mojo-compiler ==1.1.1"),
             ("license: MIT", "license: Apache-2.0"),
             ("license_file: LICENSE", "license_file: COPYING"),
             (

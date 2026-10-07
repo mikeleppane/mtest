@@ -25,9 +25,7 @@ from mtest.model import TestResult
 
 
 @fieldwise_init
-struct FileAccum[A: Copyable & Movable & ImplicitlyDeletable](
-    Copyable, Movable
-):
+struct FileAccum[A: Copyable & Deinitable](Copyable, Movable):
     """One file's state accumulated between FileStarted and FileFinished.
 
     Parameters:
@@ -43,9 +41,7 @@ struct FileAccum[A: Copyable & Movable & ImplicitlyDeletable](
     """One record per non-final retry attempt, in attempt order."""
 
 
-struct FileAccums[A: Copyable & Movable & ImplicitlyDeletable](
-    Copyable, Movable
-):
+struct FileAccums[A: Copyable & Deinitable](Copyable, Movable):
     """The in-flight per-file accumulators, keyed by path.
 
     A small linear index rather than a map: a run holds accumulators only for

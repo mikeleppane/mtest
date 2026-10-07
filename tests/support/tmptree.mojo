@@ -70,7 +70,8 @@ def temp_root() raises -> String:
     if base == "":
         base = String("/tmp")
     elif base.byte_length() > 1 and base.endswith("/"):
-        base = String(base.removesuffix("/"))
+        var trimmed = String(base.removesuffix("/"))
+        base = trimmed^
     # Seeded so the raise below is always well-formed; the budget is positive,
     # so a real failure always overwrites this.
     var last = String("no attempt was made")

@@ -2,7 +2,7 @@
 """The packaged-artifact consumption GATE.
 
 `recipe/recipe.yaml` builds mtest into a LOCAL conda channel with a
-`mojo-compiler ==1.0.0b2` run dependency (see `pixi run package-build`). That
+`mojo-compiler ==1.1.0` run dependency (see `pixi run package-build`). That
 proves the recipe solves; it does not prove the artifact is consumable by
 someone who has only the package and not this repo's dev toolchain. This script
 is that proof, with ten ordered completion records:
@@ -126,7 +126,7 @@ CONDA_FORGE_CHANNEL = "conda-forge"
 # passes `--expect-mojo-version` instead, because it retargets the recipe at a
 # newer compiler first: without the override the install stage would demand the
 # pinned compiler and fail a candidate that was packaged correctly.
-PRODUCTION_MOJO_PIN = "1.0.0b2"
+PRODUCTION_MOJO_PIN = "1.1.0"
 
 # The known-failing fixture stage drives through the installed binary. It is an
 # e2e fixture with a manifest-pinned outcome (verdict FAIL, exit class 1, two

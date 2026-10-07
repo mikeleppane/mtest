@@ -303,9 +303,7 @@ def _relax_report_temp_mode(temp_path: String, destination: String):
     a temporary, wrong for a report a CI job, a reviewer, or a web server is
     meant to read. The mode asked for is `default_file_mode()`, what an ordinary
     new file would get here — the `0666` an `open(2)` requests, minus this
-    process's umask. It is NOT copied from `--junit-xml`'s artifact: the pinned
-    toolchain's `open` ignores the umask, so that artifact lands at a literal
-    `0666`, and matching it would publish a world-writable report.
+    process's umask.
 
     Set BEFORE publication, not after: the rename makes the temp's inode the
     published file, so the mode chosen here is the mode the report appears with

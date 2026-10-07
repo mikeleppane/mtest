@@ -2883,14 +2883,11 @@ class Runner:
         # The second is a CROSS-CHECK and is deliberately weaker: it says the
         # report is readable wherever the JUnit artifact from the SAME run is,
         # EXCEPT where this process's umask withheld the bit from both. Three
-        # honest caveats. Only the READ bits are compared, because the two
-        # writers differ on the write bits by design — this one honors the umask
-        # and the JUnit path's `open` does not, so a byte-equal comparison would
-        # pin a world-writable report as correct. The `& ~previous` term is
-        # load-bearing for the same reason: without it a CORRECT report goes red
-        # under any umask that masks a read bit (0o007, 0o027, 0o037, 0o070,
-        # 0o077 — verified), precisely because the report honors the umask and
-        # its sibling does not. And its strength depends on the sibling's own
+        # honest caveats. Only the READ bits are compared, because the
+        # JUnit path's mode is the stdlib `open`'s, which this gate does not
+        # own. The `& ~previous` term keeps a CORRECT report green under any
+        # umask that masks a read bit (0o007, 0o027, 0o037, 0o070, 0o077). And
+        # its strength depends on the sibling's own
         # mode, which this branch does not control: under a restrictive umask it
         # can have nothing left to say, and the primary assertion above is what
         # carries the pin there.
