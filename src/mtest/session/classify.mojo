@@ -158,7 +158,10 @@ def resolve_run_report(
 
     A passing suite prints its report to stdout. A failing one raises it as the
     uncaught-exception message, which the runtime prints to stderr, and exits
-    nonzero. So exit 0 reads stdout and every other ending reads stderr.
+    nonzero. So exit 0 reads stdout and every other ending reads stderr. When
+    stderr holds no report at all, stdout is read instead: a custom `main` that
+    prints the error itself and exits nonzero still speaks the protocol, as it
+    did before Mojo 1.1. A report present on stderr is never overridden.
 
     Args:
         result: The finished child run.
@@ -174,9 +177,23 @@ def resolve_run_report(
             source_path,
             result.stdout_truncated,
         )
-    return resolve_report(
+    var on_stderr = resolve_report(
         lossy_utf8(result.stderr_bytes), source_path, result.stderr_truncated
     )
+    if (
+        on_stderr.is_overflow
+        or on_stderr.report.verdict != ReportVerdict.ABSENT
+    ):
+        return on_stderr^
+    var on_stdout = resolve_report(
+        lossy_utf8(result.stdout_bytes), source_path, result.stdout_truncated
+    )
+    if (
+        on_stdout.is_overflow
+        or on_stdout.report.verdict == ReportVerdict.ABSENT
+    ):
+        return on_stderr^
+    return on_stdout^
 
 
 def _row_outcomes(report: ParsedReport) -> List[Outcome]:

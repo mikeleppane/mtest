@@ -23,7 +23,8 @@ matrix under [Installation](README.md#installation).
 
 - A failing `TestSuite` now delivers its report on stderr (Mojo 1.1 prints an
   uncaught exception there); mtest reads the report from stdout on exit 0 and
-  from stderr otherwise.
+  from stderr otherwise, falling back to stdout when stderr carries no report
+  at all, so a custom `main` that prints its own error still parses.
 - Every test build passes `-D MTEST_SOURCE=<path>`. Mojo 1.1's compilation
   cache keys on source content, so two files with identical bytes at different
   paths otherwise share one object whose report names the wrong file.

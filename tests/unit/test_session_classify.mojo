@@ -258,10 +258,22 @@ def test_resolve_run_report_reads_stdout_on_exit_zero() raises:
 def test_resolve_run_report_reads_stderr_on_failure_exit() raises:
     # A failing TestSuite raises its report as the uncaught-exception message.
     var stderr = "Unhandled exception caught during execution: \n" + _REPORT
-    var tr = resolve_run_report(_run(_REPORT, stderr, 1), "/x/y.mojo")
+    var tr = resolve_run_report(_run("", stderr, 1), "/x/y.mojo")
     assert_true(tr.report.verdict == ReportVerdict.VALID)
-    tr = resolve_run_report(_run(_REPORT, "", 1), "/x/y.mojo")
+    # Nothing at all on either stream stays ABSENT.
+    tr = resolve_run_report(_run("noise\n", "", 1), "/x/y.mojo")
     assert_true(tr.report.verdict == ReportVerdict.ABSENT)
+
+
+def test_resolve_run_report_falls_back_to_stdout_without_stderr_report() raises:
+    # A custom `main` that prints the error itself and exits nonzero.
+    var tr = resolve_run_report(_run(_REPORT, "", 1), "/x/y.mojo")
+    assert_true(tr.report.verdict == ReportVerdict.VALID)
+    # A report present on stderr, even off-grammar, is never overridden by a
+    # valid-looking one on stdout: that would launder drift into a verdict.
+    var broken = String(_REPORT).replace("--------\n", "")
+    tr = resolve_run_report(_run(_REPORT, broken, 1), "/x/y.mojo")
+    assert_true(tr.report.verdict == ReportVerdict.OFF_GRAMMAR)
 
 
 def test_resolve_untruncated_parses_whole() raises:
