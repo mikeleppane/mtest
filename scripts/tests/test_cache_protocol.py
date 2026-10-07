@@ -947,6 +947,32 @@ class ToolchainIdentityTests(ProtocolScenario):
         self.assertEqual(second_generation, sorted([before, moved[0]]))
 
 
+class SourceIdentityTests(ProtocolScenario):
+    """Mojo's compile cache keys on content, not on the source path.
+
+    Two byte-identical files at different paths share one cached object, so
+    without `-D MTEST_SOURCE` the second binary reports the first file's path
+    in every `At <path>` line. This holds that premise against the compiler.
+    """
+
+    def test_identical_files_report_their_own_paths(self) -> None:
+        source = READS_HELPER_SOURCE.replace(
+            "from helper import helper_value\n", ""
+        ).replace("helper_value()", "1")
+        for name in ("a", "b"):
+            directory = self.root / "tests" / name
+            directory.mkdir()
+            (directory / "test_same.mojo").write_text(source, encoding="utf-8")
+
+        completed = run_mtest(self.root, ["tests/a", "tests/b"])
+
+        self.assertEqual(completed.returncode, 1, msg=completed.stdout)
+        for name in ("a", "b"):
+            self.assertIn(
+                f"At tests/{name}/test_same.mojo:", completed.stdout, msg=name
+            )
+
+
 class IncludeRootTests(ProtocolScenario):
     """An include root the key cannot characterize turns the cache OFF."""
 
