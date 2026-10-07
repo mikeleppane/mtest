@@ -685,13 +685,14 @@ about the build window, and exactly where that proof stops.
     resolves to are both recorded; the intermediate links a chain passes
     through are not. A middle link repointed and repointed back around a
     compile moves neither end.
-  - **A directory that becomes a package and stops again.** A subdirectory with
-    no `__init__` is not on the compiler's path, so the walk neither frames its
-    files nor holds it to its membership. Creating an `__init__` in it during a
-    compile and deleting it afterwards puts its modules in the build and leaves
-    the tree looking as it did. Holding every non-package subdirectory to its
-    membership instead would refuse publication whenever anything at all
-    appeared in one, which is a far commoner event than this.
+  - **A directory that becomes importable and stops again.** A subdirectory no
+    import can name (no `__init__`, and a name that is not an identifier) is
+    not on the compiler's path, so the walk neither frames its files nor holds
+    it to its membership. Giving it an `__init__` during a compile and deleting
+    it afterwards puts its modules in the build and leaves the tree looking as
+    it did. Holding every such subdirectory to its membership instead would
+    refuse publication whenever anything at all appeared in one, which is a far
+    commoner event than this.
   - **An include root that did not exist when the step was keyed.** Its absence
     is part of the key, but an absence cannot be re-stat'd into a record: a
     root created during the step, consumed, and removed again leaves the key's

@@ -1438,9 +1438,10 @@ everything an ordinary edit, upgrade, or move can reach:
   and `-I ./lib` differ), while the named directory contents are walked and
   digested;
 - the walked contents of every include root — every `*.mojo`, `*.🔥`, and
-  `*.mojoc` an `-I` makes visible, recursing into
-  subdirectories that carry an `__init__`, and nothing else, so a README or a
-  lockfile changing under an include root does not evict anything;
+  `*.mojoc` an `-I` makes visible, recursing into every subdirectory an import
+  can name (one with an `__init__`, or a namespace package whose name is an
+  identifier), and nothing else, so a README or a lockfile changing under an
+  include root does not evict anything;
 - the walked contents of the directory the test file sits in, by those same
   rules — the compiler resolves a bare `from helper import ...` against the
   source file's own directory, with no `-I` involved, so a helper beside a test
