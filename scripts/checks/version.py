@@ -443,6 +443,27 @@ def check_support_matrix(repo_root: Path = REPO_ROOT) -> None:
         )
 
 
+def _current_claims(path: Path) -> list[str]:
+    """Return the Mojo toolchain claims a document makes about the present.
+
+    A changelog's older entries are records of what each release was built
+    against, so only its newest entry (the text before the second `## `
+    heading) speaks for the current pin. Every other document is read whole.
+
+    Args:
+        path: The document to read.
+
+    Returns:
+        Every `MOJO_PIN_CLAIM_RE` version claim in the current text.
+    """
+    text = _read_text(path)
+    if path.name == "CHANGELOG.md":
+        headings = [m.start() for m in re.finditer(r"(?m)^## ", text)]
+        if len(headings) >= 2:
+            text = text[: headings[1]]
+    return MOJO_PIN_CLAIM_RE.findall(text)
+
+
 def check_mojo_pin_sites(repo_root: Path = REPO_ROOT) -> None:
     """Assert every restatement of the Mojo pin matches the pixi manifest.
 
@@ -461,7 +482,7 @@ def check_mojo_pin_sites(repo_root: Path = REPO_ROOT) -> None:
     pinned = _manifest_mojo_pin(repo_root / "pixi.toml")
     for relative in MOJO_PIN_SITES:
         path = repo_root / relative
-        claimed = MOJO_PIN_CLAIM_RE.findall(_read_text(path))
+        claimed = _current_claims(path)
         if not claimed:
             raise AssertionError(f"no Mojo toolchain claim found in {path}")
         for claim in claimed:
@@ -550,7 +571,7 @@ def check_no_stale_mojo_pin_claims(repo_root: Path = REPO_ROOT) -> None:
     swept = swept_documentation(repo_root)
     pinned = _manifest_mojo_pin(repo_root / "pixi.toml")
     for relative in swept:
-        for claim in MOJO_PIN_CLAIM_RE.findall(_read_text(repo_root / relative)):
+        for claim in _current_claims(repo_root / relative):
             if claim != pinned:
                 raise AssertionError(
                     f"stale toolchain claim: {relative} names Mojo {claim!r}, "
