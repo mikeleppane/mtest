@@ -30,11 +30,13 @@ class SafetyCheckTests(unittest.TestCase):
         cases = {
             "UnsafePointer construction": "var p = UnsafePointer[Int](to=x)\n",
             "raw allocation": "var p = alloc[Int](1)\n",
-            "manual free": "p.free()\n",
+            "manual free": "p.unsafe_free()\n",
             "unsafe constructor": "StringSlice(unsafe_from_utf8=data)\n",
             "unsafe pointer escape": "value.unsafe_ptr()\n",
             "raw initialization": "memset_zero(p, 8)\n",
-            "pointer bitcast": "p.bitcast[UInt8]()\n",
+            "pointer bitcast": "p.unsafe_bitcast[UInt8]()\n",
+            "unchecked offset": "var v = q[unsafe_offset=3]\n",
+            "origin erasure": "var r = q.as_unsafe_any_origin()\n",
             "FFI call": 'external_call["read", Int](fd, p, n)\n',
         }
         for family, source in cases.items():
