@@ -34,11 +34,15 @@ actors under `tests/fixtures/exec/`.
   a hermetic build come first.
 - Toolchain flakiness is expected: build-not-run, cache quarantine, and
   crash-class retries absorb it.
-- The README is the front door. `readme-help-check` executes its command-line
-  listing against `--help` and `assertions-check` runs its assertion example;
-  everything else is reviewed, so write it to be followed and verify it by
-  following it. State limits as plain facts, never as roadmap. Keep its
-  mermaid layering diagram and the bolded labels on feature/limitation bullets.
+- The README is a short front door: pitch, quick start, a "Start here" table,
+  the repository layout, and the mermaid layering diagram. Reference lives in
+  `docs/`. `readme-help-check` holds `docs/cli-reference.md`'s listing to
+  `--help`, `package-check` holds `docs/assertions.md`'s example to the
+  installed run, and `docs_parity` holds the pages that repeat the quick start
+  to the README; everything else is reviewed, so write it to be followed and
+  verify it by following it. State limits as plain facts, never as roadmap.
+  Keep the bolded labels on the feature/limitation bullets in
+  `docs/overview.md`.
 
 ## Layering
 
