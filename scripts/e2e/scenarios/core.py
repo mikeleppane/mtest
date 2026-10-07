@@ -629,7 +629,7 @@ def s_hostile_reporters(context: ScenarioContext) -> str:
     """One hostile child, three reporters, one contract each.
 
     The actor the console scenario uses runs ONCE more with the console, the
-    NDJSON stream, and the JUnit report all live, armed with a report-stream flood
+    NDJSON stream, and the JUnit report all live, armed with a flood on both streams
     exactly the size of the capture bound so the run overruns that bound by
     precisely the hostile payload it must not lose. Every escaping helper mtest
     owns already has passing unit tests; what is left to prove is that each

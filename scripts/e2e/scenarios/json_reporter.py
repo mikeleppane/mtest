@@ -201,14 +201,11 @@ def assert_hostile_json_stream(
         streams.stderr.reporter_text,
         "captured_stderr",
     )
-    expect(
-        str(record.get("captured_stderr")).count(ELISION) == 1,
-        "the bounded captured_stderr carries no single elision marker",
-    )
-    expect(
-        ELISION not in str(record.get("captured_stdout")),
-        "the unbounded captured_stdout was elided anyway",
-    )
+    for field in ("captured_stdout", "captured_stderr"):
+        expect(
+            str(record.get(field)).count(ELISION) == 1,
+            f"the bounded {field} carries no single elision marker",
+        )
 
     reported = [r for r in report.records if r.get("event") == "test_reported"]
     expect(

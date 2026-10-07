@@ -570,7 +570,7 @@ def hostile_streams(canonical: str, flood_lines: int) -> HostileStreams:
     """Predict both streams of one armed hostile-actor run, byte for byte.
 
     Reproduces `main`'s write order from the actor's own payload constants:
-    the hostile block alone on stdout; flood, hostile block, report on stderr.
+    flood and hostile block on stdout; flood, hostile block, report on stderr.
 
     Args:
         canonical: The absolute, symlink-resolved source path the build stand-in
@@ -582,7 +582,9 @@ def hostile_streams(canonical: str, flood_lines: int) -> HostileStreams:
         The two predicted streams and the failure detail they carry.
     """
     actor = hostile_actor()
-    stdout_raw = actor.hostile_block(b"child stdout", canonical)
+    stdout_raw = actor.flood_block(flood_lines) + actor.hostile_block(
+        b"child stdout", canonical
+    )
     stderr_raw = (
         actor.flood_block(flood_lines)
         + actor.hostile_block(b"child stderr", canonical)

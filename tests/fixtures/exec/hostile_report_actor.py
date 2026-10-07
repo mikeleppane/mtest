@@ -27,7 +27,7 @@ an argument, so a harness can predict these bytes exactly without owning a copy
 of them.
 
 One optional behaviour is armed from the environment: `FLOOD_ENV` asks for a
-printable flood ahead of everything else on the report stream, which lets a
+printable flood ahead of everything else on both streams, which lets a
 scenario drive the runner past its per-stream capture bound and then assert on
 what the retained
 tail — the region mtest reparses — still holds. Absent, the actor writes only
@@ -374,8 +374,10 @@ def main() -> int:
         # overruns the capture bound it is flood bytes that are dropped from the
         # middle: every hostile byte, and the genuine report, survive in the
         # retained tail, which is the region mtest reparses after truncation.
+        flood = flood_block(flood_lines_requested())
+        write_all(1, flood)
         write_all(1, hostile_block(b"child stdout"))
-        write_all(2, flood_block(flood_lines_requested()))
+        write_all(2, flood)
         write_all(2, hostile_block(b"child stderr"))
     write_all(1 if skipping else 2, report_block(skipping))
     return 0 if skipping else 1
