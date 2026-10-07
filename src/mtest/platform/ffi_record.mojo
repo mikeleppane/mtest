@@ -55,8 +55,10 @@ struct FfiRecord(Movable):
         """
         # SAFETY: the list owns `len * 8` initialized, 8-aligned bytes whose
         # heap address is stable for the record's lifetime. Erasing the origin
-        # is what a foreign call needs; callers pass it only to synchronous
-        # calls that retain nothing, while `self` is alive.
+        # drops the borrow checker's lifetime tracking, so every caller must
+        # keep `self` alive for as long as the pointer is used: in a
+        # synchronous foreign call, or stored in another record that is
+        # destroyed no later than this one (see `_NativeBuffers`).
         return (
             self._words.unsafe_ptr()
             .unsafe_bitcast[NoneType]()
@@ -64,14 +66,15 @@ struct FfiRecord(Movable):
         )
 
     def _check[T: TrivialRegisterPassable](self, index: Int):
-        if index < 0 or (index + 1) * size_of[T]() > self.byte_length():
+        # Divide rather than multiply: `(index + 1) * size` can overflow.
+        if index < 0 or index >= self.byte_length() // size_of[T]():
             abort("FfiRecord: field index out of bounds")
 
     def load[T: TrivialRegisterPassable](self, index: Int) -> T:
         """Read the `index`th `T`-sized field.
 
         Parameters:
-            T: A fixed-width scalar or pointer type of size 1, 2, 4, or 8.
+            T: A fixed-width integer type of size 1, 2, 4, or 8.
 
         Args:
             index: The field index in units of `size_of[T]()`.
@@ -83,15 +86,17 @@ struct FfiRecord(Movable):
         self._check[T](index)
         # SAFETY: `_check` keeps the field inside the initialized buffer, and
         # the buffer's 8-byte alignment covers every power-of-two `T` up to 8
-        # at a `T`-sized index. All-zero and C-written bytes are valid for the
-        # scalar and pointer types callers read.
+        # at a `T`-sized index. Every bit pattern, zero and C-written alike, is
+        # a valid value of the integer types callers read; no caller loads a
+        # pointer.
         return self._words.unsafe_ptr().unsafe_bitcast[T]()[unsafe_offset=index]
 
     def store[T: TrivialRegisterPassable](mut self, index: Int, value: T):
         """Write the `index`th `T`-sized field.
 
         Parameters:
-            T: A fixed-width scalar or pointer type of size 1, 2, 4, or 8.
+            T: A fixed-width integer or pointer type of size 1, 2, 4, or 8. A
+                stored pointer must not outlive its target; see `ptr()`.
 
         Args:
             index: The field index in units of `size_of[T]()`.

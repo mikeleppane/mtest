@@ -130,6 +130,11 @@ struct _NativeBuffers(Movable):
         self.reap_result = FfiRecord(bytes=16)
         self.io_buffer = List[UInt8](length=_BUFSIZE, fill=0)
 
+        # SAFETY: every `_Address` stored below points into a sibling field of
+        # this struct (`owned_strings`, `argv_records`, `env_records`). Each is
+        # assigned once in this initializer and never reassigned, and all are
+        # destroyed together, so no stored address outlives its target. C reads
+        # them only during the synchronous `process_open` and retains none.
         for i in range(len(spec.argv)):
             self.argv_records.store[_Address](i * 2, self._own(spec.argv[i]))
             self.argv_records.store[UInt64](

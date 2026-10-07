@@ -149,6 +149,9 @@ struct ExecRuntime(Movable):
         # SAFETY: as in `close`. Failure cannot be raised from a destructor;
         # explicit close is the only success-reporting path.
         _ = external_call["mtest_exec_runtime_close", Int32](error.ptr())
+        # `ptr()` erases the origin, so nothing else keeps `error` alive past
+        # its last use; end its lifetime explicitly after the call.
+        _ = error^
 
 
 def interrupt_requested() -> Bool:
