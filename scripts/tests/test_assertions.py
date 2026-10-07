@@ -358,7 +358,8 @@ def write_dictionary_difference[V](actual: V) -> Bool:
         valid = subprocess.CompletedProcess(
             args=["example-o0"],
             returncode=1,
-            stdout=(
+            stdout="",
+            stderr=(
                 "Running 2 tests for test_diagnostics.mojo\n"
                 "    PASS [ T ] test_standard_assertion_still_coexists\n"
                 "    FAIL [ T ] test_text_difference_has_scalar_and_context\n"
@@ -368,7 +369,6 @@ def write_dictionary_difference[V](actual: V) -> Bool:
                 "reason: configuration text changed\n"
                 "Summary [ T ] 2 tests run: 1 passed , 1 failed , 0 skipped\n"
             ),
-            stderr="",
         )
         assertions.validate_example_run(valid)
         with self.assertRaisesRegex(AssertionError, "exact exit 1"):
@@ -376,8 +376,8 @@ def write_dictionary_difference[V](actual: V) -> Bool:
                 subprocess.CompletedProcess(
                     args=["example-o0"],
                     returncode=0,
-                    stdout=valid.stdout,
-                    stderr="",
+                    stdout="",
+                    stderr=valid.stderr,
                 )
             )
 
@@ -514,8 +514,8 @@ class AssertionLocationValidationTests(unittest.TestCase):
             subprocess.CompletedProcess(
                 args=["location-o0"],
                 returncode=1,
-                stdout=self.valid_output,
-                stderr="",
+                stdout="",
+                stderr=self.valid_output,
             ),
             self.source,
             self.expected,
@@ -527,8 +527,8 @@ class AssertionLocationValidationTests(unittest.TestCase):
                 subprocess.CompletedProcess(
                     args=["location-o0"],
                     returncode=0,
-                    stdout=self.valid_output,
-                    stderr="",
+                    stdout="",
+                    stderr=self.valid_output,
                 ),
                 self.source,
                 self.expected,
@@ -543,8 +543,8 @@ class AssertionLocationValidationTests(unittest.TestCase):
                 subprocess.CompletedProcess(
                     args=["location-o0"],
                     returncode=1,
-                    stdout=output,
-                    stderr="",
+                    stdout="",
+                    stderr=output,
                 ),
                 self.source,
                 self.expected,
@@ -560,8 +560,8 @@ class AssertionLocationValidationTests(unittest.TestCase):
                 subprocess.CompletedProcess(
                     args=["location-o0"],
                     returncode=1,
-                    stdout=output,
-                    stderr="",
+                    stdout="",
+                    stderr=output,
                 ),
                 self.source,
                 self.expected,
@@ -590,8 +590,8 @@ class AssertionLocationValidationTests(unittest.TestCase):
                 subprocess.CompletedProcess(
                     args=["location-o0"],
                     returncode=1,
-                    stdout=output,
-                    stderr="",
+                    stdout="",
+                    stderr=output,
                 ),
                 self.source,
                 self.expected,
@@ -608,8 +608,8 @@ class AssertionLocationValidationTests(unittest.TestCase):
                 subprocess.CompletedProcess(
                     args=["location-o0"],
                     returncode=1,
-                    stdout=output,
-                    stderr="",
+                    stdout="",
+                    stderr=output,
                 ),
                 self.source,
                 self.expected,
@@ -621,21 +621,21 @@ class AssertionLocationValidationTests(unittest.TestCase):
                 subprocess.CompletedProcess(
                     args=["location-o0"],
                     returncode=1,
-                    stdout=self.valid_output + "CRASH\n",
-                    stderr="",
+                    stdout="",
+                    stderr=self.valid_output + "CRASH\n",
                 ),
                 self.source,
                 self.expected,
             )
 
-    def test_rejects_stderr(self) -> None:
-        with self.assertRaisesRegex(AssertionError, "stderr"):
+    def test_rejects_stdout(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "stdout"):
             assertions.validate_location_run(
                 subprocess.CompletedProcess(
                     args=["location-o0"],
                     returncode=1,
-                    stdout=self.valid_output,
-                    stderr="unexpected",
+                    stdout="unexpected",
+                    stderr=self.valid_output,
                 ),
                 self.source,
                 self.expected,

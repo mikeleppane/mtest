@@ -236,9 +236,9 @@ def assert_hostile_junit_report(
         "<system-err>",
     )
     expect(
-        str(_only_child(suite, "system-out", "suite system-out").text).count(ELISION)
+        str(_only_child(suite, "system-err", "suite system-err").text).count(ELISION)
         == 1,
-        "the bounded <system-out> carries no single elision marker",
+        "the bounded <system-err> carries no single elision marker",
     )
     return (
         f"junit: xmllint/XSD accepts {len(raw)} bytes, exact sanitized "

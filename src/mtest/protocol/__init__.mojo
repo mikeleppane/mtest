@@ -1,6 +1,6 @@
 """The protocol layer of the mtest runner.
 
-A report parser over one child test binary's decoded stdout. It imports only
+A report parser over one child test binary's decoded report stream. It imports only
 `model`, does no I/O, and holds no FFI. It turns bytes into one of four
 verdicts (VALID, ABSENT, OFF_GRAMMAR, or AMBIGUOUS) plus the parsed rows and
 reconciled counts. It decides no policy: what a verdict means is the session's

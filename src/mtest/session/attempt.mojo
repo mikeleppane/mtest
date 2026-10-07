@@ -21,7 +21,7 @@ and below `session`, which drives it for the gate files and the plain run set.
 The precompile step reuses its attempt-event and residual-warning shapes so a
 session-level step's attempt line carries the same identity a file build's does.
 """
-from mtest.config import RunnerConfig, lossy_utf8
+from mtest.config import RunnerConfig
 from mtest.exec import (
     ExecRuntime,
     ProcessResult,
@@ -49,7 +49,7 @@ from mtest.session.classify import (
     Classification,
     TrustedReport,
     classify,
-    resolve_report,
+    resolve_run_report,
 )
 from mtest.session.file_result import (
     CacheAdmissions,
@@ -506,14 +506,11 @@ def _single_attempt(
 
     var rdur = Float64(rres.duration_ms) / 1000.0
 
-    # The run's own report IS the handshake. Decode the captured stdout, resolve
-    # WHICH report to trust under capture overflow, then run the TOTAL classifier
-    # against the canonical path the child baked into its report.
+    # The run's own report IS the handshake. Resolve WHICH report to trust
+    # under capture overflow, then run the TOTAL classifier against the
+    # canonical path the child baked into its report.
     var source_path = source_identity_key(root, rel)
-    var stdout_text = lossy_utf8(rres.stdout_bytes)
-    var trusted = resolve_report(
-        stdout_text, source_path, rres.stdout_truncated
-    )
+    var trusted = resolve_run_report(rres, source_path)
     var cls = classify(rterm, trusted.report, trusted.is_overflow)
 
     return _AttemptResult(

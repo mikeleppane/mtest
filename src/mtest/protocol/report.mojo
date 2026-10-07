@@ -1,7 +1,8 @@
-"""The report parser: one file's stdout to one of four verdicts.
+"""The report parser: one file's report stream to one of four verdicts.
 
-`parse_report` reads the decoded stdout of a single child
-`std.testing.TestSuite` binary and classifies it as VALID, ABSENT, OFF_GRAMMAR,
+`parse_report` reads the decoded report stream of a single child
+`std.testing.TestSuite` binary (stdout for a passing suite, stderr for a
+failing one) and classifies it as VALID, ABSENT, OFF_GRAMMAR,
 or AMBIGUOUS. It imports only `model`, performs no I/O, holds no FFI, decides
 no policy, and never raises. The session owns the decode and turns the verdict
 into policy; this module only reads bytes.
@@ -19,7 +20,7 @@ path is `P`:
     Test suite' <P> 'failed!             (trailer, present iff f>0)
 
 The classifier's discipline: the report grammar is the toolchain's. A
-structural break that a user's own stdout cannot forge (a missing rule, a
+structural break that a user's own output cannot forge (a missing rule, a
 broken count, a fabricated failure trailer, drift from the pinned shape) is
 OFF_GRAMMAR. A pattern user bytes can produce (a second appended block, more
 rows than declared, a duplicate name) is AMBIGUOUS. Identity is exact
@@ -32,7 +33,7 @@ longer the rule, so the report classifies OFF_GRAMMAR ("missing rule before
 summary") and not AMBIGUOUS. Both are non-VALID, so no forgery reaches VALID
 either way.
 
-The header anchor follows from the same buffering: a test's own stdout is
+The header anchor follows from the same buffering: a test's own output is
 streamed before the toolchain's buffered report block, so an earlier
 header-lookalike is user output to ignore, and the last matching header before
 the terminal rule is the primary anchor. The anchor is settled by
@@ -63,7 +64,7 @@ from mtest.model import Outcome
 
 @fieldwise_init
 struct ReportVerdict(Equatable, ImplicitlyCopyable, Movable):
-    """How a child's stdout classified against one file's report grammar."""
+    """How a child's report stream classified against one file's grammar."""
 
     var code: Int
     """The stable integer discriminant identifying this verdict."""
@@ -116,7 +117,7 @@ struct ParsedReport(Copyable, Movable):
     """
 
     var verdict: ReportVerdict
-    """Which of the four verdicts the stdout classified as."""
+    """Which of the four verdicts the report stream classified as."""
     var rows: List[ParsedRow]
     """The parsed rows, populated only for VALID (empty otherwise)."""
     var declared_count: Int
@@ -481,14 +482,14 @@ def _parse_block(
     )
 
 
-def parse_report(stdout_text: String, source_path: String) -> ParsedReport:
-    """Classify one child's decoded stdout against a file's report grammar.
+def parse_report(text: String, source_path: String) -> ParsedReport:
+    """Classify one child's decoded report stream against a file's grammar.
 
     Total: every input maps to exactly one `ParsedReport`. See the module
     docstring for the grammar and the full classification precedence.
 
     Args:
-        stdout_text: The child's stdout, already lossy-decoded to a String by
+        text: The child's report stream, already lossy-decoded to a String by
             the caller.
         source_path: The canonical source path the header must byte-equal for a
             block to count as this file's report.
@@ -507,7 +508,7 @@ def parse_report(stdout_text: String, source_path: String) -> ParsedReport:
     print(parse_report(text, "/p/a.mojo").verdict == ReportVerdict.VALID)
     ```
     """
-    var lines = _split_lines(stdout_text)
+    var lines = _split_lines(text)
     var n = len(lines)
 
     # 1. Identity: collect every header whose path byte-equals source_path.
@@ -551,7 +552,7 @@ def parse_report(stdout_text: String, source_path: String) -> ParsedReport:
         return ParsedReport.ambiguous("multiple complete report blocks")
 
     # 4-7. The anchor is chosen by RECONCILIATION, not blindly the last header.
-    # A test's own stdout precedes the buffered report, so an earlier matching
+    # A test's own output precedes the buffered report, so an earlier matching
     # header is user output to ignore; the last header before the rule is the
     # primary anchor and, for a genuine single-header report, the only candidate.
     # But a conforming FAIL's detail can contain a line that byte-equals this

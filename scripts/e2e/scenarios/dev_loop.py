@@ -342,8 +342,8 @@ def s_debug_hands_over(context: ScenarioContext) -> str:
     expect_exit(failing, 1)
     _marker_lines(failing)
     expect(
-        "tests run:" in failing.stdout,
-        f"the failing binary's own report never arrived: {failing.stdout!r}",
+        "tests run:" in failing.stderr,
+        f"the failing binary's own report never arrived: {failing.stderr!r}",
     )
     _expect_no_verdict(failing)
     return "handed over twice; the exit was the test's own both times"

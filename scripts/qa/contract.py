@@ -2551,9 +2551,10 @@ class Runner:
                 probs.append(f"{label}: second stdout line is not the run line")
             elif not lines[1].endswith(selector):
                 probs.append(f"{label}: the run line does not end in {selector!r}")
-            # The binary's own report, produced after the exec, on the same
-            # descriptor mtest was writing to a moment earlier.
-            if "tests run:" not in r.stdout:
+            # The binary's own report, produced after the exec: stdout on a
+            # pass, the uncaught-exception message on stderr on a failure.
+            report = r.stdout if want_exit == 0 else r.stderr
+            if "tests run:" not in report:
                 probs.append(f"{label}: the test binary's own report never arrived")
             if "=====" in r.stdout or "=====" in r.stderr:
                 probs.append(f"{label}: an mtest summary band survived the handoff")

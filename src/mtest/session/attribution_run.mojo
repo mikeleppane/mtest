@@ -17,7 +17,6 @@ from std.os.path import exists
 from std.time import perf_counter_ns
 
 from mtest.cache import BuildRegistry
-from mtest.config import lossy_utf8
 from mtest.exec import (
     ExecRuntime,
     ProcessResult,
@@ -30,7 +29,7 @@ from mtest.model import AttributionDisposition, Event
 from mtest.protocol import collection_disqualifier, collection_names
 from mtest.report import ReportCoordinator
 from mtest.session.attribution import attribution_step, isolation_timeout_secs
-from mtest.session.classify import resolve_report
+from mtest.session.classify import resolve_run_report
 from mtest.session.file_result import _CrashFile
 from mtest.session.effective_settings import EffectiveFileSettings
 from mtest.session.names import _select_names
@@ -117,9 +116,7 @@ def _attribution_probe(
         # Signaled, timed out, or unspawnable: no listing to be had.
         return _AttributionListing(False, binary, List[String]())
     var canonical = source_identity_key(root, rel)
-    var trusted = resolve_report(
-        lossy_utf8(pres.stdout_bytes), canonical, pres.stdout_truncated
-    )
+    var trusted = resolve_run_report(pres, canonical)
     if trusted.is_overflow:
         return _AttributionListing(False, binary, List[String]())
     if collection_disqualifier(trusted.report) != "":

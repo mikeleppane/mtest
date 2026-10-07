@@ -1296,6 +1296,8 @@ FAIL           companions/assertions/examples/test_diagnostics.mojo  <TIME>
 reproduce: mtest -I <PREFIX>/share/mtest/companions/assertions/src companions/assertions/examples/test_diagnostics.mojo::test_text_difference_has_scalar_and_context
 
 --- FAIL companions/assertions/examples/test_diagnostics.mojo (exit 1) — captured output (file-scoped; TestSuite does not attribute output to individual tests) ---
+--- captured stderr ---
+    | stack trace was not collected. Enable stack trace collection with environment variable `MODULAR_DEBUG=stack-trace-on-error`
     | Unhandled exception caught during execution:
     | Running 2 tests for <REPO>/companions/assertions/examples/test_diagnostics.mojo
     |     PASS [ <TIME> ] test_standard_assertion_still_coexists
@@ -1314,7 +1316,6 @@ reproduce: mtest -I <PREFIX>/share/mtest/companions/assertions/src companions/as
     | Summary [ <TIME> ] 2 tests run: 1 passed , 1 failed , 0 skipped
     | Test suite' <REPO>/companions/assertions/examples/test_diagnostics.mojo 'failed!
     |
---- captured stderr ---
 
 
 ===== 1 passed, 1 failed, 0 skipped, builds: 1, cached: 0 (0 excluded, 0 not run) in <TIME> =====

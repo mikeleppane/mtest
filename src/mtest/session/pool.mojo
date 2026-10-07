@@ -32,7 +32,7 @@ which a hard kill can orphan a staging directory is one build long.
 """
 from std.time import perf_counter_ns
 
-from mtest.config import ResolvedConfig, RunnerConfig, lossy_utf8
+from mtest.config import ResolvedConfig, RunnerConfig
 from mtest.exec import (
     Completion,
     ExecRuntime,
@@ -59,7 +59,7 @@ from mtest.session.attempt import (
     flaky_eligible,
 )
 from mtest.session.build import _COMPILE_GRACE_MS, build_argv
-from mtest.session.classify import classify, resolve_report
+from mtest.session.classify import classify, resolve_run_report
 from mtest.session.file_result import (
     CacheAdmissions,
     FileResult,
@@ -1078,11 +1078,7 @@ def _run_pool_batch[
             else:
                 var rdur = Float64(res.duration_ms) / 1000.0
                 var source_path = source_identity_key(root, state[i].rel)
-                var trusted = resolve_report(
-                    lossy_utf8(res.stdout_bytes),
-                    source_path,
-                    res.stdout_truncated,
-                )
+                var trusted = resolve_run_report(res, source_path)
                 var cls = classify(term, trusted.report, trusted.is_overflow)
                 var attempt_passed = flaky_eligible(cls.file_outcome)
                 var rc = retry_classify("run", term, False, res.stderr_bytes)

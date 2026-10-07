@@ -3,8 +3,8 @@
 `run_session` runs the discovered files in a fixed order (precompile steps, then
 gates, then run files), building each to a binary and executing it under the
 `exec` supervisor. It owns the run-report handshake and the verdict policy: it
-decodes each child's captured stdout, resolves which report a truncated capture
-may trust (`resolve_report`), runs the per-test classifier (`classify`),
+decodes each child's report stream, resolves which report a truncated capture
+may trust (`resolve_run_report`), runs the per-test classifier (`classify`),
 reconciles a `--only` selection run against its `--skip-all` collection
 universe, and maps every termination to an `Outcome`, emitting events to the
 composed reporter and resolving the process exit code.
@@ -33,7 +33,7 @@ otherwise `exit_code_for` over the run outcomes decides 1, 5, or 0, and under
 `--fail-on-flaky` a 0 with at least one FLAKY file becomes 1. A terminal
 artifact that could not be delivered then escalates anything below 2 to 3. The
 selection, probe, and gate paths route non-valid reports through the same
-`resolve_report`/`classify` machinery as the default path, so a forged or
+`resolve_run_report`/`classify` machinery as the default path, so a forged or
 off-grammar report resolves identically either way.
 """
 from std.sys import num_logical_cores

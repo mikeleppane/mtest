@@ -10,10 +10,14 @@ mapping. `resolve_report` (the capture-overflow tail reparse) is pinned here too
 """
 from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
-from mtest.exec import Termination
+from mtest.exec import ProcessResult, Termination
 from mtest.model import Outcome, ParseDisposition
 from mtest.protocol import ParsedReport, ParsedRow, ReportVerdict
-from mtest.session.classify import classify, resolve_report
+from mtest.session.classify import (
+    classify,
+    resolve_report,
+    resolve_run_report,
+)
 
 
 def _row(name: String, oc: Outcome) -> ParsedRow:
@@ -230,6 +234,34 @@ comptime _REPORT = (
     "--------\n"
     "Summary [ 0.00s ] 1 tests run: 1 passed , 0 failed , 0 skipped "
 )
+
+
+def _run(stdout: String, stderr: String, exit_code: Int) -> ProcessResult:
+    return ProcessResult(
+        List[UInt8](stdout.as_bytes()),
+        List[UInt8](stderr.as_bytes()),
+        False,
+        False,
+        Termination.exited(exit_code),
+        0,
+    )
+
+
+def test_resolve_run_report_reads_stdout_on_exit_zero() raises:
+    var tr = resolve_run_report(_run(_REPORT, "", 0), "/x/y.mojo")
+    assert_true(tr.report.verdict == ReportVerdict.VALID)
+    # A report forged onto stderr is never read on a clean exit.
+    tr = resolve_run_report(_run("", _REPORT, 0), "/x/y.mojo")
+    assert_true(tr.report.verdict == ReportVerdict.ABSENT)
+
+
+def test_resolve_run_report_reads_stderr_on_failure_exit() raises:
+    # A failing TestSuite raises its report as the uncaught-exception message.
+    var stderr = "Unhandled exception caught during execution: \n" + _REPORT
+    var tr = resolve_run_report(_run(_REPORT, stderr, 1), "/x/y.mojo")
+    assert_true(tr.report.verdict == ReportVerdict.VALID)
+    tr = resolve_run_report(_run(_REPORT, "", 1), "/x/y.mojo")
+    assert_true(tr.report.verdict == ReportVerdict.ABSENT)
 
 
 def test_resolve_untruncated_parses_whole() raises:

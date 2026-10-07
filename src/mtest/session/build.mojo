@@ -3,10 +3,10 @@
 Layer 4, the shared front half of the selection and collect pipelines: it
 compiles a discovered file once, records the build (or the compile error) in the
 `cache` registry, then runs the resulting binary under `--skip-all` to learn the
-file's test names without running a body. Both passes route every non-qualifying
-outcome through the same `resolve_report`/`classify` machinery the default run
-path uses, so a crash, a deadline kill, a truncated capture, or an off-grammar
-report resolves identically here and there.
+file's test names without running a body. Both passes route every
+non-qualifying outcome through the same `resolve_run_report`/`classify`
+machinery the default run path uses, so a crash, a deadline kill, a truncated
+capture, or an off-grammar report resolves identically here and there.
 
 This is also the FIRST of the three build seams into the artifact store. A
 first-attempt compile under an enabled `CacheContext` keys the file, probes the
@@ -36,7 +36,7 @@ from mtest.protocol import (
     collection_disqualifier,
     collection_names,
 )
-from mtest.session.classify import resolve_report
+from mtest.session.classify import resolve_run_report
 from mtest.session.effective_settings import EffectiveFileSettings
 from mtest.session.file_result import CacheAdmissions, FileResult
 from mtest.session.scratch import _ensure_dir, _mangle
@@ -500,9 +500,9 @@ def _probe_file(
     probe never resolves differently than the default path would: a spawn
     failure is an internal error (exit 3); an interrupt-induced timeout is an
     interrupt (exit 2); a signaled probe is that file's crash; a plain timeout
-    is a timeout. On a clean exit the captured stdout is decoded and resolved
-    under the same truncation policy the run path uses (`resolve_report`), so
-    only a report wholly retained in the tail is trusted and a forged report in
+    is a timeout. On a clean exit the report stream is decoded and resolved
+    under the same truncation policy the run path uses (`resolve_run_report`),
+    so only a report wholly retained in the tail is trusted and a forged report in
     a truncated head is refused as capture overflow: a failing outcome, never a
     qualifying listing.
 
@@ -611,9 +611,7 @@ def _probe_file(
     # consulting it. A truncated capture that kept no valid block in its tail is
     # refused as overflow — a forged all-SKIP report in the retained head must
     # never qualify as a collection listing.
-    var trusted = resolve_report(
-        lossy_utf8(pres.stdout_bytes), canonical, pres.stdout_truncated
-    )
+    var trusted = resolve_run_report(pres, canonical)
     if trusted.is_overflow:
         return _ProbeOutcome(
             False,

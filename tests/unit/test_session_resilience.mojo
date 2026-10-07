@@ -104,12 +104,15 @@ def _valid_fail_report_bytes() -> List[UInt8]:
 
 
 def _reconcile(
-    stdout_bytes: List[UInt8], code: Int, flaky_if_pass: Bool
+    report_bytes: List[UInt8], code: Int, flaky_if_pass: Bool
 ) -> FileFinishedPayload:
-    """Drive the real selection reconciler and return its emitted payload."""
+    """Drive the real selection reconciler and return its emitted payload.
+
+    The report rides stdout on exit 0 and stderr otherwise, as TestSuite emits.
+    """
     var term = ProcessResult(
-        stdout_bytes.copy(),
-        List[UInt8](),
+        report_bytes.copy() if code == 0 else List[UInt8](),
+        List[UInt8]() if code == 0 else report_bytes.copy(),
         False,
         False,
         Termination.exited(code),

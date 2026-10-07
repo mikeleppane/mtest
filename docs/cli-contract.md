@@ -366,8 +366,10 @@ def main() raises:
 ```
 
 Any behavioral equivalent is acceptable: it must honor `--skip-all`, `--only`,
-and `--skip` as arguments and emit TestSuite's standard report. The runner
-relies on that protocol, not on the exact source.
+and `--skip` as arguments and emit TestSuite's standard report: on stdout when
+the module exits 0, as the uncaught error on stderr when it does not. The runner
+reads the stream matching the exit status and relies on that protocol, not on
+the exact source.
 
 Under `--skip-all`, a conforming module executes **no test bodies** at all — it
 reports every test as SKIP without running any of them. The runner relies on

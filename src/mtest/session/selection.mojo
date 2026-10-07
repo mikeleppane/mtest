@@ -63,7 +63,11 @@ from mtest.session.build import (
     _build_for_selection,
     _probe_file,
 )
-from mtest.session.classify import Classification, classify, resolve_report
+from mtest.session.classify import (
+    Classification,
+    classify,
+    resolve_run_report,
+)
 from mtest.session.effective_settings import (
     EffectiveFileSettings,
     effective_file_settings,
@@ -355,9 +359,7 @@ def _reconcile_and_classify(
             escalated=rterm.escalated,
         )
 
-    var trusted = resolve_report(
-        lossy_utf8(term.stdout_bytes), canonical, term.stdout_truncated
-    )
+    var trusted = resolve_run_report(term, canonical)
     if trusted.is_overflow or trusted.report.verdict != ReportVerdict.VALID:
         # No VALID report to reconcile. Route it through the SAME total
         # classifier the default path uses so selection preserves every
@@ -1233,16 +1235,13 @@ def _run_selection[
         # when the run produced NO valid report AND the stdlib's anchored
         # refusal diagnostic appears is this a stale name (which a bare
         # substring in a test's own output must never forge).
-        var stdout_text = lossy_utf8(rres.stdout_bytes)
-        var run_trusted = resolve_report(
-            stdout_text, collected[i].canonical, rres.stdout_truncated
-        )
+        var run_trusted = resolve_run_report(rres, collected[i].canonical)
         var no_valid_report = run_trusted.report.verdict != ReportVerdict.VALID
         var is_stale = (
             rterm.is_exited()
             and rterm.value == 1
             and no_valid_report
-            and _has_stale_name_diagnostic(stdout_text)
+            and _has_stale_name_diagnostic(lossy_utf8(rres.stderr_bytes))
         )
 
         var fr: FileResult
