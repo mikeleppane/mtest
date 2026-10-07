@@ -243,9 +243,9 @@ alone, any concerns, and every Ask-first boundary crossed.
 ## Review gate
 
 Each phase runs an external review at two checkpoints, the plan and the full
-diff before merge: Claude Opus and Codex (danger-full-access sandbox), both at
-xhigh reasoning, briefed to attack the work with a concrete failure scenario per
-finding, severity-ranked. Triage every finding as fixed or rejected-with-reason
+diff before merge: two reviewers from different model families, at the models
+and reasoning effort the human names, briefed to attack the work with a concrete
+failure scenario per finding, severity-ranked. Triage every finding as fixed or rejected-with-reason
 in that phase's notes.
 
 ## Commits

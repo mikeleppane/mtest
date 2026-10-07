@@ -275,6 +275,11 @@ append here as later phases teach more.
 
 ## Harness and workflow
 
+- pixi runs a task's `depends-on` before its `cmd`, always. A step that must
+  follow the command (build after regenerating transcripts) goes after `&&`
+  inside `cmd`. As a dependency it ran first: `transcripts` built mtest before
+  regenerating, so a pin bump that breaks the mtest build stopped before the
+  protocol diff that explains the break was written.
 - `mojo` resolves only through the pixi environment's `PATH`, so a binary that
   spawns `mojo` children must run under `pixi run`. Never scrub the environment
   before such a spawn. A `pixi run`-less invocation of the e2e driver fails
