@@ -218,8 +218,8 @@ pixi nor Mojo.
 
 Every pin has a recorded reason; never move one to make something pass.
 
-- Mojo `==1.1.0`. CI matches local. After a bump, regenerate transcripts and
-  re-audit syntax against `mojo-syntax`.
+- Mojo `==1.1.0`. CI matches local. A bump follows
+  [`bumping-mojo`](.agents/skills/bumping-mojo/SKILL.md).
 - Zero runtime dependencies. The CLI parser is hand-rolled (`prism` was
   rejected: no `--` pass-through, repeated flags corrupt values with spaces;
   revisit when it ships native post-`--` pass-through).
@@ -296,4 +296,6 @@ Read the matching skill **before** the work:
   [`code-review-and-quality`](.agents/skills/code-review-and-quality/SKILL.md).
 - QA, acceptance, or release validation against `docs/cli-contract.md` →
   [`validating-mtest`](.agents/skills/validating-mtest/SKILL.md).
+- Moving the Mojo pin →
+  [`bumping-mojo`](.agents/skills/bumping-mojo/SKILL.md).
 - All Mojo syntax → the global `mojo-syntax` skill.
