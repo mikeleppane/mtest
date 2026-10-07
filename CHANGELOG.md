@@ -30,6 +30,16 @@ matrix under [Installation](README.md#installation).
   paths otherwise share one object whose report names the wrong file.
 - A precompile step's default output is `build/<name>.mojoc`; Mojo 1.1 no
   longer accepts `.mojopkg`.
+- The build cache walks namespace packages: a subdirectory whose name is an
+  identifier is part of a build's inputs even without an `__init__`, because
+  Mojo 1.1 imports from it.
+- The `--junit-xml` artifact is created at `0666` minus the umask; the
+  toolchain's `open` used to ignore the umask and leave it at a literal `0666`.
+
+### Known issues
+
+- Mojo 1.1.0 crashes compiling a `TestSuite` file whose name contains `"`;
+  such a file reports COMPILE-ERROR.
 
 ## 1.1.0 — 2026-08-06
 
