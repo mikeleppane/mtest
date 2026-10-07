@@ -59,10 +59,13 @@ _CANDIDATES = (
     ("FFI call", re.compile(r"\bexternal_call\s*\[")),
 )
 
-# Every stdlib unsafe operation is spelled `unsafe_*`. A spelling no family
-# matches means the toolchain renamed one and the gate went blind to it.
-_UNSAFE_SPELLING = re.compile(r"\bunsafe_\w+")
-_LOCAL_DEFINITION = re.compile(r"\bdef\s+(unsafe_\w+)")
+# Most stdlib unsafe operations are spelled `unsafe_*`. One no family matches
+# means a rename or an addition the gate is blind to. Spellings outside that
+# convention (`take_pointee`, `memcpy`, `rebind`) stay a review responsibility.
+_UNSAFE_SPELLING = re.compile(r"(\.|\b(?:def|var|comptime)\s+)?\b(unsafe_\w+)")
+_LOCAL_DEFINITION = re.compile(
+    r"^(?:def|var|comptime)\s+(unsafe_\w+)|\bvar\s+(unsafe_\w+)", re.MULTILINE
+)
 _SAFETY = re.compile(r"^\s*#\s*SAFETY:\s*\S")
 _COMMENT = re.compile(r"^\s*#")
 _POSSIBLE_ARITHMETIC = re.compile(
@@ -250,25 +253,38 @@ def scan_text(path: Path, source: str) -> tuple[list[Finding], list[InventoryIte
 
 
 def unrecognized_spellings(sources: dict[Path, str]) -> list[Finding]:
-    """Return each `unsafe_*` use on a line no candidate family matches.
+    """Return each `unsafe_*` use no candidate family match covers.
 
-    Names the scanned sources define themselves are exempt: they are this
-    repository's functions, not stdlib operations.
+    A definition is not a use. A bare use of a module-level function or any
+    `var` the scanned sources define is exempt: it is this repository's name.
+    A method call never is, since a stdlib type may define a method of the
+    same name.
     """
     sanitized = {path: _sanitize(text) for path, text in sources.items()}
     local = {
-        name for text in sanitized.values() for name in _LOCAL_DEFINITION.findall(text)
+        name
+        for text in sanitized.values()
+        for pair in _LOCAL_DEFINITION.findall(text)
+        for name in pair
+        if name
     }
     findings: list[Finding] = []
     for path, text in sanitized.items():
         for line_number, line in enumerate(text.splitlines(), start=1):
-            if _has_candidate(line):
-                continue
-            findings.extend(
-                Finding(path, line_number, name)
-                for name in _UNSAFE_SPELLING.findall(line)
-                if name not in local
-            )
+            covered = [
+                match.span()
+                for _, pattern in _CANDIDATES
+                for match in pattern.finditer(line)
+            ]
+            for use in _UNSAFE_SPELLING.finditer(line):
+                prefix, name = use.groups()
+                if prefix and prefix != ".":
+                    continue  # a definition, not a use
+                if not prefix and name in local:
+                    continue
+                start = use.start(2)
+                if not any(lo <= start < hi for lo, hi in covered):
+                    findings.append(Finding(path, line_number, name))
     return findings
 
 

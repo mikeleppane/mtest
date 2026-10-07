@@ -59,6 +59,24 @@ class SafetyCheckTests(unittest.TestCase):
             [(Path("b.mojo"), 4, "unsafe_renamed_op")],
         )
 
+    def test_a_local_name_does_not_exempt_a_method_of_that_name(self) -> None:
+        sources = {
+            Path("a.mojo"): "struct S:\n    def unsafe_get(self) -> Int:\n"
+            "        return 1\n\ndef unsafe_top() -> Int:\n    return 1\n",
+            Path("b.mojo"): "var x = items.unsafe_get(0)\nvar y = obj.unsafe_top()\n",
+        }
+        findings = safety_check.unrecognized_spellings(sources)
+        self.assertEqual(
+            [(f.line, f.family) for f in findings],
+            [(1, "unsafe_get"), (2, "unsafe_top")],
+        )
+
+    def test_a_known_spelling_does_not_hide_a_new_one_on_its_line(self) -> None:
+        findings = safety_check.unrecognized_spellings(
+            {Path("a.mojo"): "f(value.unsafe_ptr(), p.unsafe_new())\n"}
+        )
+        self.assertEqual([f.family for f in findings], ["unsafe_new"])
+
     def test_repository_spellings_are_all_recognized(self) -> None:
         paths = safety_check.mojo_files(
             Path(root) for root in safety_check.DEFAULT_ROOTS
