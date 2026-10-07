@@ -2161,6 +2161,15 @@ class AssertionPackageLayoutTests(unittest.TestCase):
             ):
                 package_consumption.validate_assertion_install(prefix)
 
+    def test_accepts_the_pinned_toolchain_config(self) -> None:
+        # The synthetic fixtures above encode what the validator expects; this
+        # holds that expectation against the compiler pixi actually installed,
+        # so a pin bump that reshapes modular.cfg goes red here, offline.
+        prefix = Path(sys.prefix)
+        config = prefix / "share" / "max" / "modular.cfg"
+        self.assertTrue(config.is_file(), f"run under pixi: no {config}")
+        package_consumption._validate_modular_config(config, prefix)
+
 
 class ExpectedMojoVersionTests(unittest.TestCase):
     """Which compiler the install stage demands, and where that number comes from."""
