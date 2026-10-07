@@ -97,8 +97,8 @@ uses the focused tasks above, and the required hosted checks are the merge
 verdict. The floor opens with a fail-fast preflight (version, formatting,
 harness self-tests, repository policy, release tooling, unsafe-Mojo inventory,
 post-fork and Clang-Tidy analysis, native ABI, JUnit oracle, build,
-production-artifact profile, rendered-JUnit, transcript, ABI-probe, and
-coverage-tripwire checks) and closes with `ci-memory`, so a
+production-artifact profile, CLI-reference help, shell-completion,
+rendered-JUnit, transcript, ABI-probe, and coverage-tripwire checks) and closes with `ci-memory`, so a
 green local run covers memory safety instead of deferring it.
 On Linux that is ASan/LSan then Memcheck; elsewhere it reports the two lanes as
 uncovered and names the Linux cells that own them. Hosted CI runs the
