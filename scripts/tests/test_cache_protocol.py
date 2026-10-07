@@ -1096,6 +1096,36 @@ class SiblingSearchPathTests(ProtocolScenario):
             msg=f"stdout={edited.stdout!r} stderr={edited.stderr!r}",
         )
 
+    def test_editing_a_namespace_package_helper_rebuilds(self) -> None:
+        # Mojo 1.1 imports `helpers.values` from a `helpers/` with no
+        # `__init__.mojo`. This holds the cache walk's rule for which
+        # directories are importable against the compiler that defines it.
+        helpers = self.root / "tests" / "helpers"
+        helpers.mkdir()
+        (helpers / "values.mojo").write_text(
+            HELPER_SOURCE.format(value=7), encoding="utf-8"
+        )
+        (self.root / "tests" / "test_reader.mojo").write_text(
+            READS_HELPER_SOURCE.replace("from helper ", "from helpers.values "),
+            encoding="utf-8",
+        )
+
+        self.run_ok(["--json", "cold.ndjson", "tests"])
+        self.run_ok(["--json", "warm.ndjson", "tests"])
+        self.assertEqual(counters(self.root / "warm.ndjson"), (0, 2))
+
+        (helpers / "values.mojo").write_text(
+            HELPER_SOURCE.format(value=999), encoding="utf-8"
+        )
+        edited = run_mtest(self.root, ["--json", "edited.ndjson", "tests"])
+
+        self.assertEqual(counters(self.root / "edited.ndjson"), (2, 0))
+        self.assertEqual(
+            edited.returncode,
+            1,
+            msg=f"stdout={edited.stdout!r} stderr={edited.stderr!r}",
+        )
+
     def test_a_fixture_file_named_like_a_test_is_still_keyed(self) -> None:
         # `test_helpers.mojo` and `test_common.mojo` are ordinary names for
         # shared fixture files, and both match the discovery glob, so both are
