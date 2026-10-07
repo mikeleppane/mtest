@@ -87,7 +87,8 @@ $ echo $?
 | Change mtest itself | [Contributing](CONTRIBUTING.md), [Architecture](docs/architecture.md) |
 | Cut a release | [Releasing](docs/releasing.md) |
 
-The same pages are published at <https://mikeleppane.github.io/mtest/>.
+The same pages are built from `docs/` on every pull request and published from
+`main` at <https://mikeleppane.github.io/mtest/>.
 Release notes are in [CHANGELOG.md](CHANGELOG.md), and
 [SECURITY.md](SECURITY.md) says how to report a vulnerability privately.
 
