@@ -17,14 +17,14 @@ from mtest.protocol import (
     collection_names,
 )
 
-from transcript_cases import read_snapshot, stdout_region, source_path_for
+from transcript_cases import read_snapshot, report_region, source_path_for
 
 comptime SP = "/home/x/proj/tests/test_a.mojo"
 
 
 def _parse(name: String) raises -> ParsedReport:
     return parse_report(
-        stdout_region(read_snapshot(name)), source_path_for(name)
+        report_region(read_snapshot(name)), source_path_for(name)
     )
 
 

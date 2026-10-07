@@ -229,7 +229,17 @@ def build_fixture(fixture: str, out_dir: str) -> str:
     src = os.path.join(FIXTURES_DIR, f"{fixture}.mojo")
     binpath = os.path.join(out_dir, fixture)
     subprocess.run(
-        ["mojo", "build", "--no-optimization", src, "-o", binpath],
+        [
+            "mojo",
+            "build",
+            "--no-optimization",
+            src,
+            "-o",
+            binpath,
+            # As mtest does: the compile cache keys on content, not path.
+            "-D",
+            f"MTEST_SOURCE={os.path.realpath(src)}",
+        ],
         check=True,
         capture_output=True,
     )
@@ -432,9 +442,11 @@ def verify_scenario(
             raise GenError("noisy: timing-lookalike user line was altered")
 
     # Every report must reconcile: declared count == rows == summary tallies.
-    rows = _report_result_lines(out_norm)
+    # A failing suite raises its report, so it lands on stderr.
+    report = out_norm if returncode == 0 else err_norm
+    rows = _report_result_lines(report)
     if rows:
-        lines = out_norm.split("\n")
+        lines = report.split("\n")
         run_line = [ln for ln in lines if RUNNING_RE.match(ln)][-1]
         run_match = re.match(r"^Running (\d+) tests for ", run_line)
         if run_match is None:

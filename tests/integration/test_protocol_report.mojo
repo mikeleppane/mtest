@@ -15,14 +15,14 @@ from mtest.protocol import ParsedReport, ReportVerdict, parse_report
 from transcript_cases import (
     read_snapshot,
     read_manifest,
-    stdout_region,
+    report_region,
     source_path_for,
 )
 
 
 def _parse(name: String) raises -> ParsedReport:
     return parse_report(
-        stdout_region(read_snapshot(name)), source_path_for(name)
+        report_region(read_snapshot(name)), source_path_for(name)
     )
 
 
