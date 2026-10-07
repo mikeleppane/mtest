@@ -323,7 +323,7 @@ Two of the manual rows need a fixture the scaffold does not have:
 ```
 Behavior ≠ contract?
 ├─ Contract is right, code is wrong ............ BUG → fix (TDD) + add a Check
-├─ Code is right, contract is silent/stale ..... DOC gap → amend contract/README
+├─ Code is right, contract is silent/stale ..... DOC gap → amend contract/docs
 └─ Both agree, behavior is merely surprising ... BY-DESIGN → note, don't "fix"
 ```
 
