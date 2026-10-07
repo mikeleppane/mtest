@@ -146,7 +146,7 @@ a nearby argument exists; review proves the argument is true and complete.
 
 The report parser reads TestSuite's own output. Its central hazard is that a
 test can **print** anything — including lines that look exactly like the report
-grammar. The parser must never miscount a test's stdout as protocol.
+grammar. The parser must never miscount a test's own output as protocol.
 
 - **Anchor on the LAST `Running <N> tests for` line** (followed by a
   `Summary`). Anything a fixture printed earlier that *looks* like a report
@@ -316,10 +316,10 @@ fail — the signature is a contract.
   fill a caller's buffer; transfer with `^` at last use. Keep big types
   `Copyable` but **not** `ImplicitlyCopyable`, so every copy is a visible
   `.copy()` in review.
-- Prefer the safe types (`List`, `Span`, `InlineArray`, `Pointer`,
-  `OwnedPointer`) over raw `UnsafePointer`. When a struct genuinely owns an fd
-  or heap bytes, give the field an explicit origin, release the resource in
-  `__del__`, and prove the round-trip with a construct-and-drop test. **The fd
+- Prefer the safe types (`List`, `Span`, `Array`, `ArcPointer`,
+  `OwnedPointer`) over raw `Pointer` operations; hand C a struct or out-record
+  through `FfiRecord`. When a struct genuinely owns an fd, release it in
+  `__deinit__`, and prove the round-trip with a construct-and-drop test. **The fd
   is the resource that leaks; treat closing it like freeing memory.**
 - Pre-size what you can: `List[Byte](capacity=n)` when a bound is known; reuse
   buffers across the spawn loop instead of reallocating per file.
@@ -337,7 +337,7 @@ hand-edited, fix the generator and regenerate.
 ## Language gotchas
 
 [.agents/lessons.md](../../lessons.md) is the incident log for the pinned
-`1.0.0b2` toolchain — "Mojo language, pinned toolchain" for language traps
+toolchain — "Mojo language, pinned toolchain" for language traps
 (FFI naming collisions, string/C-string conversions, `external_call`
 declaration arity, variadic-ABI hazards, copy/transfer rules), "Process
 supervision" for exec/native traps. Read the matching section before
@@ -361,7 +361,7 @@ non-trivial work there; append what you learn.
       raise
 - [ ] `raises` present iff the function can raise; hot cores total, boundaries
       validating
-- [ ] fds and buffers released in `__del__`; no fd growth across repeated
+- [ ] fds released in `__deinit__`; no fd growth across repeated
       spawns
 - [ ] All comparisons exact — no tolerance on exit codes or counts
 - [ ] Imports point down the layering; `src/` pure Mojo; every foreign call
