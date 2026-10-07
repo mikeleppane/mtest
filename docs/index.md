@@ -20,46 +20,53 @@ $ pixi run mtest --version
 mtest 1.1.0
 ```
 
-Skip the first command in a workspace that already exists. It is there because
-every command after it edits a `pixi.toml`, and `pixi workspace channel add`
-fails outright when there is none.
-
-Three channels have to resolve for that to solve, and the package declares the
-pinned Mojo compiler as its run dependency. The
-[Installation section of the README](https://github.com/mikeleppane/mtest#installation)
-names all three, and states which toolchain and which platforms each release
+[Installation](install.md) explains each step, names the three channels that
+have to resolve, and states which toolchain and which platforms each release
 supports.
 
 ## Where to go next
 
+- [Installation](install.md) — the package, the channels it resolves from, and
+  the supported toolchains.
 - [Getting started](getting-started.md) — from an empty directory to a green
   run, and what a file that does not compile looks like when it is reported
   honestly.
+- [Overview](overview.md) — why mtest exists, what it does, its limitations,
+  and what it deliberately does not do.
+- [Usage](usage.md) — writing a test file, selection, listing, retries,
+  timeouts, sharding, the machine reporters, `mtest.toml`, re-running
+  failures, random order, `mtest doctor`, and `mtest debug`.
 - [Continuous integration](ci.md) — the workflow to paste, and the sharded
   variant of it.
 - [Run reports](reports.md) — the self-contained Markdown or HTML document
   `--report` writes for a reader, and what happens when it cannot be
   delivered.
+- [Assertion diagnostics](assertions.md) — the optional source-only
+  `assert_equal` that explains a mismatch in more detail.
+- [Build cache](build-cache.md) — what is cached, what invalidates it, and when
+  it turns itself off.
 - [Shell completion](completions.md) — where each shell wants the script
   `mtest completions` prints, and what it completes once it is installed.
+- [CLI reference](cli-reference.md) — the complete `--help` listing, every flag,
+  and the exit codes.
 - [Command-line contract](cli-contract.md) — the specification of every
   subcommand, flag, exit code, and stream.
 - [JSON event stream](json-stream.md) — the machine-readable stream, event by
   event.
 - [Collect JSON stream](collect-stream.md) — the machine-readable test listing
   `collect --format json` writes.
+- [Architecture](architecture.md) — the layers mtest is built from, and why the
+  event stream is its extension mechanism.
 - [Toolchain compatibility](compatibility.md) — what the weekday canary probes
   on newer Mojo toolchains, and what each of its results does and does not say.
 - [Releasing](releasing.md) — the maintainer runbook.
 
-Everything else stays in the
-[README](https://github.com/mikeleppane/mtest#readme): selection, retries and
-failing a run on flaky files, timeouts, sharding, random run order, the build
-cache, project scaffolding, handing the terminal to a single test, assertion
-diagnostics, and the complete command-line listing. That document is the front door on purpose, and the few
-commands and outputs this site needs are mirrored from it byte for byte rather
-than retyped: a gate compares each mirror to its source on every run, so a page
-here cannot quietly disagree with the README. Two parts of the README are
-checked against a real binary as well — the command-line listing is compared
-with the built binary's own help output, and the assertion example is executed
-and matched against its documented outcome.
+Three parts of these pages are checked against a real binary: the
+command-line listing in the CLI reference is compared with the built binary's
+own help output, the assertion example is executed and matched against its
+documented outcome, and the workflow on the continuous-integration page is
+compared with what `mtest init --ci github` writes. The install commands and
+the first run on these pages are mirrored byte for byte from the
+[README](https://github.com/mikeleppane/mtest#readme) rather than retyped: a
+gate compares each mirror to its source on every run, so a page here cannot
+quietly disagree with the README.

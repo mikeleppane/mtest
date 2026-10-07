@@ -134,7 +134,7 @@ jobs:
       - name: Production artifact profile
         run: pixi run build-profile-check
 
-      - name: README CLI reference
+      - name: CLI reference help listing
         run: pixi run readme-help-check
 
       # Runs here rather than in the static preflight because it needs the

@@ -60,7 +60,12 @@ class TranscriptGateTests(unittest.TestCase):
                 Path("README.md"),
                 Path("docs/cli-contract.md"),
                 Path("docs/index.md"),
+                Path("docs/install.md"),
                 Path("docs/getting-started.md"),
+                Path("docs/usage.md"),
+                Path("docs/assertions.md"),
+                Path("docs/build-cache.md"),
+                Path("docs/cli-reference.md"),
                 Path("docs/assets/mtest-run.svg"),
                 Path("docs/assets/mtest-flaky.svg"),
             ),
@@ -467,29 +472,29 @@ class SupportMatrixGateTests(unittest.TestCase):
     """The published support matrix against the toolchain actually pinned."""
 
     def _clone(self, root: Path) -> tuple[Path, Path]:
-        """Copy the README and the pixi manifest into a temporary root.
+        """Copy the support-matrix page and the pixi manifest into a temporary root.
 
         Args:
             root: Empty directory standing in for the repository root.
 
         Returns:
-            The cloned README path and the cloned manifest path.
+            The cloned matrix page path and the cloned manifest path.
         """
         for relative in GATED_FILES:
             target = root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(version.REPO_ROOT / relative, target)
-        return root / "README.md", root / "pixi.toml"
+        return root / version.SUPPORT_MATRIX_PATH, root / "pixi.toml"
 
     def test_repository_matrix_names_the_pinned_toolchain(self) -> None:
         version.check_support_matrix()
 
     def test_matrix_that_advertises_another_toolchain_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-matrix-") as raw:
-            readme, pixi = self._clone(Path(raw))
+            matrix, pixi = self._clone(Path(raw))
             pinned = version._manifest_mojo_pin(pixi)
-            readme.write_text(
-                readme.read_text(encoding="utf-8").replace(
+            matrix.write_text(
+                matrix.read_text(encoding="utf-8").replace(
                     f"`{pinned}`", "`0.0.0b0`", 1
                 ),
                 encoding="utf-8",
@@ -499,7 +504,7 @@ class SupportMatrixGateTests(unittest.TestCase):
 
     def test_toolchain_bump_that_forgets_the_matrix_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-matrix-") as raw:
-            readme, pixi = self._clone(Path(raw))
+            matrix, pixi = self._clone(Path(raw))
             pinned = version._manifest_mojo_pin(pixi)
             pixi.write_text(
                 pixi.read_text(encoding="utf-8").replace(
@@ -507,16 +512,16 @@ class SupportMatrixGateTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            self.assertNotEqual(readme.read_text(encoding="utf-8"), "")
+            self.assertNotEqual(matrix.read_text(encoding="utf-8"), "")
             with self.assertRaisesRegex(AssertionError, r"9\.9\.9b9"):
                 version.check_support_matrix(Path(raw))
 
     def test_matrix_that_lost_its_section_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-matrix-") as raw:
-            readme, _ = self._clone(Path(raw))
-            readme.write_text(
-                readme.read_text(encoding="utf-8").replace(
-                    version.SUPPORT_MATRIX_HEADING, "### Toolchains", 1
+            matrix, _ = self._clone(Path(raw))
+            matrix.write_text(
+                matrix.read_text(encoding="utf-8").replace(
+                    version.SUPPORT_MATRIX_HEADING, "## Toolchains", 1
                 ),
                 encoding="utf-8",
             )

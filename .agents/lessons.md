@@ -399,7 +399,7 @@ append here as later phases teach more.
 - A tool that commits captured program output containing filesystem paths must
   rewrite the ephemeral run root to a stable placeholder before writing (both
   the literal and realpath spellings), the way `scripts/gen_transcripts.py`
-  does. `scripts/maintenance/console_svg.py`'s README SVGs are the deliberate
+  does. `scripts/maintenance/console_svg.py`'s console SVGs are the deliberate
   exception: they are documentation, not oracle evidence, so the absolute repo
   root and wall-clock timings a fresh capture bakes in are expected residual
   variance, not a bug (`scripts/maintenance/pty_capture.py`, which never

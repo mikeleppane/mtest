@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Render real mtest console runs into the SVG images embedded in README.md.
+"""Render real mtest console runs into the SVG images the docs embed.
+
+`mtest-run.svg` heads the README and `mtest-flaky.svg` illustrates retries on
+`docs/usage.md`.
 
 A documentation tool, not a gate. It drives the already-built `build/mtest`
 binary against committed `e2e/` fixtures with stdout attached to a real
@@ -12,7 +15,7 @@ a gate.
 
 Each scenario still pins its expected exit code and a few required output
 markers, and a capture is published only after both hold, so a broken binary,
-a missing `mojo`, or an internal error cannot silently replace a README image
+a missing `mojo`, or an internal error cannot silently replace a published image
 with an error card. `NO_COLOR` and `GITHUB_ACTIONS` are scrubbed from the child
 environment so inherited settings cannot strip the colors or append an
 annotation tail.
@@ -59,7 +62,7 @@ SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
 
 @dataclass(frozen=True)
 class Scenario:
-    """One README image: display command, real argv, and its validity pins."""
+    """One published image: display command, real argv, and its validity pins."""
 
     name: str
     display: str

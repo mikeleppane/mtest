@@ -35,15 +35,13 @@ TRACKED_FILES = (docs_parity.README_PATH, *docs_parity.SITE_PAGES)
 class RepositoryParityTests(unittest.TestCase):
     """The declarations, and the live tree they describe."""
 
-    def test_site_pages_are_the_five_landing_pages(self) -> None:
+    def test_site_pages_are_the_three_that_repeat_the_quick_start(self) -> None:
         self.assertEqual(
             docs_parity.SITE_PAGES,
             (
                 Path("docs/index.md"),
+                Path("docs/install.md"),
                 Path("docs/getting-started.md"),
-                Path("docs/ci.md"),
-                Path("docs/reports.md"),
-                Path("docs/completions.md"),
             ),
         )
 
@@ -58,6 +56,15 @@ class RepositoryParityTests(unittest.TestCase):
                 Path("docs/collect-stream.md"),
                 Path("docs/compatibility.md"),
                 Path("docs/releasing.md"),
+                Path("docs/overview.md"),
+                Path("docs/usage.md"),
+                Path("docs/ci.md"),
+                Path("docs/reports.md"),
+                Path("docs/assertions.md"),
+                Path("docs/build-cache.md"),
+                Path("docs/completions.md"),
+                Path("docs/cli-reference.md"),
+                Path("docs/architecture.md"),
             ),
         )
 
@@ -78,11 +85,20 @@ class RepositoryParityTests(unittest.TestCase):
             counted,
             {
                 Path("docs/index.md"): 1,
-                Path("docs/getting-started.md"): 4,
-                Path("docs/ci.md"): 3,
-                Path("docs/reports.md"): 4,
-                Path("docs/completions.md"): 4,
+                Path("docs/install.md"): 1,
+                Path("docs/getting-started.md"): 2,
             },
+        )
+
+    def test_owned_blocks_are_pinned(self) -> None:
+        """An owned block is compared with nothing, so the set is pinned here."""
+        self.assertEqual(
+            docs_parity.OWNED_BLOCKS,
+            (
+                (Path("docs/getting-started.md"), 1),
+                (Path("docs/getting-started.md"), 3),
+                (Path("docs/getting-started.md"), 4),
+            ),
         )
 
     def test_declarations_are_well_formed(self) -> None:
@@ -120,15 +136,15 @@ class RepositoryParityTests(unittest.TestCase):
             internal,
         )
 
-    def test_every_site_page_that_renders_a_version_is_gated_as_one(self) -> None:
-        """A mirrored transcript is still a public version surface.
+    def test_every_page_that_renders_a_version_is_gated_as_one(self) -> None:
+        """A mirrored or owned transcript is still a public version surface.
 
         The parity gate proves a page agrees with the README; it says nothing
         about whether what they agree on is the release being shipped. That is
-        the version gate's job, so any site page rendering a literal has to be
+        the version gate's job, so any page rendering a literal has to be
         declared a transcript site there as well.
         """
-        for page in docs_parity.SITE_PAGES:
+        for page in (*docs_parity.SITE_PAGES, *docs_parity.REFERENCE_PAGES):
             renders = version.TRANSCRIPT_RE.search(
                 (docs_parity.REPO_ROOT / page).read_text(encoding="utf-8")
             )
@@ -181,6 +197,22 @@ class ParityMutationTests(unittest.TestCase):
             docs_parity.check_parity_blocks(root)
             docs_parity.check_site_blocks_are_all_declared(root)
 
+    def test_an_owned_block_copying_the_readme_is_rejected(self) -> None:
+        """An owned block is never compared, so a README copy cannot hide there."""
+        page = Path("docs/getting-started.md")
+        index = next(i for p, i in docs_parity.OWNED_BLOCKS if p == page)
+        with self._tree() as raw:
+            root = Path(raw)
+            owned = docs_parity.fenced_blocks(
+                (root / page).read_text(encoding="utf-8"), str(page)
+            )[index]
+            readme = docs_parity.fenced_blocks(
+                (root / "README.md").read_text(encoding="utf-8"), "README.md"
+            )[0]
+            self._rewrite(root, page, owned.body, readme.body)
+            with self.assertRaisesRegex(AssertionError, "copies a README.md block"):
+                docs_parity.check_site_blocks_are_all_declared(root)
+
     def test_a_changed_byte_inside_a_mirrored_block_is_rejected(self) -> None:
         """The defect the gate exists for: a page command that drifted."""
         with self._tree() as raw:
@@ -196,15 +228,18 @@ class ParityMutationTests(unittest.TestCase):
         with self._tree() as raw:
             root = Path(raw)
             self._rewrite(
-                root, Path("docs/ci.md"), "timeout-minutes: 30", "timeout-minutes: 45"
+                root,
+                Path("docs/getting-started.md"),
+                "assert_equal(3 * 7, 21)",
+                "assert_equal(3 * 7, 22)",
             )
             with self.assertRaises(AssertionError) as caught:
                 docs_parity.check_parity_blocks(root)
             message = str(caught.exception)
-            self.assertIn("docs/ci.md", message)
+            self.assertIn("docs/getting-started.md", message)
             self.assertIn("README.md", message)
-            self.assertIn("Run it in CI", message)
-            self.assertIn("timeout-minutes: 45", message)
+            self.assertIn("Quick start", message)
+            self.assertIn("assert_equal(3 * 7, 22)", message)
 
     def test_a_changed_info_string_is_rejected(self) -> None:
         """A block that changed language changed what it claims to be."""
@@ -218,7 +253,7 @@ class ParityMutationTests(unittest.TestCase):
         """The obvious bypass: show a command without declaring a mirror."""
         with self._tree() as raw:
             root = Path(raw)
-            page = root / "docs" / "ci.md"
+            page = root / "docs" / "install.md"
             extra = "\n```console\n$ mtest tests/\n```\n"
             page.write_text(page.read_text(encoding="utf-8") + extra, encoding="utf-8")
             with self.assertRaisesRegex(AssertionError, "undeclared fenced block"):
@@ -229,9 +264,9 @@ class ParityMutationTests(unittest.TestCase):
         with self._tree() as raw:
             root = Path(raw)
             self._rewrite(
-                root, docs_parity.README_PATH, "## Run it in CI", "## Running it in CI"
+                root, docs_parity.README_PATH, "## Quick start", "## Quickstart"
             )
-            with self.assertRaisesRegex(AssertionError, "Run it in CI"):
+            with self.assertRaisesRegex(AssertionError, "Quick start"):
                 docs_parity.check_parity_blocks(root)
 
     def test_a_readme_index_that_no_longer_exists_is_rejected(self) -> None:
@@ -240,8 +275,8 @@ class ParityMutationTests(unittest.TestCase):
             root = Path(raw)
             readme = root / docs_parity.README_PATH
             text = readme.read_text(encoding="utf-8")
-            start = text.index("```yaml\n      - uses: mikeleppane/mtest@v1")
-            end = text.index("```\n", text.index("args: --gh-annotations auto"))
+            start = text.index("```console\n$ pixi run mtest tests/")
+            end = text.index("```\n", start + 3)
             readme.write_text(text[:start] + text[end + 4 :], encoding="utf-8")
             with self.assertRaisesRegex(AssertionError, r"holds only 2 blocks"):
                 docs_parity.check_parity_blocks(root)
@@ -272,7 +307,7 @@ class DeclarationTableTests(unittest.TestCase):
 
     def test_a_page_outside_the_site_list_is_rejected(self) -> None:
         """A declared page nothing sweeps could carry undeclared copies."""
-        stray = docs_parity.ParityBlock(Path("docs/tour.md"), 0, "Installation", 0)
+        stray = docs_parity.ParityBlock(Path("docs/tour.md"), 0, "Quick start", 0)
         with (
             mock.patch.object(
                 docs_parity, "PARITY_BLOCKS", (*docs_parity.PARITY_BLOCKS, stray)
@@ -283,9 +318,7 @@ class DeclarationTableTests(unittest.TestCase):
 
     def test_one_copy_declared_against_two_sources_is_rejected(self) -> None:
         """Two declarations for one block would make the pairing ambiguous."""
-        duplicate = docs_parity.ParityBlock(
-            Path("docs/index.md"), 0, "Your first test", 0
-        )
+        duplicate = docs_parity.ParityBlock(Path("docs/index.md"), 0, "Quick start", 1)
         with (
             mock.patch.object(
                 docs_parity, "PARITY_BLOCKS", (*docs_parity.PARITY_BLOCKS, duplicate)
@@ -293,6 +326,52 @@ class DeclarationTableTests(unittest.TestCase):
             self.assertRaisesRegex(AssertionError, "declared twice"),
         ):
             docs_parity.check_declarations()
+
+    def test_a_block_both_mirrored_and_owned_is_rejected(self) -> None:
+        """Owning a mirrored block would exempt it from the comparison."""
+        owned = (Path("docs/getting-started.md"), 0)
+        with (
+            mock.patch.object(
+                docs_parity, "OWNED_BLOCKS", (*docs_parity.OWNED_BLOCKS, owned)
+            ),
+            self.assertRaisesRegex(AssertionError, "declared twice"),
+        ):
+            docs_parity.check_declarations()
+
+    def test_an_owned_block_on_a_page_outside_the_site_list_is_rejected(
+        self,
+    ) -> None:
+        owned = (Path("docs/tour.md"), 0)
+        with (
+            mock.patch.object(
+                docs_parity, "OWNED_BLOCKS", (*docs_parity.OWNED_BLOCKS, owned)
+            ),
+            self.assertRaisesRegex(AssertionError, "docs/tour.md"),
+        ):
+            docs_parity.check_declarations()
+
+    def test_a_site_page_that_only_owns_blocks_is_rejected(self) -> None:
+        """A page that copies nothing is a reference page, not a site page."""
+        mirrors = tuple(
+            block
+            for block in docs_parity.PARITY_BLOCKS
+            if block.page != Path("docs/getting-started.md")
+        )
+        owned = tuple((Path("docs/getting-started.md"), index) for index in range(5))
+        with (
+            mock.patch.object(docs_parity, "PARITY_BLOCKS", mirrors),
+            mock.patch.object(docs_parity, "OWNED_BLOCKS", owned),
+            self.assertRaisesRegex(AssertionError, "declares no mirrored block"),
+        ):
+            docs_parity.check_declarations()
+
+    def test_an_owned_ordinal_past_the_end_is_rejected(self) -> None:
+        owned = (*docs_parity.OWNED_BLOCKS, (Path("docs/getting-started.md"), 9))
+        with (
+            mock.patch.object(docs_parity, "OWNED_BLOCKS", owned),
+            self.assertRaisesRegex(AssertionError, "owned block 9"),
+        ):
+            docs_parity.check_site_blocks_are_all_declared()
 
 
 class FenceScannerTests(unittest.TestCase):
@@ -517,7 +596,7 @@ class IndentedCodeTests(unittest.TestCase):
                 target = root / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(docs_parity.REPO_ROOT / relative, target)
-            page = root / "docs" / "ci.md"
+            page = root / "docs" / "install.md"
             page.write_text(
                 page.read_text(encoding="utf-8") + "\nRun this:\n\n    mtest tests/\n",
                 encoding="utf-8",
@@ -533,7 +612,7 @@ class IndentedCodeTests(unittest.TestCase):
                 target = root / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(docs_parity.REPO_ROOT / relative, target)
-            page = root / "docs" / "ci.md"
+            page = root / "docs" / "install.md"
             page.write_text(
                 page.read_text(encoding="utf-8")
                 + "\n- Then run it:\n\n      mtest tests/ --shard hash:1/4\n",
@@ -580,7 +659,7 @@ class RawHtmlCodeTests(unittest.TestCase):
                 target = root / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(docs_parity.REPO_ROOT / relative, target)
-            page = root / "docs" / "ci.md"
+            page = root / "docs" / "install.md"
             page.write_text(
                 page.read_text(encoding="utf-8")
                 + "\n<pre>pixi run mtest tests --shard hash:1/4</pre>\n",
@@ -798,11 +877,11 @@ class SiteConfigurationTests(unittest.TestCase):
             config = self._configuration(root)
             config.write_text(
                 config.read_text(encoding="utf-8").replace(
-                    "  - Continuous integration: ci.md\n", "", 1
+                    "  - Installation: install.md\n", "", 1
                 ),
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(AssertionError, "ci.md"):
+            with self.assertRaisesRegex(AssertionError, "install.md"):
                 docs_parity.check_site_configuration(root)
 
     def test_a_vanished_configuration_is_reported_not_crashed(self) -> None:

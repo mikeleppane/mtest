@@ -1134,6 +1134,10 @@ class Runner:
                     f"\n         argv: {c.argv}\n--- stdout ---\n{r.stdout}"
                     f"\n--- stderr ---\n{r.stderr}"
                 )
+            else:
+                # CI runs without -v; the tail is often the only diagnosis.
+                tail = "\n".join(r.stderr.splitlines()[-20:])
+                d += f"\n         argv: {c.argv}\n--- stderr (tail) ---\n{tail}"
             self.record(FAIL, c.name, c.ref, d)
         else:
             self.record(PASS, c.name, c.ref)

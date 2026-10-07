@@ -2,7 +2,7 @@
 
 This repository pins one Mojo toolchain exactly. Every release is built, gated,
 and published against that pin alone, and the
-[Supported toolchains table in the README](https://github.com/mikeleppane/mtest#supported-toolchains)
+[supported toolchains table](install.md#supported-toolchains)
 is the only statement of support this project makes.
 
 This page describes something separate: the **compatibility canary**, a

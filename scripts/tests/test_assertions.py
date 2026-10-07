@@ -356,7 +356,7 @@ def write_dictionary_difference[V](actual: V) -> Bool:
         """
         assertions.validate_dictionary_success_path(fixed)
 
-    def test_readme_example_requires_one_ordinary_failure(self) -> None:
+    def test_documented_example_requires_one_ordinary_failure(self) -> None:
         valid = subprocess.CompletedProcess(
             args=["example-o0"],
             returncode=1,

@@ -1646,31 +1646,41 @@ class AssertionPackageCommandTests(unittest.TestCase):
             )
 
 
-class AssertionReadmeExampleTests(unittest.TestCase):
+class AssertionDocExampleTests(unittest.TestCase):
     def test_extracts_the_only_console_fence_from_assertion_section(self) -> None:
         contents = (
-            "# mtest\n\n"
-            "## Assertion diagnostics\n\n"
+            "# Assertion diagnostics\n\n"
             "```mojo\nassert_equal(1, 2)\n```\n\n"
             "```console\n$ mtest companions/assertions/examples\noutput\n```\n\n"
-            "## Usage\n"
+            "## Limits\n"
         )
         self.assertEqual(
-            package_consumption.readme_assertion_example_block(contents),
+            package_consumption.doc_assertion_example_block(contents),
             "$ mtest companions/assertions/examples\noutput\n",
         )
 
     def test_extracts_the_only_mojo_fence_from_assertion_section(self) -> None:
         contents = (
-            "# mtest\n\n"
-            "## Assertion diagnostics\n\n"
+            "# Assertion diagnostics\n\n"
             "```mojo\nassert_equal(1, 2)\n```\n\n"
             "```console\n$ mtest companions/assertions/examples\noutput\n```\n\n"
-            "## Usage\n"
+            "## Limits\n"
         )
         self.assertEqual(
-            package_consumption.readme_assertion_source_block(contents),
+            package_consumption.doc_assertion_source_block(contents),
             "assert_equal(1, 2)\n",
+        )
+
+    def test_the_documented_source_is_the_executed_example(self) -> None:
+        page = package_consumption.ASSERTION_DOC.read_text(encoding="utf-8")
+        self.assertEqual(
+            package_consumption.doc_assertion_source_block(page),
+            package_consumption.ASSERTION_EXAMPLE.read_text(encoding="utf-8"),
+        )
+        self.assertTrue(
+            package_consumption.doc_assertion_example_block(page).startswith(
+                package_consumption.assertion_doc_command_prefix()
+            )
         )
 
     def test_normalizes_only_paths_and_elapsed_times(self) -> None:
@@ -1705,7 +1715,7 @@ class AssertionReadmeExampleTests(unittest.TestCase):
             "===== 1 passed, 1 failed in <TIME> =====\n",
         )
 
-    def test_readme_command_prefix_derives_public_paths(self) -> None:
+    def test_doc_command_prefix_derives_public_paths(self) -> None:
         installed_source = (
             package_consumption.INSTALLED_ASSERTION_SOURCE_RELATIVE.as_posix()
         )
@@ -1713,13 +1723,13 @@ class AssertionReadmeExampleTests(unittest.TestCase):
             package_consumption.REPO_ROOT
         ).as_posix()
         self.assertEqual(
-            package_consumption.assertion_readme_command_prefix(),
+            package_consumption.assertion_doc_command_prefix(),
             "$ mtest --no-config --no-cache --show-output failures \\\n"
             f"    -I <PREFIX>/{installed_source} \\\n"
             f"    {example_directory}\n",
         )
         self.assertEqual(
-            package_consumption.assertion_readme_command_prefix().count("--no-cache"),
+            package_consumption.assertion_doc_command_prefix().count("--no-cache"),
             1,
         )
 
@@ -2160,6 +2170,15 @@ class AssertionPackageLayoutTests(unittest.TestCase):
                 "duplicate",
             ):
                 package_consumption.validate_assertion_install(prefix)
+
+    def test_accepts_the_pinned_toolchain_config(self) -> None:
+        # The synthetic fixtures above encode what the validator expects; this
+        # holds that expectation against the compiler pixi actually installed,
+        # so a pin bump that reshapes modular.cfg goes red here, offline.
+        prefix = Path(sys.prefix)
+        config = prefix / "share" / "max" / "modular.cfg"
+        self.assertTrue(config.is_file(), f"run under pixi: no {config}")
+        package_consumption._validate_modular_config(config, prefix)
 
 
 class ExpectedMojoVersionTests(unittest.TestCase):

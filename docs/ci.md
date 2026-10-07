@@ -66,7 +66,7 @@ is what keeps this page the one place the workflow is written down.
 
 Give each cell a shard and a distinct report name, in the `hash:M/N` syntax
 defined under
-[Sharding a CI matrix](https://github.com/mikeleppane/mtest#sharding-a-ci-matrix).
+[Sharding a CI matrix](usage.md#sharding-a-ci-matrix).
 The union of every shard's selection is exactly the unsharded selection, and no
 test runs twice:
 
@@ -113,9 +113,13 @@ you would rather adopt each release deliberately.
 
 ## One thing not to do
 
-Do not restore the build cache between hosted runners. The failure it produces
-is a valid cache hit that dies the moment it executes, and the reasoning is
-specific enough to be worth reading in full rather than paraphrased here: it is
-in the
-[Run it in CI section of the README](https://github.com/mikeleppane/mtest#run-it-in-ci).
-Cache the package downloads instead.
+**Do not cache `.mtest-cache/` between runners.** The build cache's key frames
+the compiler, the toolchain libraries, the environment, the invocation root,
+the build arguments, the include-root contents, and each file's own bytes — and
+nothing about the host CPU. On one machine that is exactly right. Across hosted
+runners it is not: a binary compiled where a wider instruction set was
+available, restored onto a runner without it, is a valid cache hit that dies
+with `signal 4` the moment it executes. The store is per-checkout by design and
+there is no spelling that moves it. Cache pixi's own package downloads instead,
+which `setup-pixi` already does. [Build cache](build-cache.md) describes the
+store in full.

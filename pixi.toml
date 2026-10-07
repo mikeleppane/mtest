@@ -35,6 +35,11 @@ rattler-build = "==0.69.1"
 # never fires (see scripts/checks/community_recipe.py), so this owns that check.
 check-jsonschema = "==0.37.4"
 
+# A user-site package (~/.local/lib/python3.12) shadows the environment's copy;
+# a stray `pathspec` there crashed `mojo format`. Tasks see only the lock.
+[activation.env]
+PYTHONNOUSERSITE = "1"
+
 [tasks]
 # Print the pinned Mojo version. First CI step, so a broken toolchain fails fast
 # and the exact build is stamped into the log beside the transcript headers.
@@ -42,17 +47,19 @@ mojo-version = "mojo --version"
 
 # Assert MTEST_VERSION (src/mtest/cli/parser.mojo), this manifest's `version`,
 # and the conda recipe's agree with each other and with the version this repo
-# ships. Also proves every rendered transcript in the six public surfaces --
-# `README.md`, `docs/cli-contract.md`, the two documentation-site pages that
-# mirror README blocks (`docs/index.md` and `docs/getting-started.md`), and the
-# two banner SVGs -- matches the release, and that a site rendering none at all
+# ships. Also proves every rendered transcript in the eleven public surfaces --
+# `README.md`, `docs/cli-contract.md`, the seven documentation-site pages that
+# render captured output (`docs/index.md`, `docs/install.md`,
+# `docs/getting-started.md`, `docs/usage.md`, `docs/assertions.md`,
+# `docs/build-cache.md`, and `docs/cli-reference.md`), and the two console
+# SVGs -- matches the release, and that a site rendering none at all
 # fails too, because a restructure that dropped the transcripts would otherwise
 # pass vacuously. Sweeps every tracked file for a rendered version so a new page
 # carrying one cannot be ungated from birth: an undeclared match fails until it
 # is named a site or an explicit exemption. Holds every restatement of the Mojo
 # pin -- both conda recipes, the recipe build script, and the prose in the
-# README, the contract, the changelog, the contributing guide, and the agent
-# guide -- against the one pin above, so a toolchain bump cannot leave the
+# installation page, the contract, the changelog, the contributing
+# guide, and the agent guide -- against the one pin above, so a toolchain bump cannot leave the
 # shipped package asking for the old compiler, and sweeps every reader-facing
 # Markdown document at the root and under `docs/` for a claim that disagrees
 # with it. Runs first because drift here means every later gate is validating a
@@ -60,10 +67,10 @@ mojo-version = "mojo --version"
 version-check = "python -m scripts.checks.version"
 
 # The write side of `version-check`: rewrite the release version across all
-# eleven files that carry it in one edit, e.g. `pixi run bump 1.1.0`. Every one
-# of the eleven is gated — `version-check` holds the three manifests, its own
-# pin, and the six public transcript surfaces against that pin, and
-# `scripts/qa/contract.py` fails at the contract gate — and the six transcript
+# sixteen files that carry it in one edit, e.g. `pixi run bump 1.1.0`. Every one
+# of the sixteen is gated — `version-check` holds the three manifests, its own
+# pin, and the eleven public transcript surfaces against that pin, and
+# `scripts/qa/contract.py` fails at the contract gate — and the eleven transcript
 # sites are defined once by
 # `version-check` itself and imported here, so writer and checker cannot drift.
 # Not wired into `pixi run ci`; this is the first step of cutting a release, and
@@ -101,8 +108,10 @@ build-profile-check = { cmd = "python -m scripts.tests.test_build_profiles && py
     "build-bin",
 ] }
 
-# Keep README's committed CLI reference byte-identical to the real binary. The
+# Keep the CLI reference page's committed `--help` listing
+# (`docs/cli-reference.md`) byte-identical to the real binary. The
 # `build-bin` edge stops standalone use from reading a stale or missing binary.
+# The name predates the listing's move out of the README; CI calls it by name.
 readme-help-check = { cmd = "python -m scripts.checks.readme_help", depends-on = [
     "build-bin",
 ] }
@@ -279,8 +288,14 @@ junit-render-check = { cmd = "python -m scripts.formats.junit_render", depends-o
 
 # Regenerate the protocol snapshots IN PLACE from the committed fixtures at the
 # pinned toolchain. Local use only; never run in CI. The generator self-verifies
-# with hard asserts before writing.
-transcripts = "python -m scripts.gen_transcripts"
+# with hard asserts before writing, then every test that reads the snapshots
+# runs, so a regeneration that breaks one is red here, not later. Generation
+# needs only `mojo`, so it runs before the build: on a pin bump the diff is
+# readable even while `src/` does not compile yet.
+transcripts = "python -m scripts.gen_transcripts && pixi run transcripts-consumers"
+transcripts-consumers = { cmd = "python -m scripts.harness.snapshot_consumers", depends-on = [
+    "build-bin",
+] }
 # CI gate: regenerate every transcript into a temp dir and diff byte-for-byte
 # against tests/snapshots/protocol/, MANIFEST included. This is the protocol
 # pin: a red diff after a repo change indicts THE CHANGE; a red diff after a
@@ -362,11 +377,11 @@ recipe-check = "python -m scripts.tests.test_community_recipe && python -m scrip
 
 # Fast self-tests for repository harness behavior: the self-hosted runner's
 # reconciliation, its timeout and interrupt handling, the dogfood and e2e
-# drivers, the CLI-contract and transcript comparators, the README-help
+# drivers, the CLI-contract and transcript comparators, the CLI-reference help
 # extractor, and the fully-mocked branch logic of `coverage-capability`, whose
 # real run needs a real `mojo` and lives as its own preflight task. Every member
-# uses disposable test inputs and a fake compiler, so nothing here waits on a
-# compiler or a built binary, which is why it sits ahead of every preflight
+# uses disposable test inputs and a fake compiler, except one read of the
+# installed `modular.cfg`, so nothing here waits on a compiler or a built binary, which is why it sits ahead of every preflight
 # member that does. `test_assertions` is deliberately absent: `assertions-check`
 # owns it and runs it in its own matrix cell on both platforms.
 #
@@ -375,7 +390,7 @@ recipe-check = "python -m scripts.tests.test_community_recipe && python -m scrip
 # only check that the probe oracle duplicated into both lanes has not diverged.
 # Left solely in `valgrind-check` that check is unreachable on macOS and costs a
 # full instrumented lane on Linux to learn a docstring was reworded in one copy.
-harness-unit-check = "python -m scripts.tests.test_process_watchdog && python -m scripts.tests.test_vocabulary && python -m scripts.tests.test_dogfood && python -m scripts.tests.test_package_consumption && python -m scripts.tests.test_selfhost && python -m scripts.tests.test_e2e && python -m scripts.tests.test_e2e_json && python -m scripts.tests.test_collect_stream && python -m scripts.tests.test_contract && python -m scripts.tests.test_transcript_compare && python -m scripts.tests.test_readme_help && python -m scripts.tests.test_completion_shells && python -m scripts.tests.test_coverage_capability && python -m scripts.tests.test_abi_probe && python -m scripts.tests.test_asan && python -m scripts.tests.test_valgrind && python -m scripts.tests.test_native_format && python -m scripts.tests.test_build_profiles && python -m scripts.tests.test_protocol_compare && python -m scripts.tests.test_canary_run && python -m scripts.tests.test_canary_notify"
+harness-unit-check = "python -m scripts.tests.test_process_watchdog && python -m scripts.tests.test_vocabulary && python -m scripts.tests.test_dogfood && python -m scripts.tests.test_package_consumption && python -m scripts.tests.test_selfhost && python -m scripts.tests.test_snapshot_consumers && python -m scripts.tests.test_e2e && python -m scripts.tests.test_e2e_json && python -m scripts.tests.test_collect_stream && python -m scripts.tests.test_contract && python -m scripts.tests.test_transcript_compare && python -m scripts.tests.test_readme_help && python -m scripts.tests.test_completion_shells && python -m scripts.tests.test_coverage_capability && python -m scripts.tests.test_abi_probe && python -m scripts.tests.test_asan && python -m scripts.tests.test_valgrind && python -m scripts.tests.test_native_format && python -m scripts.tests.test_build_profiles && python -m scripts.tests.test_protocol_compare && python -m scripts.tests.test_canary_run && python -m scripts.tests.test_canary_notify"
 
 # Repository policy: does this tree still obey its own rules? The public-version
 # oracle, the documentation-site parity oracle, the layout and invocation-policy

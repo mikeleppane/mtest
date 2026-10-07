@@ -118,7 +118,4 @@ replaces the report at the other's target.
 
 [§15.5 of the command-line contract](cli-contract.md#155-run-report-report-formatpath-report-style-style)
 is the normative specification: the grammar, the document's parts, and every
-one of those refusals. The blocks on this page are mirrored byte for byte from
-the [Run reports section of the
-README](https://github.com/mikeleppane/mtest#run-reports), which is where they
-are written down.
+one of those refusals.

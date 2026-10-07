@@ -34,8 +34,8 @@ Never delete or move a published tag to recover from a failed run.
    merge, and not at a release. `v1` is a major-version alias rather than a
    release tag — the release procedure below only ever *moves* it, so nothing
    there brings it into existence, and until it exists `mikeleppane/mtest@v1`
-   does not resolve and every workflow copied from the README or the
-   documentation site fails with `Unable to resolve action`.
+   does not resolve and every workflow copied from the documentation site
+   fails with `Unable to resolve action`.
 
 Do not create the fork token until the first exact-main dry run succeeds. When
 it is needed, create an expiring fine-grained personal access token owned by
@@ -100,8 +100,8 @@ release responses.
    companion.
 11. Only after public verification passes, fill in the release's **Published**
    subsection in `CHANGELOG.md` with the channel, build number, and artifact
-   names, and confirm the README's Installation section and the release notes
-   say the package is publicly available.
+   names, and confirm the installation page (`docs/install.md`) and the release
+   notes say the package is publicly available.
 
 ## Recovery
 
