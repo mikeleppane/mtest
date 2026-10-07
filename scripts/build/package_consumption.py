@@ -716,13 +716,9 @@ def _validate_modular_config(config: Path, prefix: Path) -> None:
     if shared_libs is None:
         mismatches.append("[mojo-max] shared_libs: missing")
     else:
-        library_suffix = ".dylib" if sys.platform == "darwin" else ".so"
-        expected_shared_libs = (
-            str(prefix / "lib" / f"libAsyncRTMojoBindings{library_suffix}")
-            + ",-Xlinker,-rpath,-Xlinker,"
-            + str(prefix / "lib")
-            + ";"
-        )
+        # Mojo 1.1 links no runtime bindings library by name: the option is
+        # only the rpath to the prefix's own `lib`.
+        expected_shared_libs = "-Xlinker,-rpath,-Xlinker," + str(prefix / "lib") + ";"
         if shared_libs != expected_shared_libs:
             mismatches.append(
                 "[mojo-max] shared_libs: expected "
@@ -730,20 +726,6 @@ def _validate_modular_config(config: Path, prefix: Path) -> None:
                 + ", got "
                 + repr(shared_libs)
             )
-        runtime_library = prefix / "lib" / (f"libAsyncRTMojoBindings{library_suffix}")
-        try:
-            resolved_runtime_library = runtime_library.resolve(strict=True)
-        except OSError as exc:
-            mismatches.append(f"[mojo-max] shared_libs: cannot resolve: {exc}")
-        else:
-            if (
-                not resolved_runtime_library.is_relative_to(prefix)
-                or not resolved_runtime_library.is_file()
-            ):
-                mismatches.append(
-                    "[mojo-max] shared_libs: runtime library must resolve to "
-                    "a regular file inside prefix"
-                )
     if mismatches:
         raise PackageCheckError(
             "installed modular.cfg does not name its own prefix exactly: "
