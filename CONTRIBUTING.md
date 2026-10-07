@@ -94,12 +94,9 @@ memory-safety lanes, ASan/LSan and Valgrind, run on Linux only.
 
 `pixi run ci` is there for an explicit exhaustive local run; routine development
 uses the focused tasks above, and the required hosted checks are the merge
-verdict. The floor opens with a fail-fast preflight (version, formatting,
-harness self-tests, repository policy, release tooling, unsafe-Mojo inventory,
-post-fork and Clang-Tidy analysis, native ABI, JUnit oracle, build,
-production-artifact profile, CLI-reference help, shell-completion,
-rendered-JUnit, transcript, ABI-probe, and coverage-tripwire checks) and closes with `ci-memory`, so a
-green local run covers memory safety instead of deferring it.
+verdict. The floor opens with the fail-fast `ci-preflight` (its members are
+listed in `pixi.toml`) and closes with `ci-memory`, so a green local run covers
+memory safety instead of deferring it.
 On Linux that is ASan/LSan then Memcheck; elsewhere it reports the two lanes as
 uncovered and names the Linux cells that own them. Hosted CI runs the
 behavioral floor (`test`, `assertions-check`, `e2e`) plus the two cache gates
