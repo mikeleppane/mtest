@@ -68,6 +68,8 @@ class AssertionCommandTests(unittest.TestCase):
                 "/checkout/tests/assertions/api_consumer.mojo",
                 "-o",
                 "/checkout/build/assertions-check/api-o0",
+                "-D",
+                "MTEST_SOURCE=/checkout/tests/assertions/api_consumer.mojo",
             ],
         )
 

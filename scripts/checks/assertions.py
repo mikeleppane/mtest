@@ -289,6 +289,9 @@ def compile_command(
         str(source),
         "-o",
         str(output),
+        # As mtest does: the compile cache keys on content, not path.
+        "-D",
+        f"MTEST_SOURCE={source.resolve()}",
     ]
 
 
