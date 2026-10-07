@@ -635,10 +635,11 @@ def _probe_file(
                 ParseDisposition.CAPTURE_OVERFLOW,
                 "capture-overflow",
                 (
-                    "the --skip-all probe's stdout overflowed the capture bound"
-                    " and no complete report survived in the retained tail"
-                    " (look for the '[mtest: output truncated' marker); reduce"
-                    " the probe's output or raise the capture bound"
+                    "the --skip-all probe's report stream overflowed the"
+                    " capture bound and no complete report survived in the"
+                    " retained tail (look for the '[mtest: output truncated'"
+                    " marker); reduce the probe's output or raise the capture"
+                    " bound"
                 ),
                 build_argv,
                 bdur,

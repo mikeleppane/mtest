@@ -13,7 +13,7 @@
 # entrypoint because `pixi run build` invokes it directly, and the four `test*`
 # tasks reach it through their `build-bin` dependency.
 #
-# NOTE: mojo 1.0.0b2 has no `mojo package` subcommand -- only `mojo precompile`,
+# NOTE: mojo 1.1.0 has no `mojo package` subcommand -- only `mojo precompile`,
 # which produces the compiled packages. The checkout-owned outputs are
 # toml.mojoc and mtest.mojoc so `-I build` resolves both package imports.
 #

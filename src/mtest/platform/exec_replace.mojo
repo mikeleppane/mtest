@@ -10,7 +10,7 @@ so one declaration serves Linux and macOS, with no variadic tail whose Darwin
 arm64 calling convention could silently hand the target garbage arguments.
 
 The argument vector is built as a list of addresses rather than a list of
-pointers because `UnsafePointer` is non-nullable at the pinned toolchain, so
+pointers because `Pointer` is non-nullable at the pinned toolchain, so
 the NULL terminator `execv` requires cannot be expressed as an element of a
 pointer list at all.
 """
@@ -134,7 +134,7 @@ def exec_replace(binary: String, argv: List[String]) raises:
         # `addrs` holds exactly the still-valid element addresses argued for
         # above, in order, followed by the `0` appended before the loop — the
         # all-zero-bits null pointer that terminates a `char *const argv[]`,
-        # which has to be written as an integer because `UnsafePointer` is
+        # which has to be written as an integer because `Pointer` is
         # non-nullable at the pinned toolchain. Both pointers address complete
         # NUL-terminated data: `c_string_bytes` appends the terminator, and no
         # interior NUL can appear because every string was rejected above, so

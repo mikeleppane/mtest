@@ -3,7 +3,7 @@
 Layer 4, the plain (non-selection) run path. `_run_one` spends up to the file's
 effective retry budget plus one attempt, each building it under
 `--compile-timeout`, executing the binary under the `exec` supervisor, then
-resolving and classifying the report its stdout carried. A crash-class ending
+resolving and classifying the report its report stream carried. A crash-class ending
 with budget left is reported immediately and retried: a build rebuilds
 quarantined against a fresh module cache, and a run re-runs the same binary. A
 late pass after any retry is flaky.
@@ -133,7 +133,7 @@ struct _AttemptResult(Copyable, Movable):
     var rdur: Float64
     """The run wall time in seconds."""
     var trusted: TrustedReport
-    """The resolved report the run's stdout was trusted to carry."""
+    """The resolved report the run's report stream was trusted to carry."""
     var cls: Classification
     """The per-test classification of the run."""
     var run_stdout_truncated: Bool

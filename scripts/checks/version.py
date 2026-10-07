@@ -206,12 +206,12 @@ check available for any of them:
   installed compiler actually reports, including the revision hash this
   manifest does not carry.
 - `scripts/build/package_consumption.py` globs
-  `mojo-compiler-1.0.0b2-*.json` in the installed environment's `conda-meta` to
+  `mojo-compiler-1.1.0-*.json` in the installed environment's `conda-meta` to
   prove the solve pulled the declared run dependency. A stale glob fails that
   gate as a missing run dependency, which indicts the recipe rather than the
   glob, so this is the restatement most likely to waste a bump's afternoon.
-- `scripts/e2e/scenarios/doctor.py` asserts the exact `expected Mojo 1.0.0b2
-  (2cf4d08a)` text the `doctor` subcommand prints, which is a claim about the
+- `scripts/e2e/scenarios/doctor.py` asserts the exact `expected Mojo 1.1.0
+  (8189361e)` text the `doctor` subcommand prints, which is a claim about the
   CLI's output rather than about the manifest.
 """
 
@@ -231,12 +231,12 @@ MOJO_PIN_CLAIM_RE = re.compile(
 )
 """One claim about which Mojo toolchain this release uses.
 
-Covers the forms the tree actually writes: a recipe's `- mojo ==1.0.0b2` and
-`- mojo-compiler ==1.0.0b2`, Markdown's `` `mojo-compiler ==1.0.0b2` `` and
-``Mojo `1.0.0b2` `` and ``Mojo `==1.0.0b2` ``, the package filename
-`mojo-compiler-1.0.0b2-release`, and the rendered `Mojo 1.0.0b2 (2cf4d08a)`.
+Covers the forms the tree actually writes: a recipe's `- mojo ==1.1.0` and
+`- mojo-compiler ==1.1.0`, Markdown's `` `mojo-compiler ==1.1.0` `` and
+``Mojo `1.1.0` `` and ``Mojo `==1.1.0` ``, the package filename
+`mojo-compiler-1.1.0-release`, and the rendered `Mojo 1.1.0 (8189361e)`.
 Requiring the word `mojo` immediately before the version is what keeps prose
-about behavior at the pinned toolchain (`1.0.0b2 polymorphism is static`) out:
+about behavior at the pinned toolchain (`1.1.0 polymorphism is static`) out:
 that text goes stale on a bump too, but it is not a claim about what to
 install, and gating it would make every such sentence a version site.
 """

@@ -5,7 +5,7 @@
 # Runnable with only bash + mojo + clang -- NO Python, no other tooling -- so it
 # runs identically in a developer checkout (invoked by the pixi build tasks) and
 # inside rattler-build's ISOLATED recipe environment, whose requirements.build is
-# only `mojo ==1.0.0b2` and `clang ==18.1.8` (recipe/build.sh calls this script).
+# only `mojo ==1.1.0` and `clang ==18.1.8` (recipe/build.sh calls this script).
 # Before this entrypoint existed the recipe hand-repeated all three stages with
 # the C flags hardcoded inline, so the tested artifact and the published one
 # could silently diverge; this removes that drift.
@@ -18,7 +18,7 @@
 # the same file scripts/checks/native_abi.py reads for its symbol verification --
 # the flags are defined in exactly one place.
 #
-# NOTE: mojo 1.0.0b2 has no `mojo package` subcommand -- only `mojo precompile`,
+# NOTE: mojo 1.1.0 has no `mojo package` subcommand -- only `mojo precompile`,
 # which produces a compiled package. Checkout-owned artifacts use the supported
 # .mojoc extension; the vendored parser is precompiled first, then `-I build`
 # resolves it while precompiling mtest and resolves both packages while linking
