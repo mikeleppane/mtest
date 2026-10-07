@@ -288,9 +288,12 @@ junit-render-check = { cmd = "python -m scripts.formats.junit_render", depends-o
 
 # Regenerate the protocol snapshots IN PLACE from the committed fixtures at the
 # pinned toolchain. Local use only; never run in CI. The generator self-verifies
-# with hard asserts before writing, then the classified modules that parse the
-# snapshots run, so a regeneration that breaks them is red here, not later.
-transcripts = { cmd = "python -m scripts.gen_transcripts && python -m scripts.harness.snapshot_consumers", depends-on = [
+# with hard asserts before writing, then every test that reads the snapshots
+# runs, so a regeneration that breaks one is red here, not later. Generation
+# needs only `mojo`, so it runs before the build: on a pin bump the diff is
+# readable even while `src/` does not compile yet.
+transcripts = "python -m scripts.gen_transcripts && pixi run transcripts-consumers"
+transcripts-consumers = { cmd = "python -m scripts.harness.snapshot_consumers", depends-on = [
     "build-bin",
 ] }
 # CI gate: regenerate every transcript into a temp dir and diff byte-for-byte
@@ -377,8 +380,8 @@ recipe-check = "python -m scripts.tests.test_community_recipe && python -m scrip
 # drivers, the CLI-contract and transcript comparators, the CLI-reference help
 # extractor, and the fully-mocked branch logic of `coverage-capability`, whose
 # real run needs a real `mojo` and lives as its own preflight task. Every member
-# uses disposable test inputs and a fake compiler, so nothing here waits on a
-# compiler or a built binary, which is why it sits ahead of every preflight
+# uses disposable test inputs and a fake compiler, except one read of the
+# installed `modular.cfg`, so nothing here waits on a compiler or a built binary, which is why it sits ahead of every preflight
 # member that does. `test_assertions` is deliberately absent: `assertions-check`
 # owns it and runs it in its own matrix cell on both platforms.
 #
@@ -387,7 +390,7 @@ recipe-check = "python -m scripts.tests.test_community_recipe && python -m scrip
 # only check that the probe oracle duplicated into both lanes has not diverged.
 # Left solely in `valgrind-check` that check is unreachable on macOS and costs a
 # full instrumented lane on Linux to learn a docstring was reworded in one copy.
-harness-unit-check = "python -m scripts.tests.test_process_watchdog && python -m scripts.tests.test_vocabulary && python -m scripts.tests.test_dogfood && python -m scripts.tests.test_package_consumption && python -m scripts.tests.test_selfhost && python -m scripts.tests.test_e2e && python -m scripts.tests.test_e2e_json && python -m scripts.tests.test_collect_stream && python -m scripts.tests.test_contract && python -m scripts.tests.test_transcript_compare && python -m scripts.tests.test_readme_help && python -m scripts.tests.test_completion_shells && python -m scripts.tests.test_coverage_capability && python -m scripts.tests.test_abi_probe && python -m scripts.tests.test_asan && python -m scripts.tests.test_valgrind && python -m scripts.tests.test_native_format && python -m scripts.tests.test_build_profiles && python -m scripts.tests.test_protocol_compare && python -m scripts.tests.test_canary_run && python -m scripts.tests.test_canary_notify"
+harness-unit-check = "python -m scripts.tests.test_process_watchdog && python -m scripts.tests.test_vocabulary && python -m scripts.tests.test_dogfood && python -m scripts.tests.test_package_consumption && python -m scripts.tests.test_selfhost && python -m scripts.tests.test_snapshot_consumers && python -m scripts.tests.test_e2e && python -m scripts.tests.test_e2e_json && python -m scripts.tests.test_collect_stream && python -m scripts.tests.test_contract && python -m scripts.tests.test_transcript_compare && python -m scripts.tests.test_readme_help && python -m scripts.tests.test_completion_shells && python -m scripts.tests.test_coverage_capability && python -m scripts.tests.test_abi_probe && python -m scripts.tests.test_asan && python -m scripts.tests.test_valgrind && python -m scripts.tests.test_native_format && python -m scripts.tests.test_build_profiles && python -m scripts.tests.test_protocol_compare && python -m scripts.tests.test_canary_run && python -m scripts.tests.test_canary_notify"
 
 # Repository policy: does this tree still obey its own rules? The public-version
 # oracle, the documentation-site parity oracle, the layout and invocation-policy
