@@ -43,6 +43,29 @@ class SafetyCheckTests(unittest.TestCase):
             with self.subTest(family=family):
                 self.assert_undocumented(source, family)
 
+    def test_unknown_unsafe_spelling_is_reported(self) -> None:
+        sources = {
+            Path("a.mojo"): "def unsafe_local() -> Int:\n    return 1\n",
+            Path("b.mojo"): (
+                "var n = unsafe_local()\n"
+                "var p = value.unsafe_ptr()\n"
+                "# unsafe_in_comment\n"
+                "p.unsafe_renamed_op()\n"
+            ),
+        }
+        findings = safety_check.unrecognized_spellings(sources)
+        self.assertEqual(
+            [(f.path, f.line, f.family) for f in findings],
+            [(Path("b.mojo"), 4, "unsafe_renamed_op")],
+        )
+
+    def test_repository_spellings_are_all_recognized(self) -> None:
+        paths = safety_check.mojo_files(
+            Path(root) for root in safety_check.DEFAULT_ROOTS
+        )
+        sources = {path: path.read_text(encoding="utf-8") for path in paths}
+        self.assertEqual(safety_check.unrecognized_spellings(sources), [])
+
     def test_adjacent_safety_clause_covers_candidate(self) -> None:
         self.assert_clean(
             "# SAFETY: `p` owns one initialized Int slot here.\np.free()\n"

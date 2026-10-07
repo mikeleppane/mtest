@@ -59,6 +59,10 @@ _CANDIDATES = (
     ("FFI call", re.compile(r"\bexternal_call\s*\[")),
 )
 
+# Every stdlib unsafe operation is spelled `unsafe_*`. A spelling no family
+# matches means the toolchain renamed one and the gate went blind to it.
+_UNSAFE_SPELLING = re.compile(r"\bunsafe_\w+")
+_LOCAL_DEFINITION = re.compile(r"\bdef\s+(unsafe_\w+)")
 _SAFETY = re.compile(r"^\s*#\s*SAFETY:\s*\S")
 _COMMENT = re.compile(r"^\s*#")
 _POSSIBLE_ARITHMETIC = re.compile(
@@ -245,6 +249,29 @@ def scan_text(path: Path, source: str) -> tuple[list[Finding], list[InventoryIte
     return findings, _manual_inventory(path, lines)
 
 
+def unrecognized_spellings(sources: dict[Path, str]) -> list[Finding]:
+    """Return each `unsafe_*` use on a line no candidate family matches.
+
+    Names the scanned sources define themselves are exempt: they are this
+    repository's functions, not stdlib operations.
+    """
+    sanitized = {path: _sanitize(text) for path, text in sources.items()}
+    local = {
+        name for text in sanitized.values() for name in _LOCAL_DEFINITION.findall(text)
+    }
+    findings: list[Finding] = []
+    for path, text in sanitized.items():
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            if _has_candidate(line):
+                continue
+            findings.extend(
+                Finding(path, line_number, name)
+                for name in _UNSAFE_SPELLING.findall(line)
+                if name not in local
+            )
+    return findings
+
+
 def mojo_files(roots: Iterable[Path]) -> list[Path]:
     """Return deterministic Mojo inputs beneath existing roots."""
     return sorted(
@@ -265,7 +292,8 @@ def main(argv: list[str] | None = None) -> int:
 
     Returns:
         0 when every candidate line has a SAFETY comment covering it. 1 when
-        any candidate is undocumented, and also when the inventory came back
+        any candidate is undocumented, when an `unsafe_*` spelling matches no
+        candidate family, and also when the inventory came back
         empty, since an empty inventory means the roots stopped resolving and
         the gate would otherwise pass by scanning nothing.
     """
@@ -279,17 +307,22 @@ def main(argv: list[str] | None = None) -> int:
         print("SAFETY check failed: source inventory is empty")
         return 1
 
+    sources = {path: path.read_text(encoding="utf-8") for path in paths}
     findings: list[Finding] = []
     inventory: list[InventoryItem] = []
-    for path in paths:
-        current_findings, current_inventory = scan_text(
-            path, path.read_text(encoding="utf-8")
-        )
+    for path, text in sources.items():
+        current_findings, current_inventory = scan_text(path, text)
         findings.extend(current_findings)
         inventory.extend(current_inventory)
+    unknown = unrecognized_spellings(sources)
 
     for finding in findings:
         print(f"{finding.path}:{finding.line}: missing SAFETY: {finding.family}")
+    for finding in unknown:
+        print(
+            f"{finding.path}:{finding.line}: `{finding.family}` matches no "
+            "candidate family; add one to _CANDIDATES"
+        )
     print("Manual-review inventory (non-gating lexical hints):")
     if inventory:
         for item in inventory:
@@ -297,8 +330,11 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("(none)")
 
-    if findings:
-        print(f"SAFETY check failed: {len(findings)} undocumented candidate(s)")
+    if findings or unknown:
+        print(
+            f"SAFETY check failed: {len(findings)} undocumented candidate(s), "
+            f"{len(unknown)} unrecognized unsafe spelling(s)"
+        )
         return 1
     print("SAFETY check passed")
     return 0
