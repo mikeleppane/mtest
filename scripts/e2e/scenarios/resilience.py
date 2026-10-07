@@ -818,7 +818,7 @@ def s_precompile_promotion(context: ScenarioContext) -> str:
     """
     rel = "e2e/pkg/test_uses_pkg.mojo"
     out_dir = os.path.join(REPO_ROOT, "build", "e2e-promotion")
-    out_rel = "build/e2e-promotion/mathlib.mojopkg"
+    out_rel = "build/e2e-promotion/mathlib.mojoc"
     out_path = os.path.join(REPO_ROOT, out_rel)
     sentinel = b"SENTINEL-PACKAGE-BYTES\n"
 

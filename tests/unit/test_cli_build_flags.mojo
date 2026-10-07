@@ -35,14 +35,14 @@ def test_includes_build_args_and_precompiles_in_order() raises:
     c.build_args = ["-D", "FOO=1"]
     c.precompiles = [
         Precompile(src="a.mojo", out=Optional[String](None)),
-        Precompile(src="b.mojo", out=Optional[String]("out/b.mojopkg")),
+        Precompile(src="b.mojo", out=Optional[String]("out/b.mojoc")),
     ]
     var got = build_flags_string(c)
     assert_equal(
         got,
         (
             "-I build -I vendor --build-arg -D --build-arg FOO=1 "
-            "--precompile a.mojo --precompile b.mojo:out/b.mojopkg"
+            "--precompile a.mojo --precompile b.mojo:out/b.mojoc"
         ),
     )
 

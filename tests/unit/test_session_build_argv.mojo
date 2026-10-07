@@ -51,13 +51,13 @@ def test_build_argv_is_exact_for_a_precompile_step() raises:
                 "precompile",
                 ["src"],
                 ["--Werror"],
-                "build/.tmp/helper.mojopkg",
+                "build/.tmp/helper.mojoc",
                 "src/helper",
                 "",
             )
         ),
         (
-            "/opt/mojo precompile src/helper -o build/.tmp/helper.mojopkg"
+            "/opt/mojo precompile src/helper -o build/.tmp/helper.mojoc"
             " -I src --Werror"
         ),
     )

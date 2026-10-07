@@ -38,14 +38,14 @@ def _is_source_name(name: String) -> Bool:
         name: One directory entry's bare name.
 
     Returns:
-        True for `*.mojo`, `*.🔥`, `*.mojopkg`, and `*.mojoc`. Anything else —
+        True for `*.mojo`, `*.🔥`, and `*.mojoc`. Anything else —
         a README, a lockfile, an editor swapfile — cannot change what the
         compiler produces and is deliberately left out, so unrelated churn in
         an include root does not evict the whole cache.
     """
     if name.endswith(".mojo") or name.endswith(".🔥"):
         return True
-    return name.endswith(".mojopkg") or name.endswith(".mojoc")
+    return name.endswith(".mojoc")
 
 
 def _is_scannable_name(name: String) -> Bool:
@@ -55,7 +55,7 @@ def _is_scannable_name(name: String) -> Bool:
         name: One directory entry's bare name.
 
     Returns:
-        True for `*.mojo` and `*.🔥`. A `*.mojopkg` or `*.mojoc` is excluded and
+        True for `*.mojo` and `*.🔥`. A `*.mojoc` is excluded and
         needs no scan: its imports were bound when it was compiled and cannot
         late-resolve to a source file sitting beside a test.
     """
@@ -732,7 +732,7 @@ def walk_include_root(
     """Feed everything `-I dir` makes visible to the compiler, in a fixed order.
 
     The walk mirrors what the import resolver can actually reach: every
-    top-level `*.mojo` / `*.🔥` / `*.mojopkg` / `*.mojoc`, plus the same rule
+    top-level `*.mojo` / `*.🔥` / `*.mojoc`, plus the same rule
     applied recursively inside each subdirectory that carries an `__init__`.
     Dot-prefixed entries are skipped, entries are visited in byte order, and
     each file contributes its path (relative to `dir`), its size, and its

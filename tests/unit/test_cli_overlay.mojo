@@ -66,7 +66,7 @@ def test_every_cli_expressible_config_knob_is_present() raises:
         "--build-arg",
         "-DDEBUG",
         "--precompile",
-        "src/lib:build/lib.mojopkg",
+        "src/lib:build/lib.mojoc",
         "--compile-timeout",
         "20",
         "--color",

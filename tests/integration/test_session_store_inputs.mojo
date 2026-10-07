@@ -228,7 +228,7 @@ def test_walk_hashes_top_level_sources() raises:
 def test_walk_covers_every_source_suffix() raises:
     var bare = temp_root()
     write_file(bare, "inc/top.mojo", "# a")
-    for suffix in ["🔥", "mojopkg", "mojoc"]:
+    for suffix in ["🔥", "mojoc"]:
         var full = temp_root()
         write_file(full, "inc/top.mojo", "# a")
         write_file(full, "inc/extra." + String(suffix), "# x")
@@ -274,7 +274,7 @@ def test_walk_exclude_skips_path() raises:
     write_file(bare, "inc/top.mojo", "# a")
     var root = temp_root()
     write_file(root, "inc/top.mojo", "# a")
-    write_file(root, "inc/gen.mojopkg", "# generated")
+    write_file(root, "inc/gen.mojoc", "# generated")
     assert_not_equal(
         _walk_digest(bare, "inc", ""), _walk_digest(root, "inc", "")
     )
@@ -283,7 +283,7 @@ def test_walk_exclude_skips_path() raises:
     # that step runs.
     assert_equal(
         _walk_digest(bare, "inc", ""),
-        _walk_digest(root, "inc", "inc/gen.mojopkg"),
+        _walk_digest(root, "inc", "inc/gen.mojoc"),
     )
 
 

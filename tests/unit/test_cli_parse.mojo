@@ -179,7 +179,7 @@ def test_build_args_accumulate() raises:
 def test_precompile_with_and_without_out() raises:
     var argv: List[String] = [
         "--precompile",
-        "src/mylib:build/mylib.mojopkg",
+        "src/mylib:build/mylib.mojoc",
         "--precompile",
         "src/other",
     ]
@@ -187,7 +187,7 @@ def test_precompile_with_and_without_out() raises:
     assert_equal(len(r.config.precompiles), 2)
     assert_equal(r.config.precompiles[0].src, "src/mylib")
     assert_true(r.config.precompiles[0].out)
-    assert_equal(r.config.precompiles[0].out.value(), "build/mylib.mojopkg")
+    assert_equal(r.config.precompiles[0].out.value(), "build/mylib.mojoc")
     assert_equal(r.config.precompiles[1].src, "src/other")
     assert_false(Bool(r.config.precompiles[1].out))
 

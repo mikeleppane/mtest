@@ -201,9 +201,9 @@ def test_gitignore_update_follows_the_last_matching_pattern() raises:
 
 
 def test_gitignore_update_preserves_the_original_bytes() raises:
-    var updated = gitignore_update(_bytes("build/\n*.mojopkg\n"), True)
+    var updated = gitignore_update(_bytes("build/\n*.mojoc\n"), True)
     assert_true(Bool(updated))
-    assert_true(_text(updated.value()).startswith("build/\n*.mojopkg\n"))
+    assert_true(_text(updated.value()).startswith("build/\n*.mojoc\n"))
     assert_true(_text(updated.value()).endswith(".mtest-cache/\n"))
 
 

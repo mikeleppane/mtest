@@ -248,7 +248,7 @@ def precompile_out_path(src: String, out_name: Optional[String]) -> String:
 
     Returns:
         The output package's path, exactly as the compiler's `-o` receives it —
-        the configured `out_name` verbatim, or `build/<name>.mojopkg` where
+        the configured `out_name` verbatim, or `build/<name>.mojoc` where
         `name` is `src`'s `.mojo`-stripped basename.
 
     Examples:
@@ -257,9 +257,9 @@ def precompile_out_path(src: String, out_name: Optional[String]) -> String:
     from mtest.session.precompile import precompile_out_path
 
     var defaulted = precompile_out_path("lib/helper.mojo", None)
-    # "build/helper.mojopkg"
-    var named = precompile_out_path("lib", Optional[String]("out/lib.mojopkg"))
-    # "out/lib.mojopkg"
+    # "build/helper.mojoc"
+    var named = precompile_out_path("lib", Optional[String]("out/lib.mojoc"))
+    # "out/lib.mojoc"
     ```
     """
     if out_name:
@@ -267,7 +267,7 @@ def precompile_out_path(src: String, out_name: Optional[String]) -> String:
     return (
         String("build/")
         + String(basename(src).removesuffix(".mojo"))
-        + ".mojopkg"
+        + ".mojoc"
     )
 
 
@@ -291,8 +291,8 @@ def precompile_out_dir(out_path: String) -> String:
     ```mojo
     from mtest.session.precompile import precompile_out_dir
 
-    var nested = precompile_out_dir("build/helper.mojopkg")  # "build"
-    var top = precompile_out_dir("helper.mojopkg")  # "."
+    var nested = precompile_out_dir("build/helper.mojoc")  # "build"
+    var top = precompile_out_dir("helper.mojoc")  # "."
     ```
     """
     var d = String(dirname(out_path))
@@ -337,7 +337,7 @@ def _run_precompile(
         root: The invocation root the compiler runs in.
         src: The source to precompile.
         out_name: The output package path, or None to default to
-            `build/<name>.mojopkg` where `name` is `src`'s `.mojo`-stripped
+            `build/<name>.mojoc` where `name` is `src`'s `.mojo`-stripped
             basename.
         include_paths: Directories passed to the compiler as `-I`.
 

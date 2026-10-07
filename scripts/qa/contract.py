@@ -3959,7 +3959,7 @@ def main() -> int:
     try:
         scaffold(root)
         pc = subprocess.run(
-            ["mojo", "precompile", "textkit", "-o", "build/textkit.mojopkg"],
+            ["mojo", "precompile", "textkit", "-o", "build/textkit.mojoc"],
             cwd=root,
             env=env,
             capture_output=True,

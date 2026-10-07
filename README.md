@@ -1437,8 +1437,8 @@ everything an ordinary edit, upgrade, or move can reach:
   digested. The `-I` argument spelling is keyed exactly as written (`-I lib`
   and `-I ./lib` differ), while the named directory contents are walked and
   digested;
-- the walked contents of every include root — every `*.mojo`, `*.🔥`,
-  `*.mojopkg`, and `*.mojoc` an `-I` makes visible, recursing into
+- the walked contents of every include root — every `*.mojo`, `*.🔥`, and
+  `*.mojoc` an `-I` makes visible, recursing into
   subdirectories that carry an `__init__`, and nothing else, so a README or a
   lockfile changing under an include root does not evict anything;
 - the walked contents of the directory the test file sits in, by those same

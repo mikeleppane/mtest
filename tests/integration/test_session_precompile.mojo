@@ -279,7 +279,7 @@ def test_failed_precompile_leaves_a_good_out_package_untouched() raises:
     write_file(root, "badpkg/__init__.mojo", SRC_COMPILE_ERROR)
     write_file(root, "tests/test_a.mojo", SRC_PASS)
     var sentinel = String("SENTINEL-PACKAGE-BYTES\n")
-    write_file(root, "build/badpkg.mojopkg", sentinel)
+    write_file(root, "build/badpkg.mojoc", sentinel)
 
     var config = base_config()
     config.precompiles.append(Precompile("badpkg", None))
@@ -290,7 +290,7 @@ def test_failed_precompile_leaves_a_good_out_package_untouched() raises:
     var code = run_session(config, root, comp)
 
     assert_equal(code, 1, "a failed precompile resolves to exit 1")
-    var after = open(root + "/build/badpkg.mojopkg", "r").read()
+    var after = open(root + "/build/badpkg.mojoc", "r").read()
     assert_equal(after, sentinel, "a failed precompile damaged the good OUT")
     for name in listdir(root + "/build"):
         assert_false(
@@ -311,7 +311,7 @@ def test_promotion_failure_never_reports_a_compiler_ending() raises:
         root, "goodpkg/__init__.mojo", "def helper() -> Int:\n    return 7\n"
     )
     write_file(root, "tests/test_a.mojo", SRC_PASS)
-    makedirs(root + "/build/goodpkg.mojopkg")
+    makedirs(root + "/build/goodpkg.mojoc")
 
     var config = base_config()
     config.precompiles.append(Precompile("goodpkg", None))

@@ -432,7 +432,7 @@ bare `--` is equivalent. `-I PATH`
 
 Repeatable. Each `--precompile` package is built with `mojo precompile` **before
 any test build**, in the order listed. Precompiled packages inherit `-I` and
-`--build-arg`. `OUT` defaults to `build/<name>.mojopkg`, and its directory is
+`--build-arg`. `OUT` defaults to `build/<name>.mojoc`, and its directory is
 automatically added to `-I` so dependent test files resolve `from <name> import
 …`. A step whose inputs and whose output are both unchanged is **skipped**
 (§8.5): `mojo precompile` does not produce identical bytes for identical
@@ -1819,7 +1819,7 @@ mtest -k matmul -s tests/
 
 # Precompile a library, smoke-test first, exclude the slow suite, forward a
 # build flag — the whole configuration lives on the command line.
-mtest --precompile src/mylib:build/mylib.mojopkg -I build \
+mtest --precompile src/mylib:build/mylib.mojoc -I build \
       --build-arg=--no-optimization --gate tests/test_smoke.mojo \
       --exclude 'tests/test_slow_*.mojo' tests/
 
@@ -2303,7 +2303,7 @@ fail-on-flaky = false            # exit 1 on a FLAKY-only session
 mojo = "mojo"
 include = ["vendor"]
 build-args = ["-DDEBUG"]
-precompile = ["src/lib.mojo", "src/gpu.mojo:build/gpu.mojopkg"]
+precompile = ["src/lib.mojo", "src/gpu.mojo:build/gpu.mojoc"]
 compile-timeout = 600            # integer seconds >= 0
 
 [report]
