@@ -17,15 +17,22 @@ exclude_docs: |
 
 nav:
   - Home: index.md
+  - Installation: install.md
   - Getting started: getting-started.md
+  - Overview: overview.md
+  - Usage: usage.md
   - Continuous integration: ci.md
   - Run reports: reports.md
+  - Assertion diagnostics: assertions.md
+  - Build cache: build-cache.md
   - Shell completion: completions.md
   - Reference:
+      - CLI reference: cli-reference.md
       - Command-line contract: cli-contract.md
       - JSON event stream: json-stream.md
       - Collect JSON stream: collect-stream.md
       - Toolchain compatibility: compatibility.md
+      - Architecture: architecture.md
   - Maintainers:
       - Releasing: releasing.md
 

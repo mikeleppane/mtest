@@ -10,7 +10,7 @@ protects.
 Every entry names the Mojo toolchain its release was built against. mtest links
 the Mojo runtime and parses `TestSuite`'s printed report, so a release supports
 exactly one toolchain and there is no compatibility range; see the support
-matrix under [Installation](README.md#installation).
+matrix under [Installation](docs/install.md#supported-toolchains).
 
 ## Unreleased
 
@@ -35,6 +35,10 @@ matrix under [Installation](README.md#installation).
   Mojo 1.1 imports from it.
 - The `--junit-xml` artifact is created at `0666` minus the umask; the
   toolchain's `open` used to ignore the umask and leave it at a literal `0666`.
+- The README is a short front door. The reference it carried moved to pages
+  under `docs/` (installation, overview, usage, assertion diagnostics, build
+  cache, CLI reference, architecture) and to `CONTRIBUTING.md`; the
+  documentation site navigates to each.
 
 ### Known issues
 
@@ -227,6 +231,6 @@ First stable release, tagged `v1.0.0`.
 
 ### Added
 
-- The complete feature set is listed under [Features](README.md#features).
+- The complete feature set is listed under [Features](docs/overview.md#features).
   This entry records what identifies the release rather than restating it, so
   the two cannot drift.

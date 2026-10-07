@@ -2,7 +2,7 @@
 
 A working suite is five minutes away: one file to save, one run to watch pass,
 and one deliberate mistake to see reported as itself. This page assumes mtest
-is already in the workspace; if it is not, [install it first](index.md#install)
+is already in the workspace; if it is not, [install it first](install.md)
 and come back.
 
 ## Save a test file
@@ -10,8 +10,8 @@ and come back.
 In a directory with nothing in it yet, `mtest init` is the one command that
 writes all of this at once — a first test file, an `mtest.toml` pointing at
 `tests/`, a `.gitignore`, and with `--ci github` a workflow — and prints the
-prerequisites still to run. The
-[Starting a project section of the README](https://github.com/mikeleppane/mtest#starting-a-project)
+prerequisites still to run.
+[Starting a project in one command](#starting-a-project-in-one-command) below
 walks through it. The rest of this page builds the same thing a piece at a
 time, so you can see what each one is for.
 
@@ -61,7 +61,8 @@ this page reproduces on purpose.
 Every test file is built and its binary executed directly, because that is the
 only way a Mojo program's exit code is truthful. A compiler therefore has to be
 reachable from the workspace, and it is: the package declares one as its run
-dependency. Point the runner at the directory holding the file:
+dependency. Point the runner at the directory holding the file. `run` is the
+default subcommand, so `mtest tests/` means `mtest run tests/`:
 
 ```console
 $ pixi run mtest tests/
@@ -110,11 +111,48 @@ The reproduce line is the exact build invocation the runner used, so a compile
 error can be investigated outside the runner without reconstructing anything by
 hand.
 
+## Starting a project in one command
+
+`mtest init` writes the files a project needs into the current directory:
+
+```console
+$ pixi run mtest init --ci github
+created tests/test_example.mojo
+created mtest.toml
+created .github/workflows/test.yml
+created .gitignore
+next: pixi init .
+next: pixi workspace channel add https://conda.modular.com/max/
+next: pixi workspace channel add https://repo.prefix.dev/modular-community
+next: pixi add mtest
+next: mtest
+next: commit pixi.toml and pixi.lock, which the workflow installs from
+```
+
+Drop `--ci github` and neither the workflow nor the commit line appears. The
+`next:` lines are prerequisites rather than suggestions, and they are ordered:
+`pixi workspace channel add` fails outright without a `pixi.toml`, `mtest` does
+not resolve until the package is in the workspace, and the workflow just
+written installs from the lock file, which `pixi add` is what produces. They
+repeat the [installation](install.md) sequence because `init` cannot see
+whether you have run it — in a workspace that already has mtest, every line
+before `next: mtest` is already done and `pixi init .` would fail if you ran
+it again.
+
+**Nothing existing is replaced.** Every artifact is published without
+overwriting, so a second `init` reports each one as `skipped` and still exits
+`0`, and a file you have already edited is left exactly as it was.
+`.gitignore` is the one file `init` edits rather than creates: the
+`.mtest-cache/` and `build/bin/` entries — mtest's working state, and the
+binaries it compiles your test files into — are appended to whatever is already
+there, and only the ones actually missing are added. A `.gitignore` that is a
+symlink or not a regular file is refused (exit `4`) before any artifact is
+written.
+
 ## Where to go next
 
 Selection, retries, timeouts, sharding, the machine-readable reporters, and
-project configuration are all in the
-[Usage section of the README](https://github.com/mikeleppane/mtest#usage), and
-every flag is specified exactly in the
+project configuration are all in [Usage](usage.md), and every flag is listed in
+the [CLI reference](cli-reference.md) and specified exactly in the
 [command-line contract](cli-contract.md). If the next thing you want is a
 pipeline rather than a flag, go to [continuous integration](ci.md).

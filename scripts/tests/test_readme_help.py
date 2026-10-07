@@ -1,4 +1,4 @@
-"""Tests for the byte-exact README help checker."""
+"""Tests for the byte-exact CLI reference help checker."""
 
 from __future__ import annotations
 
@@ -11,35 +11,41 @@ from unittest import mock
 from scripts.checks import readme_help
 
 
-VALID_README = (
-    b"# mtest\n\n## CLI reference\n\n```text\ngenerated help\n```\n\n## Next section\n"
+VALID_PAGE = (
+    b"# CLI reference\n\nIntro.\n\n```text\ngenerated help\n```\n\n## Next section\n"
 )
 
 
 class ReadmeHelpExtractionTests(unittest.TestCase):
+    def test_reads_the_cli_reference_page(self) -> None:
+        self.assertEqual(readme_help.REFERENCE_PATH, Path("docs/cli-reference.md"))
+        readme_help._readme_help_block(
+            (readme_help.REPO_ROOT / readme_help.REFERENCE_PATH).read_bytes()
+        )
+
     def test_extracts_the_standalone_text_fence(self) -> None:
         self.assertEqual(
-            readme_help._readme_help_block(VALID_README),
+            readme_help._readme_help_block(VALID_PAGE),
             b"generated help\n",
         )
 
     def test_rejects_a_suffixed_closing_fence(self) -> None:
-        malformed = VALID_README.replace(b"```\n\n## Next", b"```suffix\n\n## Next")
+        malformed = VALID_PAGE.replace(b"```\n\n## Next", b"```suffix\n\n## Next")
         with self.assertRaisesRegex(AssertionError, "not closed"):
             readme_help._readme_help_block(malformed)
 
     def test_rejects_an_indented_closing_fence(self) -> None:
-        malformed = VALID_README.replace(b"```\n\n## Next", b"  ```\n\n## Next")
+        malformed = VALID_PAGE.replace(b"```\n\n## Next", b"  ```\n\n## Next")
         with self.assertRaisesRegex(AssertionError, "not closed"):
             readme_help._readme_help_block(malformed)
 
     def test_rejects_duplicate_cli_sections(self) -> None:
-        malformed = VALID_README + VALID_README
+        malformed = VALID_PAGE + VALID_PAGE
         with self.assertRaisesRegex(AssertionError, "exactly one CLI"):
             readme_help._readme_help_block(malformed)
 
     def test_rejects_duplicate_text_fences(self) -> None:
-        malformed = VALID_README.replace(
+        malformed = VALID_PAGE.replace(
             b"```\n\n## Next",
             b"```\n\n```text\nother\n```\n\n## Next",
         )
@@ -50,7 +56,9 @@ class ReadmeHelpExtractionTests(unittest.TestCase):
 class ReadmeHelpSubprocessTests(unittest.TestCase):
     def _repo(self, raw_tmp: str) -> Path:
         repo = Path(raw_tmp)
-        (repo / "README.md").write_bytes(VALID_README)
+        page = repo / readme_help.REFERENCE_PATH
+        page.parent.mkdir(parents=True)
+        page.write_bytes(VALID_PAGE)
         return repo
 
     def test_rejects_nonzero_help_exit(self) -> None:

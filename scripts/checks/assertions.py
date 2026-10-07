@@ -672,15 +672,15 @@ def _validate_api_run(
 
 
 def validate_example_run(run: subprocess.CompletedProcess[str]) -> None:
-    """Require the committed README source example to fail exactly as documented."""
-    require_complete_capture(run, "README example")
+    """Require the committed documented example to fail exactly as documented."""
+    require_complete_capture(run, "documented example")
     if run.returncode != 1:
         raise AssertionError(
-            f"README example must terminate with exact exit 1, got {run.returncode}"
+            f"documented example must terminate with exact exit 1, got {run.returncode}"
         )
     # A failing TestSuite raises its report as the uncaught error on stderr.
     if run.stdout:
-        raise AssertionError(f"README example wrote stdout: {run.stdout}")
+        raise AssertionError(f"documented example wrote stdout: {run.stdout}")
     report = run.stderr
     required = (
         "PASS [",
@@ -695,9 +695,9 @@ def validate_example_run(run: subprocess.CompletedProcess[str]) -> None:
     )
     missing = [item for item in required if item not in report]
     if missing:
-        raise AssertionError(f"README example output is incomplete: {missing}")
+        raise AssertionError(f"documented example output is incomplete: {missing}")
     if "CRASH" in report:
-        raise AssertionError("README example reported CRASH")
+        raise AssertionError("documented example reported CRASH")
 
 
 def run_static_assertion_proofs(mojo: Path) -> tuple[str, ...]:

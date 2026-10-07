@@ -9,13 +9,13 @@ built conda package. Nothing else keeps the three in sync; this script is that
 gate: parse all three, assert they are byte-identical, and assert the agreed
 value is the version this repo is currently shipping.
 
-Six further surfaces state a version to a reader rather than to a tool, and
+Eleven further surfaces state a version to a reader rather than to a tool, and
 they were gated by nothing until this script took them on: `README.md`,
-`docs/cli-contract.md` and two documentation-site pages carry captured CLI
+`docs/cli-contract.md` and seven documentation-site pages carry captured CLI
 transcripts, and the two banner SVGs under `docs/assets/` carry the same text
 inside the image, where nobody reading the rendered page can tell the output is
-not live. Until this gate covered them a stale literal in any of the six
-shipped to the repository page unnoticed.
+not live. Until this gate covered them a stale literal in any of them shipped
+to the repository page unnoticed.
 Each site is checked twice over: every literal it renders must equal the
 release, and it must still render at least one, because a restructure that
 dropped the transcripts would otherwise pass this gate vacuously. The gate
@@ -29,14 +29,14 @@ was not told about, forcing each new surface to be declared a site or an
 explicit exemption. That is what makes the list a decision rather than a
 memory.
 
-Eight files restate which Mojo toolchain this release uses: both conda recipes,
-the recipe build script, and the prose in the README (including its support
-matrix cell), the contract, the changelog, the contributing guide, and the
-agent guide. Every claim in them is compared against the one pin in
-`pixi.toml`. The recipes are the ones that ship, and nothing held either
-against the manifest before, so a toolchain bump that stopped at the manifest
-left the published package asking for a compiler this repository no longer
-builds against.
+Nine files restate which Mojo toolchain this release uses: both conda recipes,
+the recipe build script, and the prose in the README, the installation page
+(including its support matrix cell), the contract, the changelog, the
+contributing guide, and the agent guide. Every claim in them is compared
+against the one pin in `pixi.toml`. The recipes are the ones that ship, and
+nothing held either against the manifest before, so a toolchain bump that
+stopped at the manifest left the published package asking for a compiler this
+repository no longer builds against.
 
 That list is hand-written too, so it is inverted the same way, over the
 documents a reader acts on: every tracked Markdown file at the repository root
@@ -76,21 +76,27 @@ TRANSCRIPT_SITES = (
     Path("README.md"),
     Path("docs/cli-contract.md"),
     Path("docs/index.md"),
+    Path("docs/install.md"),
     Path("docs/getting-started.md"),
+    Path("docs/usage.md"),
+    Path("docs/assertions.md"),
+    Path("docs/build-cache.md"),
+    Path("docs/cli-reference.md"),
     Path("docs/assets/mtest-run.svg"),
     Path("docs/assets/mtest-flaky.svg"),
 )
 """Every public surface that renders `mtest <version>` for a reader.
 
-The four Markdown files carry captured CLI transcripts; the two SVGs carry the
-same text inside the README banners, where no reader of the rendered page can
-tell the output is not live. Two of the Markdown files are documentation-site
-pages, and their transcripts are not retyped copies: the docs-parity gate holds
+The nine Markdown files carry captured CLI transcripts; the two SVGs carry the
+same text inside the console images on the README and the usage page, where no
+reader of the rendered page can tell the output is not live. The install block
+and the first run on `docs/index.md`, `docs/install.md` and
+`docs/getting-started.md` are not retyped copies: the docs-parity gate holds
 each of them byte-identical to the README block it mirrors. That gate proves a
 page still says what the README says; this one proves what they both say is the
-version being shipped. `docs/ci.md` is a site page too and is deliberately
-absent, because its two mirrored workflows render no version literal, and a
-listed site that renders none fails this gate.
+version being shipped. `docs/ci.md`, `docs/reports.md` and the other pages are
+deliberately absent, because they render no version literal, and a listed site
+that renders none fails this gate.
 
 `scripts/release/bump.py` writes exactly this set, importing it from here so
 the writer and this gate cannot disagree about what a site is. Files that pin a
@@ -109,9 +115,12 @@ The trailing guard forbids a *prefix* match. On a malformed literal such as
 as written instead of being read as a release that agrees.
 """
 
-SUPPORT_MATRIX_HEADING = "### Supported toolchains"
-"""The README section whose table states which Mojo toolchain this release
-supports. Prose, not a transcript: `TRANSCRIPT_RE` cannot see it."""
+SUPPORT_MATRIX_PATH = Path("docs/install.md")
+"""The document carrying the support matrix."""
+
+SUPPORT_MATRIX_HEADING = "## Supported toolchains"
+"""The section whose table states which Mojo toolchain this release supports.
+Prose, not a transcript: `TRANSCRIPT_RE` cannot see it."""
 
 SUPPORT_MATRIX_PIN_RE = re.compile(r"(?m)^\|[^|\n]*\|\s*`([^`\n]+)`\s*\|")
 """The support matrix's Mojo cell, the first backquoted cell in that table.
@@ -174,6 +183,7 @@ MOJO_PIN_SITES = (
     Path("recipe/community/recipe.yaml.in"),
     Path("recipe/build.sh"),
     Path("README.md"),
+    Path("docs/install.md"),
     Path("CONTRIBUTING.md"),
     Path("CHANGELOG.md"),
     Path("docs/cli-contract.md"),
@@ -366,11 +376,11 @@ def check_transcript_sites(repo_root: Path = REPO_ROOT) -> None:
                 )
 
 
-def _support_matrix_mojo_pin(readme_path: Path) -> str:
-    """Extract the Mojo cell from the README's support matrix.
+def _support_matrix_mojo_pin(matrix_path: Path) -> str:
+    """Extract the Mojo cell from the published support matrix.
 
     Args:
-        readme_path: Absolute path to the README carrying the matrix.
+        matrix_path: Absolute path to the document carrying the matrix.
 
     Returns:
         The toolchain string the matrix promises, without its backquotes.
@@ -379,20 +389,20 @@ def _support_matrix_mojo_pin(readme_path: Path) -> str:
         AssertionError: If the section or its table row is absent, which means
             the matrix moved and this check would otherwise pass vacuously.
     """
-    text = _read_text(readme_path)
+    text = _read_text(matrix_path)
     start = text.find(SUPPORT_MATRIX_HEADING)
     if start < 0:
         raise AssertionError(
-            f"could not find a `{SUPPORT_MATRIX_HEADING}` section in {readme_path}"
+            f"could not find a `{SUPPORT_MATRIX_HEADING}` section in {matrix_path}"
         )
-    # Bound the search to the section, so a table further down the README
+    # Bound the search to the section, so a table further down the document
     # cannot stand in for a matrix that has lost its own.
     end = text.find("\n#", start + len(SUPPORT_MATRIX_HEADING))
     section = text[start:] if end < 0 else text[start:end]
     match = SUPPORT_MATRIX_PIN_RE.search(section)
     if match is None:
         raise AssertionError(
-            f"the `{SUPPORT_MATRIX_HEADING}` section of {readme_path} states no "
+            f"the `{SUPPORT_MATRIX_HEADING}` section of {matrix_path} states no "
             "Mojo toolchain"
         )
     return match.group(1)
@@ -419,26 +429,26 @@ def _manifest_mojo_pin(pixi_path: Path) -> str:
 
 
 def check_support_matrix(repo_root: Path = REPO_ROOT) -> None:
-    """Assert the README's support matrix names the toolchain actually pinned.
+    """Assert the published support matrix names the toolchain actually pinned.
 
     The matrix is a published claim about what this release builds against, and
     nothing else compares it to the manifest, so a toolchain bump that forgot
-    the README would advertise support for a version the repo no longer uses.
+    the matrix would advertise support for a version the repo no longer uses.
 
     Args:
-        repo_root: Repository root holding the README and the pixi manifest.
+        repo_root: Repository root holding the matrix and the pixi manifest.
 
     Raises:
         AssertionError: If the matrix cell and the manifest pin disagree, or if
             either cannot be located.
     """
-    readme_path = repo_root / "README.md"
+    matrix_path = repo_root / SUPPORT_MATRIX_PATH
     pixi_path = repo_root / "pixi.toml"
-    advertised = _support_matrix_mojo_pin(readme_path)
+    advertised = _support_matrix_mojo_pin(matrix_path)
     pinned = _manifest_mojo_pin(pixi_path)
     if advertised != pinned:
         raise AssertionError(
-            f"stale support matrix: {readme_path} advertises Mojo "
+            f"stale support matrix: {matrix_path} advertises Mojo "
             f"{advertised!r}, but {pixi_path} pins {pinned!r}"
         )
 

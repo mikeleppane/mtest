@@ -34,7 +34,7 @@ is that proof, with ten ordered completion records:
   4. Compile and run the installed assertion source at `-O0` and `-O3` with
      the exact compiler installed as the package's run dependency.
   5. Run the committed assertion example through the installed binary and
-     compare its normalized output byte-for-byte with the README.
+     compare its normalized output byte-for-byte with `docs/assertions.md`.
   6. Toolchain-threaded dogfood run: three focused executable probes through
      the INSTALLED binary (never `build/mtest`). Unlike stage 3, this stage
      inherits the environment, because the probes' compiler children need
@@ -49,7 +49,7 @@ is that proof, with ten ordered completion records:
      package format into its own local channel, install it into a second
      scratch env (again pinned to that build's exact build string and verified
      against its recorded SHA-256), run `--version`, then repeat the installed
-     assertion-source and README-example proofs.
+     assertion-source and documented-example proofs.
 
 Both gated platforms run this identical gate: the subdir, the loader-inspection
 command, and the loader environment variables come from one immutable
@@ -343,7 +343,8 @@ def main():
 ASSERTION_EXAMPLE = (
     REPO_ROOT / "companions" / "assertions" / "examples" / "test_diagnostics.mojo"
 )
-ASSERTION_README_SECTION = "## Assertion diagnostics\n"
+ASSERTION_DOC = REPO_ROOT / "docs" / "assertions.md"
+ASSERTION_DOC_SECTION = "# Assertion diagnostics\n"
 ASSERTION_MOJO_FENCE = "```mojo\n"
 ASSERTION_CONSOLE_FENCE = "```console\n"
 
@@ -964,18 +965,16 @@ def stage_assertion_source_probe(
         record_completed_stage(completion_id)
 
 
-def _readme_assertion_fence(
+def _doc_assertion_fence(
     contents: str,
     fence: str,
     label: str,
 ) -> str:
-    if contents.count(ASSERTION_README_SECTION) != 1:
+    if contents.count(ASSERTION_DOC_SECTION) != 1:
         raise PackageCheckError(
-            "README must contain exactly one assertion-diagnostics section"
+            "docs/assertions.md must contain exactly one assertion-diagnostics section"
         )
-    section_start = contents.index(ASSERTION_README_SECTION) + len(
-        ASSERTION_README_SECTION
-    )
+    section_start = contents.index(ASSERTION_DOC_SECTION) + len(ASSERTION_DOC_SECTION)
     section_end = contents.find("\n## ", section_start)
     if section_end == -1:
         section_end = len(contents)
@@ -991,18 +990,18 @@ def _readme_assertion_fence(
     return section[block_start : block_end + 1]
 
 
-def readme_assertion_example_block(contents: str) -> str:
+def doc_assertion_example_block(contents: str) -> str:
     """Extract the sole console fence from the assertion-diagnostics section."""
-    return _readme_assertion_fence(
+    return _doc_assertion_fence(
         contents,
         ASSERTION_CONSOLE_FENCE,
         "console",
     )
 
 
-def readme_assertion_source_block(contents: str) -> str:
+def doc_assertion_source_block(contents: str) -> str:
     """Extract the sole Mojo fence from the assertion-diagnostics section."""
-    return _readme_assertion_fence(
+    return _doc_assertion_fence(
         contents,
         ASSERTION_MOJO_FENCE,
         "Mojo",
@@ -1058,7 +1057,7 @@ def _normalize_assertion_times(output: str) -> str:
     return normalized
 
 
-def assertion_readme_command_prefix() -> str:
+def assertion_doc_command_prefix() -> str:
     """Return the documented command prefix for the installed example run."""
     installed_source = INSTALLED_ASSERTION_SOURCE_RELATIVE.as_posix()
     example_directory = ASSERTION_EXAMPLE.parent.relative_to(REPO_ROOT).as_posix()
@@ -1123,42 +1122,42 @@ def stage_assertion_example(
             f"installed assertion example output is incomplete: {missing}"
         )
     normalized = normalize_assertion_example(result.stdout, prefix, REPO_ROOT)
-    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    documented_source = readme_assertion_source_block(readme)
+    page = ASSERTION_DOC.read_text(encoding="utf-8")
+    documented_source = doc_assertion_source_block(page)
     example_source = ASSERTION_EXAMPLE.read_text(encoding="utf-8")
     if documented_source != example_source:
         diff = "".join(
             difflib.unified_diff(
                 documented_source.splitlines(keepends=True),
                 example_source.splitlines(keepends=True),
-                fromfile="README.md assertion Mojo fence",
+                fromfile="docs/assertions.md Mojo fence",
                 tofile=str(ASSERTION_EXAMPLE.relative_to(REPO_ROOT)),
             )
         )
         raise PackageCheckError(
-            "README assertion source differs from the executed example:\n" + diff
+            "documented assertion source differs from the executed example:\n" + diff
         )
-    documented = readme_assertion_example_block(readme)
-    actual = assertion_readme_command_prefix() + normalized
+    documented = doc_assertion_example_block(page)
+    actual = assertion_doc_command_prefix() + normalized
     normalized_documented = _normalize_assertion_times(documented)
     if normalized_documented != actual:
         diff = "".join(
             difflib.unified_diff(
                 normalized_documented.splitlines(keepends=True),
                 actual.splitlines(keepends=True),
-                fromfile="README.md assertion console fence",
+                fromfile="docs/assertions.md console fence",
                 tofile="installed assertion example",
             )
         )
         raise PackageCheckError(
-            "README assertion example differs from installed output:\n" + diff
+            "documented assertion example differs from installed output:\n" + diff
         )
     capture_name = f"{completion_id or 'assertion-example'}-output.txt"
     capture = SCRATCH_ROOT / capture_name
     capture.write_text(actual, encoding="utf-8")
     print(actual, end="", flush=True)
     print(
-        f"package-check: captured normalized README output at {capture}",
+        f"package-check: captured normalized documented output at {capture}",
         flush=True,
     )
     if completion_id is not None:
@@ -2210,7 +2209,7 @@ def stage_tarball_fallback_smoke(target: PackagePlatform | None = None) -> None:
     """Smoke-run the classic tar-bz2 package format.
 
     Builds the SAME recipe into its own local channel, installs it into a second
-    scratch env, runs `--version`, and repeats the source and README assertion
+    scratch env, runs `--version`, and repeats the source and documented assertion
     proofs.
 
     Args:

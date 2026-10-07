@@ -82,7 +82,4 @@ that no script offers a flag, subcommand, or value this build refuses.
 [§30 of the command-line
 contract](cli-contract.md#30-shell-completion-mtest-completions-shell) is the
 normative specification: the grammar, the exit codes, and what the three
-scripts do and do not promise. The blocks on this page are mirrored byte for
-byte from the [Shell completion section of the
-README](https://github.com/mikeleppane/mtest#shell-completion), which is where
-they are written down.
+scripts do and do not promise.

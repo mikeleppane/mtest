@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Require README's CLI help fence to equal the real binary's stdout."""
+"""Require the CLI reference page's help fence to equal the real binary's stdout.
+
+The listing lives in `docs/cli-reference.md`. The module keeps its
+`readme_help` name, and the pixi task its `readme-help-check` name, because
+hosted CI calls the task by name.
+"""
 
 from __future__ import annotations
 
@@ -10,15 +15,18 @@ import sys
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SECTION = b"## CLI reference\n"
+REFERENCE_PATH = Path("docs/cli-reference.md")
+SECTION = b"# CLI reference\n"
 OPEN_FENCE = b"```text\n"
 CLOSE_FENCE = b"```"
 
 
 def _readme_help_block(contents: bytes) -> bytes:
-    """Extract the single text fence in README's CLI reference section."""
+    """Extract the single text fence in the CLI reference section."""
     if contents.count(SECTION) != 1:
-        raise AssertionError("README must contain exactly one CLI reference section")
+        raise AssertionError(
+            f"{REFERENCE_PATH} must contain exactly one CLI reference section"
+        )
     section_start = contents.index(SECTION) + len(SECTION)
     next_section = contents.find(b"\n## ", section_start)
     section_end = len(contents) if next_section == -1 else next_section
@@ -36,8 +44,8 @@ def _readme_help_block(contents: bytes) -> bytes:
 
 
 def check_readme_help(repo_root: Path = REPO_ROOT) -> None:
-    """Compare README's help fence with the checked-out binary byte-for-byte."""
-    readme = _readme_help_block((repo_root / "README.md").read_bytes())
+    """Compare the CLI reference help fence with the built binary byte-for-byte."""
+    documented = _readme_help_block((repo_root / REFERENCE_PATH).read_bytes())
     binary = repo_root / "build" / "mtest"
     try:
         run = subprocess.run(
@@ -61,16 +69,18 @@ def check_readme_help(repo_root: Path = REPO_ROOT) -> None:
             "built binary --help wrote stderr: "
             + run.stderr.decode("utf-8", errors="replace")
         )
-    if readme != run.stdout:
+    if documented != run.stdout:
         diff = "".join(
             difflib.unified_diff(
-                readme.decode("utf-8", errors="replace").splitlines(keepends=True),
+                documented.decode("utf-8", errors="replace").splitlines(keepends=True),
                 run.stdout.decode("utf-8", errors="replace").splitlines(keepends=True),
-                fromfile="README.md help fence",
+                fromfile=f"{REFERENCE_PATH} help fence",
                 tofile="build/mtest --help",
             )
         )
-        raise AssertionError("README help fence differs from the binary:\n" + diff)
+        raise AssertionError(
+            f"{REFERENCE_PATH} help fence differs from the binary:\n" + diff
+        )
 
 
 def main() -> int:
@@ -80,7 +90,10 @@ def main() -> int:
     except AssertionError as exc:
         print(f"readme-help-check: FAIL: {exc}", file=sys.stderr)
         return 1
-    print("readme-help-check: OK — README help fence matches build/mtest --help")
+    print(
+        f"readme-help-check: OK — {REFERENCE_PATH} help fence matches "
+        "build/mtest --help"
+    )
     return 0
 
 

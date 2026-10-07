@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""Hold every command and output on the documentation site to its README source.
+"""Hold every command and output the site repeats from the README to its source.
 
-The site exists to navigate a reader to documents that are already gated: the
-command-line contract, the event-stream specification, the release runbook.
-Five pages cannot do their job by navigation alone — a landing page has to
-show how the package is installed, a five-minute path has to show a test file
-and the run it produces, the continuous-integration page has to show the
-workflow to paste, the run-report page has to show what the document it
-describes actually looks like, and the shell-completion page has to show where
-each shell wants the script written — and each of those is a command or a
-captured output living somewhere other than the surface that owns it.
+Most pages under `docs/` own what they show: usage, the build cache, the CLI
+reference, the run reports and the rest are written down once, on their page.
+The README is a short front door, and its quick start — the install commands,
+a first test file, and the green run it produces — is the one place three site
+pages repeat: the landing page and the installation page show the install
+block, and the five-minute path shows the test file and the run. Each of those
+is a command or a captured output living somewhere other than the surface that
+owns it.
 
 A second copy of a command is the defect this repository keeps finding. A copy
 on a site page is executed by nothing and reviewed against nothing: it agrees
@@ -25,13 +24,10 @@ outright is named in `OWNED_BLOCKS` instead. Declaring the block one way or the
 other is what buys the right to show it at all.
 
 Parity is agreement with the README, which is a weaker claim than truth and is
-stated that way deliberately. Only two parts of the README are executed against
-a real binary: its command-line listing, compared to the built binary's own
-help output, and its assertion example, run and matched against its documented
-outcome. The install block and the first-run transcripts these pages mirror are
-not among them, so this gate proves a page cannot drift from the README — not
-that the README is right. Read a page's claim about its own guarantee against
-that boundary.
+stated that way deliberately. The install block and the first-run transcripts
+these pages mirror are not executed against a real binary, so this gate proves
+a page cannot drift from the README — not that the README is right. Read a
+page's claim about its own guarantee against that boundary.
 
 Four further assertions stop the gate from being defeated by simply not using
 it:
@@ -94,19 +90,16 @@ DOCS_DIR = Path("docs")
 
 SITE_PAGES = (
     Path("docs/index.md"),
+    Path("docs/install.md"),
     Path("docs/getting-started.md"),
-    Path("docs/ci.md"),
-    Path("docs/reports.md"),
-    Path("docs/completions.md"),
 )
-"""Every documentation-site page allowed to render a command or an output.
+"""Every documentation-site page that repeats a block from the README.
 
-A page here is a copy: it exists to walk a reader somewhere and shows blocks
-that live elsewhere, so each of those blocks is declared in `PARITY_BLOCKS` and
-compared to its source; a block the page itself owns is declared in
-`OWNED_BLOCKS`. Every page listed here must declare at least one mirror, which
-is what stops a page from being emptied of both its blocks and its declarations
-and still passing.
+A page here shows at least one block that lives in the README, so each such
+block is declared in `PARITY_BLOCKS` and compared to its source, and every
+other block on the page is declared in `OWNED_BLOCKS`. Every page listed here
+must declare at least one mirror, which is what stops a page from being emptied
+of both its mirrored blocks and their declarations and still passing.
 """
 
 REFERENCE_PAGES = (
@@ -115,17 +108,31 @@ REFERENCE_PAGES = (
     Path("docs/collect-stream.md"),
     Path("docs/compatibility.md"),
     Path("docs/releasing.md"),
+    Path("docs/overview.md"),
+    Path("docs/usage.md"),
+    Path("docs/ci.md"),
+    Path("docs/reports.md"),
+    Path("docs/assertions.md"),
+    Path("docs/build-cache.md"),
+    Path("docs/completions.md"),
+    Path("docs/cli-reference.md"),
+    Path("docs/architecture.md"),
 )
 """Documents the site navigates to, which are originals rather than copies.
 
 Excluded from parity by this explicit rule, not by being forgotten: parity is
-agreement between a copy and the source it copied, and these five copy
-nothing. Each is the surface that owns its own content — the frozen
-command-line contract (whose documented behaviors the contract gate executes),
-the two machine-format specifications, the toolchain-compatibility page that
-describes what the compatibility canary probes and what its classifications
-mean, and the release runbook — and the contract is a version-transcript site
-in its own right.
+agreement between a copy and the source it copied, and these copy nothing.
+Each is the surface that owns its own content — the frozen command-line
+contract (whose documented behaviors the contract gate executes), the two
+machine-format specifications, the toolchain-compatibility page that describes
+what the compatibility canary probes and what its classifications mean, the
+release runbook, and the user guides that moved out of the README. Some are
+held to a real binary by gates of their own: `readme-help-check` compares the
+CLI reference's help listing with `build/mtest --help`, `package-check` runs
+the assertion example and matches its documented output, and the contract gate
+compares the first workflow on the continuous-integration page with what
+`mtest init --ci github` writes. Several render version transcripts, which the
+version gate holds as sites in their own right.
 
 Naming them is what lets the sweep below invert the question. Without an
 explicit list, "not a site page" and "not gated at all" would be the same
@@ -294,35 +301,13 @@ class ParityBlock:
 
 
 PARITY_BLOCKS = (
-    # The landing page's install block: the channel and package commands, and
-    # the version the installed binary prints back.
-    ParityBlock(Path("docs/index.md"), 0, "Installation", 0),
-    # The five-minute path: the test file a reader saves, the command that
-    # writes it for them, the passing run, and the compile error a wrong
-    # import produces.
-    ParityBlock(Path("docs/getting-started.md"), 0, "Your first test", 0),
-    ParityBlock(Path("docs/getting-started.md"), 1, "Your first test", 1),
-    ParityBlock(Path("docs/getting-started.md"), 2, "Your first test", 2),
-    ParityBlock(Path("docs/getting-started.md"), 3, "Your first test", 3),
-    # The workflow to paste, the sharded variant of it, and the composite
-    # action that replaces the invocation step in either.
-    ParityBlock(Path("docs/ci.md"), 0, "Run it in CI", 0),
-    ParityBlock(Path("docs/ci.md"), 1, "Run it in CI", 1),
-    ParityBlock(Path("docs/ci.md"), 2, "Run it in CI", 2),
-    # The run report: the invocation that writes both formats, and the three
-    # parts of the document a reader is shown — the summary table, one file
-    # section with its root-relative backtrace, and the machine index.
-    ParityBlock(Path("docs/reports.md"), 0, "Run reports", 0),
-    ParityBlock(Path("docs/reports.md"), 1, "Run reports", 1),
-    ParityBlock(Path("docs/reports.md"), 2, "Run reports", 2),
-    ParityBlock(Path("docs/reports.md"), 3, "Run reports", 3),
-    # Installing a completion script: the two bash routes, the zsh file and
-    # the `.zshrc` lines that put its directory on `$fpath` before `compinit`,
-    # and the fish redirect.
-    ParityBlock(Path("docs/completions.md"), 0, "Shell completion", 0),
-    ParityBlock(Path("docs/completions.md"), 1, "Shell completion", 1),
-    ParityBlock(Path("docs/completions.md"), 2, "Shell completion", 2),
-    ParityBlock(Path("docs/completions.md"), 3, "Shell completion", 3),
+    # The install block: the channel and package commands, and the version the
+    # installed binary prints back, on the landing and installation pages.
+    ParityBlock(Path("docs/index.md"), 0, "Quick start", 0),
+    ParityBlock(Path("docs/install.md"), 0, "Quick start", 0),
+    # The five-minute path: the test file a reader saves and the passing run.
+    ParityBlock(Path("docs/getting-started.md"), 0, "Quick start", 1),
+    ParityBlock(Path("docs/getting-started.md"), 2, "Quick start", 2),
 )
 """Every mirrored block, paired with the README block that owns it.
 
@@ -331,7 +316,13 @@ genuinely cannot do its job without showing it, and appearing here is what
 subjects it to the comparison below.
 """
 
-OWNED_BLOCKS: tuple[tuple[Path, int], ...] = ()
+OWNED_BLOCKS: tuple[tuple[Path, int], ...] = (
+    # The five-minute path's own blocks: the command that writes the test file,
+    # the compile error a wrong import produces, and `mtest init`.
+    (Path("docs/getting-started.md"), 1),
+    (Path("docs/getting-started.md"), 3),
+    (Path("docs/getting-started.md"), 4),
+)
 """Fenced blocks on a site page that the page itself owns, by `(page, ordinal)`.
 
 The README does not carry these, so there is nothing to compare them with.
