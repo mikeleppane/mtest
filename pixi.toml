@@ -35,6 +35,11 @@ rattler-build = "==0.69.1"
 # never fires (see scripts/checks/community_recipe.py), so this owns that check.
 check-jsonschema = "==0.37.4"
 
+# A user-site package (~/.local/lib/python3.12) shadows the environment's copy;
+# a stray `pathspec` there crashed `mojo format`. Tasks see only the lock.
+[activation.env]
+PYTHONNOUSERSITE = "1"
+
 [tasks]
 # Print the pinned Mojo version. First CI step, so a broken toolchain fails fast
 # and the exact build is stamped into the log beside the transcript headers.
