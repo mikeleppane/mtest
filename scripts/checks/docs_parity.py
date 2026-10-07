@@ -780,19 +780,32 @@ def check_site_blocks_are_all_declared(repo_root: Path = REPO_ROOT) -> None:
 
     Raises:
         AssertionError: If a site page holds a fenced block that no declaration
-            names, an owned ordinal names no block, an indented code block, or
-            a raw-HTML code container.
+            names, an owned ordinal names no block, an owned block copies a
+            README block, an indented code block, or a raw-HTML code container.
     """
     declared = {(block.page, block.page_index) for block in PARITY_BLOCKS}
     declared |= set(OWNED_BLOCKS)
+    readme_bodies = {
+        block.body
+        for block in fenced_blocks(
+            _read_text(repo_root / README_PATH), str(README_PATH)
+        )
+    }
     for page in SITE_PAGES:
         text = _read_text(repo_root / page)
         blocks = fenced_blocks(text, str(page))
         for owned_page, owned_index in OWNED_BLOCKS:
-            if owned_page == page and owned_index >= len(blocks):
+            if owned_page != page:
+                continue
+            if owned_index >= len(blocks):
                 raise AssertionError(
                     f"{page} declares owned block {owned_index} but holds only "
                     f"{len(blocks)}"
+                )
+            if blocks[owned_index].body in readme_bodies:
+                raise AssertionError(
+                    f"{page} block {owned_index} is declared owned but copies "
+                    f"a {README_PATH} block; declare it in PARITY_BLOCKS"
                 )
         undeclared = [
             f"{page}:{block.line} (block {index})"

@@ -197,6 +197,22 @@ class ParityMutationTests(unittest.TestCase):
             docs_parity.check_parity_blocks(root)
             docs_parity.check_site_blocks_are_all_declared(root)
 
+    def test_an_owned_block_copying_the_readme_is_rejected(self) -> None:
+        """An owned block is never compared, so a README copy cannot hide there."""
+        page = Path("docs/getting-started.md")
+        index = next(i for p, i in docs_parity.OWNED_BLOCKS if p == page)
+        with self._tree() as raw:
+            root = Path(raw)
+            owned = docs_parity.fenced_blocks(
+                (root / page).read_text(encoding="utf-8"), str(page)
+            )[index]
+            readme = docs_parity.fenced_blocks(
+                (root / "README.md").read_text(encoding="utf-8"), "README.md"
+            )[0]
+            self._rewrite(root, page, owned.body, readme.body)
+            with self.assertRaisesRegex(AssertionError, "copies a README.md block"):
+                docs_parity.check_site_blocks_are_all_declared(root)
+
     def test_a_changed_byte_inside_a_mirrored_block_is_rejected(self) -> None:
         """The defect the gate exists for: a page command that drifted."""
         with self._tree() as raw:
