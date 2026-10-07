@@ -342,8 +342,8 @@ def s_debug_hands_over(context: ScenarioContext) -> str:
     expect_exit(failing, 1)
     _marker_lines(failing)
     expect(
-        "tests run:" in failing.stdout,
-        f"the failing binary's own report never arrived: {failing.stdout!r}",
+        "tests run:" in failing.stderr,
+        f"the failing binary's own report never arrived: {failing.stderr!r}",
     )
     _expect_no_verdict(failing)
     return "handed over twice; the exit was the test's own both times"
@@ -885,10 +885,11 @@ def s_new_then_run(context: ScenarioContext) -> str:
         )
 
         # The stem is interpolated into the scaffolded file's own docstring, so
-        # a basename carrying the two characters that end a Mojo string
-        # literal is the case where `new` can report success and leave behind
-        # something that does not compile. Only building it settles that.
-        hostile = 'test_a"""b\\.mojo'
+        # a basename carrying a backslash is the case where `new` can report
+        # success and leave behind something that does not compile (`\.` is an
+        # invalid escape). It carries no `"`: Mojo 1.1.0 segfaults compiling a
+        # TestSuite file whose name holds one. Only building it settles that.
+        hostile = "test_a'b\\.mojo"
         made = runner.run_mtest(["new", hostile])
         expect_exit(made, 0)
         hostile_run = runner.run_mtest([hostile])

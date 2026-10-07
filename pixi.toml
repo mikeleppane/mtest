@@ -14,7 +14,7 @@ platforms = ["linux-64", "osx-arm64"]
 # Bumping mojo is an Ask-first decision. CI must match local, and a bump can
 # change both valid syntax and the pinned protocol, so regenerate the
 # transcripts and read the diff as the changelog. See AGENTS.md.
-mojo = "==1.0.0b2,<2"
+mojo = "==1.1.0,<2"
 # Build and check tooling only. Product code and project-config parsing are
 # native Mojo, and the shipped package has no Python dependency.
 python = "3.12.*"
@@ -73,8 +73,8 @@ bump = "python -m scripts.release.bump"
 
 # Precompile the vendored TOML parser and src/mtest into build/toml.mojoc and
 # build/mtest.mojoc. The package-compiles GATE: an empty-but-broken package
-# fails here before any test does. `mojo package` does not exist in 1.0.0b2;
-# `mojo precompile` produces the compiled artifacts.
+# fails here before any test does. Mojo has no `mojo package`; `mojo
+# precompile` produces the compiled artifacts.
 build = "bash scripts/build/mojo_package.sh"
 
 # Compile the exec-private C adapter to the one production object linked into
@@ -128,7 +128,7 @@ completions-check-host-shells = { cmd = "python -m scripts.checks.completion_she
 ] }
 
 # Build recipe/recipe.yaml into a LOCAL conda channel: rattler-build solves an
-# isolated build env (mojo ==1.0.0b2 plus the C toolchain), builds mtest FROM
+# isolated build env (mojo ==1.1.0 plus the C toolchain), builds mtest FROM
 # SOURCE inside that sandbox, and writes the .conda under
 # build/conda-channel/<subdir>, a plain directory with repodata.json. Nothing is
 # uploaded or published. Not wired into `pixi run ci`; each platform's package
@@ -174,7 +174,7 @@ py-check = "python -m scripts.checks.python_quality"
 # the output location (build/site, which .gitignore already covers).
 docs-build = "python -m scripts.docs.build_site"
 
-# Rewrite every real Mojo file in its own invocation. Mojo 1.0.0b2 can stall
+# Rewrite every real Mojo file in its own invocation. Mojo 1.0.0b2 stalled
 # when one formatter invocation spans several paths. `find -P` does not traverse
 # symlinks; the C-locale sort fixes ordering.
 mojo-fmt = '''sh -c '
@@ -442,7 +442,7 @@ harness-check = { depends-on = [
 abi-probe-check = "python -m scripts.checks.abi_probe"
 
 # A fail-closed TRIPWIRE in `ci-preflight`: ask the pinned toolchain whether it
-# has grown a source-coverage facility. Mojo 1.0.0b2 has none, neither `mojo
+# has grown a source-coverage facility. Mojo 1.1.0 has none, neither `mojo
 # build --help` nor `mojo --help` naming a coverage, profile, or instrumentation
 # flag, which is why notes/test-confidence-map.md maps release confidence to
 # behavioral and mutation oracles instead of to a line percentage. Asymmetric on

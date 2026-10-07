@@ -93,11 +93,11 @@ def test_precompile_key_is_stable_and_tracks_its_source() raises:
     var no_dirs = List[String]()
     var first_ctx = CacheContext()
     var first = _step_key(
-        first_ctx, root, "pkg", no_dirs, no_dirs, "build/pkg.mojopkg"
+        first_ctx, root, "pkg", no_dirs, no_dirs, "build/pkg.mojoc"
     )
     var again_ctx = CacheContext()
     var again = _step_key(
-        again_ctx, root, "pkg", no_dirs, no_dirs, "build/pkg.mojopkg"
+        again_ctx, root, "pkg", no_dirs, no_dirs, "build/pkg.mojoc"
     )
     # Byte identity over unchanged inputs is the whole premise: a key that
     # wandered would make every stamp a permanent miss.
@@ -115,7 +115,7 @@ def test_precompile_key_is_stable_and_tracks_its_source() raises:
     )
     var edited_ctx = CacheContext()
     var edited = _step_key(
-        edited_ctx, root, "pkg", no_dirs, no_dirs, "build/pkg.mojopkg"
+        edited_ctx, root, "pkg", no_dirs, no_dirs, "build/pkg.mojoc"
     )
     assert_not_equal(first.digest_full, edited.digest_full)
 
@@ -123,7 +123,7 @@ def test_precompile_key_is_stable_and_tracks_its_source() raises:
     # a different package is a different step.
     var moved_ctx = CacheContext()
     var moved = _step_key(
-        moved_ctx, root, "pkg", no_dirs, no_dirs, "build/other.mojopkg"
+        moved_ctx, root, "pkg", no_dirs, no_dirs, "build/other.mojoc"
     )
     assert_not_equal(edited.digest_full, moved.digest_full)
 
@@ -139,7 +139,7 @@ def test_precompile_key_keys_a_single_file_source() raises:
         "lib/helper.mojo",
         no_dirs,
         no_dirs,
-        "build/helper.mojopkg",
+        "build/helper.mojoc",
     )
     # A single-file source contributes its own bytes rather than a walk, and
     # `src_sha` describes them.
@@ -152,7 +152,7 @@ def test_precompile_key_keys_a_single_file_source() raises:
         "lib/helper.mojo",
         no_dirs,
         no_dirs,
-        "build/helper.mojopkg",
+        "build/helper.mojoc",
     )
     assert_not_equal(before.digest_full, after.digest_full)
 
@@ -177,7 +177,7 @@ def test_precompile_key_covers_a_single_file_sources_siblings() raises:
         "lib/pkg.mojo",
         no_dirs,
         no_dirs,
-        "build/pkg.mojopkg",
+        "build/pkg.mojoc",
     )
 
     write_file(root, "lib/sibling.mojo", "def value() -> Int:\n    return 2\n")
@@ -188,7 +188,7 @@ def test_precompile_key_covers_a_single_file_sources_siblings() raises:
         "lib/pkg.mojo",
         no_dirs,
         no_dirs,
-        "build/pkg.mojopkg",
+        "build/pkg.mojoc",
     )
     assert_not_equal(
         before.digest_full,
@@ -207,7 +207,7 @@ def test_precompile_key_covers_a_single_file_sources_siblings() raises:
         "lib/pkg.mojo",
         no_dirs,
         no_dirs,
-        "build/pkg.mojopkg",
+        "build/pkg.mojoc",
     )
     assert_equal(after.digest_full, noise.digest_full)
 
@@ -218,9 +218,9 @@ def test_precompile_key_excludes_its_own_output() raises:
     # key that digested it would describe the step's RESULT: the cold run would
     # key one way, the warm run another, and no stamp could ever be hit.
     var root = _pkg_root()
-    var out_path = String("build/pkg.mojopkg")
+    var out_path = String("build/pkg.mojoc")
     write_bytes(root, out_path, [UInt8(1), UInt8(2)])
-    write_bytes(root, "build/neighbour.mojopkg", [UInt8(3)])
+    write_bytes(root, "build/neighbour.mojoc", [UInt8(3)])
     var includes: List[String] = ["build"]
     var no_dirs = List[String]()
     var first_ctx = CacheContext()
@@ -236,7 +236,7 @@ def test_precompile_key_excludes_its_own_output() raises:
 
     # ...while everything else in that same include root still does, which is
     # what proves the exclusion is narrow and the root really is walked.
-    write_bytes(root, "build/neighbour.mojopkg", [UInt8(4)])
+    write_bytes(root, "build/neighbour.mojoc", [UInt8(4)])
     var neighbour_ctx = CacheContext()
     var neighbour = _step_key(
         neighbour_ctx, root, "pkg", includes, no_dirs, out_path
@@ -246,19 +246,19 @@ def test_precompile_key_excludes_its_own_output() raises:
 
 def test_precompile_key_tracks_earlier_step_outputs() raises:
     var root = _pkg_root()
-    write_bytes(root, "build/first.mojopkg", [UInt8(1)])
+    write_bytes(root, "build/first.mojoc", [UInt8(1)])
     var no_dirs = List[String]()
-    var priors: List[String] = ["build/first.mojopkg"]
+    var priors: List[String] = ["build/first.mojoc"]
     var before_ctx = CacheContext()
     var before = _step_key(
-        before_ctx, root, "pkg", no_dirs, priors, "build/pkg.mojopkg"
+        before_ctx, root, "pkg", no_dirs, priors, "build/pkg.mojoc"
     )
     # An earlier step's package is on this step's include path, so rebuilding
     # that step must rebuild this one.
-    write_bytes(root, "build/first.mojopkg", [UInt8(2)])
+    write_bytes(root, "build/first.mojoc", [UInt8(2)])
     var after_ctx = CacheContext()
     var after = _step_key(
-        after_ctx, root, "pkg", no_dirs, priors, "build/pkg.mojopkg"
+        after_ctx, root, "pkg", no_dirs, priors, "build/pkg.mojoc"
     )
     assert_not_equal(before.digest_full, after.digest_full)
 
@@ -272,13 +272,11 @@ def test_precompile_key_forks_the_base_not_the_prefix() raises:
     var no_dirs = List[String]()
     var ctx = CacheContext()
     var before = _step_key(
-        ctx, root, "pkg", no_dirs, no_dirs, "build/pkg.mojopkg"
+        ctx, root, "pkg", no_dirs, no_dirs, "build/pkg.mojoc"
     )
     finalize_includes(ctx, root, ["pkg"])
     assert_true(ctx.enabled, "cache off: " + ctx.disable_reason)
-    var after = _step_key(
-        ctx, root, "pkg", no_dirs, no_dirs, "build/pkg.mojopkg"
-    )
+    var after = _step_key(ctx, root, "pkg", no_dirs, no_dirs, "build/pkg.mojoc")
     assert_equal(before.digest_full, after.digest_full)
 
 
@@ -288,12 +286,12 @@ def test_precompile_key_walks_extra_include_dirs() raises:
     var no_dirs = List[String]()
     var plain_ctx = CacheContext()
     var plain = _step_key(
-        plain_ctx, root, "pkg", no_dirs, no_dirs, "build/pkg.mojopkg"
+        plain_ctx, root, "pkg", no_dirs, no_dirs, "build/pkg.mojoc"
     )
     var extra_ctx = CacheContext()
     extra_ctx.extra_walk_dirs.append("extra")
     var extra = _step_key(
-        extra_ctx, root, "pkg", no_dirs, no_dirs, "build/pkg.mojopkg"
+        extra_ctx, root, "pkg", no_dirs, no_dirs, "build/pkg.mojoc"
     )
     # A `-I` inside `--build-arg` reaches the step exactly like a configured
     # include root, so it has to reach the step's key the same way.
@@ -305,7 +303,7 @@ def test_precompile_key_disables_on_an_unreadable_source() raises:
     var no_dirs = List[String]()
     var ctx = CacheContext()
     var key = precompile_key(
-        ctx, root, "absent.mojo", no_dirs, no_dirs, "build/absent.mojopkg"
+        ctx, root, "absent.mojo", no_dirs, no_dirs, "build/absent.mojoc"
     )
     # A step whose inputs cannot be characterized must RUN, unconditionally,
     # and take the cache down with it.
@@ -330,7 +328,7 @@ def test_precompile_key_disables_on_an_unwalkable_include_root() raises:
     # No `try`/`finally`: `precompile_key` is non-raising by contract, so the
     # restore below is unconditionally reached.
     var key = precompile_key(
-        ctx, root, "pkg", includes, no_dirs, "build/pkg.mojopkg"
+        ctx, root, "pkg", includes, no_dirs, "build/pkg.mojoc"
     )
     chmod_path("755", root + "/inc")
     assert_false(Bool(key))
@@ -344,10 +342,10 @@ def test_precompile_key_disables_on_an_unwalkable_include_root() raises:
 def test_precompile_key_disables_on_an_unreadable_prior_output() raises:
     var root = _pkg_root()
     var no_dirs = List[String]()
-    var priors: List[String] = ["build/vanished.mojopkg"]
+    var priors: List[String] = ["build/vanished.mojoc"]
     var ctx = CacheContext()
     var key = precompile_key(
-        ctx, root, "pkg", no_dirs, priors, "build/pkg.mojopkg"
+        ctx, root, "pkg", no_dirs, priors, "build/pkg.mojoc"
     )
     assert_false(Bool(key))
     assert_false(ctx.enabled)
@@ -363,7 +361,7 @@ def test_precompile_key_declines_for_a_disabled_context() raises:
     var ctx = CacheContext()
     ctx.disable("earlier cause")
     var key = precompile_key(
-        ctx, root, "pkg", no_dirs, no_dirs, "build/pkg.mojopkg"
+        ctx, root, "pkg", no_dirs, no_dirs, "build/pkg.mojoc"
     )
     assert_false(Bool(key))
     # The FIRST cause is the actionable one; keying an off cache must not bury
@@ -373,7 +371,7 @@ def test_precompile_key_declines_for_a_disabled_context() raises:
 
 def test_precompile_stamp_round_trips_and_guards_its_output() raises:
     var root = _pkg_root()
-    var out_path = String("build/pkg.mojopkg")
+    var out_path = String("build/pkg.mojoc")
     write_bytes(root, out_path, [UInt8(1), UInt8(2), UInt8(3)])
     var no_dirs = List[String]()
     var ctx = CacheContext()
@@ -417,7 +415,7 @@ def test_precompile_key_frames_an_absent_include_root() raises:
     var includes: List[String] = ["build"]
     var cold_ctx = CacheContext()
     var cold = _step_key(
-        cold_ctx, root, "pkg", includes, no_dirs, "build/pkg.mojopkg"
+        cold_ctx, root, "pkg", includes, no_dirs, "build/pkg.mojoc"
     )
     assert_true(cold_ctx.enabled, "cache off: " + cold_ctx.disable_reason)
 
@@ -425,16 +423,16 @@ def test_precompile_key_frames_an_absent_include_root() raises:
     makedirs(root + "/build")
     var empty_ctx = CacheContext()
     var empty = _step_key(
-        empty_ctx, root, "pkg", includes, no_dirs, "build/pkg.mojopkg"
+        empty_ctx, root, "pkg", includes, no_dirs, "build/pkg.mojoc"
     )
     assert_true(empty_ctx.enabled, "cache off: " + empty_ctx.disable_reason)
     assert_not_equal(cold.digest_full, empty.digest_full)
 
     # ...and so is present with contents, so a root that fills up takes a miss.
-    write_bytes(root, "build/other.mojopkg", [UInt8(7)])
+    write_bytes(root, "build/other.mojoc", [UInt8(7)])
     var filled_ctx = CacheContext()
     var filled = _step_key(
-        filled_ctx, root, "pkg", includes, no_dirs, "build/pkg.mojopkg"
+        filled_ctx, root, "pkg", includes, no_dirs, "build/pkg.mojoc"
     )
     assert_not_equal(empty.digest_full, filled.digest_full)
     assert_not_equal(cold.digest_full, filled.digest_full)
@@ -445,7 +443,7 @@ def test_precompile_key_frames_an_absent_include_root() raises:
     write_file(file_root, "build", "not a directory\n")
     var file_ctx = CacheContext()
     var refused = precompile_key(
-        file_ctx, file_root, "pkg", includes, no_dirs, "build/pkg.mojopkg"
+        file_ctx, file_root, "pkg", includes, no_dirs, "build/pkg.mojoc"
     )
     assert_false(Bool(refused))
     assert_false(file_ctx.enabled)
@@ -462,7 +460,7 @@ def test_precompile_probe_refuses_a_symlinked_stamp() raises:
     # cannot serve stale bytes TODAY — this pins that the asymmetry is closed
     # before some later change starts depending on it.
     var root = _pkg_root()
-    var out_path = String("build/pkg.mojopkg")
+    var out_path = String("build/pkg.mojoc")
     write_bytes(root, out_path, [UInt8(1), UInt8(2)])
     var no_dirs = List[String]()
     var ctx = CacheContext()
@@ -488,7 +486,7 @@ def test_precompile_probe_refuses_a_symlinked_stamp() raises:
 
 def test_precompile_publish_reaps_the_steps_stale_stamps() raises:
     var root = _pkg_root()
-    var out_path = String("build/pkg.mojopkg")
+    var out_path = String("build/pkg.mojoc")
     write_bytes(root, out_path, [UInt8(1)])
     var no_dirs = List[String]()
     var first_ctx = CacheContext()
@@ -536,7 +534,7 @@ def test_a_stamp_is_withheld_when_a_step_source_churned() raises:
     """
     var root = temp_root()
     write_file(root, "lib/helper.mojo", "# one\n")
-    var out_path = String("build/helper.mojopkg")
+    var out_path = String("build/helper.mojoc")
     write_bytes(root, out_path, [UInt8(1)])
     var no_dirs = List[String]()
     var ctx = CacheContext()
@@ -558,7 +556,7 @@ def test_a_stamp_is_withheld_when_a_step_source_churned() raises:
 def test_a_stamp_is_withheld_when_a_dir_source_file_churned() raises:
     """Same, for a file inside a directory-shaped step source."""
     var root = _pkg_root()
-    var out_path = String("build/pkg.mojopkg")
+    var out_path = String("build/pkg.mojoc")
     write_bytes(root, out_path, [UInt8(1)])
     var no_dirs = List[String]()
     var ctx = CacheContext()
@@ -579,7 +577,7 @@ def test_a_stamp_is_withheld_when_an_include_file_churned() raises:
     """Same, for a file under one of the step's include roots."""
     var root = _pkg_root()
     write_file(root, "inc/lib.mojo", "# lib\n")
-    var out_path = String("build/pkg.mojopkg")
+    var out_path = String("build/pkg.mojoc")
     write_bytes(root, out_path, [UInt8(1)])
     var no_dirs = List[String]()
     var includes: List[String] = ["inc"]
@@ -603,14 +601,14 @@ def test_a_stamp_is_withheld_when_a_prior_output_churned() raises:
     input of this step however it was produced.
     """
     var root = _pkg_root()
-    var out_path = String("build/pkg.mojopkg")
+    var out_path = String("build/pkg.mojoc")
     write_bytes(root, out_path, [UInt8(1)])
-    write_file(root, "build/earlier.mojopkg", "# earlier\n")
+    write_file(root, "build/earlier.mojoc", "# earlier\n")
     var no_dirs = List[String]()
-    var priors: List[String] = ["build/earlier.mojopkg"]
+    var priors: List[String] = ["build/earlier.mojoc"]
     var ctx = CacheContext()
     var key = _step_key(ctx, root, "pkg", no_dirs, priors, out_path)
-    var earlier = root + "/build/earlier.mojopkg"
+    var earlier = root + "/build/earlier.mojoc"
     mutate_until_witnessed(earlier, "# other\n")
     mutate_until_witnessed(earlier, "# earlier\n")
 
@@ -631,11 +629,11 @@ def test_a_stamp_is_written_for_an_untouched_step() raises:
     """
     var root = _pkg_root()
     write_file(root, "inc/lib.mojo", "# lib\n")
-    write_file(root, "build/earlier.mojopkg", "# earlier\n")
-    var out_path = String("build/pkg.mojopkg")
+    write_file(root, "build/earlier.mojoc", "# earlier\n")
+    var out_path = String("build/pkg.mojoc")
     write_bytes(root, out_path, [UInt8(1)])
     var includes: List[String] = ["inc"]
-    var priors: List[String] = ["build/earlier.mojopkg"]
+    var priors: List[String] = ["build/earlier.mojoc"]
     var ctx = CacheContext()
     var key = _step_key(ctx, root, "pkg", includes, priors, out_path)
 
@@ -648,7 +646,7 @@ def test_a_stamp_is_written_when_a_step_writes_into_its_include_root() raises:
     """A step's own output lands in a directory its own walks cover.
 
     That is the ordinary shape — `-I build` with a step that produces
-    `build/*.mojopkg`, and every step after the first is given the previous
+    `build/*.mojoc`, and every step after the first is given the previous
     step's output directory. The step therefore changes that directory's
     membership while it runs, by design, so the directory cannot be held to a
     membership claim: doing so would leave every such step unstamped and
@@ -656,11 +654,11 @@ def test_a_stamp_is_written_when_a_step_writes_into_its_include_root() raises:
     theirs, which is where an actual input would show up.
     """
     var root = _pkg_root()
-    var out_path = String("build/pkg.mojopkg")
+    var out_path = String("build/pkg.mojoc")
     var includes: List[String] = ["build"]
     var no_dirs = List[String]()
     # An earlier step's package, already in the include root the walk frames.
-    write_file(root, "build/earlier.mojopkg", "# earlier\n")
+    write_file(root, "build/earlier.mojoc", "# earlier\n")
     var ctx = CacheContext()
     var key = _step_key(ctx, root, "pkg", includes, no_dirs, out_path)
 
@@ -768,7 +766,7 @@ def test_unchanged_precompile_step_is_not_recompiled() raises:
     assert_equal(warm.built_files, 0, "a skipped step is not an admission")
 
     # --- The output removed: the stamp must not survive its artifact. -------
-    remove(root + "/build/goodpkg.mojopkg")
+    remove(root + "/build/goodpkg.mojoc")
     var restored = run_recording_session(config, root)
     assert_equal(restored.code, 0)
     assert_equal(
@@ -779,7 +777,7 @@ def test_unchanged_precompile_step_is_not_recompiled() raises:
             " checks the artifact, not just the key"
         ),
     )
-    assert_true(exists(root + "/build/goodpkg.mojopkg"))
+    assert_true(exists(root + "/build/goodpkg.mojoc"))
 
     # --- The source edited: the key must move. ------------------------------
     write_file(

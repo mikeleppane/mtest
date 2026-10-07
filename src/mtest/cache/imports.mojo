@@ -175,7 +175,7 @@ def _text_of(line: List[UInt8], start: Int, end: Int) -> String:
     # identifier byte (or by the line's own edge), while every byte of a
     # multi-byte sequence is `>= 0x80` and therefore IS an identifier byte — so
     # a boundary can never fall inside a sequence.
-    return String(StringSlice(unsafe_from_utf8=Span(out)))
+    return String(unsafe_from_utf8=out)
 
 
 @fieldwise_init
@@ -234,7 +234,7 @@ def _is_well_formed_utf8(data: List[UInt8]) -> Bool:
         True iff every byte belongs to a well-formed sequence.
     """
     try:
-        _ = StringSlice(from_utf8=Span(data))
+        _ = StringSpan(from_utf8=Span(data))
     except:
         return False
     return True

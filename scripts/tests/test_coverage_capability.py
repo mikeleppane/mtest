@@ -21,7 +21,7 @@ from unittest import mock
 from scripts.checks import coverage_capability
 
 
-# A verbatim slice of `mojo build --help` at the pinned 1.0.0b2 toolchain,
+# A verbatim slice of `mojo build --help` at the 1.0.0b2 toolchain,
 # deliberately the flag-dense OPTIONS body: a matcher sloppy about what counts
 # as coverage-shaped would trip on `--print-effective-target`.
 MOJO_BUILD_HELP_1_0_0B2 = """    Compilation options
@@ -100,7 +100,7 @@ class AbsentFacilityBranchTests(unittest.TestCase):
 
         self.assertEqual(
             message,
-            "Mojo source coverage unavailable at 1.0.0b2; behavioral map applies",
+            "Mojo source coverage unavailable at 1.1.0; behavioral map applies",
         )
 
     def test_absent_facility_exits_zero(self) -> None:

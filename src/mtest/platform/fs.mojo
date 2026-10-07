@@ -20,12 +20,12 @@ without matching on locale-dependent text. Their foreign calls stay proven and
 centralized here instead of being redeclared in session or tests.
 """
 from std.ffi import external_call
-from std.memory import alloc, memset_zero
 from std.os import lstat, remove
 from std.os.path import basename, dirname, realpath
 from std.sys.info import CompilationTarget
 
 from mtest.platform.cstring import c_string_bytes
+from mtest.platform.ffi_record import FfiRecord
 from mtest.platform.process import process_id
 from mtest.platform.regular_file import observe_path
 from mtest.platform.stream import EINTR, close_fd, errno_now
@@ -455,8 +455,8 @@ def prepare_directory_for_rename(
             # O_DIRECTORY requires the anchor type, and O_CLOEXEC prevents
             # descriptor escape. Success transfers one descriptor here;
             # failure owns none, and libc retains no pointer on either path.
-            raw_fd = external_call["open", Int32](
-                anchor_c.unsafe_ptr().bitcast[NoneType](),
+            raw_fd = external_call["open", Int32, num_fixed_args=2](
+                anchor_c.unsafe_ptr().unsafe_bitcast[NoneType](),
                 Int32(_DARWIN_ANCHOR_OPEN_FLAGS),
                 UInt32(0),
             )
@@ -477,11 +477,8 @@ def prepare_directory_for_rename(
         var fd = Int(raw_fd)
         var path = anchor + "/" + relative
         var c = c_string_bytes(relative)
-        # SAFETY: this allocation owns 144 initialized bytes aligned to eight,
-        # the guarded Darwin arm64 `struct stat` size and alignment. It remains
-        # live until every field read completes and is freed on every path.
-        var stat_storage = alloc[UInt64](_STAT_BYTES // 8)
-        memset_zero(stat_storage.bitcast[UInt8](), _STAT_BYTES)
+        # 144 bytes is the guarded Darwin arm64 `struct stat` size.
+        var stat_storage = FfiRecord(bytes=_STAT_BYTES)
         var stat_rc: Int32
         var stat_errno = 0
         while True:
@@ -491,12 +488,12 @@ def prepare_directory_for_rename(
             # through the synchronous call. `stat_storage` is the complete
             # writable Darwin struct region. `fd` is the live canonical anchor
             # descriptor and AT_SYMLINK_NOFOLLOW_ANY rejects a symlink in any
-            # relative component. The call writes only within the allocation,
+            # relative component. The call writes only within the record,
             # retains no pointer, and owns neither resource.
             stat_rc = external_call["fstatat", Int32](
                 Int32(fd),
                 c.unsafe_ptr(),
-                stat_storage.bitcast[NoneType](),
+                stat_storage.ptr(),
                 Int32(_DARWIN_AT_SYMLINK_NOFOLLOW_ANY),
             )
             if stat_rc == 0:
@@ -505,9 +502,6 @@ def prepare_directory_for_rename(
             if stat_errno != EINTR:
                 break
         if stat_rc != 0:
-            # SAFETY: no view of the allocation exists and `fstatat` retained
-            # no pointer, so this sole owner frees the complete allocation once.
-            stat_storage.free()
             _ = c^
             _ = close_fd(fd)
             raise Error(
@@ -518,18 +512,11 @@ def prepare_directory_for_rename(
                 + ")"
             )
 
-        # SAFETY: Darwin arm64 `struct stat` stores initialized `st_dev` as
-        # Int32 at byte 0, `st_mode` as UInt16 at byte 4, and `st_ino` as UInt64
-        # at byte 8. Each aligned read stays inside the live 144-byte
-        # allocation, produces a copied scalar, and retains no pointer.
-        var opened_dev = Int(stat_storage.bitcast[Int32]()[0])
-        var opened_mode = Int(
-            (stat_storage.bitcast[UInt8]() + 4).bitcast[UInt16]()[0]
-        )
-        var opened_ino = Int(stat_storage[1])
-        # SAFETY: all three bounded field reads completed and retain no view;
-        # this is the allocation's sole owner and frees it exactly once.
-        stat_storage.free()
+        # Darwin arm64 `struct stat` stores `st_dev` as Int32 at byte 0,
+        # `st_mode` as UInt16 at byte 4, and `st_ino` as UInt64 at byte 8.
+        var opened_dev = Int(stat_storage.load[Int32](0))
+        var opened_mode = Int(stat_storage.load[UInt16](2))
+        var opened_ino = Int(stat_storage.load[UInt64](1))
         if (
             opened_mode & S_IFMT != S_IFDIR
             or opened_dev != expected_dev

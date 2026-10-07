@@ -1057,7 +1057,7 @@ class CallSiteTests(unittest.TestCase):
         (prefix / "bin").mkdir(parents=True, exist_ok=True)
         (prefix / "bin" / "mtest").write_text("", encoding="utf-8")
         (prefix / "conda-meta").mkdir(parents=True, exist_ok=True)
-        (prefix / "conda-meta" / "mojo-compiler-1.0.0b2-release.json").write_text(
+        (prefix / "conda-meta" / "mojo-compiler-1.1.0-release.json").write_text(
             "{}", encoding="utf-8"
         )
         return prefix
@@ -1762,9 +1762,6 @@ class AssertionPackageLayoutTests(unittest.TestCase):
         mojo.write_text("#!/bin/sh\n", encoding="utf-8")
         mojo.chmod(0o755)
         (prefix / "lib" / "mojo").mkdir(parents=True)
-        (prefix / "lib" / f"libAsyncRTMojoBindings{library_suffix}").write_bytes(
-            b"runtime"
-        )
         config = prefix / "share" / "max" / "modular.cfg"
         config.parent.mkdir(parents=True)
         config.write_text(
@@ -1774,13 +1771,12 @@ class AssertionPackageLayoutTests(unittest.TestCase):
             "enable_model_ir_cache = true\n"
             "name = MAX Platform\n"
             f"path = {prefix}\n"
-            "version = 1.0.0b2\n"
+            "version = 1.1.0\n"
             "[mojo-max]\n"
             f"package_root = {prefix}\n"
             f"compilerrt_path = {prefix}/lib/libKGENCompilerRTShared{library_suffix}\n"
             f"mgprt_path = {prefix}/lib/libMGPRT{library_suffix}\n"
-            f"shared_libs = {prefix}/lib/libAsyncRTMojoBindings{library_suffix},"
-            f"-Xlinker,-rpath,-Xlinker,{prefix}/lib;\n"
+            f"shared_libs = -Xlinker,-rpath,-Xlinker,{prefix}/lib;\n"
             f"driver_path = {prefix}/bin/mojo\n"
             f"import_path = {prefix}/lib/mojo\n"
             f"jupyter_path = {prefix}/lib/libMojoJupyter{library_suffix}\n"
@@ -2064,22 +2060,6 @@ class AssertionPackageLayoutTests(unittest.TestCase):
             ):
                 package_consumption.validate_assertion_install(prefix)
 
-    def test_rejects_a_runtime_library_symlink_that_escapes_the_prefix(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
-            root = Path(raw)
-            prefix = self._valid_prefix(root)
-            library_suffix = ".dylib" if sys.platform == "darwin" else ".so"
-            external = root / f"external-runtime{library_suffix}"
-            external.write_bytes(b"foreign runtime")
-            runtime = prefix / "lib" / (f"libAsyncRTMojoBindings{library_suffix}")
-            runtime.unlink()
-            runtime.symlink_to(external)
-            with self.assertRaisesRegex(
-                package_consumption.PackageCheckError,
-                "runtime library.*inside prefix",
-            ):
-                package_consumption.validate_assertion_install(prefix)
-
     def test_rejects_flag_encoded_shared_library_search_paths(self) -> None:
         with tempfile.TemporaryDirectory(prefix="mtest-package-test-") as raw:
             prefix = self._valid_prefix(Path(raw))
@@ -2108,7 +2088,7 @@ class AssertionPackageLayoutTests(unittest.TestCase):
             parser.set(
                 "mojo-max",
                 "shared_libs",
-                f"{prefix}/lib/libWrong.so,-Xlinker,-rpath,-Xlinker,{prefix}/share;",
+                f"-Xlinker,-rpath,-Xlinker,{prefix}/share;",
             )
             with config.open("w", encoding="utf-8") as stream:
                 parser.write(stream)
@@ -2190,9 +2170,9 @@ class ExpectedMojoVersionTests(unittest.TestCase):
         # version the workspace actually builds with are one number, and a bump
         # that moves only one of them turns this red rather than turning the
         # dependency proof into a check of a version nobody uses.
-        self.assertEqual(package_consumption.PRODUCTION_MOJO_PIN, "1.0.0b2")
+        self.assertEqual(package_consumption.PRODUCTION_MOJO_PIN, "1.1.0")
         self.assertIn(
-            'mojo = "==1.0.0b2,<2"',
+            'mojo = "==1.1.0,<2"',
             (package_consumption.PIXI_TOML).read_text(encoding="utf-8"),
         )
 

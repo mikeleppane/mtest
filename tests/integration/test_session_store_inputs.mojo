@@ -228,7 +228,7 @@ def test_walk_hashes_top_level_sources() raises:
 def test_walk_covers_every_source_suffix() raises:
     var bare = temp_root()
     write_file(bare, "inc/top.mojo", "# a")
-    for suffix in ["🔥", "mojopkg", "mojoc"]:
+    for suffix in ["🔥", "mojoc"]:
         var full = temp_root()
         write_file(full, "inc/top.mojo", "# a")
         write_file(full, "inc/extra." + String(suffix), "# x")
@@ -242,17 +242,30 @@ def test_walk_covers_every_source_suffix() raises:
     assert_equal(_walk_digest(bare, "inc", ""), _walk_digest(noise, "inc", ""))
 
 
-def test_walk_skips_dot_entries_and_plain_subdirs() raises:
+def test_walk_skips_dot_entries_and_unimportable_subdirs() raises:
     var bare = temp_root()
     write_file(bare, "inc/top.mojo", "# a")
     var noisy = temp_root()
     write_file(noisy, "inc/top.mojo", "# a")
     write_file(noisy, "inc/.hidden.mojo", "# x")
     write_file(noisy, "inc/.dotdir/__init__.mojo", "# x")
-    # A subdirectory with no `__init__` is not a package, so `-I` never reaches
-    # its contents and the key must not depend on them.
-    write_file(noisy, "inc/plain/deep.mojo", "# x")
+    # No `__init__` and a name no import can spell: `-I` never reaches its
+    # contents and the key must not depend on them.
+    write_file(noisy, "inc/not-a-module/deep.mojo", "# x")
+    write_file(noisy, "inc/9lives/deep.mojo", "# x")
     assert_equal(_walk_digest(bare, "inc", ""), _walk_digest(noisy, "inc", ""))
+
+
+def test_walk_recurses_into_namespace_subdirs() raises:
+    # Mojo 1.1 imports `helpers.values` from a `helpers/` with no `__init__`,
+    # so editing that file must move the key or the cache serves a stale
+    # binary on a green run.
+    var root = temp_root()
+    write_file(root, "inc/top.mojo", "# a")
+    write_file(root, "inc/helpers/values.mojo", "# v1")
+    var before = _walk_digest(root, "inc", "")
+    write_file(root, "inc/helpers/values.mojo", "# v2")
+    assert_not_equal(before, _walk_digest(root, "inc", ""))
 
 
 def test_walk_recurses_into_package_subdirs() raises:
@@ -274,7 +287,7 @@ def test_walk_exclude_skips_path() raises:
     write_file(bare, "inc/top.mojo", "# a")
     var root = temp_root()
     write_file(root, "inc/top.mojo", "# a")
-    write_file(root, "inc/gen.mojopkg", "# generated")
+    write_file(root, "inc/gen.mojoc", "# generated")
     assert_not_equal(
         _walk_digest(bare, "inc", ""), _walk_digest(root, "inc", "")
     )
@@ -283,7 +296,7 @@ def test_walk_exclude_skips_path() raises:
     # that step runs.
     assert_equal(
         _walk_digest(bare, "inc", ""),
-        _walk_digest(root, "inc", "inc/gen.mojopkg"),
+        _walk_digest(root, "inc", "inc/gen.mojoc"),
     )
 
 
@@ -307,16 +320,27 @@ def test_walk_disables_on_symlinked_package() raises:
     )
 
 
-def test_walk_skips_symlinked_non_package_dirs() raises:
+def test_walk_skips_symlinked_unimportable_dirs() raises:
     var bare = temp_root()
     write_file(bare, "inc/top.mojo", "# a")
     var root = temp_root()
     write_file(root, "inc/top.mojo", "# a")
     write_file(root, "plainsrc/mod.mojo", "# m")
-    symlink(root + "/plainsrc", root + "/inc/p")
-    # No `__init__`, so `-I inc` does not reach inside `p` whether it is a link
-    # or not. Nothing to key, nothing to refuse.
+    symlink(root + "/plainsrc", root + "/inc/not-a-module")
+    # No import can name `not-a-module`, so `-I inc` does not reach inside it
+    # whether it is a link or not. Nothing to key, nothing to refuse.
     assert_equal(_walk_digest(bare, "inc", ""), _walk_digest(root, "inc", ""))
+
+
+def test_walk_disables_on_symlinked_namespace_dir() raises:
+    var root = temp_root()
+    write_file(root, "inc/top.mojo", "# a")
+    write_file(root, "plainsrc/mod.mojo", "# m")
+    symlink(root + "/plainsrc", root + "/inc/p")
+    # A namespace package is imported like any other, and a link cannot be
+    # walked safely, so the cache goes off.
+    var kb = KeyBuilder()
+    assert_false(walk_include_root(root, "inc", kb, "").ok)
 
 
 def test_walk_reports_failure_for_missing_dir() raises:

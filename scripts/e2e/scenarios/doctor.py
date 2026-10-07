@@ -164,7 +164,7 @@ def s_missing_toolchain(context: ScenarioContext) -> str:
         fake_lines = _expect_checks(fake_run)
         expect(
             fake_lines[4].startswith("FAIL toolchain: ")
-            and "expected Mojo 1.0.0b2" in fake_lines[4],
+            and "expected Mojo 1.1.0" in fake_lines[4],
             fake_run.stdout,
         )
 
@@ -178,12 +178,12 @@ def s_missing_toolchain(context: ScenarioContext) -> str:
         wrong_lines = _expect_checks(wrong_run)
         expect(
             wrong_lines[4].startswith("FAIL toolchain: ")
-            and "expected Mojo 1.0.0b2" in wrong_lines[4],
+            and "expected Mojo 1.1.0" in wrong_lines[4],
             wrong_run.stdout,
         )
 
         wrong_revision = root / "wrong-revision"
-        _write_identity_probe(wrong_revision, "Mojo 1.0.0b2 (deadbeef)")
+        _write_identity_probe(wrong_revision, "Mojo 1.1.0 (deadbeef)")
         wrong_revision_run = _runner(context, root).run_mtest(
             ["doctor", "--no-config", "--color", "never"],
             env_overrides={"MTEST_MOJO": os.fspath(wrong_revision)},
@@ -192,7 +192,7 @@ def s_missing_toolchain(context: ScenarioContext) -> str:
         wrong_revision_lines = _expect_checks(wrong_revision_run)
         expect(
             wrong_revision_lines[4].startswith("FAIL toolchain: ")
-            and "expected Mojo 1.0.0b2 (2cf4d08a)" in wrong_revision_lines[4],
+            and "expected Mojo 1.1.0 (8189361e)" in wrong_revision_lines[4],
             wrong_revision_run.stdout,
         )
     return "missing, fake, wrong-version, and wrong-revision toolchains failed honestly"

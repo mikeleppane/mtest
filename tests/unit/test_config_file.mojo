@@ -174,7 +174,7 @@ def test_full_document_converts_every_key_to_typed_values() raises:
         'mojo = "/opt/mojo"\n'
         'include = ["vendor"]\n'
         'build-args = ["-DDEBUG"]\n'
-        'precompile = ["src/a.mojo", "src/b.mojo:build/b.mojopkg"]\n'
+        'precompile = ["src/a.mojo", "src/b.mojo:build/b.mojoc"]\n'
         "compile-timeout = 45\n"
         "\n"
         "[report]\n"
@@ -231,7 +231,7 @@ def test_full_document_converts_every_key_to_typed_values() raises:
     assert_true(config.saw_precompile)
     assert_equal(config.precompiles[0].src, "src/a.mojo")
     assert_false(config.precompiles[0].out)
-    assert_equal(config.precompiles[1].out.value(), "build/b.mojopkg")
+    assert_equal(config.precompiles[1].out.value(), "build/b.mojoc")
     assert_true(config.saw_compile_timeout)
     assert_equal(config.compile_timeout_secs, 45)
 

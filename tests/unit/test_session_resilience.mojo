@@ -104,18 +104,21 @@ def _valid_fail_report_bytes() -> List[UInt8]:
 
 
 def _reconcile(
-    stdout_bytes: List[UInt8], code: Int, flaky_if_pass: Bool
+    report_bytes: List[UInt8], code: Int, flaky_if_pass: Bool
 ) -> FileFinishedPayload:
-    """Drive the real selection reconciler and return its emitted payload."""
+    """Drive the real selection reconciler and return its emitted payload.
+
+    The report rides stdout on exit 0 and stderr otherwise, as TestSuite emits.
+    """
     var term = ProcessResult(
-        stdout_bytes.copy(),
-        List[UInt8](),
+        report_bytes.copy() if code == 0 else List[UInt8](),
+        List[UInt8]() if code == 0 else report_bytes.copy(),
         False,
         False,
         Termination.exited(code),
         5,
     )
-    var universe = [String("test_one")]
+    var universe: List[String] = [String("test_one")]
     var fr = _reconcile_and_classify(
         _selection_settings(),
         "tests/test_a.mojo",
@@ -215,16 +218,20 @@ def test_residual_signal_says_crashed_not_killed() raises:
 def test_select_names_restricts_to_selected_subset() raises:
     # A file with two crashing tests, run under `-k <second>`: only the SECOND
     # is an isolation candidate. The deselected first must not be named.
-    var universe = [String("test_a"), String("test_b")]
-    var selected = [String("test_b")]
+    var universe: List[String] = [String("test_a"), String("test_b")]
+    var selected: List[String] = [String("test_b")]
     var got = _select_names(universe, selected)
     assert_equal(len(got), 1)
     assert_equal(got[0], "test_b")
 
 
 def test_select_names_preserves_source_order() raises:
-    var universe = [String("test_a"), String("test_b"), String("test_c")]
-    var selected = [String("test_c"), String("test_a")]
+    var universe: List[String] = [
+        String("test_a"),
+        String("test_b"),
+        String("test_c"),
+    ]
+    var selected: List[String] = [String("test_c"), String("test_a")]
     var got = _select_names(universe, selected)
     assert_equal(len(got), 2)
     assert_equal(got[0], "test_a")  # source order, not selection order
@@ -233,7 +240,7 @@ def test_select_names_preserves_source_order() raises:
 
 def test_select_names_empty_selection_keeps_all() raises:
     # The plain (non-selection) run path passes an empty set: every name stays.
-    var universe = [String("test_a"), String("test_b")]
+    var universe: List[String] = [String("test_a"), String("test_b")]
     var got = _select_names(universe, List[String]())
     assert_equal(len(got), 2)
 

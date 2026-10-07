@@ -10,10 +10,14 @@ mapping. `resolve_report` (the capture-overflow tail reparse) is pinned here too
 """
 from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
-from mtest.exec import Termination
+from mtest.exec import ProcessResult, Termination
 from mtest.model import Outcome, ParseDisposition
 from mtest.protocol import ParsedReport, ParsedRow, ReportVerdict
-from mtest.session.classify import classify, resolve_report
+from mtest.session.classify import (
+    classify,
+    resolve_report,
+    resolve_run_report,
+)
 
 
 def _row(name: String, oc: Outcome) -> ParsedRow:
@@ -56,7 +60,7 @@ def test_timed_out_is_timeout_no_report() raises:
 
 def test_timeout_valid_report_does_not_rescue() raises:
     # A latched TIMEOUT stays TIMEOUT even if a complete valid report was seen.
-    var rows = [_row("a", Outcome.PASS)]
+    var rows: List[ParsedRow] = [_row("a", Outcome.PASS)]
     var t = Termination.timed_out(Termination.EXITED, 0, False)
     var c = classify(t, _valid(rows^, 1, 0, 0), False)
     assert_true(c.file_outcome == Outcome.TIMEOUT)
@@ -79,7 +83,7 @@ def test_overflow_exit0_is_fail_capture_overflow() raises:
 def test_overflow_beats_a_valid_report() raises:
     # Overflow never yields a successful verdict even if the trusted report is
     # somehow VALID — the session only sets is_overflow when the tail lost it.
-    var rows = [_row("a", Outcome.PASS)]
+    var rows: List[ParsedRow] = [_row("a", Outcome.PASS)]
     var c = classify(Termination.exited(0), _valid(rows^, 1, 0, 0), True)
     assert_true(c.file_outcome == Outcome.FAIL)
     assert_true(c.disposition == ParseDisposition.CAPTURE_OVERFLOW)
@@ -132,7 +136,10 @@ def test_off_grammar_is_drift_exit3() raises:
 
 
 def test_exit0_valid_no_failures_is_pass() raises:
-    var rows = [_row("a", Outcome.PASS), _row("b", Outcome.SKIP)]
+    var rows: List[ParsedRow] = [
+        _row("a", Outcome.PASS),
+        _row("b", Outcome.SKIP),
+    ]
     var c = classify(Termination.exited(0), _valid(rows^, 1, 0, 1), False)
     assert_true(c.file_outcome == Outcome.PASS)
     assert_true(c.disposition == ParseDisposition.PARSED)
@@ -147,7 +154,10 @@ def test_exit0_valid_no_failures_is_pass() raises:
 
 
 def test_exit1_valid_with_failures_is_fail() raises:
-    var rows = [_row("a", Outcome.PASS), _row("b", Outcome.FAIL)]
+    var rows: List[ParsedRow] = [
+        _row("a", Outcome.PASS),
+        _row("b", Outcome.FAIL),
+    ]
     var c = classify(Termination.exited(1), _valid(rows^, 1, 1, 0), False)
     assert_true(c.file_outcome == Outcome.FAIL)
     assert_true(c.disposition == ParseDisposition.PARSED)
@@ -172,7 +182,7 @@ def test_zero_test_valid_is_pass_zero_counts() raises:
 
 
 def test_exit0_valid_with_failures_is_fail_and_warns() raises:
-    var rows = [_row("a", Outcome.FAIL)]
+    var rows: List[ParsedRow] = [_row("a", Outcome.FAIL)]
     var c = classify(Termination.exited(0), _valid(rows^, 0, 1, 0), False)
     assert_true(c.file_outcome == Outcome.FAIL)
     assert_true(c.disposition == ParseDisposition.PARSED)
@@ -183,7 +193,7 @@ def test_exit0_valid_with_failures_is_fail_and_warns() raises:
 
 
 def test_exit1_valid_no_failures_is_fail_file_level() raises:
-    var rows = [_row("a", Outcome.PASS)]
+    var rows: List[ParsedRow] = [_row("a", Outcome.PASS)]
     var c = classify(Termination.exited(1), _valid(rows^, 1, 0, 0), False)
     assert_true(c.file_outcome == Outcome.FAIL)
     assert_true(c.disposition == ParseDisposition.PARSED)
@@ -195,7 +205,7 @@ def test_exit1_valid_no_failures_is_fail_file_level() raises:
 
 
 def test_unexpected_exit_code_valid_is_fail() raises:
-    var rows = [_row("a", Outcome.FAIL)]
+    var rows: List[ParsedRow] = [_row("a", Outcome.FAIL)]
     var c = classify(Termination.exited(42), _valid(rows^, 0, 1, 0), False)
     assert_true(c.file_outcome == Outcome.FAIL)
     assert_true(c.disposition == ParseDisposition.PARSED)
@@ -207,7 +217,7 @@ def test_unexpected_exit_code_valid_is_fail() raises:
 
 
 def test_unexpected_exit_code_valid_all_pass_is_file_level_fail() raises:
-    var rows = [_row("a", Outcome.PASS)]
+    var rows: List[ParsedRow] = [_row("a", Outcome.PASS)]
     var c = classify(Termination.exited(42), _valid(rows^, 1, 0, 0), False)
     assert_true(c.file_outcome == Outcome.FAIL)
     # No failing row -> a single file-level FAIL contributes to the multiset.
@@ -224,6 +234,46 @@ comptime _REPORT = (
     "--------\n"
     "Summary [ 0.00s ] 1 tests run: 1 passed , 0 failed , 0 skipped "
 )
+
+
+def _run(stdout: String, stderr: String, exit_code: Int) -> ProcessResult:
+    return ProcessResult(
+        List[UInt8](stdout.as_bytes()),
+        List[UInt8](stderr.as_bytes()),
+        False,
+        False,
+        Termination.exited(exit_code),
+        0,
+    )
+
+
+def test_resolve_run_report_reads_stdout_on_exit_zero() raises:
+    var tr = resolve_run_report(_run(_REPORT, "", 0), "/x/y.mojo")
+    assert_true(tr.report.verdict == ReportVerdict.VALID)
+    # A report forged onto stderr is never read on a clean exit.
+    tr = resolve_run_report(_run("", _REPORT, 0), "/x/y.mojo")
+    assert_true(tr.report.verdict == ReportVerdict.ABSENT)
+
+
+def test_resolve_run_report_reads_stderr_on_failure_exit() raises:
+    # A failing TestSuite raises its report as the uncaught-exception message.
+    var stderr = "Unhandled exception caught during execution: \n" + _REPORT
+    var tr = resolve_run_report(_run("", stderr, 1), "/x/y.mojo")
+    assert_true(tr.report.verdict == ReportVerdict.VALID)
+    # Nothing at all on either stream stays ABSENT.
+    tr = resolve_run_report(_run("noise\n", "", 1), "/x/y.mojo")
+    assert_true(tr.report.verdict == ReportVerdict.ABSENT)
+
+
+def test_resolve_run_report_falls_back_to_stdout_without_stderr_report() raises:
+    # A custom `main` that prints the error itself and exits nonzero.
+    var tr = resolve_run_report(_run(_REPORT, "", 1), "/x/y.mojo")
+    assert_true(tr.report.verdict == ReportVerdict.VALID)
+    # A report present on stderr, even off-grammar, is never overridden by a
+    # valid-looking one on stdout: that would launder drift into a verdict.
+    var broken = String(_REPORT).replace("--------\n", "")
+    tr = resolve_run_report(_run(_REPORT, broken, 1), "/x/y.mojo")
+    assert_true(tr.report.verdict == ReportVerdict.OFF_GRAMMAR)
 
 
 def test_resolve_untruncated_parses_whole() raises:

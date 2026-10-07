@@ -366,8 +366,11 @@ def main() raises:
 ```
 
 Any behavioral equivalent is acceptable: it must honor `--skip-all`, `--only`,
-and `--skip` as arguments and emit TestSuite's standard report. The runner
-relies on that protocol, not on the exact source.
+and `--skip` as arguments and emit TestSuite's standard report: on stdout when
+the module exits 0, as the uncaught error on stderr when it does not. The runner
+reads the stream matching the exit status (a nonzero exit whose stderr carries
+no report at all is read from stdout) and relies on that protocol, not on the
+exact source.
 
 Under `--skip-all`, a conforming module executes **no test bodies** at all — it
 reports every test as SKIP without running any of them. The runner relies on
@@ -420,14 +423,17 @@ exit code, which is the foundation of the whole outcome model.
 ### 8.2 `--build-arg ARG` and `-I PATH`
 
 `--build-arg` (repeatable) forwards one argument to `mojo build`, after the
-runner's own arguments. Everything after a bare `--` is equivalent. `-I PATH`
+runner's own arguments: `-o`, each `-I` pair, and `-D MTEST_SOURCE=<absolute
+source path>`. The define keeps Mojo's content-keyed compile cache from reusing
+an object built from a byte-identical file at another path. Everything after a
+bare `--` is equivalent. `-I PATH`
 (repeatable) adds an include path, forwarded to every build.
 
 ### 8.3 `--precompile SRC[:OUT]`
 
 Repeatable. Each `--precompile` package is built with `mojo precompile` **before
 any test build**, in the order listed. Precompiled packages inherit `-I` and
-`--build-arg`. `OUT` defaults to `build/<name>.mojopkg`, and its directory is
+`--build-arg`. `OUT` defaults to `build/<name>.mojoc`, and its directory is
 automatically added to `-I` so dependent test files resolve `from <name> import
 …`. A step whose inputs and whose output are both unchanged is **skipped**
 (§8.5): `mojo precompile` does not produce identical bytes for identical
@@ -680,13 +686,14 @@ about the build window, and exactly where that proof stops.
     resolves to are both recorded; the intermediate links a chain passes
     through are not. A middle link repointed and repointed back around a
     compile moves neither end.
-  - **A directory that becomes a package and stops again.** A subdirectory with
-    no `__init__` is not on the compiler's path, so the walk neither frames its
-    files nor holds it to its membership. Creating an `__init__` in it during a
-    compile and deleting it afterwards puts its modules in the build and leaves
-    the tree looking as it did. Holding every non-package subdirectory to its
-    membership instead would refuse publication whenever anything at all
-    appeared in one, which is a far commoner event than this.
+  - **A directory that becomes importable and stops again.** A subdirectory no
+    import can name (no `__init__`, and a name that is not an identifier) is
+    not on the compiler's path, so the walk neither frames its files nor holds
+    it to its membership. Giving it an `__init__` during a compile and deleting
+    it afterwards puts its modules in the build and leaves the tree looking as
+    it did. Holding every such subdirectory to its membership instead would
+    refuse publication whenever anything at all appeared in one, which is a far
+    commoner event than this.
   - **An include root that did not exist when the step was keyed.** Its absence
     is part of the key, but an absence cannot be re-stat'd into a record: a
     root created during the step, consumed, and removed again leaves the key's
@@ -1774,7 +1781,7 @@ branch (repackaging an already-linked executable) is **not** taken. The
 installed binary is not loader-clean: it carries a direct link dependency on
 the Mojo runtime's shared libraries, whose transitive closure is owned by the
 `mojo-compiler` conda package. The recipe therefore declares
-`mojo-compiler ==1.0.0b2` as its sole **conda run dependency**. Project
+`mojo-compiler ==1.1.0` as its sole **conda run dependency**. Project
 configuration is parsed natively by a pinned vendored Mojo parser compiled
 into the binary. A fresh environment carrying only the declared dependency
 (not the full build toolchain) is proven sufficient to load and run the
@@ -1814,7 +1821,7 @@ mtest -k matmul -s tests/
 
 # Precompile a library, smoke-test first, exclude the slow suite, forward a
 # build flag — the whole configuration lives on the command line.
-mtest --precompile src/mylib:build/mylib.mojopkg -I build \
+mtest --precompile src/mylib:build/mylib.mojoc -I build \
       --build-arg=--no-optimization --gate tests/test_smoke.mojo \
       --exclude 'tests/test_slow_*.mojo' tests/
 
@@ -2014,7 +2021,7 @@ PASS version: mtest 1.1.0
 PASS platform: Linux x86_64 supported
 PASS root: /home/mikko/dev/mtest
 PASS exec: runtime acquired
-PASS toolchain: 'mojo' from PATH default: Mojo 1.0.0b2 (2cf4d08a)
+PASS toolchain: 'mojo' from PATH default: Mojo 1.1.0 (8189361e)
 PASS config: valid 'mtest.toml'
 PASS config-semantics: resolved values valid
 PASS state: cache and lastrun usable
@@ -2298,7 +2305,7 @@ fail-on-flaky = false            # exit 1 on a FLAKY-only session
 mojo = "mojo"
 include = ["vendor"]
 build-args = ["-DDEBUG"]
-precompile = ["src/lib.mojo", "src/gpu.mojo:build/gpu.mojopkg"]
+precompile = ["src/lib.mojo", "src/gpu.mojo:build/gpu.mojoc"]
 compile-timeout = 600            # integer seconds >= 0
 
 [report]
@@ -2528,7 +2535,7 @@ fixed order:
 5. `toolchain` — the resolved Mojo path and supplying layer, checked by a
    bounded `mojo --version` probe under the ordinary supervision substrate.
    A pass requires the exact pinned identity
-   `Mojo 1.0.0b2 (2cf4d08a)`.
+   `Mojo 1.1.0 (8189361e)`.
 6. `config` — the selected file, `none`, or its normalized parse/read failure.
    `--no-config` is root-independent. An absolute explicit config remains
    checkable without a root; discovery and relative explicit paths require the
@@ -2661,7 +2668,7 @@ they travel on the diagnostic channel instead of being lost.
 shell-quoted so they can be pasted back:
 
 ```text
-build: mojo build tests/test_thing.mojo -o build/bin/tests_stest_uthing
+build: mojo build tests/test_thing.mojo -o build/bin/tests_stest_uthing -D MTEST_SOURCE=<root>/tests/test_thing.mojo
 run: build/bin/tests_stest_uthing --only test_case
 ```
 
@@ -2733,9 +2740,10 @@ process umask — not the private mode a temporary file carries.
 The file's subject is its own basename with the `test_` prefix and the `.mojo`
 suffix removed, so `tests/test_math.mojo` is a file of tests for `math`. That
 name is escaped for the docstring it lands in, so every legal basename yields a
-file that compiles. It carries a module docstring, the `std.testing` import,
-one passing example test, and the `main()` that discovers and runs them, and it
-passes as written:
+file that compiles, except one holding `"`: Mojo 1.1.0 itself crashes compiling
+a TestSuite file with that byte in its name. It carries a module docstring, the
+`std.testing` import, one passing example test, and the `main()` that discovers
+and runs them, and it passes as written:
 
 ```console
 $ mtest new tests/test_math.mojo

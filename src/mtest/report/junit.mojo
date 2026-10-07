@@ -170,7 +170,7 @@ def _bytes_to_string(bytes: List[UInt8]) -> String:
     # (`dotted_classname`) copies already-valid-UTF-8 bytes through unchanged and
     # swaps only the single ASCII byte '/' (0x2F) for '.' (0x2E), so no
     # multi-byte sequence is ever split and no invalid byte is introduced.
-    return String(StringSlice(unsafe_from_utf8=Span(bytes)))
+    return String(unsafe_from_utf8=bytes)
 
 
 def format_seconds(seconds: Float64) -> String:

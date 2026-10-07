@@ -51,28 +51,36 @@ def read_manifest() raises -> List[String]:
     return names^
 
 
-def stdout_region(snapshot_text: String) -> String:
-    """The captured-stdout section of a snapshot, rejoined with newlines.
+def report_region(snapshot_text: String) -> String:
+    """The section of a snapshot the session hands the report parser.
 
-    Carves out the lines strictly between the `--- stdout ---` and
-    `--- stderr ---` markers and rejoins them with `\\n`, mirroring exactly what
-    the session hands the parser (the child's decoded stdout, no envelope).
+    A passing suite prints its report to stdout; a failing one raises it, and
+    the runtime prints that to stderr. So a snapshot whose `termination:` line
+    reads `exit 0` yields the lines strictly between `--- stdout ---` and
+    `--- stderr ---`, and any other yields the lines after `--- stderr ---`,
+    rejoined with `\\n` exactly as the session decodes a stream.
 
     Args:
         snapshot_text: A whole protocol snapshot's bytes.
 
     Returns:
-        The stdout region as one String. Allocates; never raises.
+        The report stream as one String. Allocates; never raises.
     """
     var lines = snapshot_text.split("\n")
-    var start = 0
-    var end = len(lines)
+    var passed = False
+    var stdout_at = len(lines)
+    var stderr_at = len(lines)
     for i in range(len(lines)):
-        if String(lines[i]) == "--- stdout ---":
-            start = i + 1
-        elif String(lines[i]) == "--- stderr ---":
-            end = i
+        var line = String(lines[i])
+        if line == "termination: exit 0":
+            passed = True
+        elif line == "--- stdout ---":
+            stdout_at = i
+        elif line == "--- stderr ---":
+            stderr_at = i
             break
+    var start = stdout_at + 1 if passed else stderr_at + 1
+    var end = stderr_at if passed else len(lines)
     var out = String("")
     for i in range(start, end):
         if i > start:

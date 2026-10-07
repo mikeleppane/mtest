@@ -222,7 +222,7 @@ def test_env_base_disables_when_the_toolchain_libraries_cannot_be_read() raises:
     """
     var root = temp_root()
     var stub = executable_stub(root, "tc/bin/mojo")
-    write_file(root, "tc/lib/mojo/std.mojopkg", "# stands in for a library")
+    write_file(root, "tc/lib/mojo/std.mojoc", "# stands in for a library")
     var config = base_config()
     config.mojo_path = stub
     chmod_path("000", root + "/tc/lib")
@@ -248,7 +248,7 @@ def test_env_base_frames_every_entry_of_the_library_directory() raises:
     """
     var root = temp_root()
     var stub = executable_stub(root, "tc/bin/mojo")
-    write_file(root, "tc/lib/mojo/std.mojopkg", "# stands in for a package")
+    write_file(root, "tc/lib/mojo/std.mojoc", "# stands in for a package")
     write_file(root, "tc/lib/mojo/libsupport.so", "# one")
     var config = base_config()
     config.mojo_path = stub

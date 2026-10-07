@@ -143,7 +143,7 @@ because there was no candidate to run one against.
 
 This is a correct result, not a fault. The stable lane reports it on every run
 for as long as the pinned toolchain is also the newest one published on the
-stable channel, which is the situation while Mojo `1.0.0b2` is both the pin and
+stable channel, which is the situation while Mojo `1.1.0` is both the pin and
 the newest stable release — so a stable lane sitting on `NO_NEWER_CANDIDATE`
 means "the stable channel has not moved", and needs no investigation. The
 nightly channel does publish prereleases beyond the pin, so the nightly lane is

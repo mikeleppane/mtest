@@ -27,7 +27,8 @@ The session layer does the decode and the parse and hands the results in;
 `classify` decides the policy and `resolve_report` decides which report to trust
 under truncation.
 """
-from mtest.exec import Termination
+from mtest.config import lossy_utf8
+from mtest.exec import ProcessResult, Termination
 from mtest.model import Outcome, ParseDisposition
 from mtest.protocol import ParsedReport, ParsedRow, ReportVerdict, parse_report
 
@@ -87,7 +88,7 @@ def _tail_after_marker(text: String) -> String:
     `[mtest: output truncated`, between the retained head and the surviving
     tail. Everything after that line is the tail the report parser reparses.
 
-    Anchors on the last matching line rather than the first. A test's own stdout
+    Anchors on the last matching line rather than the first. A test's own output
     lands in the retained head, ahead of the genuine spliced marker, so a
     malicious or buggy test could print a line opening with the marker prefix
     and forge an earlier split point. Taking the last occurrence is strictly
@@ -110,7 +111,7 @@ def _tail_after_marker(text: String) -> String:
 
 
 def resolve_report(
-    stdout_text: String, source_path: String, truncated: Bool
+    text: String, source_path: String, truncated: Bool
 ) -> TrustedReport:
     """Decide which report to trust for a run under the capture-overflow rule.
 
@@ -121,7 +122,7 @@ def resolve_report(
     `is_overflow` is set. An untruncated capture is parsed whole.
 
     Args:
-        stdout_text: The child's lossy-decoded stdout.
+        text: The child's lossy-decoded report stream.
         source_path: The canonical path the report header must byte-equal.
         truncated: Whether the capture overflowed its bound, splicing a marker.
 
@@ -134,20 +135,65 @@ def resolve_report(
     from mtest.exec import Termination
     from mtest.session.classify import classify, resolve_report
 
-    var stdout_text = String("")
-    var trusted = resolve_report(stdout_text, "/root/tests/test_a.mojo", False)
+    var text = String("")
+    var trusted = resolve_report(text, "/root/tests/test_a.mojo", False)
     var c = classify(Termination.exited(0), trusted.report, trusted.is_overflow)
     # An absent report on a clean exit is MALFORMED_SUITE, never a PASS.
     ```
     """
     if not truncated:
-        return TrustedReport(parse_report(stdout_text, source_path), False)
-    var tail = _tail_after_marker(stdout_text)
+        return TrustedReport(parse_report(text, source_path), False)
+    var tail = _tail_after_marker(text)
     var tail_report = parse_report(tail, source_path)
     if tail_report.verdict == ReportVerdict.VALID:
         # A complete valid block survived wholly in the tail: a normal report.
         return TrustedReport(tail_report^, False)
     return TrustedReport(ParsedReport.absent(), True)
+
+
+def resolve_run_report(
+    result: ProcessResult, source_path: String
+) -> TrustedReport:
+    """`resolve_report` over the stream the pinned TestSuite reported on.
+
+    A passing suite prints its report to stdout. A failing one raises it as the
+    uncaught-exception message, which the runtime prints to stderr, and exits
+    nonzero. So exit 0 reads stdout and every other ending reads stderr. When
+    stderr holds no report at all, stdout is read instead: a custom `main` that
+    prints the error itself and exits nonzero still speaks the protocol, as it
+    did before Mojo 1.1. A report present on stderr is never overridden.
+
+    Args:
+        result: The finished child run.
+        source_path: The canonical path the report header must byte-equal.
+
+    Returns:
+        The report to consult and whether its stream's capture overflowed.
+    """
+    var t = result.termination
+    if t.is_exited() and t.value == 0:
+        return resolve_report(
+            lossy_utf8(result.stdout_bytes),
+            source_path,
+            result.stdout_truncated,
+        )
+    var on_stderr = resolve_report(
+        lossy_utf8(result.stderr_bytes), source_path, result.stderr_truncated
+    )
+    if (
+        on_stderr.is_overflow
+        or on_stderr.report.verdict != ReportVerdict.ABSENT
+    ):
+        return on_stderr^
+    var on_stdout = resolve_report(
+        lossy_utf8(result.stdout_bytes), source_path, result.stdout_truncated
+    )
+    if (
+        on_stdout.is_overflow
+        or on_stdout.report.verdict == ReportVerdict.ABSENT
+    ):
+        return on_stderr^
+    return on_stdout^
 
 
 def _row_outcomes(report: ParsedReport) -> List[Outcome]:
@@ -239,10 +285,10 @@ def classify(
             ParseDisposition.CAPTURE_OVERFLOW,
             "capture-overflow",
             (
-                "the run's stdout overflowed the capture bound and no complete"
-                " report survived in the retained tail (look for the '[mtest:"
-                " output truncated' marker); reduce the test's output or raise"
-                " the capture bound"
+                "the run's report stream overflowed the capture bound and no"
+                " complete report survived in the retained tail (look for the"
+                " '[mtest: output truncated' marker); reduce the test's output"
+                " or raise the capture bound"
             ),
         )
 

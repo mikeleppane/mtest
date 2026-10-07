@@ -110,11 +110,9 @@ def _churn_until_witnessed(dir_abs: String, file_abs: String) raises:
         var now = lstat(dir_abs)
         if (
             Int(now.st_ctimespec.tv_sec) != Int(before.st_ctimespec.tv_sec)
-            or Int(now.st_ctimespec.tv_subsec)
-            != Int(before.st_ctimespec.tv_subsec)
+            or Int(now.st_ctimespec.tv_nsec) != Int(before.st_ctimespec.tv_nsec)
             or Int(now.st_mtimespec.tv_sec) != Int(before.st_mtimespec.tv_sec)
-            or Int(now.st_mtimespec.tv_subsec)
-            != Int(before.st_mtimespec.tv_subsec)
+            or Int(now.st_mtimespec.tv_nsec) != Int(before.st_mtimespec.tv_nsec)
         ):
             return
         sleep(0.005)

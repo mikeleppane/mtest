@@ -235,11 +235,11 @@ def assert_hostile_junit_report(
         streams.stderr.reporter_text,
         "<system-err>",
     )
-    expect(
-        str(_only_child(suite, "system-out", "suite system-out").text).count(ELISION)
-        == 1,
-        "the bounded <system-out> carries no single elision marker",
-    )
+    for tag in ("system-out", "system-err"):
+        expect(
+            str(_only_child(suite, tag, f"suite {tag}").text).count(ELISION) == 1,
+            f"the bounded <{tag}> carries no single elision marker",
+        )
     return (
         f"junit: xmllint/XSD accepts {len(raw)} bytes, exact sanitized "
         f"system-out/err and <failure> body, no injected row"

@@ -289,6 +289,9 @@ def compile_command(
         str(source),
         "-o",
         str(output),
+        # As mtest does: the compile cache keys on content, not path.
+        "-D",
+        f"MTEST_SOURCE={source.resolve()}",
     ]
 
 
@@ -353,13 +356,15 @@ def validate_location_run(
         raise AssertionError(
             f"location consumer must terminate with exact exit 1, got {run.returncode}"
         )
-    if run.stderr:
-        raise AssertionError(f"location consumer wrote stderr: {run.stderr}")
-    if "CRASH" in run.stdout:
+    # A failing TestSuite raises its report as the uncaught error on stderr.
+    if run.stdout:
+        raise AssertionError(f"location consumer wrote stdout: {run.stdout}")
+    report = run.stderr
+    if "CRASH" in report:
         raise AssertionError("location consumer reported CRASH")
 
     fail_rows = set(
-        re.findall(r"^\s+FAIL \[[^\]]+\] ([A-Za-z0-9_]+)\s*$", run.stdout, re.MULTILINE)
+        re.findall(r"^\s+FAIL \[[^\]]+\] ([A-Za-z0-9_]+)\s*$", report, re.MULTILINE)
     )
     expected_rows = set(expected)
     if fail_rows != expected_rows:
@@ -370,18 +375,18 @@ def validate_location_run(
 
     count = len(expected)
     summary = f"{count} tests run: 0 passed , {count} failed , 0 skipped"
-    if summary not in run.stdout:
+    if summary not in report:
         raise AssertionError(f"location consumer summary differs: want {summary!r}")
 
     provider_root = source.parents[2] / "companions/assertions/src/mtest/assertions"
-    if f"At {provider_root}" in run.stdout:
+    if f"At {provider_root}" in report:
         raise AssertionError("location consumer exposed a provider coordinate")
 
     escaped_source = re.escape(str(source))
     observed_rows = re.findall(
         rf"^\s+FAIL \[[^\]]+\] ([A-Za-z0-9_]+)\s*\n"
         rf"\s+At {escaped_source}:(\d+):(\d+):",
-        run.stdout,
+        report,
         re.MULTILINE,
     )
     observed = {name: (int(line), int(column)) for name, line, column in observed_rows}
@@ -594,14 +599,14 @@ def _validate_public_api_docs(mojo: Path) -> None:
                         "Optional[SourceLocation] = None)"
                     ),
                     (
-                        "def assert_equal[T: Copyable & ImplicitlyDeletable & "
-                        "Equatable & Writable](actual: List[T], expected: "
+                        "def assert_equal[T: Equatable & Writable & Copyable & "
+                        "Deinitable](actual: List[T], expected: "
                         'List[T], msg: String = "", *, location: '
                         "Optional[SourceLocation] = None)"
                     ),
                     (
-                        "def assert_equal[V: Copyable & ImplicitlyDeletable & "
-                        "Equatable & Writable](actual: Dict[String, V], "
+                        "def assert_equal[V: Equatable & Writable & Copyable & "
+                        "Deinitable](actual: Dict[String, V], "
                         'expected: Dict[String, V], msg: String = "", *, '
                         "location: Optional[SourceLocation] = None)"
                     ),
@@ -673,8 +678,10 @@ def validate_example_run(run: subprocess.CompletedProcess[str]) -> None:
         raise AssertionError(
             f"README example must terminate with exact exit 1, got {run.returncode}"
         )
-    if run.stderr:
-        raise AssertionError(f"README example wrote stderr: {run.stderr}")
+    # A failing TestSuite raises its report as the uncaught error on stderr.
+    if run.stdout:
+        raise AssertionError(f"README example wrote stdout: {run.stdout}")
+    report = run.stderr
     required = (
         "PASS [",
         "test_standard_assertion_still_coexists",
@@ -686,10 +693,10 @@ def validate_example_run(run: subprocess.CompletedProcess[str]) -> None:
         "reason: configuration text changed",
         "2 tests run: 1 passed , 1 failed , 0 skipped",
     )
-    missing = [item for item in required if item not in run.stdout]
+    missing = [item for item in required if item not in report]
     if missing:
         raise AssertionError(f"README example output is incomplete: {missing}")
-    if "CRASH" in run.stdout:
+    if "CRASH" in report:
         raise AssertionError("README example reported CRASH")
 
 

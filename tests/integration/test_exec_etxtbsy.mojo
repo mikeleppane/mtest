@@ -28,7 +28,6 @@ Kept in its own module because it installs signal handlers and drives the proces
 wide interrupt latch, which it resets so no state leaks into the other suites.
 """
 from std.ffi import external_call
-from std.memory import alloc, memset_zero
 from std.testing import assert_equal, assert_false, assert_true, TestSuite
 
 from mtest.exec import (
@@ -188,12 +187,9 @@ def _schedule_self_sigint() raises -> Int32:
     reap. The helper is targeted by pid, so the supervisor's own targeted waitpid
     never touches it.
     """
-    # SAFETY: `poll_storage` owns one initialized Int64 cell before fork. The
-    # child retains its COW copy until poll returns; nfds zero means poll never
-    # reads it. The parent frees its allocation after fork and the child exits
-    # without running destructors.
-    var poll_storage = alloc[Int64](1)
-    memset_zero(poll_storage.bitcast[UInt8](), 8)
+    # One zeroed cell for poll's (unread, nfds=0) array; the child keeps its
+    # COW copy and exits without running destructors.
+    var poll_storage = List[Int64](length=1, fill=0)
     # SAFETY: getpid and fork use their exact POSIX scalar/no-argument ABIs and
     # retain no pointer. All child-visible state above is initialized pre-fork.
     var self_pid = external_call["getpid", Int32]()
@@ -204,18 +200,12 @@ def _schedule_self_sigint() raises -> Int32:
         # the child's private COW image; nfds zero prevents dereference, the
         # scalar timeout is bounded, and no foreign call retains a pointer.
         _ = external_call["poll", Int32](
-            poll_storage.bitcast[UInt8](), UInt64(0), Int32(_DELAY_MS)
+            poll_storage.unsafe_ptr(), UInt64(0), Int32(_DELAY_MS)
         )
         _ = external_call["kill", Int32](self_pid, Int32(_SIGINT))
         external_call["_exit", NoneType](Int32(0))
     if Int(pid) < 0:
-        # SAFETY: fork failed, so only the parent owns `poll_storage`; no child can borrow
-        # it and freeing the unique allocation once is valid before raising.
-        poll_storage.free()
         raise Error("could not fork SIGINT test helper")
-    # SAFETY: only the parent reaches this line; its `poll_storage` allocation is unique.
-    # The successful child owns a separate COW image and cannot observe the free.
-    poll_storage.free()
     return pid
 
 

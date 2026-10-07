@@ -279,9 +279,9 @@ def _precompile_temp_path(
     The enclosing directory is what hides an unpromoted attempt from the
     `-I <dir>` scan of the output directory. The temp cannot simply be
     `<out>.tmp`, because the pinned toolchain rejects a package output path not
-    ending in `.mojopkg` or `.mojoc`: `mojo precompile -o x.tmp` is a hard
-    error. Keeping the required extension and moving the file out of the scanned
-    directory buys the same guarantee the suffix would have.
+    ending in `.mojoc`: `mojo precompile -o x.tmp` is a hard error. Keeping the
+    required extension and moving the file out of the scanned directory buys
+    the same guarantee the suffix would have.
 
     Args:
         out_path: The final output path the step promotes onto.

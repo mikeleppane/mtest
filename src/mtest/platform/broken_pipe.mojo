@@ -122,7 +122,7 @@ def ignore_broken_pipe():
     # `SIG_ERR`, reachable only for an invalid signal number and so not for this
     # constant — leaving no partial state on any path. It runs in the parent
     # process only, never between a fork and an exec.
-    _ = external_call["signal", UnsafePointer[NoneType, MutAnyOrigin]](
+    _ = external_call["signal", Pointer[NoneType, MutAnyOrigin]](
         Int32(_SIGPIPE),
-        UnsafePointer[NoneType, MutAnyOrigin](unsafe_from_address=_SIG_IGN),
+        Pointer[NoneType, MutAnyOrigin](unsafe_from_address=_SIG_IGN),
     )

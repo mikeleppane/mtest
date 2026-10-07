@@ -105,6 +105,13 @@ def _drive[C: ReportCoordinator](mut c: C, events: List[Event]) -> Bool:
     return c.stream_failed()
 
 
+def _assert_saw_stream(rec: RecordingReporter, count: Int) raises:
+    """Assert `rec` observed the whole `count`-event session stream."""
+    assert_equal(rec.count(), count)
+    assert_true(rec.kind_at(0) == EventKind.SESSION_STARTED)
+    assert_true(rec.kind_at(rec.count() - 1) == EventKind.SESSION_FINISHED)
+
+
 def test_standard_coordinator_console_bytes_match_the_composite() raises:
     # The byte-equality guard: the SAME stream through the coordinator and
     # through the composite fan-out it replaces must render identical console
@@ -428,11 +435,8 @@ def test_recording_coordinator_records_the_whole_stream() raises:
     assert_false(_drive(coord, events), "a bare recording pack never latches")
 
     # Both recorders observed the identical stream.
-    comptime for slot in range(2):
-        ref rec = coord.composite.reporters[slot]
-        assert_equal(rec.count(), len(events))
-        assert_true(rec.kind_at(0) == EventKind.SESSION_STARTED)
-        assert_true(rec.kind_at(rec.count() - 1) == EventKind.SESSION_FINISHED)
+    _assert_saw_stream(coord.composite.reporters[0], len(events))
+    _assert_saw_stream(coord.composite.reporters[1], len(events))
 
     # Every lifecycle channel is inert, so a bare driver needs no real reporter.
     coord.note_not_run(["tests/test_gamma.mojo"])

@@ -12,11 +12,9 @@ from pathlib import Path
 import pkgutil
 import re
 import shlex
-import shutil
 import stat
 import subprocess
 import sys
-import tempfile
 import tomllib
 
 from scripts.build import package_consumption
@@ -80,21 +78,6 @@ CLASSIFIED_TEST_GLOB = selfhost.TEST_FILE_GLOB
 A Mojo file under a classified root that this pattern does not match never runs,
 which is the property `check_classified_mojo_inventory` exists to catch. It has
 to test the runner's real pattern rather than a copy.
-"""
-FORBIDDEN_CLASSIFIED_PACKAGE_MARKERS = {
-    Path("tests/unit/__init__.mojo"),
-    Path("tests/integration/__init__.mojo"),
-}
-"""Package markers that must never reappear under the classified roots.
-
-Every module beneath `tests/unit` and `tests/integration` declares `main()`,
-which mtest's classified runner requires. Mojo 1.0.0b2 refuses to
-`mojo precompile` a package containing such a module (`error: 'main()' is not
-supported within packages`), so re-adding either child marker would break
-`mojo precompile tests/` the moment the compiler recurses into it.
-`tests/__init__.mojo` stays so `tests/` remains a nameable package; only its two
-children must stay marker-free. See
-`check_classified_roots_are_not_precompilable_packages`.
 """
 PLATFORM_TARGET_KEYS = {"dependencies", "tasks"}
 """What a `[target.<platform>]` table in `pixi.toml` may contain.
@@ -300,61 +283,6 @@ def check_classified_mojo_inventory(root: Path) -> None:
             )
 
 
-def check_classified_roots_are_not_precompilable_packages(
-    repo_root: Path = REPO_ROOT,
-) -> None:
-    """Guard against packaging a classified root that still declares `main()`.
-
-    Cheapest check first: a structural pre-check names the exact marker that
-    reappeared without needing `mojo` on PATH. Only once that passes does this
-    pay for a real `mojo precompile tests/`, which tests the property itself
-    rather than a proxy. That invocation stays cheap because marker-free
-    classified roots mean the compiler never recurses into either as a package
-    and only compiles the one-line `tests/__init__.mojo`. See
-    `FORBIDDEN_CLASSIFIED_PACKAGE_MARKERS`.
-
-    Args:
-        repo_root: Repository root `tests/` lives under.
-
-    Raises:
-        AssertionError: A forbidden package marker exists, `mojo` is not on
-            PATH, or a real `mojo precompile tests/` invocation fails.
-    """
-    _require_nonempty(
-        "forbidden classified package marker",
-        FORBIDDEN_CLASSIFIED_PACKAGE_MARKERS,
-    )
-    present = sorted(
-        path.as_posix()
-        for path in FORBIDDEN_CLASSIFIED_PACKAGE_MARKERS
-        if (repo_root / path).is_file()
-    )
-    if present:
-        raise AssertionError(
-            "package marker reintroduced over a main()-declaring classified "
-            "root; mojo precompile tests/ will fail with \"'main()' is not "
-            f'supported within packages": {present}'
-        )
-    mojo = shutil.which("mojo")
-    if mojo is None:
-        raise AssertionError("mojo is not available on PATH")
-    with tempfile.TemporaryDirectory(prefix="mtest-precompile-guard-") as raw_tmp:
-        output = Path(raw_tmp) / "tests.mojopkg"
-        completed = subprocess.run(
-            [mojo, "precompile", "-o", str(output), "tests/"],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-    if completed.returncode != 0:
-        raise AssertionError(
-            "mojo precompile tests/ failed "
-            f"(rc={completed.returncode}): {completed.stderr.strip()[-2000:]}"
-        )
-
-
 def check_suite_layout() -> None:
     """Every classified module and support module has its documented home."""
     _require_nonempty("classified root", CLASSIFIED_ROOTS)
@@ -370,8 +298,6 @@ def check_suite_layout() -> None:
             "tests/ contains a test module outside unit/integration: "
             f"{sorted(str(path) for path in stray)}"
         )
-    if not (tests_dir / "__init__.mojo").is_file():
-        raise AssertionError(f"tests package marker missing: {tests_dir}")
     try:
         dogfood.dogfood_test_files(REPO_ROOT)
     except RuntimeError as exc:
@@ -1199,10 +1125,6 @@ def check_package_fixture_contract(repo_root: Path = REPO_ROOT) -> None:
 def main() -> int:
     """Run every repository layout and command-policy check serially."""
     try:
-        # Before check_suite_layout: a reintroduced marker also trips the
-        # inventory's glob check, and this one names the exact file and the
-        # exact compiler error it will cause.
-        check_classified_roots_are_not_precompilable_packages()
         check_suite_layout()
         check_e2e_layout()
         check_e2e_scenario_registration()

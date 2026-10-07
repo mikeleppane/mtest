@@ -30,6 +30,7 @@ from mtest.platform.broken_pipe import (
     direct_write_failed,
     ignore_broken_pipe,
 )
+from mtest.platform.cstring import c_string_bytes
 from mtest.platform.exec_replace import exec_replace
 from mtest.platform.executable import is_executable_file, resolve_executable
 from mtest.platform.fs import (
@@ -48,6 +49,7 @@ from mtest.platform.fs import (
     rename_path,
     set_permissions,
 )
+from mtest.platform.ffi_record import FfiRecord
 from mtest.platform.process import process_id
 from mtest.platform.stream import (
     EINTR,

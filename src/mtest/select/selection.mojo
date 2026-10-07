@@ -170,7 +170,7 @@ def _lower_ascii(s: String) -> String:
     # SAFETY: `s` began as valid UTF-8 and only standalone ASCII A-Z bytes were
     # replaced by same-width ASCII a-z; continuation/leading bytes are unchanged.
     # `out` owns the complete initialized bytes until String copies the Span.
-    return String(StringSlice(unsafe_from_utf8=Span(out)))
+    return String(unsafe_from_utf8=out)
 
 
 def contains_ci(haystack: String, needle: String) -> Bool:

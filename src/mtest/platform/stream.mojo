@@ -106,7 +106,7 @@ def errno_now() -> Int:
         # initialized to 0 at thread start). No memory this process owns is
         # written, nothing is retained past the call, and there is no partial or
         # error path to clean up.
-        var loc = external_call["__error", UnsafePointer[Int32, MutAnyOrigin]]()
+        var loc = external_call["__error", Pointer[Int32, MutAnyOrigin]]()
         return Int(loc[])
     else:
         # SAFETY: Linux glibc `__errno_location` has the ABI
@@ -120,57 +120,46 @@ def errno_now() -> Int:
         # start). No memory this process owns is written, nothing is retained
         # past the call, and there is no partial or error path to clean up.
         var loc = external_call[
-            "__errno_location", UnsafePointer[Int32, MutAnyOrigin]
+            "__errno_location", Pointer[Int32, MutAnyOrigin]
         ]()
         return Int(loc[])
 
 
-def read_fd[o: Origin](fd: Int, ptr: UnsafePointer[UInt8, o], n: Int) -> Int:
-    """Read up to `n` bytes from descriptor `fd`; return the raw result.
-
-    Parameters:
-        o: The origin of the writable byte buffer `ptr` points into.
+def read_fd(fd: Int, buffer: MutSpan[UInt8, _]) -> Int:
+    """Read up to `len(buffer)` bytes from descriptor `fd` into `buffer`.
 
     Args:
         fd: The source descriptor.
-        ptr: The first of `n` writable bytes to initialize.
-        n: The maximum number of bytes to read.
+        buffer: The writable bytes to fill from the start.
 
     Returns:
         The number of bytes initialized, zero at EOF, or a negative value on
         error with `errno` set. Allocates nothing.
     """
-    # SAFETY: libc `read` has the ABI `ssize_t read(int, void*, size_t)`.
-    # `ptr` is a caller-owned pointer, borrowed only for this synchronous call,
-    # to `n` writable bytes whose allocation outlives the call. The opaque
-    # bitcast preserves its address and matches the stdlib declaration shape;
-    # it performs no access itself. `read` initializes at most `n` bytes,
-    # retains no pointer, and never frees the caller's storage. The descriptor
-    # and count are scalar values. The raw result tells the caller exactly how
-    # many bytes became initialized or whether errno must be inspected, so no
-    # partial state or owned resource is hidden here.
-    return external_call["read", Int](fd, ptr.bitcast[NoneType](), n)
+    # SAFETY: libc `read` has the ABI `ssize_t read(int, void*, size_t)`. The
+    # span's `len(buffer)` writable bytes outlive this synchronous call; `read`
+    # writes at most that many, retains no pointer, and frees nothing. The
+    # opaque cast matches the stdlib declaration shape and reads nothing.
+    return external_call["read", Int](
+        fd, buffer.unsafe_ptr().unsafe_bitcast[NoneType](), len(buffer)
+    )
 
 
-def write_fd[o: Origin](fd: Int, ptr: UnsafePointer[UInt8, o], n: Int) -> Int:
-    """Write up to `n` bytes at `ptr` to descriptor `fd`; return the raw result.
+def write_fd(fd: Int, data: Span[UInt8, _]) -> Int:
+    """Write up to `len(data)` bytes of `data` to descriptor `fd`.
 
     The pointer is passed as an opaque byte pointer to match the stdlib's own
     `write` external declaration, so the symbol is not declared twice in one
     binary. This performs no retry and interprets no error: a short or negative
     return is the caller's to handle.
 
-    Parameters:
-        o: The origin of the byte buffer `ptr` points into.
-
     Args:
         fd: The destination descriptor.
-        ptr: The first of `n` initialized bytes to write.
-        n: How many bytes to write.
+        data: The initialized bytes to write.
 
     Returns:
-        The number of bytes written, which may be short of `n`, or a negative
-        value on error with `errno` set. Allocates nothing.
+        The number of bytes written, which may be short of `len(data)`, or a
+        negative value on error with `errno` set. Allocates nothing.
 
     Examples:
 
@@ -179,24 +168,19 @@ def write_fd[o: Origin](fd: Int, ptr: UnsafePointer[UInt8, o], n: Int) -> Int:
 
     var fd = create_truncate_fd("build/events.ndjson").fd
     var payload = String("{}\\n")
-    var bytes = payload.as_bytes()
-    var written = write_fd(fd, bytes.unsafe_ptr(), len(bytes))
+    var written = write_fd(fd, payload.as_bytes())
     if written < 0:
         raise Error("write failed: errno " + String(errno_now()))
     ```
     """
-    # SAFETY: libc `write` has the ABI `ssize_t write(int, const void*, size_t)`.
-    # `ptr` is a caller-owned pointer, borrowed for this call only, addressing
-    # `n` initialized bytes that the caller guarantees outlive this synchronous
-    # call; the caller owns and frees that buffer, not this function. The bitcast
-    # to an opaque `NoneType` pointer only reinterprets the address to match the
-    # stdlib's `write` declaration shape and reads no bytes itself. `write` reads
-    # at most `n` bytes through the pointer and retains no reference past its
-    # return, so nothing escapes; it writes no memory this process owns. `fd` is
-    # a plain descriptor value, not a pointer. On both success and error the
-    # result is a plain scalar the caller inspects; there is no allocation to
-    # free and no partial state to unwind here.
-    return external_call["write", Int](fd, ptr.bitcast[NoneType](), n)
+    # SAFETY: libc `write` has the ABI `ssize_t write(int, const void*,
+    # size_t)`. The span's `len(data)` initialized bytes outlive this
+    # synchronous call; `write` reads at most that many, retains no pointer,
+    # and writes no memory this process owns. The opaque cast matches the
+    # stdlib declaration shape and reads nothing.
+    return external_call["write", Int](
+        fd, data.unsafe_ptr().unsafe_bitcast[NoneType](), len(data)
+    )
 
 
 @fieldwise_init
@@ -265,7 +249,8 @@ def create_truncate_fd(path: String) -> CreatResult:
         # it is consumed below; the returned fd, when non-negative, is owned by
         # the caller, not freed here.
         fd = external_call["creat", Int32](
-            terminated.unsafe_ptr().bitcast[NoneType](), UInt16(_CREATE_MODE)
+            terminated.unsafe_ptr().unsafe_bitcast[NoneType](),
+            UInt16(_CREATE_MODE),
         )
     else:
         # SAFETY: Linux libc `creat` has the fixed ABI
@@ -280,7 +265,8 @@ def create_truncate_fd(path: String) -> CreatResult:
         # it is consumed below; the returned fd, when non-negative, is owned by
         # the caller, not freed here.
         fd = external_call["creat", Int32](
-            terminated.unsafe_ptr().bitcast[NoneType](), UInt32(_CREATE_MODE)
+            terminated.unsafe_ptr().unsafe_bitcast[NoneType](),
+            UInt32(_CREATE_MODE),
         )
     # Snapshot `errno` while the failing `creat` is still the last syscall, before
     # `terminated^` frees the C-string: `free` may overwrite `errno`, so a read
@@ -336,20 +322,17 @@ def create_truncate_fd_guarded(path: String) -> CreatResult:
     - The returned descriptor is an ordinary blocking one, so a live consumer
       reading slowly applies backpressure exactly as it always did. Nothing but
       the readerless case changes — from a hang into an error.
-    - The mode is `creat`'s, whose ABI is fixed. This is not a stylistic choice:
-      `open(2)` is VARIADIC, and on Darwin arm64 a variadic argument is passed
-      on the stack while the non-variadic declaration Mojo emits passes it in a
-      register. An `open` that consumed a mode would therefore create the file
-      with whatever junk the stack held. The probe passes no `O_CREAT`, so libc
-      never reads its third argument and the mismatch cannot bite; the argument
-      is supplied only because one declaration per symbol is emitted per module
-      and `regular_file.mojo` already fixed the arity at three.
+    - The mode is `creat`'s, whose ABI is fixed, so the mode needs no variadic
+      calling convention at all. The probe passes no `O_CREAT`, so libc never
+      reads `open`'s third argument; it is supplied only because the stdlib
+      declares `open` at arity three (`num_fixed_args=2`) and one declaration
+      shape per symbol is emitted per binary.
 
     Residual race, stated rather than hidden: for a FIFO destination whose
     reader disconnects between the probe's close and `creat`, the open blocks as
     before. The window is two syscalls wide and needs the consumer to exit
-    inside it; closing it entirely would need `fcntl(F_SETFL)`, which is
-    variadic and so unavailable at this boundary.
+    inside it; closing it entirely would need `fcntl(F_SETFL)`, a second
+    variadic declaration this boundary does not take on.
 
     Args:
         path: The destination file to create or truncate.
@@ -384,8 +367,8 @@ def create_truncate_fd_guarded(path: String) -> CreatResult:
         # inside the initialized region. O_NONBLOCK means a readerless FIFO
         # cannot block, and O_CLOEXEC means the probe cannot cross an exec.
         # Failure owns no descriptor; success owns exactly one, closed below.
-        probe = external_call["open", Int32](
-            terminated.unsafe_ptr().bitcast[NoneType](),
+        probe = external_call["open", Int32, num_fixed_args=2](
+            terminated.unsafe_ptr().unsafe_bitcast[NoneType](),
             _probe_open_flags(),
             UInt32(0),
         )

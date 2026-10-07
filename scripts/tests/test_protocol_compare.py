@@ -90,7 +90,7 @@ class HeaderParsingTests(unittest.TestCase):
 
     def test_it_reads_a_committed_transcript(self) -> None:
         parsed = parse_header_identity(COMMITTED_SNAPSHOTS / "crashing--default.txt")
-        self.assertEqual(parsed, ToolchainIdentity("1.0.0b2", "2cf4d08a"))
+        self.assertEqual(parsed, ToolchainIdentity("1.1.0", "8189361e"))
 
     def test_it_rejects_a_header_without_a_commit(self) -> None:
         with self.assertRaises(ValueError) as raised:
@@ -150,7 +150,7 @@ class SideIdentityTests(unittest.TestCase):
 
     def test_it_reads_the_committed_snapshots(self) -> None:
         self.assertEqual(
-            side_identity(COMMITTED_SNAPSHOTS), ToolchainIdentity("1.0.0b2", "2cf4d08a")
+            side_identity(COMMITTED_SNAPSHOTS), ToolchainIdentity("1.1.0", "8189361e")
         )
 
     def test_it_rejects_disagreeing_transcripts(self) -> None:

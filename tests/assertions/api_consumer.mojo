@@ -1,6 +1,6 @@
 """Passing consumer coverage for the public assertion companion API."""
 
-from std.memory import UnsafePointer, alloc
+from std.memory import ArcPointer
 from std.reflection import source_location
 import std.testing as testing
 from std.testing import TestSuite
@@ -13,53 +13,30 @@ from mtest.assertions._display import (
 )
 
 
-def _counter() -> UnsafePointer[Int, MutUntrackedOrigin]:
-    # SAFETY: this function returns one uniquely owned, correctly aligned Int
-    # cell. Index zero is within that one-Int allocation, and assigning an Int
-    # initializes its complete target-specific representation before any read.
-    var pointer = alloc[Int](1)
-    # SAFETY: `pointer` owns one aligned Int; index zero is in bounds, and the
-    # assignment fully initializes it without exposing or retaining the pointer.
-    pointer[0] = 0
-    return pointer
-
-
 struct CounterOwner(Movable):
     """Own the four counters shared by one equality/rendering probe."""
 
-    var actual_equality: UnsafePointer[Int, MutUntrackedOrigin]
-    var expected_equality: UnsafePointer[Int, MutUntrackedOrigin]
-    var actual_render: UnsafePointer[Int, MutUntrackedOrigin]
-    var expected_render: UnsafePointer[Int, MutUntrackedOrigin]
+    var actual_equality: ArcPointer[Int]
+    var expected_equality: ArcPointer[Int]
+    var actual_render: ArcPointer[Int]
+    var expected_render: ArcPointer[Int]
 
     def __init__(out self):
-        """Allocate four initialized counter cells."""
-        self.actual_equality = _counter()
-        self.expected_equality = _counter()
-        self.actual_render = _counter()
-        self.expected_render = _counter()
-
-    def __del__(deinit self):
-        """Free each uniquely owned counter exactly once."""
-        # SAFETY: this owner holds four distinct one-Int allocations, test
-        # values only borrow their addresses, and destruction runs after those
-        # values on success or exception without any earlier free.
-        self.actual_equality.free()
-        self.expected_equality.free()
-        self.actual_render.free()
-        self.expected_render.free()
+        """Create four zeroed counter cells."""
+        self.actual_equality = ArcPointer(0)
+        self.expected_equality = ArcPointer(0)
+        self.actual_render = ArcPointer(0)
+        self.expected_render = ArcPointer(0)
 
     def read(self, slot: Int) -> Int:
-        """Read one of the four live cells by its test-only slot number."""
-        # SAFETY: this owner keeps four distinct one-Int allocations live;
-        # every branch reads index zero in one allocation without escaping it.
+        """Read one of the four cells by its test-only slot number."""
         if slot == 0:
-            return self.actual_equality[0]
+            return self.actual_equality[]
         if slot == 1:
-            return self.expected_equality[0]
+            return self.expected_equality[]
         if slot == 2:
-            return self.actual_render[0]
-        return self.expected_render[0]
+            return self.actual_render[]
+        return self.expected_render[]
 
 
 @fieldwise_init
@@ -68,22 +45,18 @@ struct ObservedValue(Copyable, Equatable, Writable):
 
     var identity: Int
     var label: String
-    var equality_calls: UnsafePointer[Int, MutUntrackedOrigin]
-    var render_calls: UnsafePointer[Int, MutUntrackedOrigin]
+    var equality_calls: ArcPointer[Int]
+    var render_calls: ArcPointer[Int]
 
     def __eq__(self, other: Self) -> Bool:
-        # SAFETY: tests construct this value only with a live CounterOwner cell
-        # that outlives every ObservedValue; index zero is within the allocation.
-        self.equality_calls[0] += 1
+        self.equality_calls[] += 1
         return self.identity == other.identity
 
     def __ne__(self, other: Self) -> Bool:
         return not (self == other)
 
     def write_to(self, mut writer: Some[Writer]):
-        # SAFETY: tests construct this value only with a live CounterOwner cell
-        # that outlives every ObservedValue; index zero is within the allocation.
-        self.render_calls[0] += 1
+        self.render_calls[] += 1
         writer.write(self.label)
 
 
@@ -174,7 +147,7 @@ def _assert_scalar_not_label(value: Int, label: String) raises:
 
 
 def _list_failure[
-    T: Copyable & ImplicitlyDestructible & Equatable & Writable
+    T: Copyable & Deinitable & Equatable & Writable
 ](actual: List[T], expected: List[T], msg: String = "") -> String:
     var detail = String("")
     try:
@@ -192,7 +165,7 @@ def _ints(count: Int) -> List[Int]:
 
 
 def _dictionary_failure[
-    V: Copyable & ImplicitlyDestructible & Equatable & Writable
+    V: Copyable & Deinitable & Equatable & Writable
 ](
     actual: Dict[String, V],
     expected: Dict[String, V],

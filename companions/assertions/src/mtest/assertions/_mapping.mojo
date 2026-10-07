@@ -89,7 +89,7 @@ def _write_keys(
 
 
 def _write_changed[
-    V: Copyable & ImplicitlyDestructible & Equatable & Writable
+    V: Copyable & Deinitable & Equatable & Writable
 ](
     mut output: BoundedWriter,
     mut selection: _Selection,
@@ -113,7 +113,7 @@ def _write_changed[
 
 
 def write_dictionary_difference[
-    V: Copyable & ImplicitlyDestructible & Equatable & Writable
+    V: Copyable & Deinitable & Equatable & Writable
 ](
     mut output: BoundedWriter,
     actual: Dict[String, V],

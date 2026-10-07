@@ -16,6 +16,9 @@ Retained files:
 Local compatibility and hardening changes are limited to:
 
 - Mojo 1.0.0b2 syntax (`fn` to `def`, and `std.math` imports)
+- Mojo 1.1.0 compatibility: an explicit `TomlValue.__deinit__` (the recursive
+  `List`/`Dict` fields otherwise fail the conditional `Deinitable` check) and
+  an explicit `Position` import in the parser
 - parser-only package exports
 - strict numeric token and signed 64-bit integer validation
 - parser depth, node, and table-update budgets

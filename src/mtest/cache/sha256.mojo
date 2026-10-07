@@ -15,7 +15,7 @@ state forks it first and finalizes the fork.
 The public surface is re-exported from `mtest.cache`.
 """
 
-comptime _K: InlineArray[UInt32, 64] = [
+comptime _K = SIMD[DType.uint32, 64](
     0x428A2F98,
     0x71374491,
     0xB5C0FBCF,
@@ -80,7 +80,7 @@ comptime _K: InlineArray[UInt32, 64] = [
     0xA4506CEB,
     0xBEF9A3F7,
     0xC67178F2,
-]
+)
 """The 64 SHA-256 round constants of FIPS 180-4 section 4.2.2."""
 
 comptime _BLOCK = 64
@@ -105,7 +105,7 @@ def _rotr(x: UInt32, n: UInt32) -> UInt32:
     return (x >> n) | (x << (32 - n))
 
 
-def _compress(mut h: InlineArray[UInt32, 8], block: List[UInt8], offset: Int):
+def _compress(mut h: Array[UInt32, 8], block: List[UInt8], offset: Int):
     """Absorb one 64-byte block into the state, per FIPS 180-4 section 6.2.2.
 
     Args:
@@ -114,7 +114,7 @@ def _compress(mut h: InlineArray[UInt32, 8], block: List[UInt8], offset: Int):
         offset: Index of the block's first byte in `block`; the caller
             guarantees `offset + 64` bytes are present.
     """
-    var w = InlineArray[UInt32, 64](fill=0)
+    var w = Array[UInt32, 64](fill=0)
     for i in range(16):
         var base = offset + i * 4
         w[i] = (
@@ -165,7 +165,7 @@ def _compress(mut h: InlineArray[UInt32, 8], block: List[UInt8], offset: Int):
     h[7] += hh
 
 
-def _hex_words(h: InlineArray[UInt32, 8], count: Int) -> String:
+def _hex_words(h: Array[UInt32, 8], count: Int) -> String:
     """Render the first `count` state words as lowercase hex, 8 digits each.
 
     Rendering word by word is what lets `hex_digest32` exist without string
@@ -208,7 +208,7 @@ struct Sha256(Copyable, Movable):
     ```
     """
 
-    var _h: InlineArray[UInt32, 8]
+    var _h: Array[UInt32, 8]
     """The eight-word running state."""
 
     var _tail: List[UInt8]
@@ -248,7 +248,7 @@ struct Sha256(Copyable, Movable):
                 _compress(self._h, self._tail, 0)
                 self._tail.clear()
 
-    def _finalized(self) -> InlineArray[UInt32, 8]:
+    def _finalized(self) -> Array[UInt32, 8]:
         """Return the state after padding, leaving `self` untouched.
 
         Appends the 0x80 marker, zero-pads to 56 bytes modulo 64, then the

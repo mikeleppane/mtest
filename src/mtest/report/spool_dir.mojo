@@ -89,7 +89,8 @@ def open_spool_dir(kind: String) raises -> String:
     if base == "":
         base = String("/tmp")
     if base.byte_length() > 1 and base.endswith("/"):
-        base = String(base.removesuffix("/"))
+        var trimmed = String(base.removesuffix("/"))
+        base = trimmed^
     var stem = base + "/mtest-" + kind + "-" + _spool_nonce() + "-"
     # Seeded so the raise below is always well-formed; the budget is positive,
     # so a real failure always overwrites this.

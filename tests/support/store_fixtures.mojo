@@ -119,8 +119,7 @@ def mutate_until_witnessed(path: String, data: String) raises:
         var now = lstat(path)
         if (
             Int(now.st_ctimespec.tv_sec) != Int(before.st_ctimespec.tv_sec)
-            or Int(now.st_ctimespec.tv_subsec)
-            != Int(before.st_ctimespec.tv_subsec)
+            or Int(now.st_ctimespec.tv_nsec) != Int(before.st_ctimespec.tv_nsec)
             or Int(now.st_size) != Int(before.st_size)
         ):
             return

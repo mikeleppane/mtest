@@ -97,10 +97,12 @@ def main() -> int:
         `0` after writing the build product, `2` for any refused invocation.
     """
     args = sys.argv[1:]
+    if len(args) == 6 and args[4] == "-D" and args[5].startswith("MTEST_SOURCE="):
+        args = args[:4]
     if len(args) != 4:
         return _reject(
             f"refusing {args!r}: this stand-in serves exactly "
-            "`build <source.mojo> -o <out>` and nothing else"
+            "`build <source.mojo> -o <out> [-D MTEST_SOURCE=<path>]` and nothing else"
         )
     if args[0] != "build":
         return _reject(f"refusing subcommand {args[0]!r}: only `build` is served")

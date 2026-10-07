@@ -201,14 +201,11 @@ def assert_hostile_json_stream(
         streams.stderr.reporter_text,
         "captured_stderr",
     )
-    expect(
-        str(record.get("captured_stdout")).count(ELISION) == 1,
-        "the bounded captured_stdout carries no single elision marker",
-    )
-    expect(
-        ELISION not in str(record.get("captured_stderr")),
-        "the unbounded captured_stderr was elided anyway",
-    )
+    for field in ("captured_stdout", "captured_stderr"):
+        expect(
+            str(record.get(field)).count(ELISION) == 1,
+            f"the bounded {field} carries no single elision marker",
+        )
 
     reported = [r for r in report.records if r.get("event") == "test_reported"]
     expect(
@@ -253,8 +250,8 @@ def assert_hostile_json_stream(
         "a non-finite number",
     )
     return (
-        f"ndjson: {len(streams.stdout.retained)} retained / "
-        f"{streams.stdout.reporter_omitted} elided stdout bytes, exact captured "
+        f"ndjson: {len(streams.stderr.retained)} retained / "
+        f"{streams.stderr.reporter_omitted} elided stderr bytes, exact captured "
         f"values and detail, strict consumer live"
     )
 

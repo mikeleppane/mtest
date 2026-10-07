@@ -2,7 +2,7 @@
 """The packaged-artifact consumption GATE.
 
 `recipe/recipe.yaml` builds mtest into a LOCAL conda channel with a
-`mojo-compiler ==1.0.0b2` run dependency (see `pixi run package-build`). That
+`mojo-compiler ==1.1.0` run dependency (see `pixi run package-build`). That
 proves the recipe solves; it does not prove the artifact is consumable by
 someone who has only the package and not this repo's dev toolchain. This script
 is that proof, with ten ordered completion records:
@@ -126,7 +126,7 @@ CONDA_FORGE_CHANNEL = "conda-forge"
 # passes `--expect-mojo-version` instead, because it retargets the recipe at a
 # newer compiler first: without the override the install stage would demand the
 # pinned compiler and fail a candidate that was packaged correctly.
-PRODUCTION_MOJO_PIN = "1.0.0b2"
+PRODUCTION_MOJO_PIN = "1.1.0"
 
 # The known-failing fixture stage drives through the installed binary. It is an
 # e2e fixture with a manifest-pinned outcome (verdict FAIL, exit class 1, two
@@ -716,13 +716,9 @@ def _validate_modular_config(config: Path, prefix: Path) -> None:
     if shared_libs is None:
         mismatches.append("[mojo-max] shared_libs: missing")
     else:
-        library_suffix = ".dylib" if sys.platform == "darwin" else ".so"
-        expected_shared_libs = (
-            str(prefix / "lib" / f"libAsyncRTMojoBindings{library_suffix}")
-            + ",-Xlinker,-rpath,-Xlinker,"
-            + str(prefix / "lib")
-            + ";"
-        )
+        # Mojo 1.1 links no runtime bindings library by name: the option is
+        # only the rpath to the prefix's own `lib`.
+        expected_shared_libs = "-Xlinker,-rpath,-Xlinker," + str(prefix / "lib") + ";"
         if shared_libs != expected_shared_libs:
             mismatches.append(
                 "[mojo-max] shared_libs: expected "
@@ -730,20 +726,6 @@ def _validate_modular_config(config: Path, prefix: Path) -> None:
                 + ", got "
                 + repr(shared_libs)
             )
-        runtime_library = prefix / "lib" / (f"libAsyncRTMojoBindings{library_suffix}")
-        try:
-            resolved_runtime_library = runtime_library.resolve(strict=True)
-        except OSError as exc:
-            mismatches.append(f"[mojo-max] shared_libs: cannot resolve: {exc}")
-        else:
-            if (
-                not resolved_runtime_library.is_relative_to(prefix)
-                or not resolved_runtime_library.is_file()
-            ):
-                mismatches.append(
-                    "[mojo-max] shared_libs: runtime library must resolve to "
-                    "a regular file inside prefix"
-                )
     if mismatches:
         raise PackageCheckError(
             "installed modular.cfg does not name its own prefix exactly: "

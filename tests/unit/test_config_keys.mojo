@@ -13,8 +13,8 @@ entry; the key table below is the second, written independently, and every
 assertion here reconciles the two or drives a key through a real resolution
 rather than reading it back from the same place it was written.
 
-**What this cannot catch.** Mojo 1.0.0b2 has no field reflection, so no
-assertion here can count a struct's fields. Every count is taken against a
+**What this cannot catch.** No assertion here counts a struct's fields by
+reflection. Every count is taken against a
 projection this file enumerates. A key added to `flag_specs()` or to the table
 below and forgotten in a struct path fails here; a field added to one struct
 alone, reaching no flag and no layer, is invisible to this gate and is caught

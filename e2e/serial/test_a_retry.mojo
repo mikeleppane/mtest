@@ -18,7 +18,6 @@ before admitting the next serial file. It combines two behaviors:
   other and fall before the next serial file's window, proving the retry drained
   inside the file's single serial slot.
 """
-from std.memory import UnsafePointer
 from std.os import getenv
 from std.os.path import exists
 from std.testing import assert_equal, TestSuite
@@ -90,10 +89,10 @@ def main() raises:
         _stamp_run_window("aretry1")
         with open(_MARKER, "w") as f:
             f.write("crashed once\n")
-        # SAFETY: this deliberately constructs an UnsafePointer at a known-invalid
+        # SAFETY: this deliberately constructs a Pointer at a known-invalid
         # address so the load below raises a genuine SIGSEGV, the exact crash this
         # fixture exists to produce for the serial-retry e2e scenario. It never
         # runs outside this test fixture.
-        var p = UnsafePointer[Int, MutUntrackedOrigin](unsafe_from_address=8)
+        var p = Pointer[Int, MutUntrackedOrigin](unsafe_from_address=8)
         print(p[])
     TestSuite.discover_tests[__functions_in_module()]().run()

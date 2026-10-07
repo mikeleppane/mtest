@@ -2551,9 +2551,10 @@ class Runner:
                 probs.append(f"{label}: second stdout line is not the run line")
             elif not lines[1].endswith(selector):
                 probs.append(f"{label}: the run line does not end in {selector!r}")
-            # The binary's own report, produced after the exec, on the same
-            # descriptor mtest was writing to a moment earlier.
-            if "tests run:" not in r.stdout:
+            # The binary's own report, produced after the exec: stdout on a
+            # pass, the uncaught-exception message on stderr on a failure.
+            report = r.stdout if want_exit == 0 else r.stderr
+            if "tests run:" not in report:
                 probs.append(f"{label}: the test binary's own report never arrived")
             if "=====" in r.stdout or "=====" in r.stderr:
                 probs.append(f"{label}: an mtest summary band survived the handoff")
@@ -2681,10 +2682,11 @@ class Runner:
         A scaffold a reader has to repair before it runs is worse than no
         scaffold at all, and nothing about its exit code would say so — only
         building and running the bytes it wrote can. The second half runs the
-        same gauntlet through a basename carrying the two characters that end
-        a Mojo string literal, because the stem is interpolated into the
-        file's own docstring: unescaped, `new` reports success and emits a
-        file that does not compile.
+        same gauntlet through a basename carrying a backslash and a quote,
+        because the stem is interpolated into the file's own docstring:
+        unescaped, `new` reports success and emits a file that does not
+        compile. It carries no `"`: Mojo 1.1.0 segfaults compiling a TestSuite
+        file whose name holds one.
         """
         ref = "§29 the scaffolded file is runnable as written, any legal name"
         halves = [
@@ -2692,7 +2694,7 @@ class Runner:
             (
                 "new: a hostile basename still compiles and passes",
                 "new_hostile",
-                'test_a"""b\\.mojo',
+                "test_a'b\\.mojo",
             ),
         ]
         for name, directory_name, basename in halves:
@@ -2883,14 +2885,11 @@ class Runner:
         # The second is a CROSS-CHECK and is deliberately weaker: it says the
         # report is readable wherever the JUnit artifact from the SAME run is,
         # EXCEPT where this process's umask withheld the bit from both. Three
-        # honest caveats. Only the READ bits are compared, because the two
-        # writers differ on the write bits by design — this one honors the umask
-        # and the JUnit path's `open` does not, so a byte-equal comparison would
-        # pin a world-writable report as correct. The `& ~previous` term is
-        # load-bearing for the same reason: without it a CORRECT report goes red
-        # under any umask that masks a read bit (0o007, 0o027, 0o037, 0o070,
-        # 0o077 — verified), precisely because the report honors the umask and
-        # its sibling does not. And its strength depends on the sibling's own
+        # honest caveats. Only the READ bits are compared, because the
+        # JUnit path's mode is the stdlib `open`'s, which this gate does not
+        # own. The `& ~previous` term keeps a CORRECT report green under any
+        # umask that masks a read bit (0o007, 0o027, 0o037, 0o070, 0o077). And
+        # its strength depends on the sibling's own
         # mode, which this branch does not control: under a restrictive umask it
         # can have nothing left to say, and the primary assertion above is what
         # carries the pin there.
@@ -3961,7 +3960,7 @@ def main() -> int:
     try:
         scaffold(root)
         pc = subprocess.run(
-            ["mojo", "precompile", "textkit", "-o", "build/textkit.mojopkg"],
+            ["mojo", "precompile", "textkit", "-o", "build/textkit.mojoc"],
             cwd=root,
             env=env,
             capture_output=True,

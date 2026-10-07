@@ -114,10 +114,10 @@ def test_build_arg_equals_form() raises:
 
 
 def test_precompile_equals_form() raises:
-    var argv: List[String] = ["--precompile=src:out.mojopkg"]
+    var argv: List[String] = ["--precompile=src:out.mojoc"]
     var r = parse_args(argv)
     assert_equal(r.config.precompiles[0].src, "src")
-    assert_equal(r.config.precompiles[0].out.value(), "out.mojopkg")
+    assert_equal(r.config.precompiles[0].out.value(), "out.mojoc")
 
 
 def test_mojo_equals_form() raises:

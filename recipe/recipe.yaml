@@ -1,7 +1,7 @@
 # mtest distribution recipe (rattler-build).
 #
 # Builds mtest FROM SOURCE inside rattler-build's ISOLATED build environment —
-# `mojo ==1.0.0b2` (+ the pinned C toolchain) installs and runs there, so this
+# `mojo ==1.1.0` (+ the pinned C toolchain) installs and runs there, so this
 # recipe mirrors the repo's own build -> build-native -> build-bin pipeline
 # rather than repackaging a prebuilt binary. See recipe/build.sh for the exact
 # steps.
@@ -42,7 +42,7 @@ requirements:
   # versions pixi.toml pins for local/CI builds so the recipe's build matches
   # the repo's proven build exactly.
   build:
-    - mojo ==1.0.0b2
+    - mojo ==1.1.0
     - clang ==18.1.8
   # Host: the target-side libraries the produced binary links against, named
   # here as the package that owns them rather than being taken implicitly from
@@ -53,14 +53,14 @@ requirements:
   # Both gate targets build natively, so this section changes no resolution
   # today; it states the contract the `run` dependency has always relied on.
   host:
-    - mojo-compiler ==1.0.0b2
+    - mojo-compiler ==1.1.0
   # Run-time: the installed `mtest` binary is NOT loader-clean on its own, in
   # either object format. On linux-64 `readelf -d` shows a direct ELF NEEDED on
   # `libKGENCompilerRTShared.so`; on osx-arm64 `otool -L` shows the
   # corresponding Mach-O load command for the same runtime library. Its
   # transitive closure pulls in the Mojo-runtime libraries (libMSupportGlobals,
   # libAsyncRTRuntimeGlobals, libNVPTX, libAsyncRTMojoBindings) that
-  # `mojo-compiler-1.0.0b2-release` owns, plus the platform's standard C++
+  # `mojo-compiler-1.1.0-release` owns, plus the platform's standard C++
   # runtime (libstdc++/libgcc_s on Linux, libc++ on macOS) — which the base
   # environment provides and `mojo-compiler` itself depends on, NOT libraries
   # mtest vendors or that mojo-compiler "owns". The native adapter is statically
@@ -70,7 +70,7 @@ requirements:
   # empirically ON BOTH PLATFORMS, in a fresh environment carrying only the
   # declared run dependency with that platform's loader search path emptied.
   run:
-    - mojo-compiler ==1.0.0b2
+    - mojo-compiler ==1.1.0
 
 tests:
   # Installs the just-built package into a fresh test env carrying ONLY the

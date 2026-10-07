@@ -133,7 +133,7 @@ def _hex_decode(hex_text: String) -> Optional[String]:
         i += 2
     var decoded: String
     try:
-        decoded = String(StringSlice(from_utf8=Span(raw)))
+        decoded = String(from_utf8=raw)
     except:
         return None
     return Optional[String](decoded^)

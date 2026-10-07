@@ -206,12 +206,12 @@ check available for any of them:
   installed compiler actually reports, including the revision hash this
   manifest does not carry.
 - `scripts/build/package_consumption.py` globs
-  `mojo-compiler-1.0.0b2-*.json` in the installed environment's `conda-meta` to
+  `mojo-compiler-1.1.0-*.json` in the installed environment's `conda-meta` to
   prove the solve pulled the declared run dependency. A stale glob fails that
   gate as a missing run dependency, which indicts the recipe rather than the
   glob, so this is the restatement most likely to waste a bump's afternoon.
-- `scripts/e2e/scenarios/doctor.py` asserts the exact `expected Mojo 1.0.0b2
-  (2cf4d08a)` text the `doctor` subcommand prints, which is a claim about the
+- `scripts/e2e/scenarios/doctor.py` asserts the exact `expected Mojo 1.1.0
+  (8189361e)` text the `doctor` subcommand prints, which is a claim about the
   CLI's output rather than about the manifest.
 """
 
@@ -231,12 +231,12 @@ MOJO_PIN_CLAIM_RE = re.compile(
 )
 """One claim about which Mojo toolchain this release uses.
 
-Covers the forms the tree actually writes: a recipe's `- mojo ==1.0.0b2` and
-`- mojo-compiler ==1.0.0b2`, Markdown's `` `mojo-compiler ==1.0.0b2` `` and
-``Mojo `1.0.0b2` `` and ``Mojo `==1.0.0b2` ``, the package filename
-`mojo-compiler-1.0.0b2-release`, and the rendered `Mojo 1.0.0b2 (2cf4d08a)`.
+Covers the forms the tree actually writes: a recipe's `- mojo ==1.1.0` and
+`- mojo-compiler ==1.1.0`, Markdown's `` `mojo-compiler ==1.1.0` `` and
+``Mojo `1.1.0` `` and ``Mojo `==1.1.0` ``, the package filename
+`mojo-compiler-1.1.0-release`, and the rendered `Mojo 1.1.0 (8189361e)`.
 Requiring the word `mojo` immediately before the version is what keeps prose
-about behavior at the pinned toolchain (`1.0.0b2 polymorphism is static`) out:
+about behavior at the pinned toolchain (`1.1.0 polymorphism is static`) out:
 that text goes stale on a bump too, but it is not a claim about what to
 install, and gating it would make every such sentence a version site.
 """
@@ -443,6 +443,27 @@ def check_support_matrix(repo_root: Path = REPO_ROOT) -> None:
         )
 
 
+def _current_claims(path: Path) -> list[str]:
+    """Return the Mojo toolchain claims a document makes about the present.
+
+    A changelog's older entries are records of what each release was built
+    against, so only its newest entry (the text before the second `## `
+    heading) speaks for the current pin. Every other document is read whole.
+
+    Args:
+        path: The document to read.
+
+    Returns:
+        Every `MOJO_PIN_CLAIM_RE` version claim in the current text.
+    """
+    text = _read_text(path)
+    if path.name == "CHANGELOG.md":
+        headings = [m.start() for m in re.finditer(r"(?m)^## ", text)]
+        if len(headings) >= 2:
+            text = text[: headings[1]]
+    return MOJO_PIN_CLAIM_RE.findall(text)
+
+
 def check_mojo_pin_sites(repo_root: Path = REPO_ROOT) -> None:
     """Assert every restatement of the Mojo pin matches the pixi manifest.
 
@@ -461,7 +482,7 @@ def check_mojo_pin_sites(repo_root: Path = REPO_ROOT) -> None:
     pinned = _manifest_mojo_pin(repo_root / "pixi.toml")
     for relative in MOJO_PIN_SITES:
         path = repo_root / relative
-        claimed = MOJO_PIN_CLAIM_RE.findall(_read_text(path))
+        claimed = _current_claims(path)
         if not claimed:
             raise AssertionError(f"no Mojo toolchain claim found in {path}")
         for claim in claimed:
@@ -550,7 +571,7 @@ def check_no_stale_mojo_pin_claims(repo_root: Path = REPO_ROOT) -> None:
     swept = swept_documentation(repo_root)
     pinned = _manifest_mojo_pin(repo_root / "pixi.toml")
     for relative in swept:
-        for claim in MOJO_PIN_CLAIM_RE.findall(_read_text(repo_root / relative)):
+        for claim in _current_claims(repo_root / relative):
             if claim != pinned:
                 raise AssertionError(
                     f"stale toolchain claim: {relative} names Mojo {claim!r}, "

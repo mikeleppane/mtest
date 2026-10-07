@@ -42,7 +42,7 @@ from mtest.platform import (
     close_fd,
     create_truncate_fd_guarded,
     errno_now,
-    write_fd,
+    write_all_bytes_fd_status,
 )
 from mtest.report.json_stream import serialize_event, stream_header
 from mtest.report.reporter import Reporter
@@ -257,32 +257,12 @@ struct JsonStreamReporter(Reporter):
             `True` when every byte was written, `False` after latching a
             failure.
         """
-        var b = s.as_bytes()
-        var total = len(b)
-        var offset = 0
-        while offset < total:
-            # SAFETY: `b` borrows `s`'s bytes for the whole loop (`s` is a live
-            # argument, so its buffer outlives every iteration). `offset` is in
-            # `[0, total)` every iteration, so `unsafe_ptr() + offset` stays
-            # inside the `total`-byte initialized buffer, and the length passed
-            # is exactly the remaining `total - offset` bytes; the derived
-            # pointer does not escape and `write_fd` reads through it and retains
-            # nothing.
-            var n = write_fd(self._fd, b.unsafe_ptr() + offset, total - offset)
-            if n < 0:
-                var err = errno_now()
-                if err == EINTR:
-                    continue
-                self._latch(err, context)
-                return False
-            if n == 0:
-                # A zero write with bytes still pending makes no progress; treat
-                # it as a failed destination rather than spin forever.
-                self._latch(0, context)
-                return False
-            offset += n
-        _ = b
-        return True
+        var status = write_all_bytes_fd_status(self._fd, s.as_bytes())
+        if status == 0:
+            return True
+        # -1 is a write that made no progress, which sets no errno.
+        self._latch(status if status > 0 else 0, context)
+        return False
 
     def _latch(mut self, err: Int, context: String):
         """Record the first write failure and go silent for the rest of the run.

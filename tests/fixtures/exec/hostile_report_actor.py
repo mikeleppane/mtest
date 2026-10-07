@@ -27,8 +27,9 @@ an argument, so a harness can predict these bytes exactly without owning a copy
 of them.
 
 One optional behaviour is armed from the environment: `FLOOD_ENV` asks for a
-printable stdout flood ahead of everything else, which lets a scenario drive the
-runner past its per-stream capture bound and then assert on what the retained
+printable flood ahead of everything else on both streams, which lets a
+scenario drive the runner past its per-stream capture bound and then assert on
+what the retained
 tail — the region mtest reparses — still holds. Absent, the actor writes only
 the hostile blocks and its report, which is what the console scenario wants.
 
@@ -360,6 +361,9 @@ def write_all(fd: int, payload: bytes) -> None:
 def main() -> int:
     """Write the hostile streams and the report, then exit like TestSuite does.
 
+    A failing suite raises its report, which the runtime prints to stderr; a
+    `--skip-all` probe passes and prints it to stdout.
+
     Returns:
         `1` for the failing run, matching a real suite that raised its report;
         `0` for a `--skip-all` collection probe, which fails nothing.
@@ -370,10 +374,12 @@ def main() -> int:
         # overruns the capture bound it is flood bytes that are dropped from the
         # middle: every hostile byte, and the genuine report, survive in the
         # retained tail, which is the region mtest reparses after truncation.
-        write_all(1, flood_block(flood_lines_requested()))
+        flood = flood_block(flood_lines_requested())
+        write_all(1, flood)
         write_all(1, hostile_block(b"child stdout"))
+        write_all(2, flood)
         write_all(2, hostile_block(b"child stderr"))
-    write_all(1, report_block(skipping))
+    write_all(1 if skipping else 2, report_block(skipping))
     return 0 if skipping else 1
 
 

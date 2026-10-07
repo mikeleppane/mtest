@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fail closed when the pinned Mojo toolchain grows a source-coverage facility.
 
-mtest has no line or branch coverage number, because Mojo 1.0.0b2 ships no
+mtest has no line or branch coverage number, because Mojo 1.1.0 ships no
 coverage instrumentation: neither ``mojo build --help`` nor ``mojo --help``
 mentions a coverage, profile, or instrumentation flag. Release confidence rests
 on the behavioral and mutation oracles this repository's checks enforce.
@@ -39,7 +39,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # The toolchain this probe's recorded result belongs to. `check_version_pin`
 # refuses to run against any other pin, so the pinned message below cannot
 # outlive the version it names.
-PINNED_MOJO_VERSION = "1.0.0b2"
+PINNED_MOJO_VERSION = "1.1.0"
 
 # The exact commands this probe's recorded result was produced by. They are argv
 # lists, never a shell string: no product or test oracle in this repo invokes

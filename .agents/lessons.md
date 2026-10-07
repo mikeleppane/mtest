@@ -21,11 +21,26 @@ append here as later phases teach more.
   commits that way, and only `fmt-check` in CI surfaced it.
 - Discovery order is source order (`__functions_in_module()` yields source
   order); the fixtures pin this deliberately with non-alphabetical functions.
-- TestSuite buffers its whole report and flushes it at the end, and on failure
-  it raises the report, so the block arrives after the runtime's `Unhandled
-  exception caught during execution:` line. Anchor on the last `Running <N>
-  tests for` line that is followed by a `Summary` line, never the first match;
-  a `Running`-lookalike a test prints before crashing has no Summary.
+- TestSuite buffers its whole report and flushes it at the end. A passing
+  suite prints it to stdout; a failing one raises it, and since Mojo 1.1 the
+  runtime prints an uncaught exception to STDERR, after a `stack trace was not
+  collected` hint and the `Unhandled exception caught during execution:` line.
+  So the report stream follows the exit status (`resolve_run_report`), and so
+  does the stale-name `test not found in suite` refusal. Anchor on the last
+  `Running <N> tests for` line that is followed by a `Summary` line, never the
+  first match; a `Running`-lookalike a test prints before crashing has no
+  Summary.
+- Mojo 1.1's compilation cache (`MODULAR_CACHE_DIR`, default under the pixi
+  env's `share/max/.mojo_cache`) keys on source content, not path. A file whose
+  bytes match one built at another path reuses that object, and its TestSuite
+  report names the OTHER path, which reads as a malformed suite. Every test
+  build passes `-D MTEST_SOURCE=<source identity>` to put the path in the key.
+- Mojo 1.1.0 segfaults compiling `TestSuite.discover_tests[__functions_in_module()]`
+  when the source file name contains `"` (exit 139, a compiler stack dump);
+  `\` and other bytes are fine. A plain `main` in the same file builds. No
+  runner-side fix exists: such a file reports COMPILE-ERROR. Likely the same
+  midend crash as modular/modular#7229 (`StaticString` parameters reached by
+  `__functions_in_module()`).
 - `suite.skip[f]()` exists (manual construction form); a natively-skipped test
   emits a normal `SKIP` row, distinct from selection-induced SKIPs.
 - A bare `abort()` emits no `ABORT:` line, so crash fixtures must pass a
@@ -36,14 +51,14 @@ append here as later phases teach more.
   matched a frame pattern.
 - The report colorizes only on a TTY, and mtest and the generator capture
   through pipes, so the parser sees plain text.
-- `mojo package` does not exist in 1.0.0b2; `mojo precompile` produces the
+- There is no `mojo package`; `mojo precompile` produces the
   precompiled package (this repo's `build/*.mojoc` files).
 - The module cache is redirectable via `MODULAR_CACHE_DIR`. `mojo build` is
   multi-threaded by default (`--num-threads`), so parallel worker sizing must
   not oversubscribe compiler threads.
 - `mojo precompile` is NOT byte-reproducible: two runs over identical inputs
   produced packages digesting `43fcef41...` and `eb81d1f7...`. Nothing may
-  assume a rebuilt `.mojopkg` is byte-stable, and any digest taken over one is
+  assume a rebuilt `.mojoc` is byte-stable, and any digest taken over one is
   a fingerprint of *that* build, not of its inputs. The consequence compounds:
   a precompile step that re-runs rewrites its package and therefore moves
   every key derived from it, so a build cache over a project that precompiles
@@ -165,19 +180,32 @@ append here as later phases teach more.
   `@fieldwise_init` struct.
 - `exit()` is not `noreturn` to flow analysis; seed a sentinel before a `try`
   whose branches all exit, with a comment saying why.
-- `UnsafePointer` is non-nullable, and `unsafe_from_address=0` fails at compile
-  time. For a NULL argv terminator, over-allocate by one and `memset_zero`. Use
-  the free `alloc[T](n)`; `.alloc`/`.offset` methods do not exist.
-- `UnsafePointer[T, _]` helper arguments get an immutable wildcard origin, so
-  write struct fields inline at the call site where the pointer still has its
-  concrete mutable origin.
-- String to C string: `s.as_c_string_slice().unsafe_ptr()`. Bytes to String:
-  `String(StringSlice(unsafe_from_utf8=Span(list)))`.
+- By Mojo 1.1, `UnsafePointer` is unified into `Pointer`, with every unsafe
+  operation spelled `unsafe_*` (`[unsafe_offset=i]`, `unsafe_bitcast`,
+  `unsafe_free`) and `alloc` taking a `Layout`. Do not hand-allocate FFI
+  storage: an `FfiRecord`
+  (zeroed, aligned, self-freeing, bounds-checked fields) or a
+  `List[T](length=n, fill=0)` covers every case here, and a `Span` slice
+  (`Span(buf)[offset:]`) replaces pointer arithmetic. Shared mutable test state
+  is an `ArcPointer`, not a raw cell.
+- Bytes to String: `String(unsafe_from_utf8=list)` or `String(from_utf8=list)`
+  (validating). `StringSlice` is now `StringSpan`; `Span` lives in the prelude.
+- An untyped list literal is an `Array` since Mojo 1.1: `var xs = [a, b]` will
+  not pass where a `List` is expected, nor `append`. Annotate
+  `var xs: List[T] = [...]`.
+- `x = String(x.removesuffix(...))` is an aliasing error since 1.1; bind the
+  result to a temporary and move it in.
+- A struct whose fields recursively contain its own type (`List[Self]`,
+  `Dict[String, Self]`) fails the conditional `Deinitable` check; declare an
+  explicit `def __deinit__(deinit self): pass` (destructors are `__deinit__`
+  since 1.0).
+- A `comptime for` index over a literal `range(2)` cannot pick a tuple element
+  of a concrete type; `range(Self.N)` over a trait-bound pack works. In a test,
+  index the tuple with literals.
 - A closed-vocabulary Int-wrapping struct must conform to `ImplicitlyCopyable`
   or its comptime constants fail to materialize. Large owning structs stay
   `Copyable, Movable` only, so every copy is a visible `.copy()`; that is house
-  discipline, not compiler-forced (`String` is `ImplicitlyCopyable` in
-  1.0.0b2).
+  discipline, not compiler-forced (`String` is `ImplicitlyCopyable`).
 - `Int(String)` raises on non-digit input, so a pure non-raising parser
   hand-rolls digit-by-digit parsing. `std.os.path.realpath` exists for
   canonicalizing to the exact string `mojo build` bakes into reports.
@@ -219,19 +247,19 @@ append here as later phases teach more.
   `FileDescriptor`. Reading is not the same hazard: `FileDescriptor(fd).isatty()`
   on a closed descriptor was probed and returns cleanly; it is the printing path
   that closes.
-- `external_call` emits a NON-variadic call. On Darwin arm64 a variadic
-  argument travels on the stack while the emitted call passes it in a register,
-  so a variadic argument libc actually *consumes* is silent garbage there while
-  Linux passes — `open(2)`'s mode under `O_CREAT`, `fcntl`'s under `F_SETFL`.
-  Reach for a fixed-ABI sibling (`creat` instead of `open`+`O_CREAT`), or keep
-  the variadic argument unconsumed and say in the SAFETY comment why libc never
-  reads it.
+- `external_call` emits a NON-variadic call unless given
+  `num_fixed_args=N` (Mojo 1.0+). On Darwin arm64 a variadic argument travels on
+  the stack while a non-variadic call passes it in a register, so a consumed
+  variadic argument is silent garbage there while Linux passes. Declare variadic
+  libc functions with `num_fixed_args` (the stdlib declares `open` with
+  `num_fixed_args=2`, so this tree must match), and still prefer a fixed-ABI
+  sibling (`creat` instead of `open`+`O_CREAT`).
 - ONE `external_call` declaration shape per libc symbol repo-wide. Arity is
   part of the shape, and a second declaration with a different one breaks the
   link from a file that has nothing to do with either call site — the error
-  surfaces at archive time and names neither. `open` is fixed at arity 3 in
-  this tree (`platform/regular_file.mojo`, `platform/stream.mojo`); grep for an
-  existing declaration before writing a new one.
+  surfaces at archive time and names neither. `open` is fixed at arity 3 with
+  `num_fixed_args=2` in this tree, matching the stdlib's own declaration; grep
+  for an existing declaration before writing a new one.
 - `isdir` / `isfile` / `islink` fold every error into `False`, so "I could not
   characterize this" becomes "it is not there" and a thing that should have
   been examined is skipped in silence. Where the difference decides anything,

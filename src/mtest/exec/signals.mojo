@@ -18,43 +18,45 @@ destructor is only a last-resort retry for exceptional unwinding; callers must
 use `close()` on every ordinary path.
 """
 from std.ffi import external_call
-from std.memory import alloc, memset_zero
 
-from mtest.platform import process_id
+from mtest.platform import FfiRecord, process_id
 
 
-comptime _ERROR_BYTES = 32
+comptime ERROR_BYTES = 32
 """Size of ABI-v1 `struct mtest_exec_error` (alignment 8)."""
 
 
-def _runtime_error(
-    prefix: String,
-    operation: Int,
-    error_number: Int,
-    cleanup_operation: Int,
-    cleanup_error: Int,
-) -> Error:
-    """Build one named native-runtime machinery error.
+def native_error(prefix: String, error: FfiRecord) -> String:
+    """Render a native error record, keeping any cleanup failure.
 
-    A nonzero `cleanup_operation` means the rollback failed too, and appends
-    that operation and errno to the message.
+    ABI-v1 fixes the primary operation/errno at UInt32/Int32 fields 0/1 and the
+    cleanup operation/errno at fields 2/3. A nonzero cleanup operation means
+    the rollback failed too, and is appended to the message.
+
+    Args:
+        prefix: The machinery-error label, e.g. `exec: poll failed`.
+        error: The record a failing native call initialized.
+
+    Returns:
+        The named error message.
     """
     var message = (
         prefix
         + " (operation "
-        + String(operation)
+        + String(error.load[UInt32](0))
         + ", errno "
-        + String(error_number)
+        + String(error.load[Int32](1))
         + ")"
     )
+    var cleanup_operation = error.load[UInt32](2)
     if cleanup_operation != 0:
         message += (
             "; cleanup operation "
             + String(cleanup_operation)
             + " failed with errno "
-            + String(cleanup_error)
+            + String(error.load[Int32](3))
         )
-    return Error(message^)
+    return message^
 
 
 struct ExecRuntime(Movable):
@@ -98,39 +100,19 @@ struct ExecRuntime(Movable):
             Error: A named `exec: runtime open failed` machinery error carrying
                 the adapter operation and errno plus any rollback failure.
         """
-        # SAFETY: `alloc[UInt64](4)` owns 32 bytes aligned to 8, exactly ABI-v1's
-        # error record. Zeroing initializes every byte before C may write it;
-        # `mtest_exec_runtime_open` does not retain the pointer.
-        var error = alloc[UInt64](4)
-        memset_zero(error.bitcast[UInt8](), _ERROR_BYTES)
+        var error = FfiRecord(bytes=ERROR_BYTES)
+        # SAFETY: `error` is a complete zeroed ABI-v1 error record that outlives
+        # this synchronous call; `mtest_exec_runtime_open` does not retain it.
         var result = external_call["mtest_exec_runtime_open", Int32](
-            error.bitcast[UInt8]()
+            error.ptr()
         )
         if result != 0:
-            # SAFETY: the adapter initialized the complete aligned error record
-            # before returning. ABI-v1 fixes primary operation/errno at 0/4 and
-            # cleanup operation/errno at 8/12; a nonzero cleanup operation on
-            # runtime-open means native state is RESTORE_REQUIRED and this live
-            # token must own the explicit restoration retry.
-            var operation = Int(error.bitcast[UInt32]()[0])
-            var error_number = Int(error.bitcast[Int32]()[1])
-            var cleanup_operation = Int(error.bitcast[UInt32]()[2])
-            var cleanup_error = Int(error.bitcast[Int32]()[3])
-            if cleanup_operation != 0:
+            # A nonzero cleanup operation on runtime-open means native state is
+            # RESTORE_REQUIRED and this live token must own the explicit
+            # restoration retry.
+            if error.load[UInt32](2) != 0:
                 self.active = True
-            # SAFETY: `error` is still the unique allocation owner and C did not
-            # retain it; this frees it exactly once before the raising path.
-            error.free()
-            raise _runtime_error(
-                "exec: runtime open failed",
-                operation,
-                error_number,
-                cleanup_operation,
-                cleanup_error,
-            )
-        # SAFETY: `error` remains uniquely owned and non-escaping after the
-        # successful non-retaining ABI call; free it exactly once.
-        error.free()
+            raise Error(native_error("exec: runtime open failed", error))
         self.active = True
 
     def close(mut self) raises:
@@ -148,48 +130,28 @@ struct ExecRuntime(Movable):
         """
         if not self.active:
             return
-        # SAFETY: this is the same complete, aligned, uniquely-owned ABI-v1 error
-        # record used by construction. The close call writes but never retains it.
-        var error = alloc[UInt64](4)
-        memset_zero(error.bitcast[UInt8](), _ERROR_BYTES)
+        var error = FfiRecord(bytes=ERROR_BYTES)
+        # SAFETY: `error` is a complete zeroed ABI-v1 error record that outlives
+        # this synchronous call; the close call writes but never retains it.
         var result = external_call["mtest_exec_runtime_close", Int32](
-            error.bitcast[UInt8]()
+            error.ptr()
         )
         if result != 0:
-            # SAFETY: C initialized the record before returning; ABI-v1 fixes
-            # primary and cleanup values at the first four 32-bit slots.
-            var operation = Int(error.bitcast[UInt32]()[0])
-            var error_number = Int(error.bitcast[Int32]()[1])
-            var cleanup_operation = Int(error.bitcast[UInt32]()[2])
-            var cleanup_error = Int(error.bitcast[Int32]()[3])
-            # SAFETY: the non-retained allocation still has one owner; free once
-            # while leaving `self.active` true for an explicit retry.
-            error.free()
-            raise _runtime_error(
-                "exec: runtime close failed",
-                operation,
-                error_number,
-                cleanup_operation,
-                cleanup_error,
-            )
-        # SAFETY: successful close did not retain the uniquely-owned record.
-        error.free()
+            # `self.active` stays true for an explicit retry.
+            raise Error(native_error("exec: runtime close failed", error))
         self.active = False
 
-    def __del__(deinit self):
+    def __deinit__(deinit self):
         """Last-resort restoration; explicit `close()` is required."""
         if not self.active:
             return
-        # SAFETY: destructor fallback owns this aligned 32-byte record, fully
-        # initializes it, passes it to a non-retaining ABI call, then frees it.
-        # Failure cannot be raised from a destructor; explicit close is the only
-        # success-reporting path and is enforced by callers/tests.
-        var error = alloc[UInt64](4)
-        memset_zero(error.bitcast[UInt8](), _ERROR_BYTES)
-        _ = external_call["mtest_exec_runtime_close", Int32](
-            error.bitcast[UInt8]()
-        )
-        error.free()
+        var error = FfiRecord(bytes=ERROR_BYTES)
+        # SAFETY: as in `close`. Failure cannot be raised from a destructor;
+        # explicit close is the only success-reporting path.
+        _ = external_call["mtest_exec_runtime_close", Int32](error.ptr())
+        # `ptr()` erases the origin, so nothing else keeps `error` alive past
+        # its last use; end its lifetime explicitly after the call.
+        _ = error^
 
 
 def interrupt_requested() -> Bool:

@@ -259,7 +259,7 @@ class MojoPinGateTests(unittest.TestCase):
         for relative in version.MOJO_PIN_SITES:
             path = version.REPO_ROOT / relative
             self.assertTrue(path.is_file(), path)
-            claims = version.MOJO_PIN_CLAIM_RE.findall(path.read_text(encoding="utf-8"))
+            claims = version._current_claims(path)
             self.assertNotEqual(claims, [], path)
             self.assertEqual(set(claims), {pinned}, path)
 
@@ -283,6 +283,19 @@ class MojoPinGateTests(unittest.TestCase):
                 site.write_text(text[:start] + "0.0.0b0" + text[end:], encoding="utf-8")
                 with self.assertRaisesRegex(AssertionError, r"0\.0\.0b0"):
                     version.check_mojo_pin_sites(root)
+
+    def test_an_older_changelog_entry_may_name_its_own_toolchain(self) -> None:
+        """Only the newest entry speaks for the pin; older ones are records."""
+        with tempfile.TemporaryDirectory(prefix="mtest-pin-") as raw:
+            root = Path(raw)
+            self._clone(root)
+            changelog = root / "CHANGELOG.md"
+            changelog.write_text(
+                changelog.read_text(encoding="utf-8")
+                + "\n## 0.0.1 — 2000-01-01\n\n- Mojo `0.0.0b0`.\n",
+                encoding="utf-8",
+            )
+            version.check_mojo_pin_sites(root)
 
     def test_a_manifest_bump_that_forgets_the_recipes_is_rejected(self) -> None:
         """The shipped case: the package would request the old compiler."""

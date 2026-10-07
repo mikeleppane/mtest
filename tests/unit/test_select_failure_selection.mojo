@@ -32,7 +32,7 @@ def _selected(
 
 def test_file_record_selects_the_discovered_file() raises:
     var files: List[String] = ["tests/a.mojo", "tests/b.mojo"]
-    var names = [
+    var names: List[CollectedNames] = [
         _collected("tests/a.mojo", ["test_a"]),
         _collected("tests/b.mojo", ["test_b"]),
     ]
@@ -46,7 +46,9 @@ def test_file_record_selects_the_discovered_file() raises:
 
 def test_test_record_selects_only_a_live_collected_name() raises:
     var files: List[String] = ["tests/a.mojo"]
-    var names = [_collected("tests/a.mojo", ["test_a", "test_b"])]
+    var names: List[CollectedNames] = [
+        _collected("tests/a.mojo", ["test_a", "test_b"])
+    ]
     var state = LastRunState([_test("tests/a.mojo", "test_b")])
     var selected = resolve_last_failed(files, names, state)
     assert_true(selected.matched)
@@ -57,7 +59,9 @@ def test_test_record_selects_only_a_live_collected_name() raises:
 
 def test_missing_file_and_missing_test_drop_loudly_without_raising() raises:
     var files: List[String] = ["tests/a.mojo"]
-    var names = [_collected("tests/a.mojo", ["test_live"])]
+    var names: List[CollectedNames] = [
+        _collected("tests/a.mojo", ["test_live"])
+    ]
     var state = LastRunState(
         [
             _file("tests/gone.mojo"),
@@ -75,7 +79,7 @@ def test_missing_file_and_missing_test_drop_loudly_without_raising() raises:
 
 def test_empty_and_all_stale_state_fall_back() raises:
     var files: List[String] = ["tests/a.mojo"]
-    var names = [_collected("tests/a.mojo", ["test_a"])]
+    var names: List[CollectedNames] = [_collected("tests/a.mojo", ["test_a"])]
     var empty = resolve_last_failed(files, names, LastRunState.empty())
     assert_false(empty.matched)
     assert_equal(len(empty.stale_ids), 0)
@@ -96,7 +100,7 @@ def test_gate_records_are_live_not_stale() raises:
     """
     var files: List[String] = ["tests/a.mojo"]
     var gates: List[String] = ["tests/test_smoke.mojo"]
-    var names = [_collected("tests/a.mojo", ["test_a"])]
+    var names: List[CollectedNames] = [_collected("tests/a.mojo", ["test_a"])]
     var by_file = resolve_last_failed(
         files, names, LastRunState([_file("tests/test_smoke.mojo")]), gates
     )
@@ -128,7 +132,9 @@ def test_gate_records_are_live_not_stale() raises:
 
 def test_live_test_outside_ordinary_selection_is_not_stale() raises:
     var files: List[String] = ["tests/a.mojo"]
-    var names = [_selected("tests/a.mojo", ["test_a", "test_b"], ["test_b"])]
+    var names: List[CollectedNames] = [
+        _selected("tests/a.mojo", ["test_a", "test_b"], ["test_b"])
+    ]
     var state = LastRunState([_test("tests/a.mojo", "test_a")])
     var selected = resolve_last_failed(files, names, state)
     assert_false(selected.matched)
@@ -141,7 +147,7 @@ def test_last_failed_preserves_discovery_and_collection_order() raises:
         "tests/b.mojo",
         "tests/c.mojo",
     ]
-    var names = [
+    var names: List[CollectedNames] = [
         _collected("tests/a.mojo", ["test_a", "test_b"]),
         _collected("tests/b.mojo", ["test_b"]),
         _collected("tests/c.mojo", ["test_c"]),
@@ -164,7 +170,7 @@ def test_last_failed_preserves_discovery_and_collection_order() raises:
 
 def test_hostile_stale_identifier_is_one_safe_physical_line() raises:
     var files: List[String] = ["tests/a.mojo"]
-    var names = [_collected("tests/a.mojo", ["test_a"])]
+    var names: List[CollectedNames] = [_collected("tests/a.mojo", ["test_a"])]
     var state = LastRunState(
         [_file("gone\nforged\t\x1b\u0085\u2028\u2029.mojo")]
     )

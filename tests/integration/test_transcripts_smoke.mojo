@@ -45,20 +45,24 @@ def _index_of(lines: List[String], target: String) -> Int:
     return -1
 
 
-def _last_running(lines: List[String], end: Int) -> Int:
+def _last_running(lines: List[String], start: Int, end: Int) -> Int:
     var idx = -1
-    for i in range(end):
+    for i in range(start, end):
         if lines[i].startswith("Running ") and (" tests for " in lines[i]):
             idx = i
     return idx
 
 
-def _stderr_marker(lines: List[String]) -> Int:
-    # The report lives in the stdout section only; scanning must stop at the
-    # stderr marker so a report-grammar lookalike in captured stderr is never
-    # folded into the stdout tally.
-    var i = _index_of(lines, "--- stderr ---")
-    return len(lines) if i < 0 else i
+def _report_bounds(lines: List[String]) -> Tuple[Int, Int]:
+    # The report rides stdout on a clean exit and stderr otherwise (a failing
+    # suite raises it). Scanning stays inside that one section so a
+    # report-grammar lookalike in the other stream is never folded in.
+    var stderr_i = _index_of(lines, "--- stderr ---")
+    if stderr_i < 0:
+        stderr_i = len(lines)
+    if lines[2] == "termination: exit 0":
+        return (4, stderr_i)
+    return (stderr_i + 1, len(lines))
 
 
 def _first_int(field: String) raises -> Int:
@@ -105,8 +109,8 @@ def test_report_counts_reconcile() raises:
     var checked = 0
     for name in _manifest():
         var lines = _lines(_read(TX_DIR + name))
-        var stderr_i = _stderr_marker(lines)
-        var anchor = _last_running(lines, stderr_i)
+        var bounds = _report_bounds(lines)
+        var anchor = _last_running(lines, bounds[0], bounds[1])
         if anchor < 0:
             continue  # error/crash scenarios carry no report block
 
@@ -122,10 +126,10 @@ def test_report_counts_reconcile() raises:
         var sum_fail = -1
         var sum_skip = -1
 
-        # Scan only the report block — from the anchor to the stderr marker. A
-        # report-lookalike a test printed earlier (before the anchor) or anything
-        # in captured stderr (after the marker) must NOT be counted.
-        for i in range(anchor, stderr_i):
+        # Scan only the report block — from the anchor to the end of its
+        # section. A report-lookalike a test printed earlier (before the
+        # anchor) or anything in the other stream must NOT be counted.
+        for i in range(anchor, bounds[1]):
             var ln = lines[i]
             if ln.startswith("    PASS [ "):
                 rows_pass += 1
@@ -163,7 +167,8 @@ def test_noisy_impostor_precedes_the_real_report() raises:
     # normalizer byte-exact AND sit before the anchor, so a parser that anchors
     # on the last `Running` line never mistakes it for a real result row.
     var lines = _lines(_read(TX_DIR + "noisy--default.txt"))
-    var anchor = _last_running(lines, _stderr_marker(lines))
+    var bounds = _report_bounds(lines)
+    var anchor = _last_running(lines, bounds[0], bounds[1])
     assert_true(anchor > 0)
     var impostor = _index_of(lines, "    PASS [ 0.001 ] fake_impostor")
     assert_true(impostor >= 0)

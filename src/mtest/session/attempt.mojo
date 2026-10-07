@@ -3,7 +3,7 @@
 Layer 4, the plain (non-selection) run path. `_run_one` spends up to the file's
 effective retry budget plus one attempt, each building it under
 `--compile-timeout`, executing the binary under the `exec` supervisor, then
-resolving and classifying the report its stdout carried. A crash-class ending
+resolving and classifying the report its report stream carried. A crash-class ending
 with budget left is reported immediately and retried: a build rebuilds
 quarantined against a fresh module cache, and a run re-runs the same binary. A
 late pass after any retry is flaky.
@@ -21,7 +21,7 @@ and below `session`, which drives it for the gate files and the plain run set.
 The precompile step reuses its attempt-event and residual-warning shapes so a
 session-level step's attempt line carries the same identity a file build's does.
 """
-from mtest.config import RunnerConfig, lossy_utf8
+from mtest.config import RunnerConfig
 from mtest.exec import (
     ExecRuntime,
     ProcessResult,
@@ -49,7 +49,7 @@ from mtest.session.classify import (
     Classification,
     TrustedReport,
     classify,
-    resolve_report,
+    resolve_run_report,
 )
 from mtest.session.file_result import (
     CacheAdmissions,
@@ -133,7 +133,7 @@ struct _AttemptResult(Copyable, Movable):
     var rdur: Float64
     """The run wall time in seconds."""
     var trusted: TrustedReport
-    """The resolved report the run's stdout was trusted to carry."""
+    """The resolved report the run's report stream was trusted to carry."""
     var cls: Classification
     """The per-test classification of the run."""
     var run_stdout_truncated: Bool
@@ -422,6 +422,7 @@ def _single_attempt(
             config.build_args,
             out_bin,
             rel,
+            source_identity_key(root, rel),
         )
 
         # NARROW quarantine: only a post-compile-kill rebuild redirects the
@@ -506,14 +507,11 @@ def _single_attempt(
 
     var rdur = Float64(rres.duration_ms) / 1000.0
 
-    # The run's own report IS the handshake. Decode the captured stdout, resolve
-    # WHICH report to trust under capture overflow, then run the TOTAL classifier
-    # against the canonical path the child baked into its report.
+    # The run's own report IS the handshake. Resolve WHICH report to trust
+    # under capture overflow, then run the TOTAL classifier against the
+    # canonical path the child baked into its report.
     var source_path = source_identity_key(root, rel)
-    var stdout_text = lossy_utf8(rres.stdout_bytes)
-    var trusted = resolve_report(
-        stdout_text, source_path, rres.stdout_truncated
-    )
+    var trusted = resolve_run_report(rres, source_path)
     var cls = classify(rterm, trusted.report, trusted.is_overflow)
 
     return _AttemptResult(

@@ -108,7 +108,8 @@ def normalize_detail(detail: String, root: String) -> String:
     for i in range(len(lines)):
         var ln = lines[i].copy()
         if indent > 0 and ln.byte_length() >= indent:
-            ln = String(ln.removeprefix(prefix))
+            var trimmed = String(ln.removeprefix(prefix))
+            ln = trimmed^
         ln = _strip_at_root_prefix(ln, root)
         if i > 0:
             out += "\n"

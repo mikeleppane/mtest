@@ -46,14 +46,16 @@ _CANDIDATES = (
         re.compile(r"\bUnsafePointer\s*(?:\[[^\n]*\])?\s*\("),
     ),
     ("raw allocation", re.compile(r"\balloc\s*\[")),
-    ("manual free", re.compile(r"\.free\s*\(")),
+    ("manual free", re.compile(r"\.(?:unsafe_)?free\s*\(")),
     (
         "unsafe constructor",
         re.compile(r"\bunsafe_from_[A-Za-z0-9_]+\s*(?:=|\()"),
     ),
     ("unsafe pointer escape", re.compile(r"\.unsafe_ptr\s*\(")),
     ("raw initialization", re.compile(r"\bmemset_[A-Za-z0-9_]*\s*\(")),
-    ("pointer bitcast", re.compile(r"\.bitcast\s*\[")),
+    ("pointer bitcast", re.compile(r"\.(?:unsafe_)?bitcast\s*\[")),
+    ("unchecked offset", re.compile(r"\bunsafe_offset\s*=")),
+    ("origin erasure", re.compile(r"\.as_unsafe_any_origin\s*\(")),
     ("FFI call", re.compile(r"\bexternal_call\s*\[")),
 )
 
@@ -68,6 +70,7 @@ _DERIVED_POINTER_DEREFERENCE = re.compile(r"\)\s*\[[^\]\n]+\]")
 _NON_POINTER_BRACKETS = {
     "alloc",
     "bitcast",
+    "unsafe_bitcast",
     "external_call",
     "range",
 }
@@ -75,7 +78,7 @@ _ALLOCATED_NAME = re.compile(
     r"\bvar\s+([A-Za-z_]\w*)\s*=\s*(?:alloc\s*\[|UnsafePointer\s*(?:\[|\())"
 )
 _POINTER_PARAMETER = re.compile(
-    r"\b([A-Za-z_]\w*)\s*:\s*(?:UnsafePointer\b|[A-Za-z_]\w*Ptr\b)"
+    r"\b([A-Za-z_]\w*)\s*:\s*(?:(?:Unsafe|Mut|Immut)?Pointer\b|[A-Za-z_]\w*Ptr\b)"
 )
 
 

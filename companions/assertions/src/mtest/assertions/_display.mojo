@@ -210,7 +210,7 @@ struct BoundedWriter(Movable, Writer):
         else:
             self.truncated = True
 
-    def write_string(mut self, string: StringSlice):
+    def write_string(mut self, string: StringSpan):
         """Append user text with disruptive scalars escaped atomically."""
         if self.truncated:
             return

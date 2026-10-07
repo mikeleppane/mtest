@@ -10,7 +10,7 @@ $ pixi install --locked
 $ pixi run mojo-version
 ```
 
-The project is pinned to Mojo `1.0.0b2`. Python tooling also needs
+The project is pinned to Mojo `1.1.0`. Python tooling also needs
 [`uv`](https://docs.astral.sh/uv/) on `PATH`; `pixi run py-check` fails instead
 of skipping when `uvx` is unavailable.
 

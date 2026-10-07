@@ -286,6 +286,26 @@ def test_protocol_snapshot_failure_retains_lifecycle_warning() -> None:
             raise AssertionError(f"lifecycle warning omitted {expected!r}")
 
 
+def test_generator_reconciles_a_failing_report_on_stderr() -> None:
+    """A failing suite's report is on stderr; its counts must still reconcile."""
+    from scripts import gen_transcripts
+
+    root = Path(__file__).resolve().parents[2]
+    transcript = (root / "tests/snapshots/protocol/mixed--default.txt").read_text(
+        encoding="utf-8"
+    )
+    err_norm = transcript.split("--- stderr ---\n", 1)[1]
+    gen_transcripts.verify_scenario("mixed", "default", "", err_norm, 1, transcript)
+    forged = err_norm.replace("3 tests run: 2 passed", "99 tests run: 98 passed")
+    try:
+        gen_transcripts.verify_scenario(
+            "mixed", "default", "", forged, 1, transcript.replace(err_norm, forged)
+        )
+    except gen_transcripts.GenError:
+        return
+    raise AssertionError("a stderr report whose counts disagree was accepted")
+
+
 def main() -> int:
     """Run the transcript comparator's path-only mutation proof."""
     test_transcript_comparator()
@@ -294,6 +314,7 @@ def main() -> int:
     test_protocol_snapshot_check_delegates_to_the_generator()
     test_protocol_snapshot_generation_refuses_a_failed_writer()
     test_protocol_snapshot_failure_retains_lifecycle_warning()
+    test_generator_reconciles_a_failing_report_on_stderr()
     print("transcript-comparator: OK")
     return 0
 

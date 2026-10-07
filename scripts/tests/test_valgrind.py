@@ -860,11 +860,11 @@ class LeakRecordsCallSiteTests(unittest.TestCase):
     """
 
     REACHABLE_LOG = (
-        "==1== 78,596 bytes in 10 blocks are still reachable in loss record 1 of 1\n"
+        "==1== 78,599 bytes in 10 blocks are still reachable in loss record 1 of 1\n"
         "==1==    at 0x1: malloc (vg_replace_malloc.c:1)\n"
         "==1==    by 0x2: runtime_init (libmojo.so)\n"
         "==1== LEAK SUMMARY:\n"
-        "==1==    still reachable: 78,596 bytes in 10 blocks\n"
+        "==1==    still reachable: 78,599 bytes in 10 blocks\n"
     )
 
     def test_parse_reachable_routes_through_leak_records(self) -> None:

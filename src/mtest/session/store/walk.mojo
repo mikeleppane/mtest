@@ -38,14 +38,14 @@ def _is_source_name(name: String) -> Bool:
         name: One directory entry's bare name.
 
     Returns:
-        True for `*.mojo`, `*.🔥`, `*.mojopkg`, and `*.mojoc`. Anything else —
+        True for `*.mojo`, `*.🔥`, and `*.mojoc`. Anything else —
         a README, a lockfile, an editor swapfile — cannot change what the
         compiler produces and is deliberately left out, so unrelated churn in
         an include root does not evict the whole cache.
     """
     if name.endswith(".mojo") or name.endswith(".🔥"):
         return True
-    return name.endswith(".mojopkg") or name.endswith(".mojoc")
+    return name.endswith(".mojoc")
 
 
 def _is_scannable_name(name: String) -> Bool:
@@ -55,7 +55,7 @@ def _is_scannable_name(name: String) -> Bool:
         name: One directory entry's bare name.
 
     Returns:
-        True for `*.mojo` and `*.🔥`. A `*.mojopkg` or `*.mojoc` is excluded and
+        True for `*.mojo` and `*.🔥`. A `*.mojoc` is excluded and
         needs no scan: its imports were bound when it was compiled and cannot
         late-resolve to a source file sitting beside a test.
     """
@@ -85,7 +85,7 @@ def _module_name(name: String) -> String:
     # index of a literal ASCII `.` (0x2E). A byte below 0x80 never appears
     # inside a multi-byte sequence, so cutting at that `.` cannot split one and
     # the prefix `[0, cut)` is well-formed on its own.
-    return String(StringSlice(unsafe_from_utf8=Span(out)))
+    return String(unsafe_from_utf8=out)
 
 
 def _names_contain(names: List[String], needle: String) -> Bool:
@@ -239,23 +239,41 @@ struct WalkOutcome(Copyable, Movable):
         return WalkOutcome(False, reason)
 
 
-def _has_init(names: List[String]) -> Bool:
-    """Whether a directory listing contains an `__init__`, making it a package.
+def _is_importable_dir(name: String, names: List[String]) -> Bool:
+    """Whether `-I` on a directory's parent can reach the modules inside it.
 
-    Reads the listing rather than asking `isfile` twice: `isfile` cannot tell a
-    missing `__init__.mojo` from one it was not permitted to stat, and those two
-    answers must lead to opposite decisions.
+    A directory with an `__init__` is a package. Since Mojo 1.1 one without is a
+    namespace package, importable whenever its name can be an import-path
+    segment. Reads the listing rather than asking `isfile`: `isfile` cannot tell
+    a missing `__init__.mojo` from one it was not permitted to stat, and those
+    two answers must lead to opposite decisions.
 
     Args:
-        names: One directory's entry names.
+        name: The directory's own name.
+        names: Its entry names.
 
     Returns:
-        True iff `__init__.mojo` or `__init__.🔥` is among them.
+        True iff it holds `__init__.mojo` or `__init__.🔥`, or `name` is an
+        identifier. Any non-ASCII byte counts as an identifier byte, so the
+        walk errs toward framing a directory the compiler would skip.
     """
-    for name in names:
-        if name == "__init__.mojo" or name == "__init__.🔥":
+    for entry in names:
+        if entry == "__init__.mojo" or entry == "__init__.🔥":
             return True
-    return False
+    var bytes = name.as_bytes()
+    if len(bytes) == 0 or (bytes[0] >= 48 and bytes[0] <= 57):
+        return False
+    for b in bytes:
+        var ok = (
+            b == 95
+            or b >= 128
+            or (b >= 48 and b <= 57)
+            or (b >= 65 and b <= 90)
+            or (b >= 97 and b <= 122)
+        )
+        if not ok:
+            return False
+    return True
 
 
 @fieldwise_init
@@ -338,9 +356,9 @@ def _witness_of(
         Int(st.st_ino),
         Int(st.st_size),
         Int(st.st_mtimespec.tv_sec),
-        Int(st.st_mtimespec.tv_subsec),
+        Int(st.st_mtimespec.tv_nsec),
         Int(st.st_ctimespec.tv_sec),
-        Int(st.st_ctimespec.tv_subsec),
+        Int(st.st_ctimespec.tv_nsec),
     )
 
 
@@ -632,14 +650,13 @@ def _walk_into(
                     "cannot read the directory '" + rel + "'"
                 )
             var sub = listing.value().copy()
-            # Without an `__init__`, `-I` on the parent does not reach inside,
-            # so the contents cannot change the build and must not change the
-            # key. That holds for a symlinked directory too, which is why the
-            # package test comes first.
-            if not _has_init(sub):
+            # A directory the compiler cannot import from cannot change the
+            # build and must not change the key. That holds for a symlinked
+            # directory too, which is why this test comes first.
+            if not _is_importable_dir(name, sub):
                 continue
             if is_link:
-                # A symlinked PACKAGE is imported by the compiler but cannot be
+                # A symlinked package is imported by the compiler but cannot be
                 # walked: descending it risks a cycle no lexical normalization
                 # detects. Skipping it silently was the stale-hit hole — editing
                 # the link's target would leave the key untouched and serve the
@@ -732,16 +749,16 @@ def walk_include_root(
     """Feed everything `-I dir` makes visible to the compiler, in a fixed order.
 
     The walk mirrors what the import resolver can actually reach: every
-    top-level `*.mojo` / `*.🔥` / `*.mojopkg` / `*.mojoc`, plus the same rule
-    applied recursively inside each subdirectory that carries an `__init__`.
+    top-level `*.mojo` / `*.🔥` / `*.mojoc`, plus the same rule applied
+    recursively inside each subdirectory an import can name: one that carries
+    an `__init__`, or whose name is an identifier (a namespace package).
     Dot-prefixed entries are skipped, entries are visited in byte order, and
     each file contributes its path (relative to `dir`), its size, and its
     content digest.
 
     Symlinks are resolved by what the compiler would do with them. A symlinked
-    directory that is NOT a package contributes nothing, because `-I` does not
-    reach inside it either. A symlinked directory that IS a package fails the
-    walk: the compiler imports it, so its contents belong in the key, but
+    directory no import can name contributes nothing, because `-I` does not
+    reach inside it either. A symlinked importable directory fails the walk: the compiler imports it, so its contents belong in the key, but
     descending a link can close a cycle. Off is the only honest answer, and the
     reason names the link.
 

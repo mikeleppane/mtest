@@ -29,8 +29,8 @@ mtest ships as a conda package built **from source** by
 [rattler-build](https://prefix-dev.github.io/rattler-build/) from
 [`recipe/recipe.yaml`](recipe/recipe.yaml), inside an isolated build
 environment pinned to the same toolchain this repo builds against
-(`mojo ==1.0.0b2`, `clang ==18.1.8`). The binary links against the Mojo runtime,
-so the package declares `mojo-compiler ==1.0.0b2` as its sole conda run
+(`mojo ==1.1.0`, `clang ==18.1.8`). The binary links against the Mojo runtime,
+so the package declares `mojo-compiler ==1.1.0` as its sole conda run
 dependency. The native TOML parser is compiled into the shipped binary from
 the pinned vendored source.
 
@@ -72,13 +72,15 @@ To run mtest straight from a checkout instead, see
 
 | mtest | Mojo | Platforms | Status |
 |-------|------|-----------|--------|
-| 1.1.x | `1.0.0b2` | linux-64, osx-arm64 | Supported |
+| `main` | `1.1.0` | linux-64, osx-arm64 | Supported |
+| 1.1.x | `1.0.0b2` | linux-64, osx-arm64 | Released |
 
 **Supported** means this repository builds, gates, and publishes that
 combination: the pinned toolchain is what the protocol snapshots were captured
 against, what both blocking packaged-artifact jobs install, and what the conda
-package declares as its run dependency. There is no compatibility range, and
-that is a deliberate design position rather than an unfinished one. mtest links
+package declares as its run dependency. A **Released** row records the
+toolchain a published release was built against. There is no compatibility
+range, and that is a deliberate design position rather than an unfinished one. mtest links
 the Mojo runtime and parses the exact report `TestSuite` prints, so a build
 serves one toolchain; accepting a report the runner does not fully understand
 is how a runner produces a false green, and this one exits 3 on protocol drift
@@ -201,7 +203,7 @@ COMPILE-ERROR  tests/test_math.mojo            0.00s
     | from testing import assert_equal, TestSuite
     |      ^
     | mojo: error: failed to parse the provided Mojo source module
-reproduce: mojo build tests/test_math.mojo -o build/bin/tests_stest_umath
+reproduce: mojo build tests/test_math.mojo -o build/bin/tests_stest_umath -D MTEST_SOURCE=/tmp/mtest-quickstart/tests/test_math.mojo
 
 
 ===== 0 passed, 0 failed, 0 skipped, 1 compile error, builds: 1, cached: 0 (0 excluded, 0 not run) in 1.0s =====
@@ -493,7 +495,7 @@ NO-TESTS       e2e/suite/test_zero.mojo   0.07s
     |     var value = this_symbol_is_never_defined_anywhere()
     |                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     | mojo: error: failed to parse the provided Mojo source module
-reproduce: mojo build e2e/suite/test_compile_error.mojo -o build/bin/e2e_ssuite_stest_ucompile_uerror
+reproduce: mojo build e2e/suite/test_compile_error.mojo -o build/bin/e2e_ssuite_stest_ucompile_uerror -D MTEST_SOURCE=/home/mikko/dev/mtest/e2e/suite/test_compile_error.mojo
 
 [...CRASH detail with its captured stack trace omitted...]
 
@@ -1044,7 +1046,7 @@ PASS version: mtest 1.1.0
 PASS platform: Linux x86_64 supported
 PASS root: /home/mikko/dev/mtest
 PASS exec: runtime acquired
-PASS toolchain: 'mojo' from PATH default: Mojo 1.0.0b2 (2cf4d08a)
+PASS toolchain: 'mojo' from PATH default: Mojo 1.1.0 (8189361e)
 PASS config: valid 'mtest.toml'
 PASS config-semantics: resolved values valid
 PASS state: cache and lastrun usable
@@ -1075,7 +1077,7 @@ $ echo $?
 ```
 
 The `toolchain` check is deliberately strict: a `PASS` requires the exact
-pinned identity `Mojo 1.0.0b2 (2cf4d08a)`, because a different toolchain is a
+pinned identity `Mojo 1.1.0 (8189361e)`, because a different toolchain is a
 different `TestSuite` report format. `doctor` also treats a broken
 configuration differently from every other command on purpose. A missing or
 malformed selected config is a `FAIL`ed check and exit `1`, not the usage error
@@ -1093,7 +1095,7 @@ check the name really exists — prints the two commands it used, and then
 
 ```console
 $ pixi run bash -c 'build/mtest debug e2e/suite/test_passing.mojo::test_two_passes'
-build: mojo build e2e/suite/test_passing.mojo -o build/bin/e2e_ssuite_stest_upassing
+build: mojo build e2e/suite/test_passing.mojo -o build/bin/e2e_ssuite_stest_upassing -D MTEST_SOURCE=/home/mikko/dev/mtest/e2e/suite/test_passing.mojo
 run: build/bin/e2e_ssuite_stest_upassing --only test_two_passes
 
 Running 3 tests for /home/mikko/dev/mtest/e2e/suite/test_passing.mojo
@@ -1294,6 +1296,8 @@ FAIL           companions/assertions/examples/test_diagnostics.mojo  <TIME>
 reproduce: mtest -I <PREFIX>/share/mtest/companions/assertions/src companions/assertions/examples/test_diagnostics.mojo::test_text_difference_has_scalar_and_context
 
 --- FAIL companions/assertions/examples/test_diagnostics.mojo (exit 1) — captured output (file-scoped; TestSuite does not attribute output to individual tests) ---
+--- captured stderr ---
+    | stack trace was not collected. Enable stack trace collection with environment variable `MODULAR_DEBUG=stack-trace-on-error`
     | Unhandled exception caught during execution:
     | Running 2 tests for <REPO>/companions/assertions/examples/test_diagnostics.mojo
     |     PASS [ <TIME> ] test_standard_assertion_still_coexists
@@ -1312,7 +1316,6 @@ reproduce: mtest -I <PREFIX>/share/mtest/companions/assertions/src companions/as
     | Summary [ <TIME> ] 2 tests run: 1 passed , 1 failed , 0 skipped
     | Test suite' <REPO>/companions/assertions/examples/test_diagnostics.mojo 'failed!
     |
---- captured stderr ---
 
 
 ===== 1 passed, 1 failed, 0 skipped, builds: 1, cached: 0 (0 excluded, 0 not run) in <TIME> =====
@@ -1434,10 +1437,11 @@ everything an ordinary edit, upgrade, or move can reach:
   digested. The `-I` argument spelling is keyed exactly as written (`-I lib`
   and `-I ./lib` differ), while the named directory contents are walked and
   digested;
-- the walked contents of every include root — every `*.mojo`, `*.🔥`,
-  `*.mojopkg`, and `*.mojoc` an `-I` makes visible, recursing into
-  subdirectories that carry an `__init__`, and nothing else, so a README or a
-  lockfile changing under an include root does not evict anything;
+- the walked contents of every include root — every `*.mojo`, `*.🔥`, and
+  `*.mojoc` an `-I` makes visible, recursing into every subdirectory an import
+  can name (one with an `__init__`, or a namespace package whose name is an
+  identifier), and nothing else, so a README or a lockfile changing under an
+  include root does not evict anything;
 - the walked contents of the directory the test file sits in, by those same
   rules — the compiler resolves a bare `from helper import ...` against the
   source file's own directory, with no `-I` involved, so a helper beside a test
@@ -2091,7 +2095,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the contributor workflow and
 use [docs/releasing.md](docs/releasing.md) for the GitHub and
 modular-community publication procedure.
 
-Requires [pixi](https://pixi.sh). The toolchain (Mojo `1.0.0b2`) and all
+Requires [pixi](https://pixi.sh). The toolchain (Mojo `1.1.0`) and all
 tasks are pinned in [pixi.toml](pixi.toml); re-pinning on a Modular release
 regenerates the protocol transcripts. See [CHANGELOG.md](CHANGELOG.md) for
 release-to-release changes.

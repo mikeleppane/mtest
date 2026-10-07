@@ -7,7 +7,7 @@
 # build-bin pipeline, so the published artifact is produced by exactly the same
 # precompile + production native object + link definition the checkout builds and
 # tests. That entrypoint runs with only bash + mojo + clang, which is all this
-# isolated env provides: requirements.build is `mojo ==1.0.0b2` and
+# isolated env provides: requirements.build is `mojo ==1.1.0` and
 # `clang ==18.1.8` (no Python), both resolving on PATH without extra plumbing.
 #
 # Runs with $SRC_DIR as the working directory (the recipe's `source: path: ..`

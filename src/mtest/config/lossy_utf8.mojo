@@ -117,6 +117,6 @@ def lossy_utf8(bytes: List[UInt8]) -> String:
         # first continuation and every remaining 0x80..0xBF continuation prove
         # this 2..4-byte slice is one RFC 3629 scalar (no overlong, surrogate, or
         # >U+10FFFF value). `slice` remains live until String copies the Span.
-        out += String(StringSlice(unsafe_from_utf8=Span(slice)))
+        out += String(unsafe_from_utf8=slice)
         i += seq_len
     return out^

@@ -30,18 +30,20 @@ def test_build_argv_is_exact_for_a_test_file() raises:
                 ["--Werror", "-O0"],
                 "build/bin/tests_stest_ua",
                 "tests/test_a.mojo",
+                "/r/tests/test_a.mojo",
             )
         ),
         (
             "mojo build tests/test_a.mojo -o build/bin/tests_stest_ua"
-            " -I build -I vendor --Werror -O0"
+            " -I build -I vendor -D MTEST_SOURCE=/r/tests/test_a.mojo"
+            " --Werror -O0"
         ),
     )
 
 
 def test_build_argv_is_exact_for_a_precompile_step() raises:
-    # The verb is the only variation point across the four sites: a precompile
-    # step threads the same includes and the same configured build arguments.
+    # A precompile step threads the same includes and configured build
+    # arguments, and carries no source identity.
     assert_equal(
         _joined(
             build_argv(
@@ -49,12 +51,13 @@ def test_build_argv_is_exact_for_a_precompile_step() raises:
                 "precompile",
                 ["src"],
                 ["--Werror"],
-                "build/.tmp/helper.mojopkg",
+                "build/.tmp/helper.mojoc",
                 "src/helper",
+                "",
             )
         ),
         (
-            "/opt/mojo precompile src/helper -o build/.tmp/helper.mojopkg"
+            "/opt/mojo precompile src/helper -o build/.tmp/helper.mojoc"
             " -I src --Werror"
         ),
     )
@@ -70,6 +73,7 @@ def test_build_argv_needs_no_includes_and_no_build_args() raises:
                 List[String](),
                 "build/bin/x",
                 "tests/test_x.mojo",
+                "",
             )
         ),
         "mojo build tests/test_x.mojo -o build/bin/x",
@@ -86,6 +90,7 @@ def test_build_argv_puts_the_configured_arguments_last() raises:
         ["-O3", "--debug-level", "none"],
         "build/bin/x",
         "tests/test_x.mojo",
+        "",
     )
     assert_equal(len(argv), 10)
     assert_equal(argv[7], "-O3")
@@ -104,6 +109,7 @@ def test_build_argv_emits_o_and_its_path_as_two_tokens() raises:
         List[String](),
         ".mtest-cache/build-v1/.tmp-x/bin",
         "tests/test_x.mojo",
+        "",
     )
     assert_equal(argv[3], "-o")
     assert_equal(argv[4], ".mtest-cache/build-v1/.tmp-x/bin")
@@ -120,6 +126,7 @@ def test_build_argv_never_carries_the_pools_thread_token() raises:
         ["--Werror"],
         "build/bin/x",
         "tests/test_x.mojo",
+        "",
     )
     for token in argv:
         assert_true(
