@@ -180,9 +180,10 @@ append here as later phases teach more.
   `@fieldwise_init` struct.
 - `exit()` is not `noreturn` to flow analysis; seed a sentinel before a `try`
   whose branches all exit, with a comment saying why.
-- Mojo 1.0 unified `UnsafePointer` into `Pointer`, with every unsafe operation
-  spelled `unsafe_*` (`[unsafe_offset=i]`, `unsafe_bitcast`, `unsafe_free`) and
-  `alloc` taking a `Layout`. Do not hand-allocate FFI storage: an `FfiRecord`
+- By Mojo 1.1, `UnsafePointer` is unified into `Pointer`, with every unsafe
+  operation spelled `unsafe_*` (`[unsafe_offset=i]`, `unsafe_bitcast`,
+  `unsafe_free`) and `alloc` taking a `Layout`. Do not hand-allocate FFI
+  storage: an `FfiRecord`
   (zeroed, aligned, self-freeing, bounds-checked fields) or a
   `List[T](length=n, fill=0)` covers every case here, and a `Span` slice
   (`Span(buf)[offset:]`) replaces pointer arithmetic. Shared mutable test state

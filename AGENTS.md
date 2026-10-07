@@ -3,6 +3,7 @@
 The source of truth for working in this repo: scope, gates, pins, and
 conventions. The skills under `.agents/skills/` go deeper on specific
 activities; the global `mojo-syntax` skill is the authority on Mojo syntax.
+Docstrings are Google-style, triple-quoted, and mandatory on public entities.
 This file beats a skill; a direct instruction from the human beats this file.
 
 ## Scope
@@ -71,7 +72,8 @@ Three seams carry the design:
   executes its `next_step`; the pool (`session/pool.mojo`, `-n`) runs its own
   phase machine and uses only the kernel's policy methods. A scheduling rule for
   both drivers belongs in those policy methods. Concurrency is only across
-  files, and `-n 1` is byte-identical to the sequential path.
+  files, and `-n 1` is byte-identical to the sequential path (no
+  `--num-threads` on the build argv).
 - **The report stream**: a passing TestSuite prints its report to stdout; a
   failing one raises it as the uncaught-exception message on stderr.
   `session/classify.resolve_run_report` picks the stream from the exit status;
@@ -80,7 +82,8 @@ Three seams carry the design:
 ## Foreign boundaries and unsafe code
 
 All platform and foreign-ABI knowledge lives in two audited places; no layer
-above `exec` makes a raw platform call:
+above `exec` makes a raw platform call, and a new foreign call belongs in
+`platform` unless it is native-adapter machinery:
 
 - `src/mtest/platform` (Layer 0): per-call libc operations, each an
   `external_call` with its own `# SAFETY:` proof, or a safe stdlib wrapper
@@ -151,7 +154,8 @@ topology; read them rather than a list here. Gate semantics to know first:
 - `py-check` (ruff, mypy `--strict`) needs `uv` on PATH, so it sits outside
   `pixi run ci`; hosted CI runs it.
 - `ci-memory` runs ASan/LSan then Valgrind on linux-64 and reports the lanes
-  uncovered elsewhere.
+  uncovered elsewhere. `native-check` depends on `postfork-check`, so the
+  native gate cannot skip the child call-graph audit.
 - One build at a time against `build/`: a racing build corrupts
   `build/mtest.mojoc` and reads as a regression.
 
@@ -202,7 +206,10 @@ byte-stable. The 20 required contexts: `preflight`, `classified suite`,
 `build stamp`, and `packaged artifact` under both `Linux /` and
 `macOS arm64 /`; `Linux / compiled oracles`, `Linux / ASan + LSan`,
 `Linux / Valgrind Memcheck`; and `Python quality`. CodeQL blocks through the
-ruleset's `code_scanning` rule, not a status context. `docs.yml` is the only
+ruleset's `code_scanning` rule, not a status context; the sanitizer negative
+controls under `MTEST_EXEC_TESTING` are dismissed there as used-in-tests,
+because `TEST_ONLY_SYMBOLS` in `scripts/checks/native_abi.py` proves them
+absent from the production object. `docs.yml` is the only
 workflow with `pages: write`/`id-token: write`; `compat-canary.yml` is the only
 lane running an unpinned compiler, with its write-scoped job running neither
 pixi nor Mojo.
@@ -241,8 +248,8 @@ in that phase's notes.
 
 Conventional Commits with a required scope; atomic; imperative subject <= 72
 chars; a body explaining why. Types: `feat`, `fix`, `refactor`, `perf`, `docs`,
-`test`, `bench`, `build`, `ci`, `chore`. `skills` is a scope
-(`docs(skills): …`). A commit regenerating transcripts names the oracle-side
+`test`, `bench`, `build`, `ci`, `chore`. Merge commits are exempt. `skills` is a
+scope (`docs(skills): …`). A commit regenerating transcripts names the oracle-side
 reason in its body. Commits carry only human authorship: no AI attribution
 lines or trailers. Committed files state reasons directly; the gitignored
 working plans under `docs/plans/` are never referenced.
