@@ -12,7 +12,7 @@ value is the version this repo is currently shipping.
 Eleven further surfaces state a version to a reader rather than to a tool, and
 they were gated by nothing until this script took them on: `README.md`,
 `docs/cli-contract.md` and seven documentation-site pages carry captured CLI
-transcripts, and the two banner SVGs under `docs/assets/` carry the same text
+transcripts, and the two console SVGs under `docs/assets/` carry the same text
 inside the image, where nobody reading the rendered page can tell the output is
 not live. Until this gate covered them a stale literal in any of them shipped
 to the repository page unnoticed.
@@ -182,7 +182,6 @@ MOJO_PIN_SITES = (
     Path("recipe/recipe.yaml"),
     Path("recipe/community/recipe.yaml.in"),
     Path("recipe/build.sh"),
-    Path("README.md"),
     Path("docs/install.md"),
     Path("CONTRIBUTING.md"),
     Path("CHANGELOG.md"),

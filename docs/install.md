@@ -6,8 +6,10 @@ mtest ships as a conda package built **from source** by
 inside an isolated build environment pinned to the same toolchain the
 repository builds against (`mojo ==1.1.0`, `clang ==18.1.8`). The binary links
 against the Mojo runtime, so the package declares `mojo-compiler ==1.1.0` as its
-sole conda run dependency. The native TOML parser is compiled into the shipped
-binary from the pinned vendored source.
+sole conda run dependency. That is the recipe on `main`; a published release
+declares the toolchain its [Supported toolchains](#supported-toolchains) row
+names. The native TOML parser is compiled into the shipped binary from the
+pinned vendored source.
 
 mtest is published to
 [modular-community](https://prefix.dev/channels/modular-community/packages/mtest)

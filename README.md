@@ -21,7 +21,9 @@ across files, and reporting results the way CI expects.
 
 mtest is published to
 [modular-community](https://prefix.dev/channels/modular-community/packages/mtest)
-for linux-64 and osx-arm64, and runs on Mojo `1.1.0`. From an empty directory:
+for linux-64 and osx-arm64.
+[Supported toolchains](docs/install.md#supported-toolchains) names the Mojo
+version each release needs. From an empty directory:
 
 ```console
 $ pixi init .

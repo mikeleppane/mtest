@@ -58,7 +58,7 @@ mojo-version = "mojo --version"
 # carrying one cannot be ungated from birth: an undeclared match fails until it
 # is named a site or an explicit exemption. Holds every restatement of the Mojo
 # pin -- both conda recipes, the recipe build script, and the prose in the
-# README, the installation page, the contract, the changelog, the contributing
+# installation page, the contract, the changelog, the contributing
 # guide, and the agent guide -- against the one pin above, so a toolchain bump cannot leave the
 # shipped package asking for the old compiler, and sweeps every reader-facing
 # Markdown document at the root and under `docs/` for a claim that disagrees
