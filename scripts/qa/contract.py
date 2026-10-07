@@ -2682,10 +2682,11 @@ class Runner:
         A scaffold a reader has to repair before it runs is worse than no
         scaffold at all, and nothing about its exit code would say so — only
         building and running the bytes it wrote can. The second half runs the
-        same gauntlet through a basename carrying the two characters that end
-        a Mojo string literal, because the stem is interpolated into the
-        file's own docstring: unescaped, `new` reports success and emits a
-        file that does not compile.
+        same gauntlet through a basename carrying a backslash and a quote,
+        because the stem is interpolated into the file's own docstring:
+        unescaped, `new` reports success and emits a file that does not
+        compile. It carries no `"`: Mojo 1.1.0 segfaults compiling a TestSuite
+        file whose name holds one.
         """
         ref = "§29 the scaffolded file is runnable as written, any legal name"
         halves = [
@@ -2693,7 +2694,7 @@ class Runner:
             (
                 "new: a hostile basename still compiles and passes",
                 "new_hostile",
-                'test_a"""b\\.mojo',
+                "test_a'b\\.mojo",
             ),
         ]
         for name, directory_name, basename in halves:

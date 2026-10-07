@@ -2738,9 +2738,10 @@ process umask — not the private mode a temporary file carries.
 The file's subject is its own basename with the `test_` prefix and the `.mojo`
 suffix removed, so `tests/test_math.mojo` is a file of tests for `math`. That
 name is escaped for the docstring it lands in, so every legal basename yields a
-file that compiles. It carries a module docstring, the `std.testing` import,
-one passing example test, and the `main()` that discovers and runs them, and it
-passes as written:
+file that compiles, except one holding `"`: Mojo 1.1.0 itself crashes compiling
+a TestSuite file with that byte in its name. It carries a module docstring, the
+`std.testing` import, one passing example test, and the `main()` that discovers
+and runs them, and it passes as written:
 
 ```console
 $ mtest new tests/test_math.mojo
