@@ -284,8 +284,11 @@ junit-render-check = { cmd = "python -m scripts.formats.junit_render", depends-o
 
 # Regenerate the protocol snapshots IN PLACE from the committed fixtures at the
 # pinned toolchain. Local use only; never run in CI. The generator self-verifies
-# with hard asserts before writing.
-transcripts = "python -m scripts.gen_transcripts"
+# with hard asserts before writing, then the classified modules that parse the
+# snapshots run, so a regeneration that breaks them is red here, not later.
+transcripts = { cmd = "python -m scripts.gen_transcripts && python -m scripts.harness.snapshot_consumers", depends-on = [
+    "build-bin",
+] }
 # CI gate: regenerate every transcript into a temp dir and diff byte-for-byte
 # against tests/snapshots/protocol/, MANIFEST included. This is the protocol
 # pin: a red diff after a repo change indicts THE CHANGE; a red diff after a
