@@ -793,6 +793,7 @@ def _run_pool_batch[
                         config.build_args,
                         state[picked].out_bin,
                         state[picked].rel,
+                        source_identity_key(root, state[picked].rel),
                     )
                     state[picked].build_argv = argv.copy()
                     # The token flag rides the SPAWN argv; the stored reproduce

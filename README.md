@@ -203,7 +203,7 @@ COMPILE-ERROR  tests/test_math.mojo            0.00s
     | from testing import assert_equal, TestSuite
     |      ^
     | mojo: error: failed to parse the provided Mojo source module
-reproduce: mojo build tests/test_math.mojo -o build/bin/tests_stest_umath
+reproduce: mojo build tests/test_math.mojo -o build/bin/tests_stest_umath -D MTEST_SOURCE=/tmp/mtest-quickstart/tests/test_math.mojo
 
 
 ===== 0 passed, 0 failed, 0 skipped, 1 compile error, builds: 1, cached: 0 (0 excluded, 0 not run) in 1.0s =====
@@ -495,7 +495,7 @@ NO-TESTS       e2e/suite/test_zero.mojo   0.07s
     |     var value = this_symbol_is_never_defined_anywhere()
     |                 ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     | mojo: error: failed to parse the provided Mojo source module
-reproduce: mojo build e2e/suite/test_compile_error.mojo -o build/bin/e2e_ssuite_stest_ucompile_uerror
+reproduce: mojo build e2e/suite/test_compile_error.mojo -o build/bin/e2e_ssuite_stest_ucompile_uerror -D MTEST_SOURCE=/home/mikko/dev/mtest/e2e/suite/test_compile_error.mojo
 
 [...CRASH detail with its captured stack trace omitted...]
 
@@ -1095,7 +1095,7 @@ check the name really exists — prints the two commands it used, and then
 
 ```console
 $ pixi run bash -c 'build/mtest debug e2e/suite/test_passing.mojo::test_two_passes'
-build: mojo build e2e/suite/test_passing.mojo -o build/bin/e2e_ssuite_stest_upassing
+build: mojo build e2e/suite/test_passing.mojo -o build/bin/e2e_ssuite_stest_upassing -D MTEST_SOURCE=/home/mikko/dev/mtest/e2e/suite/test_passing.mojo
 run: build/bin/e2e_ssuite_stest_upassing --only test_two_passes
 
 Running 3 tests for /home/mikko/dev/mtest/e2e/suite/test_passing.mojo

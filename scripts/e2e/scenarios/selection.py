@@ -554,6 +554,8 @@ PRECEDENCE_BUILD_ARGV = (
     PRECEDENCE_FILE,
     "-o",
     "build/bin/e2e_smatrix_stest_ubeta",
+    "-D",
+    "MTEST_SOURCE=" + os.path.realpath(os.path.join(REPO_ROOT, PRECEDENCE_FILE)),
 )
 """The exact vector mtest hands the compiler, `argv[0]` excluded.
 

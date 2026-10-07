@@ -382,6 +382,7 @@ def _run_precompile(
             config.build_args,
             tmp_path,
             src,
+            "",
         )
 
         # NARROW quarantine: only a post-compile-kill retry redirects the module

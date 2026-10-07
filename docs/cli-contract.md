@@ -422,7 +422,10 @@ exit code, which is the foundation of the whole outcome model.
 ### 8.2 `--build-arg ARG` and `-I PATH`
 
 `--build-arg` (repeatable) forwards one argument to `mojo build`, after the
-runner's own arguments. Everything after a bare `--` is equivalent. `-I PATH`
+runner's own arguments: `-o`, each `-I` pair, and `-D MTEST_SOURCE=<absolute
+source path>`. The define keeps Mojo's content-keyed compile cache from reusing
+an object built from a byte-identical file at another path. Everything after a
+bare `--` is equivalent. `-I PATH`
 (repeatable) adds an include path, forwarded to every build.
 
 ### 8.3 `--precompile SRC[:OUT]`
@@ -2663,7 +2666,7 @@ they travel on the diagnostic channel instead of being lost.
 shell-quoted so they can be pasted back:
 
 ```text
-build: mojo build tests/test_thing.mojo -o build/bin/tests_stest_uthing
+build: mojo build tests/test_thing.mojo -o build/bin/tests_stest_uthing -D MTEST_SOURCE=<root>/tests/test_thing.mojo
 run: build/bin/tests_stest_uthing --only test_case
 ```
 

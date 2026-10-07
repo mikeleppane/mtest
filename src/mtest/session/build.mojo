@@ -108,6 +108,7 @@ def build_argv(
     build_args: List[String],
     out_path: String,
     source: String,
+    source_identity: String,
 ) -> List[String]:
     """The compiler command line every build and precompile spawn runs.
 
@@ -115,6 +116,11 @@ def build_argv(
     to be the command that actually ran: `<mojo> <verb> <source> -o <out>`, one
     `-I` pair per include root, then the configured build arguments last, where
     a user's flag can still override a default the runner supplied.
+
+    A test build also passes `-D MTEST_SOURCE=<source identity>`. Mojo's
+    compilation cache keys on source content, not path, so without it a file
+    whose bytes match one built elsewhere reuses that object and its report
+    names the other file's path. The define puts the path into the key.
 
     The pool's `--num-threads` is deliberately absent. It is a scheduling token
     for one spawn rather than part of a command a user reruns, so the pool
@@ -127,6 +133,8 @@ def build_argv(
         build_args: The configured build arguments, appended verbatim.
         out_path: The `-o` value, relative to the invocation root.
         source: The source to compile, relative to the invocation root.
+        source_identity: The path the child's report must name
+            (`source_identity_key`), or `""` for a precompile step.
 
     Returns:
         The command line. Allocates.
@@ -140,6 +148,9 @@ def build_argv(
     for p in includes:
         argv.append("-I")
         argv.append(p)
+    if source_identity:
+        argv.append("-D")
+        argv.append("MTEST_SOURCE=" + source_identity)
     for a in build_args:
         argv.append(a)
     return argv^
@@ -255,6 +266,7 @@ def _build_for_selection(
         config.build_args,
         out_bin,
         rel,
+        source_identity_key(root, rel),
     )
 
     if first_attempt:

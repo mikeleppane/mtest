@@ -422,6 +422,7 @@ def _single_attempt(
             config.build_args,
             out_bin,
             rel,
+            source_identity_key(root, rel),
         )
 
         # NARROW quarantine: only a post-compile-kill rebuild redirects the
