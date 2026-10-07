@@ -14,6 +14,10 @@ __pycache__/
 .ruff_cache/
 # linked git worktrees for parallel branches; checkouts, not repository content
 .worktrees/
+# Claude Code session state and its agent worktrees
+.claude/
+# uv writes an empty lock beside the tool-only pyproject.toml; there is no project to lock
+/uv.lock
 # internal working plans, notes, and review outputs — never committed or published
 docs/plans/
 docs/superpowers/
