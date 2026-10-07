@@ -85,6 +85,10 @@ class RepositoryParityTests(unittest.TestCase):
             },
         )
 
+    def test_owned_blocks_are_pinned(self) -> None:
+        """An owned block is compared with nothing, so the set is pinned here."""
+        self.assertEqual(docs_parity.OWNED_BLOCKS, ())
+
     def test_declarations_are_well_formed(self) -> None:
         docs_parity.check_declarations()
 
@@ -293,6 +297,52 @@ class DeclarationTableTests(unittest.TestCase):
             self.assertRaisesRegex(AssertionError, "declared twice"),
         ):
             docs_parity.check_declarations()
+
+    def test_a_block_both_mirrored_and_owned_is_rejected(self) -> None:
+        """Owning a mirrored block would exempt it from the comparison."""
+        owned = (Path("docs/getting-started.md"), 0)
+        with (
+            mock.patch.object(
+                docs_parity, "OWNED_BLOCKS", (*docs_parity.OWNED_BLOCKS, owned)
+            ),
+            self.assertRaisesRegex(AssertionError, "declared twice"),
+        ):
+            docs_parity.check_declarations()
+
+    def test_an_owned_block_on_a_page_outside_the_site_list_is_rejected(
+        self,
+    ) -> None:
+        owned = (Path("docs/tour.md"), 0)
+        with (
+            mock.patch.object(
+                docs_parity, "OWNED_BLOCKS", (*docs_parity.OWNED_BLOCKS, owned)
+            ),
+            self.assertRaisesRegex(AssertionError, "docs/tour.md"),
+        ):
+            docs_parity.check_declarations()
+
+    def test_a_site_page_that_only_owns_blocks_is_rejected(self) -> None:
+        """A page that copies nothing is a reference page, not a site page."""
+        mirrors = tuple(
+            block
+            for block in docs_parity.PARITY_BLOCKS
+            if block.page != Path("docs/getting-started.md")
+        )
+        owned = tuple((Path("docs/getting-started.md"), index) for index in range(5))
+        with (
+            mock.patch.object(docs_parity, "PARITY_BLOCKS", mirrors),
+            mock.patch.object(docs_parity, "OWNED_BLOCKS", owned),
+            self.assertRaisesRegex(AssertionError, "declares no mirrored block"),
+        ):
+            docs_parity.check_declarations()
+
+    def test_an_owned_ordinal_past_the_end_is_rejected(self) -> None:
+        owned = (*docs_parity.OWNED_BLOCKS, (Path("docs/getting-started.md"), 9))
+        with (
+            mock.patch.object(docs_parity, "OWNED_BLOCKS", owned),
+            self.assertRaisesRegex(AssertionError, "owned block 9"),
+        ):
+            docs_parity.check_site_blocks_are_all_declared()
 
 
 class FenceScannerTests(unittest.TestCase):
