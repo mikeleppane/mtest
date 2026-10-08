@@ -263,13 +263,17 @@ class InstalledPackageTests(unittest.TestCase):
                 verify_public_package(VERSION, BUILD_NUMBER)
 
         self.assertGreater(len(observed), 1)
-        prefix_bin = str(
-            Path(observed[0][0][-1]).parent / ".pixi" / "envs" / "default" / "bin"
-        )
+        prefix = Path(observed[0][0][-1]).parent / ".pixi" / "envs" / "default"
+        prefix_bin = str(prefix / "bin")
         for _, environment in observed[1:]:
             self.assertEqual(
                 environment["PATH"],
                 os.pathsep.join((prefix_bin, os.defpath)),
+            )
+            # Without it the installed `mojo` cannot locate `std`.
+            self.assertEqual(
+                environment["MODULAR_HOME"],
+                str(prefix / "share" / "max"),
             )
             self.assertNotEqual(environment["HOME"], polluted["HOME"])
             self.assertNotIn("PYTHONPATH", environment)
