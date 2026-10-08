@@ -572,10 +572,13 @@ def s_timeout(context: ScenarioContext) -> str:
         f" escalated to SIGKILL — the escalation clause is not conditional on the"
         f" latched Termination:\n{verdict}",
     )
-    expect(run.wall < 10.0, f"mtest took {run.wall:.1f}s to honor --timeout 1")
+    # The verdict's duration is the run alone; run.wall also holds a cold
+    # compile, which reached 11.6s on a hosted macOS runner.
+    run_seconds = float(verdict.split()[2].removesuffix("s"))
+    expect(run_seconds < 5.0, f"mtest took {run_seconds:.2f}s to honor --timeout 1")
     return (
         f"TIMEOUT verdict names the deadline and claims NO escalation (polite"
-        f" SIGTERM sufficed), exit 1, returned in {run.wall:.1f}s"
+        f" SIGTERM sufficed), exit 1, run ended in {run_seconds:.2f}s"
     )
 
 

@@ -337,6 +337,9 @@ def _acceptance_environment(prefix: Path, workspace: Path) -> dict[str, str]:
     return {
         "HOME": str(home),
         "MODULAR_CACHE_DIR": str(cache),
+        # What mojo-compiler's activation script exports; without it the
+        # installed `mojo` cannot locate `std`.
+        "MODULAR_HOME": str(prefix / "share" / "max"),
         "PATH": os.pathsep.join((str(prefix / "bin"), os.defpath)),
         "TMPDIR": str(temporary),
     }
