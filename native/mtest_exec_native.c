@@ -1722,7 +1722,10 @@ int32_t mtest_exec_process_open(const struct mtest_exec_process_spec *spec,
     process->process_group = leader;
     if (mtest_fail_if_requested(MTEST_EXEC_OP_PARENT_SETPGID) || setpgid(leader, leader) != 0) {
         int saved_errno = errno;
-        if (saved_errno != EACCES && saved_errno != ESRCH) {
+        /* The child's own pre-exec setpgid is authoritative. EACCES (exec'd),
+           ESRCH (gone), and XNU's EPERM for a child racing through exec or
+           exit leave the parent nothing to do. */
+        if (saved_errno != EACCES && saved_errno != ESRCH && saved_errno != EPERM) {
             (void)kill(-leader, SIGKILL);
             (void)kill(leader, SIGKILL);
             int wait_result = mtest_waitpid_exact(leader, NULL);
