@@ -12,12 +12,29 @@ the Mojo runtime and parses `TestSuite`'s printed report, so a release supports
 exactly one toolchain and there is no compatibility range; see the support
 matrix under [Installation](docs/install.md#supported-toolchains).
 
-## Unreleased
+## 1.2.0 — 2026-10-08
+
+A toolchain release: mtest now builds against Mojo 1.1.0 and no longer runs on
+the `1.0.0b2` toolchain, which is the upgrade's one breaking step. The command line gains
+nothing and loses nothing. What Mojo 1.1 changed underneath, mtest absorbs:
+where a failing suite prints its report, how the compilation cache keys a
+file, the precompiled-package suffix, and namespace-package imports.
 
 ### Toolchain
 
 - Mojo `1.1.0`. The conda package declares `mojo-compiler ==1.1.0` as its sole
-  run dependency.
+  run dependency. A project still on the `1.0.0b2` toolchain stays on mtest 1.1.x.
+
+### Platforms
+
+- `linux-64` and `osx-arm64`. The package is built from source once per
+  platform; there is no `noarch` artifact.
+
+### Published
+
+- Not yet. This subsection is filled in once **Community Verify** installs the
+  release from the public channels, per
+  [docs/releasing.md](docs/releasing.md).
 
 ### Changed
 
@@ -68,9 +85,15 @@ refused before a run now, and three defects an installed 1.0.0 still carries.
 
 ### Published
 
-- Not yet. This subsection is filled in once **Community Verify** installs the
-  release from the public channels, per
-  [docs/releasing.md](docs/releasing.md).
+- `modular-community` (`https://repo.prefix.dev/modular-community`), build
+  number 0: `mtest-1.1.0-hb0f4dca_0.conda` for linux-64 and
+  `mtest-1.1.0-h60d57d3_0.conda` for osx-arm64. Installing additionally
+  resolves `https://conda.modular.com/max/` for the run dependency and
+  `conda-forge` for everything underneath. Licensed MIT.
+- Verified on linux-64 only, by running the 1.2.0 public verifier locally:
+  the tag's own verifier could never pass, because it ran the installed
+  `mojo` without the `MODULAR_HOME` that activation exports. The osx-arm64
+  artifact is published but unverified.
 
 ### Command-line contract
 

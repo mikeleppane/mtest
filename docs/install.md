@@ -21,7 +21,7 @@ $ pixi workspace channel add https://conda.modular.com/max/
 $ pixi workspace channel add https://repo.prefix.dev/modular-community
 $ pixi add mtest
 $ pixi run mtest --version
-mtest 1.1.0
+mtest 1.2.0
 ```
 
 Skip the first command in a workspace that already exists. It is there because
@@ -49,7 +49,7 @@ To run mtest straight from a checkout instead, see
 
 | mtest | Mojo | Platforms | Status |
 |-------|------|-----------|--------|
-| `main` | `1.1.0` | linux-64, osx-arm64 | Supported |
+| 1.2.x | `1.1.0` | linux-64, osx-arm64 | Supported |
 | 1.1.x | `1.0.0b2` | linux-64, osx-arm64 | Released |
 
 **Supported** means this repository builds, gates, and publishes that

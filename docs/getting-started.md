@@ -66,7 +66,7 @@ default subcommand, so `mtest tests/` means `mtest run tests/`:
 
 ```console
 $ pixi run mtest tests/
-mtest 1.1.0 (mojo)
+mtest 1.2.0 (mojo)
 root: /tmp/mtest-quickstart   selected: 1 files   excluded: 0
 
 PASS           tests/test_math.mojo            0.03s
@@ -89,7 +89,7 @@ test that failed, it is never quietly skipped, and the run exits non-zero:
 
 ```console
 $ pixi run mtest tests/
-mtest 1.1.0 (mojo)
+mtest 1.2.0 (mojo)
 root: /tmp/mtest-quickstart   selected: 1 files   excluded: 0
 
 COMPILE-ERROR  tests/test_math.mojo            0.00s

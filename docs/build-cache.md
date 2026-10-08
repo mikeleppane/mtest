@@ -11,7 +11,7 @@ The summary band reports the split. A cold store builds everything:
 
 ```console
 $ pixi run bash -c 'build/mtest --cache-clear e2e/matrix'
-mtest 1.1.0 (mojo)
+mtest 1.2.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
 
 PASS           e2e/matrix/test_alpha.mojo      0.02s
@@ -24,7 +24,7 @@ Run it again over the same tree and nothing is compiled:
 
 ```console
 $ pixi run bash -c 'build/mtest e2e/matrix'
-mtest 1.1.0 (mojo)
+mtest 1.2.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
 
 PASS           e2e/matrix/test_alpha.mojo      0.02s
@@ -161,7 +161,7 @@ first cause, and the run proceeds normally, compiling everything:
 
 ```console
 $ pixi run bash -c 'build/mtest --build-arg --target-cpu --build-arg x86-64-v3 e2e/matrix'
-mtest 1.1.0 (mojo)
+mtest 1.2.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
 
 WARNING  cache-off: unrecognized build argument '--target-cpu'
@@ -193,7 +193,7 @@ a measurement with the store out of the picture:
 
 ```console
 $ pixi run bash -c 'build/mtest --no-cache e2e/matrix'
-mtest 1.1.0 (mojo)
+mtest 1.2.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
 
 PASS           e2e/matrix/test_alpha.mojo      0.02s

@@ -1892,7 +1892,7 @@ slowest-files list:
 
 ```text
 $ mtest
-mtest 1.1.0 (mojo)
+mtest 1.2.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0   workers: 16
 
 PASS           e2e/matrix/test_alpha.mojo      0.02s
@@ -1975,7 +1975,7 @@ mtest-lastrun v1
 test	e2e/suite/test_failing.mojo::test_second_fails
 
 $ mtest --lf e2e/matrix e2e/suite/test_failing.mojo
-mtest 1.1.0 (mojo)
+mtest 1.2.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 3 files   excluded: 0
 
 FAIL           e2e/suite/test_failing.mojo     0.02s
@@ -1999,7 +1999,7 @@ rather than exiting 5:
 
 ```text
 $ mtest --lf e2e/matrix
-mtest 1.1.0 (mojo)
+mtest 1.2.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0
 
 lf: previously-failing e2e/suite/test_failing.mojo::test_second_fails no longer exists — dropped
@@ -2017,7 +2017,7 @@ broke; every other check still runs:
 
 ```text
 $ mtest doctor
-PASS version: mtest 1.1.0
+PASS version: mtest 1.2.0
 PASS platform: Linux x86_64 supported
 PASS root: /home/mikko/dev/mtest
 PASS exec: runtime acquired
@@ -2031,7 +2031,7 @@ $ echo $?
 0
 
 $ MTEST_MOJO=/opt/nonexistent/mojo mtest doctor --no-config
-PASS version: mtest 1.1.0
+PASS version: mtest 1.2.0
 PASS platform: Linux x86_64 supported
 PASS root: /home/mikko/dev/mtest
 PASS exec: runtime acquired
@@ -2050,7 +2050,7 @@ A selected-config failure is a `FAIL`ed check and exit 1 under `doctor`, where
 
 ```text
 $ mtest doctor --config ci/mtest.toml
-PASS version: mtest 1.1.0
+PASS version: mtest 1.2.0
 PASS platform: Linux x86_64 supported
 PASS root: /home/mikko/dev/mtest
 PASS exec: runtime acquired

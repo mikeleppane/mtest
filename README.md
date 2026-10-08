@@ -31,7 +31,7 @@ $ pixi workspace channel add https://conda.modular.com/max/
 $ pixi workspace channel add https://repo.prefix.dev/modular-community
 $ pixi add mtest
 $ pixi run mtest --version
-mtest 1.1.0
+mtest 1.2.0
 ```
 
 In a workspace that already exists, skip `pixi init .`. Then save this as
@@ -59,7 +59,7 @@ and run the directory:
 
 ```console
 $ pixi run mtest tests/
-mtest 1.1.0 (mojo)
+mtest 1.2.0 (mojo)
 root: /tmp/mtest-quickstart   selected: 1 files   excluded: 0
 
 PASS           tests/test_math.mojo            0.03s
