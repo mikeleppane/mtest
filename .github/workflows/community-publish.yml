@@ -276,10 +276,19 @@ jobs:
           git -C upstream checkout --detach "$UPSTREAM_COMMIT"
           test "$(git -C upstream rev-parse HEAD)" = "$UPSTREAM_COMMIT"
 
+      # Upstream's requires-pixi is the version its own CI installs.
+      - name: Read upstream pixi version
+        id: upstream-pixi
+        run: |
+          set -euo pipefail
+          version="$(sed -nE 's/^requires-pixi = ">=([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p' upstream/pixi.toml)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "version=v$version" >> "$GITHUB_OUTPUT"
+
       - name: Set up upstream pixi
         uses: prefix-dev/setup-pixi@d3f436a425481402e6a95a1d1fc10331c708cd9e # v0.10.2
         with:
-          pixi-version: v0.63.2
+          pixi-version: ${{ steps.upstream-pixi.outputs.version }}
           run-install: false
 
       - name: Verify, stage, lint, and build
@@ -356,10 +365,19 @@ jobs:
           git -C upstream checkout --detach "$UPSTREAM_COMMIT"
           test "$(git -C upstream rev-parse HEAD)" = "$UPSTREAM_COMMIT"
 
+      # Upstream's requires-pixi is the version its own CI installs.
+      - name: Read upstream pixi version
+        id: upstream-pixi
+        run: |
+          set -euo pipefail
+          version="$(sed -nE 's/^requires-pixi = ">=([0-9]+\.[0-9]+\.[0-9]+)"$/\1/p' upstream/pixi.toml)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "version=v$version" >> "$GITHUB_OUTPUT"
+
       - name: Set up upstream pixi
         uses: prefix-dev/setup-pixi@d3f436a425481402e6a95a1d1fc10331c708cd9e # v0.10.2
         with:
-          pixi-version: v0.63.2
+          pixi-version: ${{ steps.upstream-pixi.outputs.version }}
           run-install: false
 
       - name: Prove unsupported target is skipped
