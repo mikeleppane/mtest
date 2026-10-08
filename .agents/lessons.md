@@ -115,6 +115,12 @@ append here as later phases teach more.
   defect only appears on loaded runners. Every existing `kill_all` test
   resolved the setup channel first (waiting on a readiness file, or pumping
   sweeps), which is how the gap survived.
+- The parent's post-fork `setpgid(leader, leader)` races the child's own
+  pre-exec `setpgid(0, 0)`. Linux reports a lost race as `EACCES` (exec'd) or
+  `ESRCH` (gone), but XNU can also report `EPERM` for a child racing through
+  exec or exit. Treating it as fatal killed the child and surfaced as
+  `INTERNAL-ERROR … internal failure running 'mojo'`, only on loaded hosted
+  macOS runners, with nothing changed on our side.
 
 ## Parsing and verdict discipline
 
