@@ -33,7 +33,7 @@ def main() raises:
 $ mtest --no-config --no-cache --show-output failures \
     -I <PREFIX>/share/mtest/companions/assertions/src \
     companions/assertions/examples
-mtest 1.1.0 (mojo)
+mtest 1.2.0 (mojo)
 root: <REPO>   selected: 1 files   excluded: 0
 
 FAIL           companions/assertions/examples/test_diagnostics.mojo  <TIME>

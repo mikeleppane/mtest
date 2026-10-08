@@ -141,7 +141,7 @@ parallelism:
 
 ```console
 $ pixi run bash -c 'build/mtest -n 2 e2e/matrix'
-mtest 1.1.0 (mojo)
+mtest 1.2.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0   workers: 2
 
 PASS           e2e/matrix/test_beta.mojo       0.02s
@@ -156,7 +156,7 @@ machine with its peers. Pinned files carry a `SERIAL` tag:
 
 ```console
 $ pixi run bash -c "build/mtest -n 2 --serial 'e2e/matrix/test_alpha.mojo' e2e/matrix"
-mtest 1.1.0 (mojo)
+mtest 1.2.0 (mojo)
 root: /home/mikko/dev/mtest   selected: 2 files   excluded: 0   workers: 2
 
 PASS           e2e/matrix/test_beta.mojo       0.02s

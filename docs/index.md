@@ -17,7 +17,7 @@ $ pixi workspace channel add https://conda.modular.com/max/
 $ pixi workspace channel add https://repo.prefix.dev/modular-community
 $ pixi add mtest
 $ pixi run mtest --version
-mtest 1.1.0
+mtest 1.2.0
 ```
 
 [Installation](install.md) explains each step, names the three channels that
