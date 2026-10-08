@@ -369,6 +369,31 @@ static int exercise_terminal_setpgid_cleanup(void) {
     return WEXITSTATUS(status);
 }
 
+static int exercise_parent_setpgid_race_errnos(void) {
+    struct mtest_exec_bytes argv[1] = {bytes("/usr/bin/true")};
+    struct mtest_exec_process_spec spec;
+    memset(&spec, 0, sizeof(spec));
+    spec.argv = argv;
+    spec.argc = 1;
+    /* Exec'd, gone, and XNU's EPERM for a child racing through exec or exit. */
+    const int race_errnos[] = {EACCES, ESRCH, EPERM};
+    for (size_t i = 0; i < sizeof(race_errnos) / sizeof(race_errnos[0]); ++i) {
+        struct mtest_exec_process_ref process;
+        struct mtest_exec_error error;
+        CHECK(mtest_exec_test_fault_configure(MTEST_EXEC_OP_PARENT_SETPGID, 1, race_errnos[i], 0) ==
+                  0,
+              "configure parent setpgid race errno");
+        CHECK(mtest_exec_process_open(&spec, &process, &error) == 0,
+              "a parent setpgid race errno still opens the child");
+        CHECK(mtest_exec_test_fault_seen(MTEST_EXEC_OP_PARENT_SETPGID) == 1,
+              "parent setpgid seam consulted exactly once");
+        mtest_exec_test_fault_reset();
+        CHECK(mtest_exec_process_abort(process.handle, 0, &error) == 0,
+              "the raced child aborts cleanly");
+    }
+    return 0;
+}
+
 static int exercise_process_with_closed_standard_fds_child(void) {
     int saved_stdin = fcntl(STDIN_FILENO, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
     if (saved_stdin < 0) {
@@ -1313,6 +1338,7 @@ int main(void) {
     CHECK(exercise_preobserve_zombie_only_term() == 0, "pre-observe zombie-only group TERM");
     CHECK(exercise_reaped_unswept_abort() == 0, "reaped unswept abort stays terminal");
     CHECK(exercise_terminal_setpgid_cleanup() == 0, "terminal setpgid cleanup stays non-reusable");
+    CHECK(exercise_parent_setpgid_race_errnos() == 0, "parent setpgid race errnos are tolerated");
     int closed_standard_fds_result = exercise_process_with_closed_standard_fds();
     CHECK(closed_standard_fds_result == 0, "capture survives closed stdin and stdout");
     CHECK(exercise_second_candidate_allocation_failure() == 0,
