@@ -69,7 +69,7 @@ class WorkflowInventoryAndCodeQLTests(unittest.TestCase):
         )
         self.assertEqual(
             workflow_security.CODEQL_ACTION_SHA,
-            "e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81",
+            "cdf488f595d80d6e07e03d4674febd5ab45fa938",
         )
         for path in workflow_security.WORKFLOW_PATHS:
             name = path.name
@@ -84,10 +84,10 @@ class WorkflowInventoryAndCodeQLTests(unittest.TestCase):
         self.assertNotIn(
             "github/codeql-action/",
             codeql.replace(
-                "github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81",
+                "github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938",
                 "",
             ).replace(
-                "github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81",
+                "github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938",
                 "",
             ),
         )
@@ -105,7 +105,7 @@ class WorkflowInventoryAndCodeQLTests(unittest.TestCase):
             ),
             workflow.replace(
                 f"github/codeql-action/init@{workflow_security.CODEQL_ACTION_SHA}"
-                " # v4.37.3",
+                " # v4.37.9",
                 f"github/codeql-action/init@{workflow_security.CODEQL_ACTION_SHA}",
                 1,
             ),
@@ -192,7 +192,7 @@ class WorkflowInventoryAndCodeQLTests(unittest.TestCase):
             "      - name: Autobuild\n"
             "        uses: github/codeql-action/autobuild@"
             f"{workflow_security.CODEQL_ACTION_SHA}"
-            " # v4.37.3\n\n" + marker,
+            " # v4.37.9\n\n" + marker,
             1,
         )
         self._reject(mutated, "autobuild")
@@ -264,7 +264,7 @@ class DocsWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(
             workflow_security.DEPLOY_PAGES_ACTION_SHA,
-            "cd2ce8fcbc39b97be8ca5fce6e763baed58fa128",
+            "368f82528645a54fb793d4d04e342629a3f51346",
         )
         self.assertEqual(
             workflow_security.REVIEWED_ACTION_PINS["actions/upload-pages-artifact"],
@@ -272,7 +272,7 @@ class DocsWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(
             workflow_security.REVIEWED_ACTION_PINS["actions/deploy-pages"],
-            {(workflow_security.DEPLOY_PAGES_ACTION_SHA, "v5.0.0")},
+            {(workflow_security.DEPLOY_PAGES_ACTION_SHA, "v5.0.1")},
         )
         workflow = self._workflow()
         self.assertIn(
@@ -282,7 +282,7 @@ class DocsWorkflowTests(unittest.TestCase):
         )
         self.assertIn(
             f"actions/deploy-pages@{workflow_security.DEPLOY_PAGES_ACTION_SHA}"
-            " # v5.0.0",
+            " # v5.0.1",
             workflow,
         )
 
@@ -412,7 +412,7 @@ class DocsWorkflowTests(unittest.TestCase):
         self._reject(
             self._workflow().replace(
                 "        uses: actions/deploy-pages@"
-                f"{workflow_security.DEPLOY_PAGES_ACTION_SHA} # v5.0.0\n",
+                f"{workflow_security.DEPLOY_PAGES_ACTION_SHA} # v5.0.1\n",
                 "",
                 1,
             ),
@@ -424,7 +424,7 @@ class DocsWorkflowTests(unittest.TestCase):
         self._reject(
             self._workflow().replace(
                 "        uses: actions/deploy-pages@"
-                f"{workflow_security.DEPLOY_PAGES_ACTION_SHA} # v5.0.0",
+                f"{workflow_security.DEPLOY_PAGES_ACTION_SHA} # v5.0.1",
                 "        uses: actions/upload-artifact@"
                 f"{workflow_security.UPLOAD_ARTIFACT_ACTION_SHA} # v7.0.1",
                 1,
@@ -1799,7 +1799,7 @@ class CompatCanaryWorkflowTests(unittest.TestCase):
                 "      - name: Upsert the pinned issues\n",
                 "      - name: Set up Pixi\n"
                 "        uses: prefix-dev/setup-pixi@"
-                f"{workflow_security.SETUP_PIXI_ACTION_SHA} # v0.10.0\n\n"
+                f"{workflow_security.SETUP_PIXI_ACTION_SHA} # v0.10.2\n\n"
                 "      - name: Upsert the pinned issues\n",
                 1,
             ),

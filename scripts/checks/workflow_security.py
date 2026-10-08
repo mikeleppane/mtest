@@ -256,23 +256,23 @@ ALWAYS_SUCCEED_RE = re.compile(r"\|\|\s*true\b")
 """A trailing `|| true`, which discards the runner's exit code."""
 
 CHECKOUT_ACTION_SHA = "3d3c42e5aac5ba805825da76410c181273ba90b1"
-SETUP_PIXI_ACTION_SHA = "a09b6247153796b190642a2b53fac4241043cf6f"
-CODEQL_ACTION_SHA = "e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81"
+SETUP_PIXI_ACTION_SHA = "d3f436a425481402e6a95a1d1fc10331c708cd9e"
+CODEQL_ACTION_SHA = "cdf488f595d80d6e07e03d4674febd5ab45fa938"
 """Reviewed immutable action revisions used by the CodeQL workflow."""
 
 UPLOAD_ARTIFACT_ACTION_SHA = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
 """Reviewed immutable actions/upload-artifact v7.0.1 revision."""
 
-SETUP_UV_ACTION_SHA = "c771a70e6277c0a99b617c7a806ffedaca235ff9"
-"""Reviewed immutable astral-sh/setup-uv v9.0.0 revision."""
+SETUP_UV_ACTION_SHA = "20cfd1bf945f4377ade1205e4dbc17946fc9a30d"
+"""Reviewed immutable astral-sh/setup-uv v10.0.1 revision."""
 
 DOWNLOAD_ARTIFACT_ACTION_SHA = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
 
 UPLOAD_PAGES_ARTIFACT_ACTION_SHA = "fc324d3547104276b827a68afc52ff2a11cc49c9"
 """Reviewed immutable actions/upload-pages-artifact v5.0.0 revision."""
 
-DEPLOY_PAGES_ACTION_SHA = "cd2ce8fcbc39b97be8ca5fce6e763baed58fa128"
-"""Reviewed immutable actions/deploy-pages v5.0.0 revision.
+DEPLOY_PAGES_ACTION_SHA = "368f82528645a54fb793d4d04e342629a3f51346"
+"""Reviewed immutable actions/deploy-pages v5.0.1 revision.
 
 This is the one action in the repository that is ever handed `pages: write` and
 `id-token: write`, so it is also the one whose revision matters most.
@@ -287,14 +287,14 @@ ACTION_USE_RE = re.compile(
 
 REVIEWED_ACTION_PINS = {
     "actions/checkout": {(CHECKOUT_ACTION_SHA, "v7.0.1")},
-    "actions/deploy-pages": {(DEPLOY_PAGES_ACTION_SHA, "v5.0.0")},
+    "actions/deploy-pages": {(DEPLOY_PAGES_ACTION_SHA, "v5.0.1")},
     "actions/download-artifact": {(DOWNLOAD_ARTIFACT_ACTION_SHA, "v8.0.1")},
     "actions/upload-artifact": {(UPLOAD_ARTIFACT_ACTION_SHA, "v7.0.1")},
     "actions/upload-pages-artifact": {(UPLOAD_PAGES_ARTIFACT_ACTION_SHA, "v5.0.0")},
-    "astral-sh/setup-uv": {(SETUP_UV_ACTION_SHA, "v9.0.0")},
-    "github/codeql-action/analyze": {(CODEQL_ACTION_SHA, "v4.37.3")},
-    "github/codeql-action/init": {(CODEQL_ACTION_SHA, "v4.37.3")},
-    "prefix-dev/setup-pixi": {(SETUP_PIXI_ACTION_SHA, "v0.10.0")},
+    "astral-sh/setup-uv": {(SETUP_UV_ACTION_SHA, "v10.0.1")},
+    "github/codeql-action/analyze": {(CODEQL_ACTION_SHA, "v4.37.9")},
+    "github/codeql-action/init": {(CODEQL_ACTION_SHA, "v4.37.9")},
+    "prefix-dev/setup-pixi": {(SETUP_PIXI_ACTION_SHA, "v0.10.2")},
 }
 """A tampered SHA fails even if it is a real, resolvable commit.
 
@@ -670,9 +670,9 @@ def check_codeql_workflow(repo_root: Path = REPO_ROOT) -> None:
     }
     expected_pin_lines = {
         f"        uses: actions/checkout@{CHECKOUT_ACTION_SHA} # v7.0.1",
-        f"        uses: prefix-dev/setup-pixi@{SETUP_PIXI_ACTION_SHA} # v0.10.0",
-        f"        uses: github/codeql-action/init@{CODEQL_ACTION_SHA} # v4.37.3",
-        f"        uses: github/codeql-action/analyze@{CODEQL_ACTION_SHA} # v4.37.3",
+        f"        uses: prefix-dev/setup-pixi@{SETUP_PIXI_ACTION_SHA} # v0.10.2",
+        f"        uses: github/codeql-action/init@{CODEQL_ACTION_SHA} # v4.37.9",
+        f"        uses: github/codeql-action/analyze@{CODEQL_ACTION_SHA} # v4.37.9",
     }
     for name, job in job_blocks.items():
         uses = re.findall(r"^        uses: ([^ ]+)(?: # .*)?$", job, re.MULTILINE)
@@ -1141,7 +1141,7 @@ def check_compat_canary_workflow(repo_root: Path = REPO_ROOT) -> None:
     expected_pin_lines = {
         "probe": [
             f"        uses: actions/checkout@{CHECKOUT_ACTION_SHA} # v7.0.1",
-            f"        uses: prefix-dev/setup-pixi@{SETUP_PIXI_ACTION_SHA} # v0.10.0",
+            f"        uses: prefix-dev/setup-pixi@{SETUP_PIXI_ACTION_SHA} # v0.10.2",
             (
                 "        uses: actions/upload-artifact@"
                 f"{UPLOAD_ARTIFACT_ACTION_SHA} # v7.0.1"
@@ -1517,7 +1517,7 @@ def check_docs_workflow(repo_root: Path = REPO_ROOT) -> None:
             f"configured site output, actual={uploads}"
         )
 
-    expected_deploy = [f"actions/deploy-pages@{DEPLOY_PAGES_ACTION_SHA} # v5.0.0"]
+    expected_deploy = [f"actions/deploy-pages@{DEPLOY_PAGES_ACTION_SHA} # v5.0.1"]
     deploys = re.findall(
         r"^\s+uses: (actions/deploy-pages@.+)$", deploy_job, re.MULTILINE
     )
