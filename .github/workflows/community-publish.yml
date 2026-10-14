@@ -65,7 +65,7 @@ jobs:
 
       - name: Download triggering release evidence
         if: github.event_name == 'workflow_run'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: release-result
           path: build/release-result
@@ -262,7 +262,7 @@ jobs:
           persist-credentials: false
 
       - name: Download rendered recipe
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: community-recipe-${{ github.run_id }}
           path: candidate
@@ -351,7 +351,7 @@ jobs:
           persist-credentials: false
 
       - name: Download rendered recipe
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: community-recipe-${{ github.run_id }}
           path: candidate
@@ -445,7 +445,7 @@ jobs:
           ref: ${{ needs.resolve.outputs.source_rev }}
 
       - name: Download rendered recipe
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: community-recipe-${{ github.run_id }}
           path: build/community-render
@@ -514,7 +514,7 @@ jobs:
           persist-credentials: false
 
       - name: Download rendered recipe
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: community-recipe-${{ github.run_id }}
           path: candidate
